@@ -62,17 +62,6 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
-    void should_keep_global_batcher_queue_depth_series_untagged_by_priority() {
-        reporter.reportBatcherQueueDepth("PREFILL", "10.0.0.1", 5);
-
-        FlexMetricTags tags = FlexMetricTags.of(
-                "type", "batchQueue",
-                "role", "PREFILL",
-                "engineIp", "10.0.0.1");
-        verify(monitor).report(ROUTING_QUEUE_LENGTH, tags, 5.0);
-    }
-
-    @Test
     void should_report_dispatch_reason_with_correct_tags() {
         reporter.reportDispatchReason("PREFILL", "10.0.0.1", "batch_full");
 

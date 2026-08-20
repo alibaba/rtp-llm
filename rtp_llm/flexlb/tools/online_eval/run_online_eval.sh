@@ -109,40 +109,61 @@ if [[ "${LOAD_CLIENT_IMPL}" == "python" || "${MOCK_ENGINE_IMPL}" == "python" ]];
   fi
 fi
 
-DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":10000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":10,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":1000000,"flexlbBatchMaxInflight":1000000,"flexlbBatchDispatchPoolSize":500,"flexlbBatchDispatchQueueSize":10000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":-1,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
-DEFAULT_STRATEGY_CONFIGS='{"shortestTtft":{"candidatePool":{"mode":"FIXED","size":2}}}'
-FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
-STRATEGY_CONFIGS="${STRATEGY_CONFIGS:-${DEFAULT_STRATEGY_CONFIGS}}"
+DEFAULT_FLEXLB_CONFIG='{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "ordering": {"type": "PRIORITY", "defaultPriority": 50},
+    "capacity": {"maxOutstandingRequestsGlobal": 1000000}
+  },
+  "dispatcher": {
+    "type": "BATCH",
+    "maxRequests": 32,
+    "maxCollectionWaitMs": 10,
+    "maxWaitingRequestsPerPrefillWorker": 1024,
+    "earlyDispatchPredictedExecutionMs": 550,
+    "enqueueRpcTimeoutMs": 5000
+  },
+  "router": {
+    "availabilityHysteresisPercent": 30,
+    "roles": {
+      "prefill": {
+        "availability": {"maxPendingRequests": 100000},
+        "executionTimeEstimator": {"type": "FORMULA"},
+        "selector": {
+          "type": "ESTIMATED_TTFT",
+          "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"}
+        }
+      },
+      "decode": {
+        "availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 132},
+        "kvReservation": {"maxOutputTokensForEstimate": 1000},
+        "selector": {"type": "KV_USAGE_WEIGHTED_RANDOM"}
+      },
+      "vit": {"selector": {"type": "RANDOM"}}
+    }
+  },
+  "observability": {
+    "cacheHit": {
+      "recentKeyWindow": {
+        "writeEnabled": true,
+        "durationMs": 1800000,
+        "maxKeyOccurrences": 10000000
+      },
+      "metricsEnabled": true,
+      "requestTraceLogEnabled": false
+    }
+  }
+}'
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_eval_master}"
 
-# ========== Thread Pool Size Configuration ==========
-# These defaults keep total threads <1000 on high-core machines.
-export GRPC_CLIENT_EXECUTOR_CORE_SIZE="${GRPC_CLIENT_EXECUTOR_CORE_SIZE:-32}"
-export GRPC_CLIENT_EXECUTOR_MAX_SIZE="${GRPC_CLIENT_EXECUTOR_MAX_SIZE:-32}"
-export GRPC_CLIENT_EXECUTOR_QUEUE_SIZE="${GRPC_CLIENT_EXECUTOR_QUEUE_SIZE:-10000}"
-export GRPC_CLIENT_EVENT_LOOP_THREADS="${GRPC_CLIENT_EVENT_LOOP_THREADS:-8}"
-export GRPC_SERVER_WORKER_EVENT_LOOP_THREADS="${GRPC_SERVER_WORKER_EVENT_LOOP_THREADS:-4}"
-export FLEXLB_N_CHANNELS="${FLEXLB_N_CHANNELS:-16}"
-export HTTP_NETTY_EVENT_LOOP_THREADS="${HTTP_NETTY_EVENT_LOOP_THREADS:-4}"
-export HTTP_NETTY_EVENT_EXECUTOR_THREADS="${HTTP_NETTY_EVENT_EXECUTOR_THREADS:-16}"
-export HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE="${HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE:-1000}"
-export HTTP_REQUEST_EXECUTOR_CORE_SIZE="${HTTP_REQUEST_EXECUTOR_CORE_SIZE:-32}"
-export HTTP_REQUEST_EXECUTOR_MAX_SIZE="${HTTP_REQUEST_EXECUTOR_MAX_SIZE:-32}"
-export HTTP_REQUEST_EXECUTOR_QUEUE_SIZE="${HTTP_REQUEST_EXECUTOR_QUEUE_SIZE:-10000}"
-export ENGINE_SYNC_EXECUTOR_CORE_SIZE="${ENGINE_SYNC_EXECUTOR_CORE_SIZE:-32}"
-export ENGINE_SYNC_EXECUTOR_MAX_SIZE="${ENGINE_SYNC_EXECUTOR_MAX_SIZE:-64}"
-export STATUS_CHECK_EXECUTOR_CORE_SIZE="${STATUS_CHECK_EXECUTOR_CORE_SIZE:-32}"
-export STATUS_CHECK_EXECUTOR_MAX_SIZE="${STATUS_CHECK_EXECUTOR_MAX_SIZE:-64}"
-export SERVICE_DISCOVERY_MAX_SIZE="${SERVICE_DISCOVERY_MAX_SIZE:-32}"
-export NETTY_SELECT_THREAD_MULTIPLIER="${NETTY_SELECT_THREAD_MULTIPLIER:-1}"
-export NETTY_WORKER_THREAD_MULTIPLIER="${NETTY_WORKER_THREAD_MULTIPLIER:-1}"
+# These are independent transport settings, not FLEXLB_CONFIG fields.
 export FLEXLB_GRPC_EXECUTOR_CORE_SIZE="${FLEXLB_GRPC_EXECUTOR_CORE_SIZE:-128}"
 export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
 # FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE: no script default — code default (1000) applies
 # unless the caller exports it explicitly (still forwarded via the environment).
-export SCHEDULE_WORKER_SIZE="${SCHEDULE_WORKER_SIZE:-16}"
 
 MOCK_PID=""
 FLEXLB_PID=""
@@ -580,36 +601,25 @@ PY
 )
 fi
 
+PROCESS_FLEXLB_CONFIG=""
+if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
+  PROCESS_FLEXLB_CONFIG="$(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
+envs = payload.get("zone_process_setting", {}).get("process_info", {}).get("envs", [])
+for item in envs:
+    if isinstance(item, list) and len(item) == 2 and item[0] == "FLEXLB_CONFIG":
+        print(item[1], end="")
+        break
+PY
+)"
+fi
+FLEXLB_CONFIG="${FLEXLB_CONFIG:-${PROCESS_FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}}"
+
 RUNTIME_OVERRIDE_ENV_ARGS=()
 OVERRIDE_ENV_KEYS=(
-  AUTO_TPM_ENABLED
-  AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER
-  CACHE_HIT_MAX_CACHE_KEYS
-  CACHE_HIT_METRIC_REPORT_ENABLED
-  CACHE_HIT_TIME_WINDOW_MS
-  CACHE_HIT_TRACE_LOG_ENABLED
-  CACHE_HIT_WINDOW_WRITE_ENABLED
-  COST_ALPHA0
-  COST_ALPHA1
-  COST_ALPHA2
-  COST_ALPHA3
-  COST_ALPHA4
-  COST_ALPHA5
-  COST_SLO_MS
-  DECODE_CONCURRENCY_LIMIT
-  DECODE_LOAD_BALANCE_STRATEGY
-  DEFAULT_SCHEDULE_MODE
-  ENGINE_SYNC_EXECUTOR_CORE_SIZE
-  ENGINE_SYNC_EXECUTOR_MAX_SIZE
-  FLEXLB_BATCH_ALGORITHM
-  FLEXLB_BATCH_DISPATCH_POOL_SIZE
-  FLEXLB_BATCH_DISPATCH_QUEUE_SIZE
-  FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES
-  FLEXLB_BATCH_FIXED_WAIT_MS
-  FLEXLB_BATCH_MAX_INFLIGHT
-  FLEXLB_BATCH_MIN_SIZE
-  FLEXLB_BATCH_PREDICT_THRESHOLD_MS
-  FLEXLB_BATCH_SIZE_MAX
   FLEXLB_GRPC_EXECUTOR_CORE_SIZE
   FLEXLB_GRPC_EXECUTOR_MAX_SIZE
   FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
@@ -619,33 +629,9 @@ OVERRIDE_ENV_KEYS=(
   GRADIENT
   GRADIENT_MAX_SPEED
   GRADIENT_START_SPEED
-  GRPC_CLIENT_EVENT_LOOP_THREADS
-  GRPC_CLIENT_EXECUTOR_CORE_SIZE
-  GRPC_CLIENT_EXECUTOR_MAX_SIZE
-  GRPC_CLIENT_EXECUTOR_QUEUE_SIZE
-  GRPC_SERVER_WORKER_EVENT_LOOP_THREADS
-  HTTP_NETTY_EVENT_EXECUTOR_QUEUE_SIZE
-  HTTP_NETTY_EVENT_EXECUTOR_THREADS
-  HTTP_NETTY_EVENT_LOOP_THREADS
-  HTTP_REQUEST_EXECUTOR_CORE_SIZE
-  HTTP_REQUEST_EXECUTOR_MAX_SIZE
-  HTTP_REQUEST_EXECUTOR_QUEUE_SIZE
-  HYSTERESIS_BIAS_PERCENT
-  LOAD_BALANCE_STRATEGY
-  MAX_QUEUE_SIZE
-  NETTY_SELECT_THREAD_MULTIPLIER
-  NETTY_WORKER_THREAD_MULTIPLIER
-  PREFILL_QUEUE_SIZE_THRESHOLD
-  PREFILL_TIME_FORMULA
-  SCHEDULE_WORKER_SIZE
-  SERVICE_DISCOVERY_MAX_SIZE
-  STATUS_CHECK_EXECUTOR_CORE_SIZE
-  STATUS_CHECK_EXECUTOR_MAX_SIZE
-  SYNC_REQUEST_TIMEOUT_MS
-  SYNC_STATUS_INTERVAL
 )
 for key in "${OVERRIDE_ENV_KEYS[@]}"; do
-  if [[ -v "${key}" ]]; then
+  if declare -p "${key}" >/dev/null 2>&1; then
     RUNTIME_OVERRIDE_ENV_ARGS+=("${key}=${!key}")
   fi
 done
@@ -683,7 +669,6 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
   if [[ -n "${FLEXLB_START_CMD:-}" ]]; then
     env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      "STRATEGY_CONFIGS=${STRATEGY_CONFIGS}" \
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
       "HIPPO_ROLE=${HIPPO_ROLE}" \
@@ -695,7 +680,6 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     fi
     env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
-      "STRATEGY_CONFIGS=${STRATEGY_CONFIGS}" \
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
       "HIPPO_ROLE=${HIPPO_ROLE}" \

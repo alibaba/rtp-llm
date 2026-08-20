@@ -160,11 +160,6 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public synchronized void learn(List<BatchItem> items, long predictedMs, long actualMs) {
-        learn(PrefillBatchFeatures.from(items), predictedMs, actualMs);
-    }
-
-    @Override
     public synchronized void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
         this.itemBatch.add(new BatchUpdateItem(features, actualMs));
         if (this.itemBatch.size() < this.batchSize) {

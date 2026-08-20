@@ -114,25 +114,12 @@ for key, value in payload["env"].items():
 PY
 )
 
-# -- 2. Start FlexLB master (batch mode) --
+# -- 2. Start FlexLB master (queue + priority ordering, batch dispatch) --
+DEFAULT_FLEXLB_CONFIG='{"schemaVersion":1,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxRequests":32,"maxCollectionWaitMs":10,"earlyDispatchPredictedExecutionMs":550,"maxInflightBatchesPerPrefillWorker":4},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxWaitVsAverageMultiplier":3.0}}}},"decode":{"availability":{"maxEngineRequests":132}}}}}'
+FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 echo "[2/4] Starting FlexLB master (BATCH / COST_BASED_PREFILL) ..."
 env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
-  "LOAD_BALANCE_STRATEGY=COST_BASED_PREFILL" \
-  "DECODE_LOAD_BALANCE_STRATEGY=COST_BASED_DECODE" \
-  "DECODE_CONCURRENCY_LIMIT=132" \
-  "FLEXLB_BATCH_ALGORITHM=fixed_window" \
-  "FLEXLB_BATCH_FIXED_WAIT_MS=10" \
-  "FLEXLB_BATCH_PREDICT_THRESHOLD_MS=550" \
-  "FLEXLB_BATCH_SIZE_MAX=32" \
-  "FLEXLB_BATCH_MIN_SIZE=1" \
-  "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES=4" \
-  "HYSTERESIS_BIAS_PERCENT=0" \
-  "MAX_QUEUE_SIZE=5000" \
-  "PREFILL_QUEUE_SIZE_THRESHOLD=100000" \
-  "DEFAULT_SCHEDULE_MODE=BATCH" \
-  "COST_SLO_MS=30000" \
-  "COST_HOTSPOT_MULTIPLIER=1.5" \
-  "STRATEGY_CONFIGS={}" \
+  "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
   "OTEL_TRACE_SKIP_PATTERN=.*" \
   "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
   "HIPPO_ROLE=flexlb_batch_smoke" \

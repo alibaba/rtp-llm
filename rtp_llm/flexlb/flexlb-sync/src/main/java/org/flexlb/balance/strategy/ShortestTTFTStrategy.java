@@ -8,6 +8,7 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
@@ -16,7 +17,6 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -47,9 +47,10 @@ import java.util.Map;
  *   <li>If all CAS attempts fail, fall back to the lowest-TTFT candidate</li>
  * </ol>
  *
- * <p>Supports BATCH, DIRECT, and QUEUE routing. BATCH and QUEUE+AutoTPM scoring includes
- * the worker-batcher wait while their inflight lifecycle remains owned by
- * {@code PriorityScheduler}; DIRECT and legacy QUEUE reserve locally.
+ * <p>Supports DIRECT and QUEUE scheduling with either dispatcher. Common
+ * scheduler paths include the worker-batcher wait while their inflight
+ * lifecycle remains owned by {@code PriorityScheduler}; DIRECT and FIFO
+ * non-batch queue routing reserve locally.
  */
 @Component("shortestTtftStrategy")
 public class ShortestTTFTStrategy implements LoadBalanceStrategy {
@@ -106,7 +107,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         List<PrefillEndpoint> eligible = getAvailableEndpoints(
                 roleType,
                 group,
-                config.getResourceMeasureIndicator(roleType),
+                config.resourceMeasureFor(roleType),
                 balanceContext.getExcludedPrefillIpPort());
         if (CollectionUtils.isEmpty(eligible)) {
             Logger.debug("ShortestTTFT select failed: no available endpoints, request_id={}", requestId);
@@ -167,7 +168,9 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                                                 String group,
                                                 long seqLen,
                                                 FlexlbConfig config) {
-        if (!config.isCacheAffinityEnabled()) {
+        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        if (cacheAffinity == null) {
             return selectBaselineEndpoint(scoredEndpoints, config);
         }
 
@@ -184,8 +187,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 minTtftMs,
                 referenceHitTokens,
                 seqLen,
-                config.getCacheAffinityMaxExtraTtftMs(),
-                config.getCacheAffinityMinHitRate());
+                cacheAffinity.getMaxExtraTtftMs(),
+                cacheAffinity.getMinPrefixHitPercent());
 
         ScoredEndpoint selected;
         String reason;
@@ -247,7 +250,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     /** Preserve the original candidate-pool and CAS fairness behavior. */
     private ScoredEndpoint selectBaselineEndpoint(
             List<ScoredEndpoint> scoredEndpoints, FlexlbConfig config) {
-        int candidateCount = config.resolveShortestTtftCandidateCount(scoredEndpoints.size());
+        int candidateCount = config.shortestTtftCandidateCount(scoredEndpoints.size());
         List<ScoredEndpoint> candidates = scoredEndpoints.subList(
                 0, Math.min(candidateCount, scoredEndpoints.size()));
 
@@ -351,7 +354,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     /**
-     * Estimate all work already ahead of a request. PriorityScheduler-owned paths include
+     * Estimate all work already ahead of a request. Queue-scheduler-owned paths include
      * both dispatched inflight work and the per-worker batcher queue; otherwise only the
      * inflight ledger is relevant. Long.MAX_VALUE remains an unavailable sentinel.
      */
@@ -361,15 +364,14 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             return Long.MAX_VALUE;
         }
         inflightWaitMs = Math.max(0L, inflightWaitMs);
-        if (!usesPriorityScheduler(balanceContext)) {
+        if (!queueSchedulerOwnsRequest(balanceContext)) {
             return inflightWaitMs;
         }
 
         FlexlbConfig config = balanceContext.getConfig();
-        long batcherWaitMs = config != null && config.isAutoTpmEnabled()
+        long batcherWaitMs = config.isPriorityOrdering()
                 ? ep.batcherEstimatedWaitMs(
                         balanceContext.getPriority(),
-                        balanceContext.getDeadlineMs(),
                         balanceContext.getRequestId())
                 : ep.batcherWaitMs();
         batcherWaitMs = Math.max(0L, batcherWaitMs);
@@ -516,9 +518,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long ttft = selected.ttft();
         long bestCacheHit = selected.hitCache();
 
-        // DIRECT (including a BATCH fallback) and legacy QUEUE reserve here.
-        // PriorityScheduler owns BATCH and QUEUE+AutoTPM reservations.
-        if (usesStrategyInflightTracking(balanceContext)) {
+        // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
+        if (strategyOwnsInflightTracking(balanceContext)) {
             ep.commitBatch(requestId, selected.prefillMs(), Collections.emptyList());
         }
 
@@ -540,26 +541,17 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         return result;
     }
 
-    /**
-     * Whether this request is actually owned by PriorityScheduler. The request-level mode
-     * is authoritative because RouteService may downgrade a configured BATCH request to DIRECT.
-     */
-    private static boolean usesPriorityScheduler(BalanceContext balanceContext) {
-        if (balanceContext == null) {
+    /** Whether this request is owned by the common queue/batch scheduler. */
+    private static boolean queueSchedulerOwnsRequest(BalanceContext balanceContext) {
+        if (balanceContext == null || balanceContext.getConfig() == null) {
             return false;
         }
-        ScheduleModeEnum mode = balanceContext.getScheduleMode();
-        if (mode == ScheduleModeEnum.BATCH) {
-            return true;
-        }
         FlexlbConfig config = balanceContext.getConfig();
-        return mode == ScheduleModeEnum.QUEUE
-                && config != null
-                && config.isAutoTpmEnabled();
+        return config.isQueue();
     }
 
     /** Whether this strategy, rather than PriorityScheduler, owns Prefill accounting. */
-    private static boolean usesStrategyInflightTracking(BalanceContext balanceContext) {
-        return !usesPriorityScheduler(balanceContext);
+    private static boolean strategyOwnsInflightTracking(BalanceContext balanceContext) {
+        return !queueSchedulerOwnsRequest(balanceContext);
     }
 }

@@ -1,7 +1,7 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -50,12 +50,11 @@ class PreemptionPhasesE2ETest {
     @Timeout(30)
     void a1_queue_full_evicts_lowest_priority_victim_with_8400_yielded() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "50", 1.0, false)) {
-            h.config.setAutoTpmEnabled(true);
-            h.config.setAutoTpmPrefillQueueEvictEnabled(true);
-            h.config.setFlexlbBatchQueueMaxSize(2);
+            h.allowPreemption(VictimStage.PREFILL_QUEUED);
+            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(2);
             // 大窗口停住派发：队列状态稳定可断言
-            h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
+            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+            h.config.batchDispatcher().setMaxRequests(100);
 
             CompletableFuture<Response> low1 = h.scheduler.submit(h.context(101, 30));
             CompletableFuture<Response> low2 = h.scheduler.submit(h.context(102, 40));
@@ -88,11 +87,11 @@ class PreemptionPhasesE2ETest {
     @Timeout(30)
     void a2_decode_reserved_eviction_victim_8400_and_shadow_accounting_transfers() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "50", 1.0, false)) {
-            h.config.setAutoTpmEnabled(true);
-            h.config.setAutoTpmDecodeReservedEvictEnabled(true);
-            h.config.setDecodeConcurrencyLimit(1);
-            h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
+            h.allowPreemption(VictimStage.DECODE_RESERVED);
+            h.config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxEngineRequests(1L);
+            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+            h.config.batchDispatcher().setMaxRequests(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             h.setDecodeKvCapacity(0, 128, 256);
@@ -126,14 +125,14 @@ class PreemptionPhasesE2ETest {
     @Timeout(30)
     void a3_accepted_eviction_cancels_via_real_channel_victim_8429_in_order() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 20, 1, 1, "50", 10_000.0, true)) {
-            h.config.setAutoTpmEnabled(true);
             // decode 驱逐入口由 reserved-evict 总开关把门（Phase 4 gate）
-            h.config.setAutoTpmDecodeReservedEvictEnabled(true);
-            h.config.setAutoTpmDecodeAcceptedEvictEnabled(true);
-            h.config.setDecodeConcurrencyLimit(1);
-            h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
-            h.config.setAutoTpmCancelCompletionTimeoutMs(3_000);
+            h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
+            h.config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxEngineRequests(1L);
+            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+            h.config.batchDispatcher().setMaxRequests(100);
+            h.config.priorityOrdering().getPreemption().getEngineCancellation()
+                    .setCompletionTimeoutMs(3_000);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             JavaMockEngineCluster.FastRpcService prefillEngine = h.prefillEngines.get(0);
@@ -200,14 +199,14 @@ class PreemptionPhasesE2ETest {
     @Timeout(30)
     void a3_cancel_timeout_fails_incoming_without_dispatch_and_without_leak() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 30, 1, 1, "50", 10_000.0, true)) {
-            h.config.setAutoTpmEnabled(true);
-            h.config.setAutoTpmDecodeReservedEvictEnabled(true);
-            h.config.setAutoTpmDecodeAcceptedEvictEnabled(true);
-            h.config.setDecodeConcurrencyLimit(1);
-            h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
+            h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
+            h.config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxEngineRequests(1L);
+            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+            h.config.batchDispatcher().setMaxRequests(100);
             // 短等待窗口 + 不泵 → 引擎释放永远得不到确认 → 超时
-            h.config.setAutoTpmCancelCompletionTimeoutMs(100);
+            h.config.priorityOrdering().getPreemption().getEngineCancellation()
+                    .setCompletionTimeoutMs(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             JavaMockEngineCluster.FastRpcService prefillEngine = h.prefillEngines.get(0);
@@ -256,13 +255,12 @@ class PreemptionPhasesE2ETest {
     @Timeout(30)
     void a5_equal_priority_never_preempts_queue_or_reserved_victims() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 50, 1, 1, "50", 1.0, false)) {
-            h.config.setAutoTpmEnabled(true);
-            h.config.setAutoTpmPrefillQueueEvictEnabled(true);
-            h.config.setAutoTpmDecodeReservedEvictEnabled(true);
-            h.config.setDecodeConcurrencyLimit(1);
-            h.config.setFlexlbBatchQueueMaxSize(1);
-            h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
+            h.allowPreemption(VictimStage.PREFILL_QUEUED, VictimStage.DECODE_RESERVED);
+            h.config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxEngineRequests(1L);
+            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(1);
+            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+            h.config.batchDispatcher().setMaxRequests(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             h.setDecodeKvCapacity(0, 128, 256);

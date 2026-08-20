@@ -73,55 +73,155 @@ The following Maven Wrapper files are included in the project (do not delete):
 
 ### Configuration
 
-Configure the following environment variables:
+`FLEXLB_CONFIG` is the single public configuration document for FlexLB scheduling,
+dispatch, routing, worker-state synchronization, and observability. It is JSON carried
+directly in the environment variable; a file-path form is not supported.
+
+The parser is strict: duplicate keys, unknown fields, fields from inactive tagged
+variants, `null`, scalar coercion, numeric enum values, and trailing JSON are rejected at
+startup. Optional fields must be omitted rather than set to `null`. If the environment
+variable is absent, the code defaults to `QUEUE + FIFO + BATCH` and the remaining model
+defaults.
+
+The following example activates every major configuration section:
 
 ```bash
 export FLEXLB_CONFIG='{
-    "deploy":"DISAGGREGATED",
-    "loadBalanceStrategy":"ROUND_ROBIN_LOWEST_CONCURRENCY",
-    "prefillBatchWaitTimeMs":100,
-    "kvCache":"LOCAL_STATIC",
-    "staticCacheBlockSize":500,
-    "batchSize":1,
-    "prefillLbTimeoutMs":300,
-    "prefillGenerateTimeoutMs": 5000,
-    "enableGrpcPrefillMaster": false,
-    "decodeConcurrencyLimit": 32
-}'
-
-export TRAFFIC_POLICY_CONFIG='{
-    "rules": [
-        {
-            "name": "vip-api-key",
-            "api_keys": ["key-a", "key-b"],
-            "target_group": "vip-group"
-        },
-        {
-            "name": "long-context",
-            "min_seq_len": 8192,
-            "target_group": "long-context-group"
-        },
-        {
-            "name": "weighted-split",
-            "min_seq_len": 1,
-            "target_groups": [
-                {"group": "blue-group", "weight": 80},
-                {"group": "green-group", "weight": 20}
-            ]
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "queueTimeoutMs": 3600000,
+    "ordering": {
+      "type": "PRIORITY",
+      "defaultPriority": 50,
+      "preemption": {
+        "allowedVictimStages": [
+          "PREFILL_QUEUED",
+          "DECODE_RESERVED",
+          "DECODE_ENGINE_OWNED"
+        ],
+        "engineCancellation": {
+          "ackTimeoutMs": 50,
+          "completionTimeoutMs": 1000
         }
-    ]
-}'
-
-export STRATEGY_CONFIGS='{
-    "shortestTtft": {
-        "queueTimeWeight": 0.3,
-        "candidatePool": {
-            "mode": "FIXED",
-            "size": 1
-        }
+      }
+    },
+    "capacity": {
+      "maxOutstandingRequestsGlobal": 100000
+    },
+    "lifecycle": {
+      "staleInflightTimeoutMs": 300000,
+      "deliveredNotAcceptedTimeoutMs": 30000,
+      "maxDeliveredNotAcceptedRequestsGlobal": 200
     }
+  },
+  "dispatcher": {
+    "type": "BATCH",
+    "maxRequests": 8,
+    "maxCollectionWaitMs": 300,
+    "maxWaitingRequestsPerPrefillWorker": 1024,
+    "earlyDispatchPredictedExecutionMs": 100,
+    "maxInflightBatchesPerPrefillWorker": 2,
+    "enqueueRpcTimeoutMs": 5000
+  },
+  "router": {
+    "availabilityHysteresisPercent": 15,
+    "groupSelector": {
+      "defaultTargets": [
+        {"group": "default-group", "weight": 1}
+      ],
+      "rules": [
+        {
+          "name": "long-context",
+          "match": {"inputTokens": {"min": 8192}},
+          "targets": [
+            {"group": "long-context-group", "weight": 1}
+          ]
+        }
+      ]
+    },
+    "roles": {
+      "prefill": {
+        "availability": {
+          "maxPendingRequests": 64
+        },
+        "executionTimeEstimator": {
+          "type": "FORMULA",
+          "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
+        },
+        "selector": {
+          "type": "ESTIMATED_TTFT",
+          "candidateChoice": {
+            "type": "RANDOM_WITHIN_TOLERANCE",
+            "relativeTolerance": 0.1,
+            "minimumToleranceMs": 20,
+            "outlierRejection": {
+              "maxPendingVsAverageMultiplier": 3.0,
+              "maxWaitVsAverageMultiplier": 3.0
+            }
+          }
+        },
+        "cacheAffinity": {
+          "maxExtraTtftMs": 100,
+          "minPrefixHitPercent": 5
+        }
+      },
+      "decode": {
+        "availability": {
+          "maxKvUsagePercent": 90,
+          "maxEngineRequests": 128
+        },
+        "kvReservation": {
+          "maxOutputTokensForEstimate": 1000
+        },
+        "selector": {
+          "type": "KV_USAGE_WEIGHTED_RANDOM",
+          "decayPerToken": 0.001,
+          "outlierRejection": {
+            "maxEngineLoadVsAverageMultiplier": 3.0,
+            "maxKvUsedVsAverageMultiplier": 3.0
+          }
+        }
+      },
+      "vit": {
+        "selector": {"type": "RANDOM"}
+      }
+    }
+  },
+  "workerRegistry": {
+    "health": {
+      "statusPollIntervalMs": 20,
+      "statusRpcTimeoutMs": 5000,
+      "statusStaleAfterMs": 10000
+    },
+    "cacheStatus": {
+      "targetDiffSize": 30,
+      "minRefreshIntervalMs": 50,
+      "maxRefreshIntervalMs": 3000,
+      "fullSnapshotDebugMode": false
+    }
+  },
+  "observability": {
+    "cacheHit": {
+      "recentKeyWindow": {
+        "writeEnabled": true,
+        "durationMs": 1800000,
+        "maxKeyOccurrences": 10000000
+      },
+      "metricsEnabled": true,
+      "requestTraceLogEnabled": false,
+      "theoryLog": {
+        "path": "/home/admin/ai-whale/logs/master_theory_hit.log"
+      }
+    }
+  }
 }'
+```
 
+`MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
+not a second FlexLB behavior configuration:
+
+```bash
 export MODEL_SERVICE_CONFIG='{
     "service_id": "model.service",
     "load_balance": true,
@@ -156,68 +256,69 @@ export MODEL_SERVICE_CONFIG='{
 }'
 ```
 
-Traffic routing is two-layered: `TRAFFIC_POLICY_CONFIG` selects the target `group`, then each role's load balancing strategy selects the final prefill/decode host inside that group. You can also set `TRAFFIC_POLICY_CONFIG_FILE` to a JSON file path. Standalone traffic policy config takes priority over `trafficPolicy` embedded in `FLEXLB_CONFIG`, and you can replace the active policy at runtime with `POST /rtp_llm/update_traffic_policy`.
+### Scheduler, ordering, and dispatcher
 
-Cache affinity is an optional layer on both `ShortestTtft` and `CostBasedPrefill` for
-PREFILL/PDFUSION workers. Enable it and set the maximum extra predicted TTFT that a cached
-candidate may add over the baseline strategy's minimum score:
+These are separate concepts:
+
+| Scheduler | Queue ordering | Dispatcher | Behavior |
+| --- | --- | --- | --- |
+| `DIRECT` | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
+| `QUEUE` | `FIFO` | `NON_BATCH` | Queue lifecycle with arrival-order, one immediate route decision per request |
+| `QUEUE` | `PRIORITY` | `NON_BATCH` | Queue lifecycle with priority-order, one immediate route decision per request |
+| `QUEUE` | `FIFO` | `BATCH` | Arrival-order collection followed by Master `EnqueueBatch` |
+| `QUEUE` | `PRIORITY` | `BATCH` | Priority-order collection followed by Master `EnqueueBatch` |
+
+`DIRECT + BATCH` is invalid. `FIFO` and `PRIORITY` only describe the order of
+requests owned by `QUEUE`; neither is a synonym for direct routing or batching.
+`PRIORITY` adds `defaultPriority` and optional preemption. It does not add an SLO
+budget, length buckets, or priority-dependent TTL multipliers. `QUEUE` uses one
+absolute scheduling expiration derived from FlexLB admission time plus
+`scheduler.queueTimeoutMs`; retries and preemption do not reset it. `DIRECT` has
+no scheduling timeout.
+
+`BATCH` dispatches on batch size, maximum collection wait, or the optional predicted
+execution threshold. `NON_BATCH` has no collection window or target batch size.
+
+Production-style examples migrated from the former field-level environment variables:
+
+- [QUEUE + PRIORITY + NON_BATCH](docs/config-examples/flexlb-queue-priority-non-batch.json)
+- [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
+
+DIRECT uses the same role routing configuration as QUEUE. For example, a compact
+DIRECT configuration with explicit random prefill/decode selection is:
 
 ```bash
 export FLEXLB_CONFIG='{
-    "loadBalanceStrategy": "CostBasedPrefill",
-    "cacheAffinityEnabled": true,
-    "cacheAffinityMaxExtraTtftMs": 100,
-    "cacheAffinityMinHitRate": 5
+  "schemaVersion": 1,
+  "scheduler": {"type": "DIRECT"},
+  "dispatcher": {"type": "NON_BATCH"},
+  "router": {
+    "roles": {
+      "prefill": {"selector": {"type": "RANDOM"}},
+      "decode": {"selector": {"type": "RANDOM"}},
+      "vit": {"selector": {"type": "RANDOM"}}
+    }
+  }
 }'
 ```
 
-The shared policy considers only workers already admitted by the baseline strategy. It prefers
-the longest cached prompt prefix within the configured millisecond bound and minimum hit rate;
-otherwise it delegates to the baseline selection. For `ShortestTtft`, this includes the
-candidate-pool and CAS fairness behavior. For `CostBasedPrefill`, this includes its resource,
-SLO, hotspot, imbalance, and score-tie filters. Cache affinity defaults to disabled; threshold
-defaults are `0` ms and `5` percent. It does not apply to DECODE or VIT strategies. The scalar
-environment variables are `CACHE_AFFINITY_ENABLED`, `CACHE_AFFINITY_MAX_EXTRA_TTFT_MS`, and
-`CACHE_AFFINITY_MIN_HIT_RATE`.
+PREFILL and PDFUSION share the prefill selector. Prefill selector types are
+`RANDOM` and `ESTIMATED_TTFT`; the latter supports `BEST_ONLY`,
+`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL` candidate choice.
+The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
+`{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
+`{"type":"FIXED","workers":2}`. Decode selector types are `RANDOM` and
+`KV_USAGE_WEIGHTED_RANDOM`; VIT currently supports `RANDOM`.
 
-Set `decodeConcurrencyLimit` to a positive number to cap each decode worker's in-flight requests. FlexLB counts reported waiting/running tasks plus local in-transit selections, deduplicated by request id. When a decode worker reaches the limit, it is not considered serviceable; values <= 0 disable this FlexLB-side limit.
+Cache affinity is enabled by including `router.roles.prefill.cacheAffinity` and is
+valid only with `ESTIMATED_TTFT`. Omit the object to disable it. Decode admission is
+controlled by the optional positive
+`router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
+request-count cap.
 
-### Priority scheduler delivery modes
-
-The priority scheduler separates the Auto-TPM scheduling decision from the
-transport used to deliver that decision:
-
-| `DEFAULT_SCHEDULE_MODE` | `AUTO_TPM_ENABLED` | Scheduler | Delivery |
-| --- | --- | --- | --- |
-| `batch` | either value | `PriorityScheduler` | Master sends `EnqueueBatch`; responses set `enqueued_by_master=true` |
-| `queue` | `true` | `PriorityScheduler` | Master returns one route decision per request; responses set `enqueued_by_master=false` and the frontend sends the request |
-| `queue` | `false` | legacy queue | Existing queue routing behavior |
-| `direct` | either value | direct router | Existing direct routing behavior |
-
-Enable Auto-TPM route-decision delivery with:
-
-```bash
-export DEFAULT_SCHEDULE_MODE=queue
-export AUTO_TPM_ENABLED=true
-export AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER=32
-```
-
-Fixed-window or SLO-budget policy still determines when a logical decision
-group is ready. The route-request limit only bounds how many members can be
-delivered to the frontend concurrently. Excess members enter a bounded per-worker
-ready backlog, retain their original priority and enqueue time, and are delivered
-before another logical group is formed when request slots become available.
-They remain visible to timeout, shutdown, and priority-preemption cleanup while
-waiting. Set the request limit at least as large as `FLEXLB_BATCH_SIZE_MAX` when
-every ready group should be handed off in one pass. The limit is counted per
-Prefill worker and per request, is independent of the existing per-worker
-inflight-*batch* limits, and uses `0` to mean unlimited.
-`FLEXLB_BATCH_MAX_INFLIGHT` remains the global scheduler admission limit and is
-also counted in requests.
-
-See [Priority scheduler delivery modes](docs/priority-scheduler-delivery-modes.md)
-for the class model, request lifecycle, accounting invariants, and key
-control-parameter reference.
+See [QUEUE ordering and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
+for the QUEUE lifecycle, accounting invariants, complete scheduler/dispatcher
+parameter reference, and mode matrix.
 
 ### Run
 
@@ -260,15 +361,17 @@ Authorization: Bearer <token>
 }
 ```
 
-## Configuration
+## Configuration reference
 
-FlexLB supports various configuration options through environment variables and Spring Boot properties:
-
-- **Load Balancing Strategy**: Configure through `FLEXLB_CONFIG`
-- **Strategy Parameters**: Configure strategy internals through `STRATEGY_CONFIGS`; `shortestTtft.queueTimeWeight` controls how strongly worker queue time affects scheduling (range `0.0-1.0`, default `1.0`), while `shortestTtft.candidatePool` controls the candidate pool. `mode=RATIO` uses `max(minSize, floor(workerCount * ratio))`, while `mode=FIXED` uses `size`.
-- **Cache Affinity**: Set `LOAD_BALANCE_STRATEGY=CACHE_AFFINITY_FIRST` for PREFILL/PDFUSION routing. `CACHE_AFFINITY_FIRST_MAX_EXTRA_WORK_TOKENS` bounds the extra estimated prefill work accepted for the global cache leader, and `CACHE_AFFINITY_FIRST_MIN_HIT_RATE` sets the minimum effective hit percentage (default `5`). Leave DECODE on `WEIGHTED_CACHE`.
-- **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
-- **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+- **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
+- **Prefill execution formula**:
+  `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
+  `FORMULA`.
+- **Routing strategy parameters**: the tagged selector objects under
+  `router.roles.prefill`, `router.roles.decode`, and `router.roles.vit`.
+- **Traffic group selection**: `router.groupSelector` inside the same document.
+- **Backend topology**: `MODEL_SERVICE_CONFIG`.
+- **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.
 
 ## Monitoring
 

@@ -1,562 +1,318 @@
 package org.flexlb.config;
 
-import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.config.RoutingConfig.EstimatedTtftSelectorConfig;
+import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
+import org.flexlb.config.RoutingConfig.RandomWithinToleranceConfig;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import org.slf4j.LoggerFactory;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
 
     @Test
-    void should_load_traffic_policy_from_standalone_env_config() {
-        ConfigService configService = new ConfigService(Map.of(
-                "TRAFFIC_POLICY_CONFIG", """
-                        {
-                          "default_group": "standalone-group"
-                        }
-                        """));
+    void empty_environment_uses_valid_defaults() {
+        FlexlbConfig config = new ConfigService(Map.of()).loadBalanceConfig();
 
-        assertEquals("standalone-group", configService.loadBalanceConfig()
-                .getTrafficPolicy()
-                .resolveTargetGroup(request())
-                .orElseThrow());
+        assertTrue(config.isQueue());
+        assertFalse(config.isPriorityOrdering());
+        assertTrue(config.isBatchDispatch());
+        assertEquals(1, config.getSchemaVersion());
     }
 
     @Test
-    void standalone_traffic_policy_should_override_embedded_flexlb_config() {
-        ConfigService configService = new ConfigService(Map.of(
-                "FLEXLB_CONFIG", """
-                        {
-                          "trafficPolicy": {
-                            "default_group": "embedded-group"
-                          }
-                        }
-                        """,
-                "TRAFFIC_POLICY_CONFIG", """
-                        {
-                          "default_group": "standalone-group"
-                        }
-                        """));
-
-        assertEquals("standalone-group", configService.loadBalanceConfig()
-                .getTrafficPolicy()
-                .resolveTargetGroup(request())
-                .orElseThrow());
+    void configured_document_must_not_be_blank() {
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, "   ")));
     }
 
     @Test
-    void should_load_traffic_policy_from_standalone_file(@TempDir Path tempDir) throws Exception {
-        Path policyFile = tempDir.resolve("traffic-policy.json");
-        Files.writeString(policyFile, """
+    void parses_complete_responsibility_oriented_document() {
+        FlexlbConfig config = ConfigService.parse("""
                 {
-                  "default_group": "file-group"
+                  "schemaVersion": 1,
+                  "scheduler": {
+                    "type": "QUEUE",
+                    "ordering": {
+                      "type": "PRIORITY",
+                      "defaultPriority": 60,
+                      "preemption": {
+                        "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_ENGINE_OWNED"],
+                        "engineCancellation": {
+                          "ackTimeoutMs": 75,
+                          "completionTimeoutMs": 1200
+                        }
+                      }
+                    },
+                    "capacity": {
+                      "maxOutstandingRequestsGlobal": 2000
+                    },
+                    "lifecycle": {
+                      "staleInflightTimeoutMs": 300000,
+                      "deliveredNotAcceptedTimeoutMs": 30000,
+                      "maxDeliveredNotAcceptedRequestsGlobal": 200
+                    }
+                  },
+                  "dispatcher": {
+                    "type": "BATCH",
+                    "maxRequests": 16,
+                    "maxCollectionWaitMs": 50,
+                    "maxWaitingRequestsPerPrefillWorker": 256,
+                    "earlyDispatchPredictedExecutionMs": 100,
+                    "maxInflightBatchesPerPrefillWorker": 2,
+                    "enqueueRpcTimeoutMs": 4000
+                  },
+                  "router": {
+                    "availabilityHysteresisPercent": 10,
+                    "groupSelector": {
+                      "defaultTargets": [{"group": "blue", "weight": 1}],
+                      "rules": [{
+                        "name": "long-context",
+                        "match": {"inputTokens": {"min": 4096}},
+                        "targets": [{"group": "long", "weight": 1}]
+                      }]
+                    },
+                    "roles": {
+                      "prefill": {
+                        "availability": {"maxPendingRequests": 32},
+                        "executionTimeEstimator": {
+                          "type": "FORMULA",
+                          "expression": "sum(computeTokens)"
+                        },
+                        "selector": {
+                          "type": "ESTIMATED_TTFT",
+                          "candidateChoice": {
+                            "type": "RANDOM_WITHIN_TOLERANCE",
+                            "relativeTolerance": 0.2,
+                            "minimumToleranceMs": 10,
+                            "outlierRejection": {
+                              "maxPendingVsAverageMultiplier": 2.0,
+                              "maxWaitVsAverageMultiplier": 2.5
+                            }
+                          }
+                        },
+                        "cacheAffinity": {
+                          "maxExtraTtftMs": 25,
+                          "minPrefixHitPercent": 10
+                        }
+                      },
+                      "decode": {
+                        "availability": {
+                          "maxKvUsagePercent": 85,
+                          "maxEngineRequests": 128
+                        },
+                        "kvReservation": {"maxOutputTokensForEstimate": 2048},
+                        "selector": {
+                          "type": "KV_USAGE_WEIGHTED_RANDOM",
+                          "decayPerToken": 0.002,
+                          "outlierRejection": {
+                            "maxEngineLoadVsAverageMultiplier": 2.0,
+                            "maxKvUsedVsAverageMultiplier": 2.0
+                          }
+                        }
+                      },
+                      "vit": {"selector": {"type": "RANDOM"}}
+                    }
+                  },
+                  "workerRegistry": {
+                    "health": {
+                      "statusPollIntervalMs": 25,
+                      "statusRpcTimeoutMs": 5000,
+                      "statusStaleAfterMs": 10000
+                    },
+                    "cacheStatus": {
+                      "minRefreshIntervalMs": 100,
+                      "maxRefreshIntervalMs": 2000
+                    }
+                  },
+                  "observability": {
+                    "cacheHit": {
+                      "recentKeyWindow": {
+                        "writeEnabled": true,
+                        "durationMs": 60000,
+                        "maxKeyOccurrences": 100000
+                      },
+                      "metricsEnabled": true,
+                      "requestTraceLogEnabled": false,
+                      "theoryLog": {"path": "/tmp/flexlb-theory.log"}
+                    }
+                  }
                 }
-                """, StandardCharsets.UTF_8);
+                """);
 
-        ConfigService configService = new ConfigService(Map.of(
-                "TRAFFIC_POLICY_CONFIG_FILE", policyFile.toString()));
-
-        assertEquals("file-group", configService.loadBalanceConfig()
-                .getTrafficPolicy()
-                .resolveTargetGroup(request())
-                .orElseThrow());
+        assertTrue(config.isPriorityOrdering());
+        assertTrue(config.isBatchDispatch());
+        assertEquals(60, config.priorityOrdering().getDefaultPriority());
+        assertEquals(75, config.priorityOrdering().getPreemption()
+                .getEngineCancellation().getAckTimeoutMs());
+        assertEquals(1200, config.priorityOrdering().getPreemption()
+                .getEngineCancellation().getCompletionTimeoutMs());
+        assertEquals(16, config.batchDispatcher().getMaxRequests());
+        FormulaEstimatorConfig estimator = assertInstanceOf(FormulaEstimatorConfig.class,
+                config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator());
+        assertEquals("sum(computeTokens)", estimator.getExpression());
+        EstimatedTtftSelectorConfig selector = assertInstanceOf(
+                EstimatedTtftSelectorConfig.class,
+                config.getRouter().getRoles().getPrefill().getSelector());
+        RandomWithinToleranceConfig candidateChoice = assertInstanceOf(
+                RandomWithinToleranceConfig.class, selector.getCandidateChoice());
+        assertEquals(2.0, candidateChoice.getOutlierRejection()
+                .getMaxPendingVsAverageMultiplier());
+        assertEquals(2.5, candidateChoice.getOutlierRejection()
+                .getMaxWaitVsAverageMultiplier());
+        assertEquals(128L, config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxEngineRequests());
+        assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
     }
 
     @Test
-    void should_keep_scalar_env_overrides_with_injected_environment() {
-        ConfigService configService = new ConfigService(Map.of(
-                "DECODE_CONCURRENCY_LIMIT", "32"));
-
-        assertEquals(32, configService.loadBalanceConfig().getDecodeConcurrencyLimit());
-    }
-
-    @Test
-    void should_load_cache_affinity_for_shortest_ttft() {
-        ConfigService configService = new ConfigService(Map.of(
-                "FLEXLB_CONFIG", """
-                        {
-                          "loadBalanceStrategy": "ShortestTtft",
-                          "cacheAffinityEnabled": true,
-                          "cacheAffinityMaxExtraTtftMs": 125,
-                          "cacheAffinityMinHitRate": 12.5
-                        }
-                        """));
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        assertEquals(LoadBalanceStrategyEnum.SHORTEST_TTFT, config.getLoadBalanceStrategy());
-        assertTrue(config.isCacheAffinityEnabled());
-        assertEquals(125L, config.getCacheAffinityMaxExtraTtftMs());
-        assertEquals(12.5, config.getCacheAffinityMinHitRate());
-    }
-
-    @Test
-    void scalar_environment_should_override_embedded_cache_affinity_config() {
-        ConfigService configService = new ConfigService(Map.of(
-                "FLEXLB_CONFIG", """
-                        {
-                          "loadBalanceStrategy": "ShortestTtft",
-                          "cacheAffinityEnabled": false,
-                          "cacheAffinityMaxExtraTtftMs": 10,
-                          "cacheAffinityMinHitRate": 2
-                        }
-                        """,
-                "LOAD_BALANCE_STRATEGY", "CostBasedPrefill",
-                "CACHE_AFFINITY_ENABLED", "true",
-                "CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "125",
-                "CACHE_AFFINITY_MIN_HIT_RATE", "12.5"));
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL, config.getLoadBalanceStrategy());
-        assertTrue(config.isCacheAffinityEnabled());
-        assertEquals(125L, config.getCacheAffinityMaxExtraTtftMs());
-        assertEquals(12.5, config.getCacheAffinityMinHitRate());
-    }
-
-    @Test
-    void should_override_cache_hit_time_window_ms_with_environment() {
-        ConfigService configService = new ConfigService(Map.of(
-                "CACHE_HIT_TIME_WINDOW_MS", "600000"));
-
-        assertEquals(600000L, configService.loadBalanceConfig().getCacheHitTimeWindowMs());
-    }
-
-    @Test
-    void should_override_cache_hit_max_cache_keys_with_environment() {
-        ConfigService configService = new ConfigService(Map.of(
-                "CACHE_HIT_MAX_CACHE_KEYS", "123456"));
-
-        assertEquals(123456L, configService.loadBalanceConfig().getCacheHitMaxCacheKeys());
-    }
-
-    @Test
-    void should_override_cache_hit_switches_with_environment() {
-        ConfigService configService = new ConfigService(Map.of(
-                "CACHE_HIT_WINDOW_WRITE_ENABLED", "false",
-                "CACHE_HIT_METRIC_REPORT_ENABLED", "false",
-                "CACHE_HIT_TRACE_LOG_ENABLED", "true",
-                "CACHE_HIT_THEORY_LOG_ENABLED", "false"));
-
-        assertFalse(configService.loadBalanceConfig().isCacheHitWindowWriteEnabled());
-        assertFalse(configService.loadBalanceConfig().isCacheHitMetricReportEnabled());
-        assertTrue(configService.loadBalanceConfig().isCacheHitTraceLogEnabled());
-        assertFalse(configService.loadBalanceConfig().isCacheHitTheoryLogEnabled());
-    }
-
-    @Test
-    void auto_tpm_defaults_are_all_off() {
-        ConfigService configService = new ConfigService(Map.of());
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        assertFalse(config.isAutoTpmEnabled());
-        assertFalse(config.isAutoTpmPrefillQueueEvictEnabled());
-        assertFalse(config.isAutoTpmDecodeReservedEvictEnabled());
-        assertEquals(50, config.getAutoTpmDefaultPriority());
-        assertEquals(0, config.getAutoTpmPrefillMaxInflightRequestsPerWorker());
-        // PR-D removed rescue fields (autoTpmPriorityLevels, autoTpmDeadlineRescueEnabled,
-        // autoTpmRescueScanIntervalMs, autoTpmMaxRescuePerTick, autoTpmMaxRescuePerEndpointPerTick,
-        // autoTpmMaxTransferCount, autoTpmDangerThresholdMs) — replaced by AdmissionLease + orTimeout.
-        // Remaining reserved fields:
-        assertFalse(config.isAutoTpmDecodeAcceptedEvictEnabled());
-        assertEquals(50L, config.getAutoTpmCancelAckTimeoutMs());
-        assertEquals(1000L, config.getAutoTpmCancelCompletionTimeoutMs());
-    }
-
-    @Test
-    void should_override_auto_tpm_fields_with_environment() {
-        ConfigService configService = new ConfigService(Map.of(
-                "AUTO_TPM_ENABLED", "true",
-                "AUTO_TPM_DEFAULT_PRIORITY", "60",
-                "AUTO_TPM_SLO_LENGTH_BUCKETS", "512:200,*:3000",
-                "AUTO_TPM_PRIORITY_SLO_MULTIPLIERS", "30:3.0,50:1.0",
-                "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "32",
-                "AUTO_TPM_PREFILL_QUEUE_EVICT_ENABLED", "true",
-                "AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED", "true"));
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        assertTrue(config.isAutoTpmEnabled());
-        assertEquals(60, config.getAutoTpmDefaultPriority());
-        assertEquals("512:200,*:3000", config.getAutoTpmSloLengthBuckets());
-        assertEquals("30:3.0,50:1.0", config.getAutoTpmPrioritySloMultipliers());
-        assertEquals(32, config.getAutoTpmPrefillMaxInflightRequestsPerWorker());
-        assertTrue(config.isAutoTpmPrefillQueueEvictEnabled());
-        assertTrue(config.isAutoTpmDecodeReservedEvictEnabled());
-    }
-
-    @Test
-    void should_override_auto_tpm_reserved_fields_with_environment() {
-        // PR-D removed rescue fields; spot-check the remaining reserved fields via env override
-        ConfigService configService = new ConfigService(Map.of(
-                "AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED", "true",
-                "AUTO_TPM_CANCEL_ACK_TIMEOUT_MS", "100",
-                "AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS", "2000"));
-
-        FlexlbConfig config = configService.loadBalanceConfig();
-        assertTrue(config.isAutoTpmDecodeAcceptedEvictEnabled());
-        assertEquals(100L, config.getAutoTpmCancelAckTimeoutMs());
-        assertEquals(2000L, config.getAutoTpmCancelCompletionTimeoutMs());
-    }
-
-    @Test
-    void dump_effective_config_logs_auto_tpm_fields() {
-        Logger logger = (Logger) LoggerFactory.getLogger(ConfigService.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        logger.addAppender(appender);
-        try {
-            new ConfigService(Map.of("AUTO_TPM_ENABLED", "true"));
-        } finally {
-            logger.detachAppender(appender);
-        }
-
-        List<String> lines = appender.list.stream()
-                .map(ILoggingEvent::getFormattedMessage)
-                .toList();
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmEnabled=true")),
-                "dumpEffectiveConfig should log autoTpmEnabled");
-        assertTrue(lines.stream().anyMatch(line ->
-                        line.contains("prioritySchedulerEnabled=true")
-                                && line.contains("deliveryMode=BATCH_ENQUEUE")),
-                "dumpEffectiveConfig should log the derived scheduler delivery mode");
-        assertTrue(lines.stream().anyMatch(line ->
-                        line.contains("autoTpmPrefillMaxInflightRequestsPerWorker=0")),
-                "dumpEffectiveConfig should log the route-decision request cap");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmSloLengthBuckets=")),
-                "dumpEffectiveConfig should log autoTpmSloLengthBuckets");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmDecodeAcceptedEvictEnabled=")),
-                "dumpEffectiveConfig should log autoTpmDecodeAcceptedEvictEnabled");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCancelAckTimeoutMs=")),
-                "dumpEffectiveConfig should log autoTpmCancelAckTimeoutMs");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCancelCompletionTimeoutMs=")),
-                "dumpEffectiveConfig should log autoTpmCancelCompletionTimeoutMs");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("loadBalanceStrategy=")),
-                "dumpEffectiveConfig should log loadBalanceStrategy");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("cacheAffinityEnabled=")),
-                "dumpEffectiveConfig should log cache-affinity configuration");
-    }
-
-    @Test
-    void prefill_request_cap_outside_route_mode_is_reported_as_ineffective() {
-        Logger logger = (Logger) LoggerFactory.getLogger(ConfigService.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        logger.addAppender(appender);
-        try {
-            new ConfigService(Map.of(
-                    "DEFAULT_SCHEDULE_MODE", "batch",
-                    "AUTO_TPM_ENABLED", "true",
-                    "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "16"));
-        } finally {
-            logger.detachAppender(appender);
-        }
-
-        assertTrue(appender.list.stream()
-                        .map(ILoggingEvent::getFormattedMessage)
-                        .anyMatch(line -> line.contains(
-                                "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER is set to 16")),
-                "an inactive request cap should be visible to operators");
-    }
-
-    @Test
-    void route_delivery_without_prefill_request_cap_is_reported_as_unbounded() {
-        Logger logger = (Logger) LoggerFactory.getLogger(ConfigService.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        logger.addAppender(appender);
-        try {
-            new ConfigService(Map.of(
-                    "DEFAULT_SCHEDULE_MODE", "queue",
-                    "AUTO_TPM_ENABLED", "true"));
-        } finally {
-            logger.detachAppender(appender);
-        }
-
-        assertTrue(appender.list.stream()
-                        .map(ILoggingEvent::getFormattedMessage)
-                        .anyMatch(line -> line.contains(
-                                "QUEUE + Auto-TPM route delivery has no per-Prefill inflight request limit")),
-                "an unbounded route-delivery worker cap should be visible to operators");
-    }
-
-    // ---- F3 (P0-3): unmatched env var scan ----
-
-    @Test
-    void unmatched_env_scan_reports_only_prefixed_unknown_names() {
-        Map<String, String> environment = Map.ofEntries(
-                Map.entry("AUTO_TPM_ENABLED", "true"),                  // correct name → matched
-                Map.entry("FLEXLB_BATCH_QUEUE_MAX_SIZE", "2048"),       // correct name → matched
-                Map.entry("COST_FORMULA", "1.0"),                       // correct name → matched
-                Map.entry("CACHE_AFFINITY_ENABLED", "true"),            // correct name → matched
-                Map.entry("AUTO_TPM_ENABLE", "true"),                   // misspelled → warned
-                Map.entry("FLEXLB_BATCH_QUEUE_MAXSIZE", "2048"),        // misspelled → warned
-                Map.entry("CACHE_AFFINITY_ENABLE", "true"),              // misspelled → warned
-                Map.entry("MAX_QUEUE_SIZE", "5000"),                    // no scanned prefix → out of scope
-                Map.entry("PATH", "/usr/bin"),                          // unrelated → ignored
-                Map.entry("FLEXLB_CONFIG", "{}"),                       // special entry point → matched
-                Map.entry("FLEXLB_BATCH_ENABLED", "true"));             // deprecated → dedicated warning only
-
-        assertEquals(List.of(
-                        "AUTO_TPM_ENABLE",
-                        "CACHE_AFFINITY_ENABLE",
-                        "FLEXLB_BATCH_QUEUE_MAXSIZE"),
-                ConfigService.findUnmatchedEnvVars(environment));
-    }
-
-    @Test
-    void unmatched_env_scan_suggests_nearest_known_name() {
-        assertEquals("AUTO_TPM_ENABLED", ConfigService.nearestKnownEnvName(
-                "AUTO_TPM_ENABLE", ConfigService.knownEnvVarNames()));
-    }
-
-    @Test
-    void unmatched_env_var_logs_warn_but_does_not_abort() {
-        Logger logger = (Logger) LoggerFactory.getLogger(ConfigService.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        logger.addAppender(appender);
-        try {
-            new ConfigService(Map.of("AUTO_TPM_ENABLE", "true"));
-        } finally {
-            logger.detachAppender(appender);
-        }
-
-        assertTrue(appender.list.stream()
-                        .map(ILoggingEvent::getFormattedMessage)
-                        .anyMatch(line -> line.contains("AUTO_TPM_ENABLE")
-                                && line.contains("未匹配任何配置字段，将被忽略")),
-                "unmatched env var must produce a warn log with the variable name");
-    }
-
-    // ---- F4 (P0-4): critical config expansion + SLO spec startup validation ----
-
-    @Test
-    void invalid_auto_tpm_enabled_aborts_startup() {
+    void rejects_unknown_removed_and_inactive_fields() {
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("AUTO_TPM_ENABLED", "notabool")));
-    }
-
-    @Test
-    void invalid_flexlb_batch_queue_max_size_aborts_startup() {
+                () -> ConfigService.parse("{\"autoTpmEnabled\":true}"));
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("FLEXLB_BATCH_QUEUE_MAX_SIZE", "abc")));
+                () -> ConfigService.parse("{\"autoTpmSloLengthBuckets\":\"*:100\"}"));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{"type":"DIRECT","ordering":{"type":"FIFO"}},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{"type":"DIRECT"},
+                  "dispatcher":{"type":"NON_BATCH","maxRequests":8}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"selector":{
+                    "type":"ESTIMATED_TTFT",
+                    "candidateChoice":{
+                      "type":"LEAST_RECENTLY_USED_IN_POOL",
+                      "outlierRejection":{
+                        "maxPendingVsAverageMultiplier":2.0,
+                        "maxWaitVsAverageMultiplier":2.0
+                      }
+                    }
+                  }}}}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{
+                    "selector":{"type":"RANDOM"},
+                    "cacheAffinity":{"maxExtraTtftMs":10,"minPrefixHitPercent":5}
+                  }}},
+                  "scheduler":{"type":"DIRECT"},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
     }
 
     @Test
-    void invalid_cache_affinity_environment_aborts_startup() {
+    void rejects_duplicate_keys_nulls_and_scalar_coercion() {
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("CACHE_AFFINITY_ENABLED", "notabool")));
+                () -> ConfigService.parse("{\"schemaVersion\":1,\"schemaVersion\":1}"));
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "invalid")));
+                () -> ConfigService.parse("{} {}"));
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "invalid")));
-    }
-
-    @Test
-    void unsafe_cache_affinity_bounds_abort_startup() {
+                () -> ConfigService.parse("{\"router\":null}"));
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "-1")));
+                () -> ConfigService.parse("{\"schemaVersion\":\"1\"}"));
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "NaN")));
+                () -> ConfigService.parse("{\"schemaVersion\":1.5}"));
         assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of("CACHE_AFFINITY_MIN_HIT_RATE", "101")));
+                () -> ConfigService.parse("{\"internalRuntime\":{}}"));
     }
 
     @Test
-    void invalid_prefill_inflight_limit_type_aborts_startup() {
-        assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of(
-                        "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "not-a-number")));
+    void validates_cross_component_semantics() {
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{"type":"DIRECT"},
+                  "dispatcher":{"type":"BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":101}},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{
+                    "type":"QUEUE",
+                    "ordering":{"type":"PRIORITY","preemption":{}}
+                  },
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY",
+                    "preemption":{"allowedVictimStages":["DECODE_ENGINE_OWNED"]}}},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY",
+                    "preemption":{
+                      "allowedVictimStages":["PREFILL_QUEUED"],
+                      "engineCancellation":{"ackTimeoutMs":50,"completionTimeoutMs":1000}
+                    }}},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{
+                    "type":"QUEUE","ordering":{"type":"PRIORITY"},
+                    "maxRoutingRetries":3
+                  },
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "workerRegistry": {
+                    "health": {
+                      "statusPollIntervalMs":20,
+                      "statusRpcTimeoutMs":5000,
+                      "statusStaleAfterMs":9999
+                    },
+                    "cacheStatus":{"minRefreshIntervalMs":50,"maxRefreshIntervalMs":3000}
+                  }
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"executionTimeEstimator":{
+                    "type":"FORMULA","expression":"sum(unknownTokens)"
+                  }}}}
+                }
+                """));
     }
 
     @Test
-    void negative_prefill_inflight_limit_aborts_startup() {
-        ConfigValidationException exception = assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of(
-                        "AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER", "-1")));
+    void omission_is_the_only_unbounded_representation() {
+        FlexlbConfig config = ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"}},
+                  "dispatcher":{"type":"NON_BATCH"},
+                  "router":{"roles":{"decode":{"availability":{"maxKvUsagePercent":90}}}}
+                }
+                """);
 
-        assertTrue(exception.getMessage().contains("autoTpmPrefillMaxInflightRequestsPerWorker"));
-    }
-
-    @Test
-    void invalid_slo_length_buckets_abort_startup_with_invalid_fragment() {
-        ConfigValidationException e = assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of(
-                        "AUTO_TPM_SLO_LENGTH_BUCKETS", "256150,1024:300")));
-        assertTrue(e.getMessage().contains("256150"),
-                "abort message must name the invalid fragment: " + e.getMessage());
-    }
-
-    @Test
-    void invalid_priority_slo_multipliers_abort_startup_with_invalid_fragment() {
-        ConfigValidationException e = assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of(
-                        "AUTO_TPM_PRIORITY_SLO_MULTIPLIERS", "30:0,50:1.0")));
-        assertTrue(e.getMessage().contains("30:0"),
-                "abort message must name the invalid fragment: " + e.getMessage());
-    }
-
-    @Test
-    void valid_slo_specs_pass_startup_validation() {
-        ConfigService configService = new ConfigService(Map.of(
-                "AUTO_TPM_SLO_LENGTH_BUCKETS", "512:200,*:3000",
-                "AUTO_TPM_PRIORITY_SLO_MULTIPLIERS", "30:3.0,50:1.0"));
-
-        assertEquals("512:200,*:3000",
-                configService.loadBalanceConfig().getAutoTpmSloLengthBuckets());
-    }
-
-    @Test
-    void blank_slo_specs_pass_startup_validation() {
-        // Blank means "use built-in default" and must not abort.
-        ConfigService configService = new ConfigService(Map.of(
-                "FLEXLB_CONFIG", """
-                        {
-                          "autoTpmSloLengthBuckets": "",
-                          "autoTpmPrioritySloMultipliers": ""
-                        }
-                        """));
-
-        assertEquals("", configService.loadBalanceConfig().getAutoTpmSloLengthBuckets());
-    }
-
-    @Test
-    void should_load_strategy_config_enum_case_insensitively() {
-        ConfigService configService = new ConfigService(Map.of(
-                "STRATEGY_CONFIGS", """
-                        {
-                          "shortestTtft": {
-                            "candidatePool": {
-                              "mode": "fixed",
-                              "size": 2
-                            }
-                          }
-                        }
-                        """));
-
-        StrategyConfigs.CandidatePoolConfig candidatePool = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
-        assertEquals(StrategyConfigs.CandidatePoolMode.FIXED, candidatePool.getMode());
-        assertEquals(2, candidatePool.getSize());
-    }
-
-    @Test
-    void should_normalize_invalid_shortest_ttft_queue_time_weight() {
-        ConfigService configService = new ConfigService(Map.of(
-                "STRATEGY_CONFIGS", """
-                        {
-                          "shortestTtft": {
-                            "queueTimeWeight": 1.5
-                          }
-                        }
-                        """));
-
-        assertEquals(1.0, configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getQueueTimeWeight());
-    }
-
-    @Test
-    void should_keep_strategy_config_defaults_for_missing_fields() {
-        ConfigService configService = new ConfigService(Map.of(
-                "STRATEGY_CONFIGS", """
-                        {
-                          "shortestTtft": {
-                            "candidatePool": {
-                              "ratio": 0.5
-                            }
-                          }
-                        }
-                        """));
-
-        StrategyConfigs.CandidatePoolConfig candidatePool = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
-        assertEquals(StrategyConfigs.CandidatePoolMode.RATIO, candidatePool.getMode());
-        assertEquals(0.5, candidatePool.getRatio());
-        assertEquals(1, candidatePool.getMinSize());
-        assertEquals(1, candidatePool.getSize());
-        assertEquals(2, candidatePool.resolveCandidateCount(4));
-    }
-
-    @Test
-    void should_normalize_invalid_strategy_candidate_pool_values() {
-        ConfigService configService = new ConfigService(Map.of(
-                "STRATEGY_CONFIGS", """
-                        {
-                          "shortestTtft": {
-                            "candidatePool": {
-                              "mode": "FIXED",
-                              "size": 0,
-                              "ratio": 2.0,
-                              "minSize": 0
-                            }
-                          }
-                        }
-                        """));
-
-        StrategyConfigs.CandidatePoolConfig candidatePool = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
-        assertEquals(StrategyConfigs.CandidatePoolMode.FIXED, candidatePool.getMode());
-        assertEquals(0.3, candidatePool.getRatio());
-        assertEquals(1, candidatePool.getMinSize());
-        assertEquals(1, candidatePool.getSize());
-    }
-
-    @Test
-    void should_normalize_invalid_strategy_candidate_pool_mode() {
-        ConfigService configService = new ConfigService(Map.of(
-                "STRATEGY_CONFIGS", """
-                        {
-                          "shortestTtft": {
-                            "candidatePool": {
-                              "mode": "BAD",
-                              "size": 2
-                            }
-                          }
-                        }
-                        """));
-
-        StrategyConfigs.CandidatePoolConfig candidatePool = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
-        assertEquals(StrategyConfigs.CandidatePoolMode.RATIO, candidatePool.getMode());
-        assertEquals(2, candidatePool.getSize());
-    }
-
-    @Test
-    void should_fallback_default_strategy_configs_when_environment_json_is_malformed() {
-        ConfigService configService = new ConfigService(Map.of(
-                "STRATEGY_CONFIGS", "{\"shortestTtft\":"));
-
-        StrategyConfigs.CandidatePoolConfig candidatePool = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
-        assertEquals(StrategyConfigs.CandidatePoolMode.RATIO, candidatePool.getMode());
-        assertEquals(0.3, candidatePool.getRatio());
-        assertEquals(1, candidatePool.getMinSize());
-        assertEquals(1, candidatePool.getSize());
-    }
-
-    private Request request() {
-        Request request = new Request();
-        request.setRequestId(12345L);
-        request.setSeqLen(128L);
-        return request;
+        assertNull(config.nonBatchDispatcher().getMaxInflightRequestsPerPrefillWorker());
+        assertNull(config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxEngineRequests());
     }
 }

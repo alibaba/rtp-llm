@@ -85,6 +85,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
+                false,
                 null,
                 null
         );
@@ -114,6 +115,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
+                false,
                 null,
                 null
         );
@@ -134,7 +136,7 @@ class EngineSyncRunnerTest {
                 modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, null);
+                syncEngineStatusInterval, false, null, null);
 
         runner.run();
 
@@ -165,7 +167,7 @@ class EngineSyncRunnerTest {
                 modelName, statuses, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, registry);
+                syncEngineStatusInterval, false, null, registry);
         runner.run();
 
         assertFalse(status.isAlive());
@@ -188,6 +190,7 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
+                false,
                 null,
                 null
         );

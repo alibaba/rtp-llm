@@ -44,12 +44,12 @@ class RequestShape:
 
 
 # ---------------------------------------------------------------------------
-# Prefill formula — parsed from the Master PREFILL_TIME_FORMULA config string.
+# Prefill formula — parsed from the Master FLEXLB_CONFIG expression.
 #
-# The formula string lives in ONE place: the master config JSON
-# (data/config/master_fixed_window.json, env var PREFILL_TIME_FORMULA).
-# The mock engine reads it from there (via --master-config) and parses it
-# here, so there is no duplicate copy of the coefficients in Python.
+# The expression lives in one place:
+# router.roles.prefill.executionTimeEstimator.expression. The mock engine
+# reads it from FLEXLB_CONFIG via --master-config and parses it here, so the
+# Python model does not duplicate the coefficients.
 #
 # Expected formula structure:
 #   max(MIN, BASE + BATCH_COEF*log(batchSize + 1)
@@ -73,7 +73,7 @@ _SOFTPLUS_RE = re.compile(
 
 @dataclass
 class PrefillFormulaCoeffs:
-    """Coefficients parsed from a PREFILL_TIME_FORMULA string."""
+    """Coefficients parsed from a prefill execution-time expression."""
 
     min_ms: float
     base: float
@@ -84,24 +84,23 @@ class PrefillFormulaCoeffs:
     hit_ratio_coef: float
 
 
-def parse_prefill_formula(formula_str: str) -> PrefillFormulaCoeffs:
-    """Parse a PREFILL_TIME_FORMULA string into coefficients.
+def parse_prefill_formula(expression: str) -> PrefillFormulaCoeffs:
+    """Parse a prefill execution-time expression into coefficients.
 
-    The formula string is the single source of truth — it comes from the
-    master config JSON (env var PREFILL_TIME_FORMULA), the same string the
-    Java FormulaPredictor parses.  This function extracts the numeric
+    The expression comes from strict FLEXLB_CONFIG, the same value the Java
+    FormulaPredictor parses. This function extracts the numeric
     coefficients so the mock engine can evaluate the formula in Python.
 
     Raises ValueError if the formula does not match the expected structure.
     """
-    s = re.sub(r"\s+", " ", formula_str).strip()
+    s = re.sub(r"\s+", " ", expression).strip()
 
     # max(MIN, BASE + ...)
     m = re.match(rf"max\(\s*({_NUM})\s*,\s*({_NUM})\s*\+", s)
     if not m:
         raise ValueError(
             f"Cannot parse MIN/BASE from formula (expected 'max(NUM, NUM + ...'): "
-            f"{formula_str[:80]!r}"
+            f"{expression[:80]!r}"
         )
     min_ms = float(m.group(1))
     base = float(m.group(2))
@@ -109,7 +108,7 @@ def parse_prefill_formula(formula_str: str) -> PrefillFormulaCoeffs:
     # BATCH_COEF — COEF*log(batchSize + 1)
     batch_m = re.search(rf"({_NUM})\s*\*\s*log\(\s*batchSize\s*\+\s*1\s*\)", s)
     if not batch_m:
-        raise ValueError(f"Cannot parse BATCH_COEF from formula: {formula_str[:80]!r}")
+        raise ValueError(f"Cannot parse BATCH_COEF from formula: {expression[:80]!r}")
     batch_coef = float(batch_m.group(1))
 
     # Softplus terms: COEF*SCALE*log(1+exp((sum(computeTokens)-THRESH)/SCALE))
@@ -127,7 +126,7 @@ def parse_prefill_formula(formula_str: str) -> PrefillFormulaCoeffs:
     # HIT_COEF — COEF*sum(hitCacheTokens)
     hit_m = re.search(rf"({_NUM})\s*\*\s*sum\(\s*hitCacheTokens\s*\)", s)
     if not hit_m:
-        raise ValueError(f"Cannot parse HIT_COEF from formula: {formula_str[:80]!r}")
+        raise ValueError(f"Cannot parse HIT_COEF from formula: {expression[:80]!r}")
     hit_coef = float(hit_m.group(1))
 
     # HAS_HIT_COEF — COEF*(sum(hasHitCache)/batchSize)
@@ -136,7 +135,7 @@ def parse_prefill_formula(formula_str: str) -> PrefillFormulaCoeffs:
     )
     if not has_hit_m:
         raise ValueError(
-            f"Cannot parse HAS_HIT_COEF from formula: {formula_str[:80]!r}"
+            f"Cannot parse HAS_HIT_COEF from formula: {expression[:80]!r}"
         )
     has_hit_coef = float(has_hit_m.group(1))
 
@@ -148,7 +147,7 @@ def parse_prefill_formula(formula_str: str) -> PrefillFormulaCoeffs:
     )
     if not hit_ratio_m:
         raise ValueError(
-            f"Cannot parse HIT_RATIO_COEF from formula: {formula_str[:80]!r}"
+            f"Cannot parse HIT_RATIO_COEF from formula: {expression[:80]!r}"
         )
     hit_ratio_coef = float(hit_ratio_m.group(1))
 
@@ -198,12 +197,11 @@ class PerformanceModel:
         self.prefill_fixed_ms = _optional_float(prefill.get("fixed_ms"))
         self.prefill_scale = float(prefill.get("scale", 1.0))
 
-        # Prefill formula string — single source of truth is the master config
-        # JSON (PREFILL_TIME_FORMULA env var).  The mock engine reads it via
-        # --master-config and injects it here as prefill.formula_str.
-        formula_str = prefill.get("formula_str")
-        if formula_str:
-            self._formula_coeffs = parse_prefill_formula(formula_str)
+        # The mock launcher copies the strict FLEXLB_CONFIG estimator
+        # expression into the performance model config.
+        expression = prefill.get("expression")
+        if expression:
+            self._formula_coeffs = parse_prefill_formula(expression)
         else:
             self._formula_coeffs = None
             if self.prefill_fixed_ms is None:
@@ -292,10 +290,10 @@ def load_performance_config(path: str | None) -> dict:
         return json.load(f)
 
 
-def extract_prefill_formula_from_master_config(
+def extract_prefill_expression_from_master_config(
     master_config_path: str | None,
 ) -> str | None:
-    """Read PREFILL_TIME_FORMULA from a master config JSON file.
+    """Read the active FORMULA estimator expression from FLEXLB_CONFIG.
 
     The master config has the structure:
       {"zone_process_setting": {"process_info": {"envs": [[key, value], ...]}}}
@@ -307,14 +305,29 @@ def extract_prefill_formula_from_master_config(
     envs = (
         payload.get("zone_process_setting", {}).get("process_info", {}).get("envs", [])
     )
-    for item in envs:
-        if (
-            isinstance(item, list)
+    document = next(
+        (
+            item[1]
+            for item in envs
+            if isinstance(item, list)
             and len(item) == 2
-            and item[0] == "PREFILL_TIME_FORMULA"
-        ):
-            return item[1]
-    return None
+            and item[0] == "FLEXLB_CONFIG"
+        ),
+        None,
+    )
+    if not document:
+        return None
+    config = json.loads(document)
+    estimator = (
+        config.get("router", {})
+        .get("roles", {})
+        .get("prefill", {})
+        .get("executionTimeEstimator", {})
+    )
+    if estimator.get("type") != "FORMULA":
+        return None
+    expression = estimator.get("expression")
+    return expression if isinstance(expression, str) and expression.strip() else None
 
 
 def compute_block_keys(

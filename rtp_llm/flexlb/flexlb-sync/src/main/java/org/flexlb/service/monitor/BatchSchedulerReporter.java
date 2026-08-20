@@ -61,7 +61,7 @@ public class BatchSchedulerReporter {
 
     @PostConstruct
     public void init() {
-        // Queue — same type as RoutingQueueReporter
+        // Canonical per-worker scheduling queue metrics
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
@@ -113,24 +113,10 @@ public class BatchSchedulerReporter {
     // ==================== Queue metrics ====================
 
     /**
-     * Report per-worker batcher queue depth via {@code routing.queue.length}.
-     *
-     * @deprecated Replaced by {@link #reportBatcherQueueDepthByPriority} which
-     *             carries the priority tag. Retained for backward compatibility.
-     */
-    @Deprecated
-    public void reportBatcherQueueDepth(String role, String engineIp, int depth) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
-                "type", "batchQueue",
-                "role", role);
-        monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
-    }
-
-    /**
      * Report per-worker batcher queue depth bucketed by normalized Auto-TPM
      * priority via {@code routing.queue.length} (type=batchQueue series).
-     * <p>Tagged by the raw 1-100 priority value, "0" for legacy items without
-     * a budget — same convention as {@link #reportBatchWaitTimeMs} adding the
+     * <p>Tagged by the raw 1-100 priority value, "0" when priority is unavailable
+     * — the same convention as {@link #reportBatchWaitTimeMs} adding the
      * priority dimension to {@code routing.queue.wait.time.ms}. Only priorities
      * present in the queue are reported (no zero-fill), mirroring the
      * wait-time-by-priority empty-bucket behavior.
@@ -157,8 +143,8 @@ public class BatchSchedulerReporter {
 
     /**
      * Report batch wait time (enqueue to dispatch) via {@code routing.queue.wait.time.ms}.
-     * <p>Tagged by the normalized Auto-TPM priority (raw 1-100 value, "0" for
-     * legacy items without a budget — same convention as the auto_tpm.* family).
+     * <p>Tagged by the normalized Auto-TPM priority (raw 1-100 value, "0" when
+     * priority is unavailable — the same convention as the auto_tpm.* family).
      */
     public void reportBatchWaitTimeMs(String role, String engineIp, long waitMs, int priority) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,

@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       <em>soft timeout</em> reconciles the pending Decode ownership.</li>
  *   <li>{@link #close()} — the <b>failure</b> path
  *       ({@code PENDING→CLOSED} only):
- *       timeout, dispatch error, SLO expiry, eviction or external future
+ *       timeout, dispatch error, eviction or external future
  *       cancellation. The registrar reduces this terminal against delivery
  *       ownership: locally reversible requests are released, while a batch
  *       claim or already-published route remains behind Engine fencing.
@@ -56,8 +56,6 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Each resource-release step is idempotent, so concurrent terminal paths
  * (dispatch pipeline, calibrate, soft timeout) are harmless.
  *
- * <p><b>Legacy path</b> ({@code budget == null}): never constructs a lease;
- * the legacy dispatch lifecycle is unchanged byte-for-byte.
  */
 public final class AdmissionLease implements AutoCloseable {
 
@@ -125,16 +123,6 @@ public final class AdmissionLease implements AutoCloseable {
                 ? Objects.requireNonNull(softTimeoutScheduler,
                         "softTimeoutScheduler is required when soft timeout is enabled")
                 : softTimeoutScheduler;
-    }
-
-    /**
-     * Backward-compatible constructor (soft timeout disabled, no close callback).
-     */
-    public AdmissionLease(BatchItem item,
-                          DecodeEndpoint decodeEp,
-                          PrefillQueueManager prefillQueue,
-                          InflightRegistrar registrar) {
-        this(item, decodeEp, prefillQueue, registrar, 0, null, null);
     }
 
     // ==================== Terminal operations ====================

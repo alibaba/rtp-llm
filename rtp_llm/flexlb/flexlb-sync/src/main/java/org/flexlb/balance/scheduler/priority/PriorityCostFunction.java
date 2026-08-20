@@ -10,14 +10,8 @@ import org.flexlb.enums.DecodeTaskPhase;
  * an unbounded victim set can exceed any fixed-radix scalar. Plan selection
  * uses {@link PriorityHarmProfile} instead.
  *
- * <p>Cache benefit remains bounded for stable diagnostics and same-profile
- * ranking. It cannot affect a cross-priority comparison because the exact
- * harm profile is always compared first.
  */
 public final class PriorityCostFunction {
-
-    /** Smallest cost gap between adjacent ranks: f(40) - f(30) = 1024 - 1. */
-    public static final long MIN_ADJACENT_GAP = 1023L;
 
     // h(case) cross-type weights (design doc 7.6). A combined slot+KV plan
     // sums its already-weighted parts and is never multiplied again.
@@ -91,14 +85,4 @@ public final class PriorityCostFunction {
         return Math.max(1L, Math.round(Math.sqrt((double) kvBucket(kvTokens))));
     }
 
-    /**
-     * Cache benefit bounded so it can never reverse the priority boundary:
-     * {@code min(cacheHitTokens, benefitCap, MIN_ADJACENT_GAP / 2)}.
-     * The operator cap ({@code autoTpmPlanCacheHitBenefitCap}) defaults to 0,
-     * which disables cache benefit entirely.
-     */
-    public static long boundedCacheBenefit(long cacheHitTokens, long benefitCap) {
-        long benefit = Math.min(Math.max(0, cacheHitTokens), Math.max(0, benefitCap));
-        return Math.min(benefit, MIN_ADJACENT_GAP / 2);
-    }
 }

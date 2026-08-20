@@ -8,6 +8,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Prioritized;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A single inference request queued for a priority scheduling decision.
@@ -20,10 +21,10 @@ import java.util.concurrent.CompletableFuture;
  * so downstream operations (commit, rollback, ack) avoid repeated
  * {@code EndpointRegistry} lookups by ip+port.
  *
- * <p>{@link #sortKey} is mutable — the {@link BatcherAlgorithm} computes it
- * inside {@link WorkerBatcher#offer(BatchItem)} via {@link BatcherAlgorithm#computeSortKey}.
  */
 public final class BatchItem implements Prioritized {
+
+    private static final AtomicLong ENQUEUE_SEQUENCE = new AtomicLong();
 
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
@@ -33,6 +34,7 @@ public final class BatchItem implements Prioritized {
     private final PrefillEndpoint prefillEp;
     private final DecodeEndpoint decodeEp;
     private final long enqueuedAtMs;
+    private final long enqueueSequence;
     private final DeliveryMode deliveryMode;
 
     /**
@@ -44,16 +46,13 @@ public final class BatchItem implements Prioritized {
     private String readyDeliveryReason;
 
     /**
-     * Last SLO park diagnostics are owned by the request itself. Keeping the
+     * Last batching-park diagnostics are owned by the request itself. Keeping the
      * lazily-created mutable holder here makes repeated parks allocation-free
      * while adding only one reference to requests that never park. Unlike a
      * scheduler-wide request-id map, it cannot retain externally removed
      * items. Access is serialized by the owning worker thread / queue lock.
      */
     private ParkTrace parkTrace;
-
-    /** Mutable sort key set by the batcher algorithm at offer time. */
-    private volatile long sortKey;
 
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
@@ -71,6 +70,7 @@ public final class BatchItem implements Prioritized {
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
         this.enqueuedAtMs = enqueuedAtMs;
+        this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
         this.deliveryMode = DeliveryMode.from(ctx);
     }
 
@@ -155,39 +155,24 @@ public final class BatchItem implements Prioritized {
         int inflightCount() { return inflightCount; }
     }
 
-    /** Priority queue sort key. */
-    public long sortKey() { return sortKey; }
-
-    /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
-    public void setSortKey(long sortKey) { this.sortKey = sortKey; }
-
     /**
-     * Auto-TPM normalized priority; delegates to {@code ctx.budget()}.
-     * Returns 0 on the legacy path (budget = null), so legacy items
-     * never participate in any priority mechanism.
-     *
-     * <p>Satisfies {@link Prioritized#priority()} for the per-worker batcher
+     * Normalized request priority. Satisfies {@link Prioritized#priority()}
+     * for the per-worker batcher
      * queue's {@code PriorityBlockingQueue}.
      */
     @Override
     public int priority() {
-        return ctx != null && ctx.budget() != null ? ctx.budget().priority() : 0;
+        return ctx != null ? ctx.getPriority() : 0;
     }
 
     /**
-     * Monotonic enqueue timestamp used as the same-priority FIFO tie-break
-     * in {@link org.flexlb.util.PriorityOrdering#STRICT}. Delegates to the
-     * immutable {@link #enqueuedAtMs} field so a re-offer (retry / rescue)
-     * keeps the original enqueue order.
+     * Unique monotonic enqueue sequence used by FIFO and as the same-priority
+     * tie-break in {@link org.flexlb.util.PriorityOrdering#STRICT}. A re-offer
+     * keeps the original item and therefore the original queue position.
      */
     @Override
     public long enqueueSeq() {
-        return enqueuedAtMs;
-    }
-
-    /** Auto-TPM admission deadline (epoch ms); delegates to {@code ctx.budget()}. */
-    public long deadlineMs() {
-        return ctx != null && ctx.budget() != null ? ctx.budget().deadlineMs() : 0;
+        return enqueueSequence;
     }
 
     // -- derived accessors --

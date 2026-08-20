@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
@@ -42,11 +43,20 @@ public class RandomStrategy implements LoadBalanceStrategy {
 
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
+        if (ep instanceof DecodeEndpoint decodeEndpoint) {
+            Logger.debug("Random decode rollBack - ip: {}, requestId: {}",
+                    decodeEndpoint.ipPort(), requestId);
+            decodeEndpoint.release(requestId);
+        }
     }
 
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
+
+        FlexlbConfig config = balanceContext.getConfig() != null
+                ? balanceContext.getConfig()
+                : configService.loadBalanceConfig();
 
         Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
 
@@ -62,7 +72,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
         WorkerEndpoint selectedWorker = null;
         for (int i = 0; i < size; i++) {
             WorkerEndpoint ep = endpoints.get((startIndex + i) % size);
-            if (isWorkerAvailable(balanceContext, roleType, ep)) {
+            if (isWorkerAvailable(config, roleType, ep)) {
                 selectedWorker = ep;
                 break;
             }
@@ -73,26 +83,25 @@ public class RandomStrategy implements LoadBalanceStrategy {
         }
 
         logger.debug("Selected worker ip: {}, httpPort: {}", selectedWorker.getIp(), selectedWorker.getHttpPort());
-        return buildServerStatus(selectedWorker, roleType, balanceContext.getRequestId());
+        return buildServerStatus(selectedWorker, roleType, balanceContext, config);
     }
 
-    private boolean isWorkerAvailable(BalanceContext balanceContext, RoleType roleType, WorkerEndpoint ep) {
+    private boolean isWorkerAvailable(FlexlbConfig config, RoleType roleType, WorkerEndpoint ep) {
         if (ep == null || !ep.getStatus().isAlive()) {
             return false;
         }
 
-        FlexlbConfig config = balanceContext.getConfig() != null
-                ? balanceContext.getConfig()
-                : configService.loadBalanceConfig();
-        ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
+        ResourceMeasureIndicatorEnum indicator = config.resourceMeasureFor(roleType);
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
         return resourceMeasure == null || resourceMeasure.isResourceAvailable(ep);
     }
 
-    private ServerStatus buildServerStatus(WorkerEndpoint ep, RoleType roleType, long requestId) {
+    private ServerStatus buildServerStatus(WorkerEndpoint ep, RoleType roleType,
+                                           BalanceContext balanceContext,
+                                           FlexlbConfig config) {
+        long requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
-            result.setSuccess(true);
             result.setServerIp(ep.getIp());
             result.setHttpPort(ep.getHttpPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
@@ -100,6 +109,20 @@ public class RandomStrategy implements LoadBalanceStrategy {
             result.setRole(roleType);
             result.setGroup(ep.getStatus().getGroup());
             result.setRequestId(requestId);
+            if (roleType == RoleType.DECODE) {
+                if (!(ep instanceof DecodeEndpoint decodeEndpoint)) {
+                    throw new IllegalStateException(
+                            "DECODE random selection requires DecodeEndpoint ownership");
+                }
+                long seqLen = balanceContext.getRequest().getSeqLen();
+                long expectedKvTokens = config.decodeKvReservationTokens(
+                        seqLen,
+                        balanceContext.getRequest().getMaxNewTokens(),
+                        decodeEndpoint.realKvTotal());
+                decodeEndpoint.reserve(requestId, Math.max(0L, seqLen),
+                        expectedKvTokens, balanceContext.getPriority());
+            }
+            result.setSuccess(true);
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
             result.setSuccess(false);

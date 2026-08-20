@@ -60,46 +60,6 @@ public record DecodeEndpointSnapshot(
         List<DecodeRequestSnapshot> accepted,
         List<DecodeRequestSnapshot> running) {
 
-    /**
-     * Phase 4 compatibility constructor: reserved-only snapshot with empty
-     * accepted/running layers and {@code engineLoad == totalLoad}.
-     */
-    public DecodeEndpointSnapshot(DecodeEndpoint endpoint,
-                                  String endpointId,
-                                  long admissionVersion,
-                                  long realKvAvailable,
-                                  long realKvTotal,
-                                  int totalLoad,
-                                  long concurrencyLimit,
-                                  long hardKvReserved,
-                                  long expectedKvReserved,
-                                  List<DecodeRequestSnapshot> reserved) {
-        this(endpoint, endpointId, admissionVersion, realKvAvailable, realKvTotal,
-                totalLoad, concurrencyLimit, hardKvReserved, expectedKvReserved,
-                reserved, List.of(), List.of());
-    }
-
-    /**
-     * Layered compatibility constructor (pre-P1-3 call sites):
-     * {@code engineLoad == totalLoad}, i.e. no queued-phase entries.
-     */
-    public DecodeEndpointSnapshot(DecodeEndpoint endpoint,
-                                  String endpointId,
-                                  long admissionVersion,
-                                  long realKvAvailable,
-                                  long realKvTotal,
-                                  int totalLoad,
-                                  long concurrencyLimit,
-                                  long hardKvReserved,
-                                  long expectedKvReserved,
-                                  List<DecodeRequestSnapshot> reserved,
-                                  List<DecodeRequestSnapshot> accepted,
-                                  List<DecodeRequestSnapshot> running) {
-        this(endpoint, endpointId, admissionVersion, realKvAvailable, realKvTotal,
-                totalLoad, totalLoad, concurrencyLimit, hardKvReserved, expectedKvReserved,
-                reserved, accepted, running);
-    }
-
     public static DecodeEndpointSnapshot capture(DecodeEndpoint endpoint, long concurrencyLimit) {
         // Atomic (version, layered views) tuple: capturing the views first and
         // the version afterwards could pair a stale view with a fresher
@@ -115,8 +75,7 @@ public record DecodeEndpointSnapshot(
                     ? DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED
                     : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN;
             reserved.add(new DecodeRequestSnapshot(requestId, entry.priority(), phase,
-                    entry.releasableKvTokens(), entry.expectedKvTokens(), entry.deadlineMs(),
-                    true, masterQueued));
+                    entry.releasableKvTokens(), entry.expectedKvTokens(), true, masterQueued));
         });
         List<DecodeRequestSnapshot> accepted = new ArrayList<>();
         List<DecodeRequestSnapshot> running = new ArrayList<>();
@@ -152,7 +111,6 @@ public record DecodeEndpointSnapshot(
         // Confirmed KV is engine-owned; the tracked inputLength estimate serves
         // as both releasable and expected KV (no generation-growth estimate).
         return new DecodeRequestSnapshot(task.requestId(), task.priority(), task.phase(),
-                task.kvTokens(), task.kvTokens(), task.deadlineMs(),
-                task.priorityKnown(), false);
+                task.kvTokens(), task.kvTokens(), task.priorityKnown(), false);
     }
 }

@@ -1,5 +1,10 @@
 # FlexLB Master SLO Batch 性能评估
 
+> 历史结果说明：本文保留 2026-07-17 当次评估的名称和数据口径。
+> `COST_SLO_MS` 只是离线分析阈值，不是当前 FlexLB 配置；当前实现没有
+> SLO budget、长度 bucket 或优先级 TTL 倍率。生产行为只由
+> `FLEXLB_CONFIG` JSON 和请求自身的到期字段决定。
+
 ## 1. 结论
 
 在不修改调度策略、固定 `SCHEDULE_WORKER_SIZE=16` 的条件下，FlexLB Master 的 batch Schedule 吞吐达到目标：
@@ -26,19 +31,19 @@
 | Master worker | `SCHEDULE_WORKER_SIZE=16` |
 | Load client worker | 8 |
 | Prefill/Decode engine | 750/500 |
-| 调度模式 | `batch` |
-| Batch 算法 | `fixed_window` |
-| `FLEXLB_BATCH_PREDICT_THRESHOLD_MS` | 500 ms |
-| `FLEXLB_BATCH_FIXED_WAIT_MS` | 160 ms |
-| `FLEXLB_BATCH_SIZE_MAX` | 32 |
-| `COST_SLO_MS` | 1000 ms |
+| 调度/分发 | `scheduler.type=QUEUE` / `dispatcher.type=BATCH` |
+| Batch 算法 | fixed window |
+| `dispatcher.earlyDispatchPredictedExecutionMs` | 500 ms |
+| `dispatcher.maxCollectionWaitMs` | 160 ms |
+| `dispatcher.maxRequests` | 32 |
+| 离线分析阈值 `COST_SLO_MS` | 1000 ms |
 | Master/Java mock heap | 32 GiB / 32 GiB |
 | Mock 性能模型 | `dsv4_flash_performance.formula_1x.json` |
 | 流量 | 原始 trace 毫秒分布按 `REPLAY_SPEED` 等比例压缩 |
 
 Master 配置文件为 `tools/online_eval/data/config/master_fixed_window_slo500_wait160.json`。所有压力档固定 Master 和 load worker 数，避免把 worker 变化误判为算法或 Master 容量变化。
 
-`fixed_window` 中 500 ms 是预测时间触发阈值，不是端到端硬 SLO。批次在以下任一条件满足时 dispatch：预测 prefill 时间达到 500 ms、最老请求等待达到 160 ms、batch size 达到 32。`COST_SLO_MS=1000` 仅用于成本估算和结果校验，该算法不会以它作为硬 deadline。
+fixed window 中 500 ms 是预测时间触发阈值，不是端到端硬 SLO。批次在以下任一条件满足时 dispatch：预测 prefill 时间达到 500 ms、最老请求等待达到 160 ms、batch size 达到 32。历史结果中的 `COST_SLO_MS=1000` 仅用于离线成本估算和结果校验，不进入当前 FlexLB 配置，也不会成为请求 deadline。
 
 ## 4. 有效压力矩阵
 
@@ -99,7 +104,7 @@ Java mock 的 Enqueue ACK 立即返回，用于测量 Master Schedule，而不�
 4. 到理论结束时间后，一起进入 finished，并启动对应 decode 状态模拟。
 5. 不同 DP rank 使用独立时间线，不会被错误地串行化。
 
-模型使用 Master 相同的 `PREFILL_TIME_FORMULA`，`sleep_scale=1.0`。它用于验证批次决策、状态同步和 Master 调度容量，不等价于真实 GPU kernel 或真实 RTP-LLM 端到端性能。
+模型使用 Master 的 `FLEXLB_CONFIG.router.roles.prefill.executionTimeEstimator.expression`，`sleep_scale=1.0`。它用于验证批次决策、状态同步和 Master 调度容量，不等价于真实 GPU kernel 或真实 RTP-LLM 端到端性能。
 
 有效 10K 轮次中 mock 堆峰值为 16998 MiB/32768 MiB，无 OOM/Full GC；prefill pending 峰值为 57132，总任务在 drain 后降到 0。dispatch ACK mean/P99 为 15.159/499 ms，说明 mock ACK 不是平均吞吐瓶颈，但在微突发期间参与了尾延迟。
 

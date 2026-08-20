@@ -394,51 +394,9 @@ public class MetricConstant {
     public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
 
     /**
-     * Queue entry QPS
-     */
-    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
-
-    /**
-     * Timeout QPS
-     */
-    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
-
-    /**
-     * Queue full rejection QPS
-     */
-    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
-
-    /**
      * Wait time in milliseconds
      */
     public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";
-
-    /**
-     * Routing execution time in milliseconds
-     */
-    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS = "app.routing.route.execution.time.ms";
-
-    /**
-     * Routing success QPS
-     */
-    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
-
-    /**
-     * Routing failure QPS
-     */
-    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
-
-    /**
-     * Routing retry QPS
-     */
-    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
-
-    /* ------------------------ Resource Monitoring -------------------------- */
-
-    /**
-     * Worker permit capacity
-     */
-    public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
 
     /**
      * Network transfer delay: time from client requestTimeMs to gRPC server entry, in milliseconds.
@@ -527,11 +485,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";
 
     /**
-     * Auto-TPM per-request SLO in ms (timer), tags: priority, seq_bucket
-     */
-    public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
-
-    /**
      * Auto-TPM schedule latency in ms (timer), tags: priority, result
      */
     public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "auto_tpm.schedule.latency_ms";
@@ -589,12 +542,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_TTFT_MS = "auto_tpm.ttft_ms";
 
     /**
-     * Auto-TPM deadline miss count (QPS), tags: priority.
-     * Counted when schedule completion exceeds the request deadlineMs.
-     */
-    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "auto_tpm.deadline_miss.count";
-
-    /**
      * Auto-TPM priority preemption count (QPS), tags: stage
      * (prefill_queued / decode_reserved).
      */
@@ -631,8 +578,7 @@ public class MetricConstant {
 
     /**
      * Auto-TPM engine cancel release confirmations (QPS), tags: endpoint,
-     * priority (victim's normalized priority; "0" when the settled item
-     * carried no Auto-TPM budget).
+     * priority (victim's normalized priority; "0" when unavailable).
      * Counted when a cancelled victim's release is confirmed — either inside
      * the commit wait window or later via the WorkerStatus settle path.
      */
@@ -649,7 +595,7 @@ public class MetricConstant {
     /**
      * Auto-TPM cancel initiations (QPS), tags: priority (normalized priority
      * of the cancelled request, raw 1-100 value — matches the rest of the
-     * auto_tpm family; "0" = not inflight / no budget), reason
+     * auto_tpm family; "0" = priority unavailable), reason
      * (PRIORITY_PREEMPTED / USER_CANCELLED / DEADLINE_EXCEEDED). Counted
      * once per cancel intent injected into the EngineCancelChannel: the
      * preemption path and the Frontend-initiated cancel path.

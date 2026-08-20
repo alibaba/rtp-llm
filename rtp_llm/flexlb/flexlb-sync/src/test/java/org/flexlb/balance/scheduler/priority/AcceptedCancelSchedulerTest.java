@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
@@ -11,9 +13,8 @@ import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -83,13 +84,13 @@ class AcceptedCancelSchedulerTest {
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        config.setFlexlbBatchSizeMax(100);
-        config.setFlexlbBatchWindowMs(10_000);
-        config.setFlexlbBatchQueueMaxSize(16);
-        config.setAutoTpmEnabled(true);
-        config.setAutoTpmDecodeReservedEvictEnabled(true);
-        config.setAutoTpmDecodeAcceptedEvictEnabled(true);
-        config.setDecodeConcurrencyLimit(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(16);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_ENGINE_OWNED);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         cancelChannel = new FakeCancelChannel();
@@ -97,8 +98,6 @@ class AcceptedCancelSchedulerTest {
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
-                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, cancelChannel, coordinator) {
             @Override
             protected ServerStatus selectPrefillForDecodeEviction(BalanceContext ctx,
@@ -456,12 +455,12 @@ class AcceptedCancelSchedulerTest {
         // Engine Cancel is enabled independently, while Master-local reserved
         // eviction stays disabled. Fourteen confirmed requests against a
         // concurrency limit of five require ten victims before P70 can fit.
-        config.setAutoTpmDecodeReservedEvictEnabled(false);
-        config.setAutoTpmDecodeAcceptedEvictEnabled(true);
-        config.setDecodeConcurrencyLimit(5);
-        config.setFlexlbBatchFixedWaitMs(3_600_000);
-        config.setAutoTpmCancelAckTimeoutMs(500);
-        config.setAutoTpmCancelCompletionTimeoutMs(1_000);
+        SchedulingTestConfig.disallowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_ENGINE_OWNED);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (5));
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
+        SchedulingTestConfig.engineCancellation(config).setAckTimeoutMs(500);
+        SchedulingTestConfig.engineCancellation(config).setCompletionTimeoutMs(1_000);
 
         List<BatchItem> victims = registerConfirmedVictims(14);
         List<Long> cancelRoutes = java.util.Collections.synchronizedList(
@@ -478,7 +477,7 @@ class AcceptedCancelSchedulerTest {
 
         BalanceContext incoming = context(100L, 70);
         long now = System.currentTimeMillis();
-        incoming.setBudget(ScheduleBudget.forDeadline(70, now, now + 5_000));
+        incoming.setSchedulingMetadata(SchedulingMetadata.explicit(70, now + 5_000));
         CompletableFuture<Response> incomingResponse = scheduler.submit(incoming);
 
         await(() -> cancelChannel.cancelCount.get() == 10 && cancelRoutes.size() == 10);
@@ -687,7 +686,7 @@ class AcceptedCancelSchedulerTest {
 
         BalanceContext incoming = context(52L, 70);
         long now = System.currentTimeMillis();
-        incoming.setBudget(ScheduleBudget.forDeadline(70, now, now + 100));
+        incoming.setSchedulingMetadata(SchedulingMetadata.explicit(70, now + 100));
         CompletableFuture<Response> responseFuture = scheduler.submit(incoming);
 
         await(() -> cancelChannel.cancelCount.get() == 1
@@ -720,7 +719,7 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void asyncCancelHandoffBeforeAdmissionDeadlineUsesInflightReducer() throws Exception {
-        config.setFlexlbBatchFixedWaitMs(3_600_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
         BatchItem victim = registerConfirmedVictim(61L, 30, TaskPhase.RUNNING);
         CompletableFuture<EngineCancelChannel.CancelOutcome> ack = new CompletableFuture<>();
         cancelChannel.handler = (ignored, requestId) -> ack;
@@ -729,7 +728,7 @@ class AcceptedCancelSchedulerTest {
 
         BalanceContext incoming = context(62L, 70);
         long now = System.currentTimeMillis();
-        incoming.setBudget(ScheduleBudget.forDeadline(70, now, now + 500));
+        incoming.setSchedulingMetadata(SchedulingMetadata.explicit(70, now + 500));
         CompletableFuture<Response> responseFuture = scheduler.submit(incoming);
 
         await(() -> cancelChannel.cancelCount.get() == 1
@@ -759,7 +758,7 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void committedEnginePreemptionIgnoresTelemetryFailure() throws Exception {
-        config.setFlexlbBatchFixedWaitMs(3_600_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
         registerConfirmedVictim(63L, 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(
@@ -812,12 +811,12 @@ class AcceptedCancelSchedulerTest {
     void admissionLeaseCleanupWinningFirstPreventsCoordinatorMutation() throws Exception {
         BatchItem victim = dummyItem(21L, 30);
         assertTrue(scheduler.registerInflight(victim));
-        decodeEndpoint.reserve(21L, 128, 136, 30, 0);
+        decodeEndpoint.reserve(21L, 128, 136, 30);
         DecodeRequestSnapshot staleVictim = DecodeEndpointSnapshot
                 .capture(decodeEndpoint, 1).reserved().getFirst();
 
         AdmissionLease lease = new AdmissionLease(
-                victim, decodeEndpoint, null, scheduler);
+                victim, decodeEndpoint, null, scheduler, 0, null, null);
         lease.close();
 
         DecodePreemptionCoordinator.ExecutionResult result = coordinator.execute(
@@ -838,9 +837,9 @@ class AcceptedCancelSchedulerTest {
             long token = 10_000L + i;
             BatchItem victim = dummyItem(requestId, 30);
             assertTrue(scheduler.registerInflight(victim));
-            decodeEndpoint.reserve(requestId, 32, 40, 30, 0);
+            decodeEndpoint.reserve(requestId, 32, 40, 30);
             AdmissionLease lease = new AdmissionLease(
-                    victim, decodeEndpoint, null, scheduler);
+                    victim, decodeEndpoint, null, scheduler, 0, null, null);
 
             CountDownLatch start = new CountDownLatch(1);
             AtomicBoolean claimWon = new AtomicBoolean();
@@ -871,7 +870,7 @@ class AcceptedCancelSchedulerTest {
             throws Exception {
         BatchItem victim = registerDispatchedShadowVictim(31L, 30);
         AdmissionLease lease = new AdmissionLease(
-                victim, decodeEndpoint, null, scheduler);
+                victim, decodeEndpoint, null, scheduler, 0, null, null);
         lease.bindTo(victim.future());
         Response accepted = new Response();
         accepted.setSuccess(true);
@@ -915,10 +914,11 @@ class AcceptedCancelSchedulerTest {
 
         BatchItem victim = dummyItem(41L, 30, endpoint);
         assertTrue(scheduler.registerInflight(victim));
-        endpoint.reserve(41L, 128, 136, 30, 0);
+        endpoint.reserve(41L, 128, 136, 30);
         DecodeRequestSnapshot victimSnapshot = DecodeEndpointSnapshot
                 .capture(endpoint, 1).reserved().getFirst();
-        AdmissionLease lease = new AdmissionLease(victim, endpoint, null, scheduler);
+        AdmissionLease lease = new AdmissionLease(victim, endpoint, null, scheduler,
+                0, null, null);
         lease.bindTo(victim.future());
         endpoint.beforeBegin = () -> victim.future().completeExceptionally(
                 new java.util.concurrent.TimeoutException("public admission timeout"));
@@ -947,7 +947,7 @@ class AcceptedCancelSchedulerTest {
         DecodePreemptionCoordinator.Request request =
                 new DecodePreemptionCoordinator.Request(
                         decodeEndpoint, snapshot.admissionVersion(), true,
-                        incomingRequestId, 128, 136, incomingPriority, 0,
+                        incomingRequestId, 128, 136, incomingPriority,
                         List.of(victims.get(0)), ackTimeoutMs, completionTimeoutMs,
                         admissionOpen, "preempted by higher-priority request " + incomingRequestId);
         return coordinator.execute(request, scheduler);
@@ -960,7 +960,7 @@ class AcceptedCancelSchedulerTest {
             java.util.function.BooleanSupplier admissionOpen) {
         return new DecodePreemptionCoordinator.Request(
                 endpoint, endpoint.admissionVersion(), false,
-                incomingRequestId, 128, 136, 70, 0,
+                incomingRequestId, 128, 136, 70,
                 List.of(victim), 500, 500, admissionOpen,
                 "preempted by higher-priority request " + incomingRequestId);
     }
@@ -976,7 +976,7 @@ class AcceptedCancelSchedulerTest {
         DecodePreemptionCoordinator.Request request =
                 new DecodePreemptionCoordinator.Request(
                         decodeEndpoint, snapshot.admissionVersion(), true,
-                        incomingRequestId, 128, 136, incomingPriority, 0,
+                        incomingRequestId, 128, 136, incomingPriority,
                         victims, ackTimeoutMs, completionTimeoutMs,
                         admissionOpen,
                         "preempted by higher-priority request " + incomingRequestId);
@@ -986,7 +986,7 @@ class AcceptedCancelSchedulerTest {
     private BatchItem registerConfirmedVictim(long requestId, int priority, TaskPhase phase) {
         BatchItem item = dummyItem(requestId, priority);
         assertTrue(scheduler.registerInflight(item));
-        decodeEndpoint.reserve(requestId, 128, 136, priority, 0);
+        decodeEndpoint.reserve(requestId, 128, 136, priority);
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setPhase(phase);
@@ -998,7 +998,7 @@ class AcceptedCancelSchedulerTest {
     private BatchItem registerDispatchedShadowVictim(long requestId, int priority) {
         BatchItem item = dummyItem(requestId, priority);
         assertTrue(scheduler.registerInflight(item));
-        decodeEndpoint.reserve(requestId, 128, 136, priority, 0);
+        decodeEndpoint.reserve(requestId, 128, 136, priority);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("stage2_test", 0));
         return item;
     }
@@ -1018,8 +1018,8 @@ class AcceptedCancelSchedulerTest {
         BatchItem second = dummyItem(2L, 30);
         assertTrue(scheduler.registerInflight(first));
         assertTrue(scheduler.registerInflight(second));
-        decodeEndpoint.reserve(1L, 128, 136, 30, 0);
-        decodeEndpoint.reserve(2L, 128, 136, 30, 0);
+        decodeEndpoint.reserve(1L, 128, 136, 30);
+        decodeEndpoint.reserve(2L, 128, 136, 30);
 
         TaskInfo firstTask = new TaskInfo();
         firstTask.setRequestId(1L);
@@ -1040,7 +1040,7 @@ class AcceptedCancelSchedulerTest {
             long requestId = i;
             BatchItem victim = dummyItem(requestId, 30);
             assertTrue(scheduler.registerInflight(victim));
-            decodeEndpoint.reserve(requestId, 128, 136, 30, 0);
+            decodeEndpoint.reserve(requestId, 128, 136, 30);
             TaskInfo task = new TaskInfo();
             task.setRequestId(requestId);
             task.setPhase(TaskPhase.RUNNING);
@@ -1202,7 +1202,6 @@ class AcceptedCancelSchedulerTest {
                 long incomingKvTokens,
                 long incomingExpectedKvTokens,
                 int incomingPriority,
-                long incomingDeadlineMs,
                 long expectedAdmissionVersion,
                 boolean requireVersionMatch) {
             beforeBegin.run();

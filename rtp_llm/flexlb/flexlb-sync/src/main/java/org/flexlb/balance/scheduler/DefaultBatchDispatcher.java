@@ -49,13 +49,22 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     private final ThreadPoolExecutor dispatchExecutor;
     private final MeterRegistry meterRegistry;
 
+    @Autowired
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
                                   @Autowired(required = false) MeterRegistry meterRegistry) {
+        this(grpcClient, configService, meterRegistry,
+                configService.loadBalanceConfig().getInternalRuntime()
+                        .getBatchDispatchThreads(),
+                configService.loadBalanceConfig().getInternalRuntime()
+                        .getBatchDispatchQueueCapacity());
+    }
+
+    /** Package-visible sizing injection keeps integration fixtures bounded and deterministic. */
+    DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
+                           MeterRegistry meterRegistry, int poolSize, int queueSize) {
         this.grpcClient = grpcClient;
         this.configService = configService;
         this.meterRegistry = meterRegistry;
-        int poolSize = configService.loadBalanceConfig().getFlexlbBatchDispatchPoolSize();
-        int queueSize = configService.loadBalanceConfig().getFlexlbBatchDispatchQueueSize();
         Logger.info("FlexLB dispatch executor config: poolSize={}, queueSize={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
                 poolSize, queueSize);
         this.dispatchExecutor = new ThreadPoolExecutor(
@@ -171,7 +180,8 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         // Resolve every potentially fallible argument before entering the RPC
         // invocation block. A failure here is definitely pre-send and is
         // handled by doDispatch's outer guard.
-        long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
+        long deadlineMs = configService.loadBalanceConfig().batchDispatcher()
+                .getEnqueueRpcTimeoutMs();
         String prefillIp = prefillEp.getIp();
         int prefillGrpcPort = prefillEp.getGrpcPort();
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
@@ -412,6 +422,9 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private void logDispatch(long batchId, List<BatchItem> items,
                              PrefillEndpoint prefillEp, long predMs, String reason) {
+        if (!Logger.isDebugEnabled()) {
+            return;
+        }
         long totalTokens = 0;
         long totalHit = 0;
         StringBuilder itemDetail = new StringBuilder();
@@ -432,13 +445,13 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         BatchItem head = items.get(0);
         long now = System.currentTimeMillis();
         long waitMs = now - head.enqueuedAtMs();
-        long budgetMs = head.sortKey() - now;
+        long remainingMs = head.ctx().getRequestExpiresAtMs() - now;
 
         Logger.debug("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
-                        + "pred_ms={} reason={} wait_ms={} budget_ms={} "
+                        + "pred_ms={} reason={} wait_ms={} request_remaining_ms={} "
                         + "prefill={}:{} items=[{}]",
                 batchId, items.size(), totalTokens, totalHit, predMs, reason,
-                waitMs, budgetMs,
+                waitMs, remainingMs,
                 prefillEp.getIp(), prefillEp.getHttpPort(),
                 itemDetail);
     }

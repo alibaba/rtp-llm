@@ -5,11 +5,12 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
+import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -21,12 +22,13 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -34,6 +36,8 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -51,6 +55,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -79,11 +84,8 @@ class PrioritySchedulerTest {
         cancelChannel = mock(EngineCancelChannel.class);
 
         config = new FlexlbConfig();
-        config.setScheduleWorkerSize(1);
-        config.setFlexlbBatchSizeMax(2);
-        config.setFlexlbBatchWindowMs(10_000);
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.tombstoned()));
@@ -122,6 +124,48 @@ class PrioritySchedulerTest {
     @AfterEach
     void tearDown() {
         scheduler.shutdown();
+    }
+
+    @Test
+    void queueModeMatrixUsesOneSchedulingTimeoutCodeAcrossDispatchers() {
+        long expiredAtMs = System.currentTimeMillis() - 1;
+
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                submitExpired(90_001L, expiredAtMs).getCode());
+
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                submitExpired(90_002L, expiredAtMs).getCode());
+
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                submitExpired(90_003L, expiredAtMs).getCode());
+
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                submitExpired(90_004L, expiredAtMs).getCode());
+    }
+
+    @Test
+    void canonicalDiagnosticsReadWorkerQueueAndSchedulerLifecycle() throws Exception {
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+
+        CompletableFuture<Response> pending = scheduler.submit(context(90_010L));
+        awaitCondition(() -> scheduler.getQueuedRequestCount() == 1);
+
+        assertFalse(pending.isDone());
+        assertEquals(1, scheduler.getQueuedRequestCount());
+        List<RequestLifecycleSnapshot> snapshot = scheduler.snapshotActiveRequests();
+        assertEquals(1, snapshot.size());
+        assertEquals(90_010L, snapshot.getFirst().requestId());
+        assertEquals(RequestLifecycleState.QUEUED, snapshot.getFirst().state());
     }
 
     @Test
@@ -184,21 +228,20 @@ class PrioritySchedulerTest {
     @Test
     void decodeDispatchLimit_sameDpBatchSendsOnlyFreeSlot_thenDispatchesEachItemOnce()
             throws Exception {
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchAlgorithm("fixed_window");
-        config.setFlexlbBatchSizeMax(20);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setDecodeConcurrencyLimit(5);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(20);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(5L);
         PrefillEndpoint prefill = replacePrefillEndpoint();
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
 
         for (long requestId = 9_000; requestId < 9_004; requestId++) {
-            decode.reserve(requestId, 128, 136, 30, 0);
+            decode.reserve(requestId, 128, 136, 30);
         }
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             long requestId = ctx.getRequestId();
-            decode.reserve(requestId, 128, 136, 50, 0);
+            decode.reserve(requestId, 128, 136, 50);
             decode.markQueuedPhase(requestId);
             return successRoute(requestId);
         });
@@ -224,7 +267,7 @@ class PrioritySchedulerTest {
         // Free exactly one slot. The next head may dispatch once, while all
         // other members remain charged and queued at the limit.
         decode.release(firstSent.getFirst());
-        config.setFlexlbBatchSizeMax(19);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(19);
         awaitCondition(() -> sentBatches.size() == 2
                 && prefill.getBatcher().pendingDeliveryCount() == 0
                 && prefill.getBatcher().queueSize() == 18
@@ -240,14 +283,13 @@ class PrioritySchedulerTest {
 
     @Test
     void decodeDispatchClaimException_completesPendingAndTerminatesMember() throws Exception {
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchAlgorithm("fixed_window");
-        config.setFlexlbBatchSizeMax(1);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
         PrefillEndpoint prefill = replacePrefillEndpoint();
         DecodeEndpoint realDecode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         DecodeEndpoint throwingDecode = org.mockito.Mockito.spy(realDecode);
         long requestId = 2_100;
-        realDecode.reserve(requestId, 128, 136, 50, 0);
+        realDecode.reserve(requestId, 128, 136, 50);
         realDecode.markQueuedPhase(requestId);
         when(throwingDecode.tryClaimEngineDispatch(eq(requestId), anyLong()))
                 .thenThrow(new IllegalStateException("claim failed"));
@@ -271,25 +313,24 @@ class PrioritySchedulerTest {
 
     @Test
     void decodeDispatchLimit_fullDpDoesNotBlockAnotherDpInSameBatch() throws Exception {
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchAlgorithm("fixed_window");
-        config.setFlexlbBatchSizeMax(2);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setDecodeConcurrencyLimit(5);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(5L);
         PrefillEndpoint prefill = replacePrefillEndpoint();
         DecodeEndpoint full = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         DecodeEndpoint available = ensureDecodeEndpoint("10.0.0.3", 8081, 8082);
         for (long requestId = 9_100; requestId < 9_105; requestId++) {
-            full.reserve(requestId, 128, 136, 30, 0);
+            full.reserve(requestId, 128, 136, 30);
         }
         for (long requestId = 9_200; requestId < 9_204; requestId++) {
-            available.reserve(requestId, 128, 136, 30, 0);
+            available.reserve(requestId, 128, 136, 30);
         }
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             long requestId = ctx.getRequestId();
             DecodeEndpoint target = requestId == 2_001 ? full : available;
-            target.reserve(requestId, 128, 136, 50, 0);
+            target.reserve(requestId, 128, 136, 50);
             target.markQueuedPhase(requestId);
             return successRouteWithDecode(requestId,
                     requestId == 2_001 ? "10.0.0.2" : "10.0.0.3");
@@ -377,7 +418,7 @@ class PrioritySchedulerTest {
 
     @Test
     void worker_completion_before_enqueue_ack_still_completes_schedule_future() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ackFuture = new CompletableFuture<>();
         CountDownLatch enqueueStarted = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
@@ -430,11 +471,9 @@ class PrioritySchedulerTest {
     @Test
     void routeDecisionMode_honorsRequestCap_withoutBatchEnqueue_andReleasesOnTerminal()
             throws Exception {
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchAlgorithm("fixed_window");
-        config.setFlexlbBatchSizeMax(1);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config)
+                .setMaxInflightRequestsPerPrefillWorker(1);
 
         WorkerStatus prefillStatus = workerStatus("10.0.0.9", 8090, 8091);
         PrefillEndpoint prefill = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
@@ -442,7 +481,7 @@ class PrioritySchedulerTest {
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.8", 8180, 8181);
         when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
             long requestId = ((BalanceContext) invocation.getArgument(0)).getRequestId();
-            decode.reserve(requestId, 128, 136, 50, 0);
+            decode.reserve(requestId, 128, 136, 50);
             decode.markQueuedPhase(requestId);
             return successRoute(
                     requestId,
@@ -568,7 +607,7 @@ class PrioritySchedulerTest {
 
         List<BatchItem> items = java.util.stream.LongStream.rangeClosed(4_201L, 4_204L)
                 .mapToObj(requestId -> {
-                    decode.reserve(requestId, 128, 136, 50, 0);
+                    decode.reserve(requestId, 128, 136, 50);
                     decode.markQueuedPhase(requestId);
                     BatchItem item = routeDecisionItem(requestId, prefill, decode);
                     assertTrue(scheduler.registerInflight(item));
@@ -598,24 +637,17 @@ class PrioritySchedulerTest {
     }
 
     @Test
-    void postDeliveryFenceRetriesConfigReadFailureWithoutReleasingLedger() throws Exception {
+    void postDeliveryFenceUsesInternalCancelTimeoutWithoutConfigRead() throws Exception {
         PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         long requestId = 4_205L;
-        decode.reserve(requestId, 128, 136, 50, 0);
+        decode.reserve(requestId, 128, 136, 50);
         decode.markQueuedPhase(requestId);
         BatchItem item = routeDecisionItem(requestId, prefill, decode);
         assertTrue(scheduler.registerInflight(item));
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("config_failure_fence", 0));
 
-        java.util.concurrent.atomic.AtomicBoolean failNextConfigRead =
-                new java.util.concurrent.atomic.AtomicBoolean(true);
-        when(configService.loadBalanceConfig()).thenAnswer(invocation -> {
-            if (failNextConfigRead.compareAndSet(true, false)) {
-                throw new IllegalStateException("transient config read failure");
-            }
-            return config;
-        });
+        clearInvocations(configService);
         when(cancelChannel.cancel(any(), eq(requestId), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelOutcome.tombstoned()));
@@ -623,14 +655,12 @@ class PrioritySchedulerTest {
         assertEquals(
                 InflightRegistrar.PostDeliveryFenceResult.STARTED,
                 scheduler.fenceAfterDeliveryTimeout(item, "test_config_failure"));
-        assertTrue(decode.reservedView().containsKey(requestId));
-        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
-                scheduler.getRequestState(requestId, 0).state());
 
         awaitCondition(() -> scheduler.getRequestState(requestId, 0).state()
                 == RequestLifecycleState.TIMED_OUT);
         assertFalse(decode.reservedView().containsKey(requestId));
-        verify(cancelChannel, times(1)).cancel(any(), eq(requestId), anyLong());
+        verify(cancelChannel, times(1)).cancel(any(), eq(requestId), eq(50L));
+        verify(configService, never()).loadBalanceConfig();
     }
 
     @Test
@@ -978,33 +1008,34 @@ class PrioritySchedulerTest {
 
     @Test
     void completedAdmissionFuturesAreRemovedFromSharedDeadlineTimer() throws Exception {
-        assertTrue(scheduler.removesCanceledAdmissionTimeouts());
-        int baseline = scheduler.admissionTimeoutQueueSize();
+        assertTrue(scheduler.removesCanceledRequestExpirations());
+        int baseline = scheduler.requestExpirationQueueSize();
         int requestCount = 128;
         long now = System.currentTimeMillis();
         List<CompletableFuture<Response>> futures = new java.util.ArrayList<>(requestCount);
         for (int i = 0; i < requestCount; i++) {
             BalanceContext context = context(4_250L + i);
-            context.setBudget(ScheduleBudget.forDeadline(
-                    50, now, now + TimeUnit.MINUTES.toMillis(1)));
+            context.setSchedulingMetadata(SchedulingMetadata.explicit(
+                    50, now + TimeUnit.MINUTES.toMillis(1)));
             CompletableFuture<Response> future = new CompletableFuture<>();
             futures.add(future);
-            scheduler.attachAdmissionTimeout(context, future);
+            scheduler.attachRequestExpiration(context, future);
         }
-        awaitCondition(() -> scheduler.admissionTimeoutQueueSize()
+        awaitCondition(() -> scheduler.requestExpirationQueueSize()
                 == baseline + requestCount);
 
         Response success = new Response();
         success.setSuccess(true);
         futures.forEach(future -> future.complete(success));
-        awaitCondition(() -> scheduler.admissionTimeoutQueueSize() == baseline);
-        assertEquals(baseline, scheduler.admissionTimeoutQueueSize(),
+        awaitCondition(() -> scheduler.requestExpirationQueueSize() == baseline);
+        assertEquals(baseline, scheduler.requestExpirationQueueSize(),
                 "completed requests must not be retained until their original deadline");
     }
 
     @Test
     void quarantinedFencesStopDelayedRetries_andCleanupProbesRoundRobin() throws Exception {
-        config.setFlexlbInflightTtlMs(TimeUnit.MINUTES.toMillis(10));
+        config.queueScheduler().getLifecycle()
+                .setStaleInflightTimeoutMs(TimeUnit.MINUTES.toMillis(10));
         PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         List<Long> requestIds = java.util.stream.LongStream.rangeClosed(4_301L, 4_305L)
@@ -1022,7 +1053,7 @@ class PrioritySchedulerTest {
         });
 
         List<BatchItem> items = requestIds.stream().map(requestId -> {
-            decode.reserve(requestId, 128, 136, 50, 0);
+            decode.reserve(requestId, 128, 136, 50);
             decode.markQueuedPhase(requestId);
             BatchItem item = routeDecisionItem(requestId, prefill, decode);
             assertTrue(scheduler.registerInflight(item));
@@ -1082,7 +1113,7 @@ class PrioritySchedulerTest {
                 "the next empty quarantine sweep must discard every stale generation ref");
 
         long shutdownRequestId = 4_306L;
-        decode.reserve(shutdownRequestId, 128, 136, 50, 0);
+        decode.reserve(shutdownRequestId, 128, 136, 50);
         decode.markQueuedPhase(shutdownRequestId);
         BatchItem shutdownItem = routeDecisionItem(shutdownRequestId, prefill, decode);
         assertTrue(scheduler.registerInflight(shutdownItem));
@@ -1100,8 +1131,8 @@ class PrioritySchedulerTest {
 
     @Test
     void submit_rejects_when_global_inflight_limit_reached() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
-        config.setFlexlbBatchMaxInflight(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(1);
 
         CountDownLatch batchBlocked = new CountDownLatch(1);
         CountDownLatch releaseBlock = new CountDownLatch(1);
@@ -1124,8 +1155,293 @@ class PrioritySchedulerTest {
     }
 
     @Test
+    void globalOutstandingCapacityIsAtomicAndReusableAfterConcurrentTerminals()
+            throws Exception {
+        int limit = 4;
+        int attempts = 64;
+        config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(limit);
+
+        AtomicInteger routed = new AtomicInteger();
+        AtomicInteger activeRoutes = new AtomicInteger();
+        AtomicInteger peakRoutes = new AtomicInteger();
+        CountDownLatch acceptedRoutesEntered = new CountDownLatch(limit);
+        CountDownLatch releaseAcceptedRoutes = new CountDownLatch(1);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            routed.incrementAndGet();
+            int active = activeRoutes.incrementAndGet();
+            peakRoutes.accumulateAndGet(active, Math::max);
+            acceptedRoutesEntered.countDown();
+            try {
+                assertTrue(releaseAcceptedRoutes.await(5, TimeUnit.SECONDS));
+            } finally {
+                activeRoutes.decrementAndGet();
+            }
+            return Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
+        });
+
+        ExecutorService submitters = Executors.newFixedThreadPool(attempts);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch rejectedReturned = new CountDownLatch(attempts - limit);
+        CountDownLatch allReturned = new CountDownLatch(attempts);
+        List<CompletableFuture<Response>> futures =
+                Collections.synchronizedList(new ArrayList<>());
+        try {
+            for (int i = 0; i < attempts; i++) {
+                long requestId = 10_000L + i;
+                submitters.execute(() -> {
+                    try {
+                        assertTrue(start.await(5, TimeUnit.SECONDS));
+                        CompletableFuture<Response> future = scheduler.submit(context(requestId));
+                        futures.add(future);
+                        if (future.isDone()) {
+                            rejectedReturned.countDown();
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        allReturned.countDown();
+                    }
+                });
+            }
+            start.countDown();
+            assertTrue(acceptedRoutesEntered.await(5, TimeUnit.SECONDS));
+            assertTrue(rejectedReturned.await(5, TimeUnit.SECONDS),
+                    "every request beyond the hard bound must reject while N routes are blocked");
+
+            assertEquals(limit, scheduler.outstandingRequestCount());
+            assertEquals(limit, routed.get());
+            assertEquals(limit, peakRoutes.get(),
+                    "the capacity CAS must prevent concurrent check-then-act penetration");
+
+            releaseAcceptedRoutes.countDown();
+            assertTrue(allReturned.await(5, TimeUnit.SECONDS));
+            assertEquals(attempts, futures.size());
+            int queueFull = 0;
+            int routedFailure = 0;
+            for (CompletableFuture<Response> future : futures) {
+                Response response = future.get(2, TimeUnit.SECONDS);
+                if (response.getCode() == StrategyErrorType.QUEUE_FULL.getErrorCode()) {
+                    queueFull++;
+                } else if (response.getCode()
+                        == StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode()) {
+                    routedFailure++;
+                }
+            }
+            assertEquals(attempts - limit, queueFull);
+            assertEquals(limit, routedFailure);
+            awaitCondition(() -> scheduler.outstandingRequestCount() == 0);
+
+            Response afterRelease = scheduler.submit(context(20_000L))
+                    .get(2, TimeUnit.SECONDS);
+            assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                    afterRelease.getCode());
+            assertEquals(limit + 1, routed.get(),
+                    "terminal requests must return their permits for later submissions");
+            assertEquals(0, scheduler.outstandingRequestCount());
+        } finally {
+            releaseAcceptedRoutes.countDown();
+            submitters.shutdownNow();
+        }
+    }
+
+    @Test
+    void priorityAdmissionsBeforeInflightRegistrationConsumeAtomicCapacity()
+            throws Exception {
+        int limit = 3;
+        int attempts = 48;
+        SchedulingTestConfig.usePriorityQueue(config);
+        config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(limit);
+
+        PriorityAdmissionScheduler priorityAdmission = mock(PriorityAdmissionScheduler.class);
+        List<CompletableFuture<Response>> admitted = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            admitted.add(invocation.getArgument(1));
+            return null;
+        }).when(priorityAdmission).schedule(
+                any(BalanceContext.class), any(CompletableFuture.class), any(InflightRegistrar.class));
+
+        scheduler.shutdown();
+        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        scheduler = new PriorityScheduler(configService, router, endpointRegistry,
+                mock(BatchDispatcher.class), reporter, priorityAdmission, null, cancelChannel);
+
+        ExecutorService submitters = Executors.newFixedThreadPool(attempts);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch allReturned = new CountDownLatch(attempts);
+        List<CompletableFuture<Response>> futures =
+                Collections.synchronizedList(new ArrayList<>());
+        try {
+            for (int i = 0; i < attempts; i++) {
+                long requestId = 50_000L + i;
+                submitters.execute(() -> {
+                    try {
+                        assertTrue(start.await(5, TimeUnit.SECONDS));
+                        futures.add(scheduler.submit(context(requestId)));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        allReturned.countDown();
+                    }
+                });
+            }
+            start.countDown();
+            assertTrue(allReturned.await(5, TimeUnit.SECONDS));
+
+            assertEquals(limit, admitted.size());
+            assertEquals(0, scheduler.getInflightSize(),
+                    "pre-registration admissions expose the old inflight.size race");
+            assertEquals(limit, scheduler.outstandingRequestCount());
+            assertEquals(attempts - limit, futures.stream()
+                    .filter(CompletableFuture::isDone)
+                    .map(CompletableFuture::join)
+                    .filter(response -> response.getCode()
+                            == StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode())
+                    .count());
+
+            admitted.forEach(future -> future.complete(
+                    Response.error(StrategyErrorType.NO_AVAILABLE_WORKER)));
+            awaitCondition(() -> scheduler.outstandingRequestCount() == 0);
+
+            CompletableFuture<Response> afterRelease = scheduler.submit(context(60_000L));
+            assertEquals(limit + 1, admitted.size());
+            admitted.getLast().complete(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
+            assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                    afterRelease.get(1, TimeUnit.SECONDS).getCode());
+            assertEquals(0, scheduler.outstandingRequestCount());
+        } finally {
+            submitters.shutdownNow();
+        }
+    }
+
+    @Test
+    void shutdownClosesOutstandingAdmissionAndReleasesPendingPermitExactlyOnce()
+            throws Exception {
+        SchedulingTestConfig.usePriorityQueue(config);
+        config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(1);
+        PriorityAdmissionScheduler priorityAdmission = mock(PriorityAdmissionScheduler.class);
+
+        scheduler.shutdown();
+        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        scheduler = new PriorityScheduler(configService, router, endpointRegistry,
+                mock(BatchDispatcher.class), reporter, priorityAdmission, null, cancelChannel);
+
+        CompletableFuture<Response> pending = scheduler.submit(context(70_000L));
+        assertFalse(pending.isDone());
+        assertEquals(1, scheduler.outstandingRequestCount());
+
+        scheduler.shutdown();
+        Response response = pending.get(2, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                response.getCode());
+        assertEquals(0, scheduler.outstandingRequestCount());
+
+        scheduler.shutdown();
+        pending.cancel(false);
+        assertEquals(0, scheduler.outstandingRequestCount(),
+                "repeated shutdown/future terminal must not underflow capacity");
+    }
+
+    @Test
+    void duplicateAndRepeatedTerminalReducersReleaseOnePermitExactlyOnce()
+            throws Exception {
+        config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(1);
+        CountDownLatch routeEntered = new CountDownLatch(1);
+        CountDownLatch releaseRoute = new CountDownLatch(1);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            routeEntered.countDown();
+            assertTrue(releaseRoute.await(5, TimeUnit.SECONDS));
+            BalanceContext routedContext = invocation.getArgument(0);
+            return successRoute(routedContext.getRequestId());
+        });
+
+        long requestId = 30_000L;
+        CompletableFuture<CompletableFuture<Response>> submitted =
+                CompletableFuture.supplyAsync(() -> scheduler.submit(context(requestId)));
+        assertTrue(routeEntered.await(2, TimeUnit.SECONDS));
+        assertEquals(1, scheduler.outstandingRequestCount());
+
+        Response duplicate = scheduler.submit(context(requestId)).get(1, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.getCode());
+        assertEquals(1, scheduler.outstandingRequestCount(),
+                "duplicate rejection must not release the live generation's permit");
+
+        releaseRoute.countDown();
+        CompletableFuture<Response> original = submitted.get(2, TimeUnit.SECONDS);
+        assertEquals(1, scheduler.getInflightSize());
+        scheduler.cancelRequest(requestId, 0, CancelReason.CLIENT_CANCELLED);
+        Response cancelled = original.get(2, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), cancelled.getCode());
+        awaitCondition(() -> scheduler.outstandingRequestCount() == 0);
+
+        scheduler.cancelRequest(requestId, 0, CancelReason.CLIENT_CANCELLED);
+        scheduler.onRequestExpired(requestId, original);
+        Response duplicateAfterTerminal = scheduler.submit(context(requestId))
+                .get(1, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                duplicateAfterTerminal.getCode());
+        assertEquals(0, scheduler.outstandingRequestCount(),
+                "duplicate and repeated terminal reducers must not double-release");
+
+        when(router.route(any(BalanceContext.class)))
+                .thenReturn(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
+        Response nextGeneration = scheduler.submit(context(requestId + 1))
+                .get(1, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
+                nextGeneration.getCode());
+        assertEquals(0, scheduler.outstandingRequestCount());
+    }
+
+    @Test
+    void capacityRejectionPreservesFifoNonBatchAndPriorityStatusContracts()
+            throws Exception {
+        config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(1);
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+
+        CountDownLatch fifoRouteEntered = new CountDownLatch(1);
+        CountDownLatch releaseFifoRoute = new CountDownLatch(1);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            fifoRouteEntered.countDown();
+            assertTrue(releaseFifoRoute.await(5, TimeUnit.SECONDS));
+            return Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
+        });
+        CompletableFuture<CompletableFuture<Response>> fifoSubmit =
+                CompletableFuture.supplyAsync(() -> scheduler.submit(context(40_000L)));
+        assertTrue(fifoRouteEntered.await(2, TimeUnit.SECONDS));
+        Response fifoRejected = scheduler.submit(context(40_001L))
+                .get(1, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), fifoRejected.getCode(),
+                "FIFO + NON_BATCH preserves the established queue-timeout contract");
+        releaseFifoRoute.countDown();
+        fifoSubmit.get(2, TimeUnit.SECONDS).get(2, TimeUnit.SECONDS);
+        awaitCondition(() -> scheduler.outstandingRequestCount() == 0);
+
+        SchedulingTestConfig.usePriorityQueue(config);
+        CountDownLatch priorityRouteEntered = new CountDownLatch(1);
+        CountDownLatch releasePriorityRoute = new CountDownLatch(1);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            priorityRouteEntered.countDown();
+            assertTrue(releasePriorityRoute.await(5, TimeUnit.SECONDS));
+            return Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
+        });
+        CompletableFuture<CompletableFuture<Response>> prioritySubmit =
+                CompletableFuture.supplyAsync(() -> scheduler.submit(context(40_002L)));
+        assertTrue(priorityRouteEntered.await(2, TimeUnit.SECONDS));
+        Response priorityRejected = scheduler.submit(context(40_003L))
+                .get(1, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                priorityRejected.getCode());
+        assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                priorityRejected.getAdmissionRejectReason());
+        releasePriorityRoute.countDown();
+        prioritySubmit.get(2, TimeUnit.SECONDS).get(2, TimeUnit.SECONDS);
+        awaitCondition(() -> scheduler.outstandingRequestCount() == 0);
+    }
+
+    @Test
     void batcher_rejects_when_queue_full() throws Exception {
-        config.setFlexlbBatchQueueMaxSize(1);
+        SchedulingTestConfig.useBatchDispatcher(config)
+                .setMaxWaitingRequestsPerPrefillWorker(1);
 
         CompletableFuture<Response> first = scheduler.submit(context(51));
         assertFalse(first.isDone());
@@ -1190,121 +1506,8 @@ class PrioritySchedulerTest {
     }
 
     @Test
-    void processQueue_park_converges_to_urgent_dispatch() throws Exception {
-        // budget = sloMs(300) - predMs(128) = 172ms, margin = 100ms
-        // fillThreshold=2.0 → fillRatio can never reach it (max 1.0)
-        // batchSizeMax=1000 → single request can't trigger size condition
-        // So request parks, budget shrinks each 1ms iteration, after ~72ms budget < margin → urgent dispatch
-        config.setCostSloMs(300L);
-        config.setCostSloRiskMarginMs(100L);
-        config.setFlexlbBatchSizeMax(1000);
-
-        CompletableFuture<Response> future = scheduler.submit(context(901));
-
-        assertTrue(future.get(2, TimeUnit.SECONDS).isSuccess());
-        assertEquals(1, sentBatches.size());
-        assertEquals(1, batchInputs(sentBatches.getFirst()).size());
-    }
-
-    @Test
-    void processQueue_fillRatio_triggers_dispatch() throws Exception {
-        // budget = sloMs(500) - predMs(128) = 372ms, margin = 50ms
-        // fillRatio = 128/322 ≈ 0.40 >= threshold(0.3) → dispatches immediately via fillRatio
-        // batchSizeMax=1000 ensures size condition is NOT the trigger
-        config.setCostSloMs(500L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setFlexlbBatchMaxCapacity(500);
-        config.setFlexlbBatchSizeMax(1000);
-
-        CompletableFuture<Response> future = scheduler.submit(context(1001));
-
-        assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
-        assertEquals(1, sentBatches.size());
-        assertEquals(1, batchInputs(sentBatches.getFirst()).size());
-    }
-
-    @Test
-    void processQueue_dispatches_requests_within_budget() throws Exception {
-        // With slo_budget batcher (default), two 100-token requests each have
-        // budget ≈ 350ms (slo=500, margin=50, pred≈100). Both fit within the
-        // incremental budget and are dispatched together in a single batch.
-        // flexlbBatchScanAhead (default 64) determines how many candidates are
-        // scanned per iteration.
-        config.setCostSloMs(500L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setFlexlbBatchMaxCapacity(100000);
-        config.setFlexlbBatchSizeMax(100);
-
-        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1401, 100));
-        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(1402, 100));
-
-        assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
-        assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
-
-        // Both requests fit within the incremental budget → 1 combined batch
-        assertEquals(1, sentBatches.size(),
-                "slo_budget dispatches both requests together when they fit within budget");
-        assertEquals(2, batchInputs(sentBatches.get(0)).size());
-    }
-
-    @Test
-    void resolveSloMs_uses_buckets_when_configured() {
-        FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setCostSloMs(500L);
-        cfg.setCostSloBuckets("4096:2000,32768:10000,131072:30000,524288:60000");
-
-        assertEquals(2000L, cfg.resolveSloMs(100));
-        assertEquals(2000L, cfg.resolveSloMs(4096));
-        assertEquals(10000L, cfg.resolveSloMs(4097));
-        assertEquals(10000L, cfg.resolveSloMs(32768));
-        assertEquals(30000L, cfg.resolveSloMs(32769));
-        assertEquals(30000L, cfg.resolveSloMs(131072));
-        assertEquals(60000L, cfg.resolveSloMs(131073));
-        assertEquals(60000L, cfg.resolveSloMs(1000000));
-    }
-
-    @Test
-    void resolveSloMs_falls_back_to_costSloMs_when_no_buckets() {
-        FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setCostSloMs(500L);
-        cfg.setCostSloBuckets("");
-
-        assertEquals(500L, cfg.resolveSloMs(100));
-        assertEquals(500L, cfg.resolveSloMs(100000));
-    }
-
-    @Test
-    void resolveSloMs_handles_unsorted_bucket_input() {
-        FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setCostSloBuckets("131072:30000,4096:2000,32768:10000");
-
-        assertEquals(2000L, cfg.resolveSloMs(1000));
-        assertEquals(10000L, cfg.resolveSloMs(5000));
-        assertEquals(30000L, cfg.resolveSloMs(50000));
-    }
-
-    @Test
-    void dynamic_slo_prevents_drop_for_requests_exceeding_fixed_slo() throws Exception {
-        // With default costSloMs=500 and alpha1=1.0, a 600-token request has
-        // predMs=600 > sloMs=500 → budget=0 → immediate drop.
-        // With buckets "1000:5000,...", sloMs=5000 → budget=4400 → enough to batch.
-        config.setCostSloBuckets("1000:5000,100000:50000");
-        config.setCostSloRiskMarginMs(50L);
-        config.setFlexlbBatchSizeMax(2);
-
-        CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(601, 600));
-        CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(602, 600));
-
-        assertTrue(f1.get(3, TimeUnit.SECONDS).isSuccess());
-        assertTrue(f2.get(3, TimeUnit.SECONDS).isSuccess());
-
-        assertEquals(1, sentBatches.size());
-        assertEquals(2, batchInputs(sentBatches.getFirst()).size());
-    }
-
-    @Test
     void mismatched_generate_input_request_id_fails_before_batch_enqueue() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
 
         CompletableFuture<Response> future = scheduler.submit(context(31, 999));
 
@@ -1368,6 +1571,13 @@ class PrioritySchedulerTest {
         return context(requestId, requestId);
     }
 
+    private Response submitExpired(long requestId, long expiredAtMs) {
+        BalanceContext context = context(requestId);
+        context.setConfig(config);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, expiredAtMs));
+        return scheduler.submit(context).join();
+    }
+
     private static BalanceContext context(long requestId, long generateInputRequestId) {
         Request request = new Request();
         request.setRequestId(requestId);
@@ -1427,9 +1637,9 @@ class PrioritySchedulerTest {
     }
 
     @Test
-    void admissionDeadlineBeforeBatchCommitAbortsWithoutEngineFence()
+    void requestExpirationBeforeBatchCommitAbortsWithoutEngineFence()
             throws Exception {
-        config.setAutoTpmEnabled(true);
+        SchedulingTestConfig.usePriorityQueue(config);
 
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
         BatchItem item = new BatchItem(context(303), new CompletableFuture<>(), successRoute(303),
@@ -1456,7 +1666,7 @@ class PrioritySchedulerTest {
                 scheduler.onDecisionGroupReady(List.of(blockingItem), new DecisionGroupMetadata("race", 0)));
         assertTrue(deliveryClaimed.await(2, TimeUnit.SECONDS));
 
-        scheduler.onAdmissionDeadline(blockingItem.requestId(), blockingItem.future());
+        scheduler.onRequestExpired(blockingItem.requestId(), blockingItem.future());
         Response timedOut = blockingItem.future().get(2, TimeUnit.SECONDS);
         assertFalse(timedOut.isSuccess());
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), timedOut.getCode());
@@ -1466,9 +1676,9 @@ class PrioritySchedulerTest {
         assertEquals(0, blockingEndpoint.getInflightBatchCount(),
                 "delivery revalidation must prevent a commit after local timeout");
 
-        config.setFlexlbBatchSloMaxInflightBatches(1);
-        config.setFlexlbBatchFixedMaxInflightBatches(1);
-        config.setFlexlbBatchSizeMax(1);
+        SchedulingTestConfig.useBatchDispatcher(config)
+                .setMaxInflightBatchesPerPrefillWorker(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
         assertTrue(scheduler.submit(context(304)).get(2, TimeUnit.SECONDS).isSuccess());
         assertEquals(1, sentBatches.size(),
                 "after authoritative settlement, maxInflight=1 admits the next batch");
@@ -1504,7 +1714,7 @@ class PrioritySchedulerTest {
         assertFalse(item.future().isDone());
         assertEquals(1, scheduler.getInflightSize());
         assertEquals(1, endpoint.getInflightBatchCount());
-        config.setFlexlbInflightTtlMs(0);
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(0);
         scheduler.cleanupInflight();
         assertEquals(1, scheduler.getInflightSize(), "TTL cannot break uncertain ownership");
     }
@@ -1804,7 +2014,7 @@ class PrioritySchedulerTest {
 
     private static BalanceContext routeDecisionContext(long requestId) {
         BalanceContext context = context(requestId);
-        context.setScheduleMode(ScheduleModeEnum.QUEUE);
+        SchedulingTestConfig.useNonBatchDispatcher(context.getConfig());
         return context;
     }
 

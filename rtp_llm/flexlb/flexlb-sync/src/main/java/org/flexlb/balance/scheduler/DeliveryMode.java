@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.enums.ScheduleModeEnum;
 
 /**
  * Immutable delivery choice captured when a request enters the priority scheduler.
@@ -17,9 +16,11 @@ enum DeliveryMode {
     ROUTE_DECISION;
 
     static DeliveryMode from(BalanceContext context) {
-        if (context != null && context.getScheduleMode() == ScheduleModeEnum.QUEUE) {
-            return ROUTE_DECISION;
+        if (context == null || context.getConfig() == null) {
+            throw new IllegalStateException("request dispatcher configuration is unavailable");
         }
-        return BATCH_ENQUEUE;
+        return context.getConfig().isBatchDispatch()
+                ? BATCH_ENQUEUE
+                : ROUTE_DECISION;
     }
 }

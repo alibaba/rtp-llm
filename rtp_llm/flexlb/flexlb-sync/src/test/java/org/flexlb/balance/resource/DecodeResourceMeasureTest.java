@@ -36,7 +36,8 @@ class DecodeResourceMeasureTest {
 
     @Test
     void concurrency_limit_disabled_should_not_affect_decode_availability() {
-        config.setDecodeConcurrencyLimit(0);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(null);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
         endpoint.getStatus().setRunningTaskList(taskMap(1L, 2L, 3L, 4L));
@@ -47,7 +48,8 @@ class DecodeResourceMeasureTest {
 
     @Test
     void worker_should_be_unavailable_when_decode_concurrency_limit_reached() {
-        config.setDecodeConcurrencyLimit(2);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(2L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
         endpoint.reserve(1L, 0, 0);
@@ -58,7 +60,8 @@ class DecodeResourceMeasureTest {
 
     @Test
     void worker_should_be_available_when_inflight_below_concurrency_limit() {
-        config.setDecodeConcurrencyLimit(3);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(3L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
         endpoint.reserve(1L, 0, 0);
@@ -68,7 +71,8 @@ class DecodeResourceMeasureTest {
 
     @Test
     void concurrency_water_level_should_contribute_to_serviceability() {
-        config.setDecodeConcurrencyLimit(4);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(4L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveWorkerStatus();
         worker.setRunningTaskList(taskMap(1L, 2L, 3L));
@@ -78,7 +82,8 @@ class DecodeResourceMeasureTest {
 
     @Test
     void water_level_should_use_higher_value_between_kv_cache_and_concurrency() {
-        config.setDecodeConcurrencyLimit(4);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(4L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveWorkerStatus();
         worker.getTotalKvCacheTokens().set(100);

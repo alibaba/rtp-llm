@@ -6,6 +6,7 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
@@ -14,7 +15,6 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -73,7 +73,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         FlexlbConfig config = balanceContext.getConfig();
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group,
-                config.getResourceMeasureIndicator(roleType), balanceContext.getExcludedPrefillIpPort());
+                config.resourceMeasureFor(roleType), balanceContext.getExcludedPrefillIpPort());
         CandidateSet eligible = filterResult.endpoints();
         if (eligible.size() == 0) {
             Logger.debug("Prefill select failed: no available endpoints, request_id={}, rejections={}",
@@ -137,7 +137,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return -1;
         }
 
-        if (!config.isCacheAffinityEnabled()) {
+        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        if (cacheAffinity == null) {
             return selectBaselineCandidate(survivors, minScore, config);
         }
 
@@ -154,8 +156,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 minScore,
                 referenceHitTokens,
                 seqLen,
-                config.getCacheAffinityMaxExtraTtftMs(),
-                config.getCacheAffinityMinHitRate());
+                cacheAffinity.getMaxExtraTtftMs(),
+                cacheAffinity.getMinPrefixHitPercent());
 
         int selectedIndex;
         if (affinity.hasPreference()) {
@@ -189,11 +191,15 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             CandidateSet survivors, long minScore, FlexlbConfig config) {
 
         long tieThreshold = 0L;
-        if (config.isScoreTieRandomEnabled()) {
-            long percentageThreshold = (long) (minScore * config.getScoreTieThresholdPct());
+        RoutingConfig.PrefillSelectorConfig selector = config.getRouter().getRoles()
+                .getPrefill().getSelector();
+        RoutingConfig.CandidateChoiceConfig candidateChoice =
+                ((RoutingConfig.EstimatedTtftSelectorConfig) selector).getCandidateChoice();
+        if (candidateChoice instanceof RoutingConfig.RandomWithinToleranceConfig random) {
+            long percentageThreshold = (long) (minScore * random.getRelativeTolerance());
             tieThreshold = Math.max(
                     Math.max(0L, percentageThreshold),
-                    Math.max(0L, config.getScoreTieThresholdMs()));
+                    Math.max(0L, random.getMinimumToleranceMs()));
         }
         long scoreCutoff = saturatingAdd(minScore, tieThreshold);
         int selectedIndex = -1;
@@ -315,11 +321,21 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                           FlexlbConfig config, Map<String, Integer> cacheMatchResults) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
-        long sloMs = config.resolveSloMs(seqLen);
-        long sloRiskMarginMs = config.getCostSloRiskMarginMs();
-        boolean sloFilterEnabled = config.isCostSloFilterEnabled();
-        double hotspotMultiplier = config.getCostHotspotMultiplier();
-        double imbalanceMultiplier = config.getCostImbalanceMultiplier();
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
+                        .getPrefill().getSelector();
+        RoutingConfig.CandidateChoiceConfig candidateChoice = selector.getCandidateChoice();
+        RoutingConfig.OutlierRejectionConfig outlier =
+                candidateChoice instanceof RoutingConfig.RandomWithinToleranceConfig random
+                        ? random.getOutlierRejection()
+                        : candidateChoice instanceof RoutingConfig.BestOnlyConfig best
+                                ? best.getOutlierRejection() : null;
+        double hotspotMultiplier = outlier == null
+                ? 0.0 : outlier.getMaxPendingVsAverageMultiplier();
+        double imbalanceMultiplier = outlier == null
+                ? 0.0 : outlier.getMaxWaitVsAverageMultiplier();
+        boolean schedulerOwnsRequest = queueSchedulerOwnsRequest(balanceContext);
+        boolean priorityOrdered = schedulerOwnsRequest && config.isPriorityOrdering();
 
         int eligibleSize = eligible.size();
         CandidateSet feasible = eligible;
@@ -328,7 +344,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long sumWaitMs = 0;
         long sumPendingCount = 0;
 
-        // Round 1: SLO filter + cache wait time / pending count for feasible endpoints
+        // Round 1: cache wait time / pending count for feasible endpoints.
         int feasibleCount = 0;
         for (int i = 0; i < eligibleSize; i++) {
             PrefillEndpoint ep = eligible.endpoint(i);
@@ -354,17 +370,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             endpointWaitMs = Math.max(0L, endpointWaitMs);
 
             long serviceWaitMs = saturatingAdd(endpointWaitMs, singlePrefillMs);
-            if (sloFilterEnabled && serviceWaitMs > sloMs - sloRiskMarginMs) {
-                rejections.merge("SLO_VIOLATION", 1, Integer::sum);
-                continue;
-            }
-
             long pendingCount = ep.realPendingCount();
-            // Auto-TPM (design doc 6.2 simplified): endpointWaitMs +
-            // estimatedWait (8.4, priority-aware) + predictedPrefill.
-            // When Auto-TPM is on, all requests carry a normalized priority
-            // (1-100), so the priority-aware estimate always applies.
-            long batcherWaitMs = estimatedBatcherWaitMs(ep, balanceContext, config);
+            // Priority ordering adds the exact queue prefix estimate; FIFO
+            // batch dispatch uses the batcher's aggregate wait estimate.
+            long batcherWaitMs = estimatedBatcherWaitMs(
+                    ep, balanceContext, schedulerOwnsRequest, priorityOrdered);
             long score = saturatingAdd(serviceWaitMs, batcherWaitMs);
             feasible.setCandidate(feasibleCount++, ep, cacheHit, score, singlePrefillMs,
                     endpointWaitMs, pendingCount);
@@ -428,14 +438,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     private long estimatedBatcherWaitMs(PrefillEndpoint ep,
                                         BalanceContext balanceContext,
-                                        FlexlbConfig config) {
-        if (!usesPriorityScheduler(balanceContext)) {
+                                        boolean schedulerOwnsRequest,
+                                        boolean priorityOrdered) {
+        if (!schedulerOwnsRequest) {
             return 0L;
         }
-        long waitMs = config.isAutoTpmEnabled()
+        long waitMs = priorityOrdered
                 ? ep.batcherEstimatedWaitMs(
                         balanceContext.getPriority(),
-                        balanceContext.getDeadlineMs(),
                         balanceContext.getRequestId())
                 : ep.batcherWaitMs();
         return Math.max(0L, waitMs);
@@ -481,7 +491,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         if (result.size() == 0 && excludedEligible[0] != null) {
             // P1-4: single-worker (or fully-filtered) cluster — excluding the
             // only eligible worker would turn a queue-full retry into a hard
-            // NO_AVAILABLE_WORKER; keep the legacy candidate set instead.
+            // NO_AVAILABLE_WORKER; retain that worker as the retry candidate.
             result.addEndpoint(excludedEligible[0]);
         }
         return new EndpointFilterResult(result, rejections);
@@ -576,9 +586,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                            long selectedPrefillMs,
                                            BalanceContext balanceContext,
                                            long bestCacheHit) {
-        // DIRECT (including a BATCH fallback) and legacy QUEUE reserve here.
-        // PriorityScheduler owns BATCH and QUEUE+AutoTPM reservations.
-        if (usesStrategyInflightTracking(balanceContext)) {
+        // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
+        if (strategyOwnsInflightTracking(balanceContext)) {
             ep.commitBatch(requestId, selectedPrefillMs, Collections.emptyList());
         }
 
@@ -616,23 +625,17 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return left + right;
     }
 
-    /** Request-level mode is authoritative because configured BATCH may downgrade to DIRECT. */
-    private static boolean usesPriorityScheduler(BalanceContext balanceContext) {
-        if (balanceContext == null) {
+    /** Whether this request is owned by the common queue/batch scheduler. */
+    private static boolean queueSchedulerOwnsRequest(BalanceContext balanceContext) {
+        if (balanceContext == null || balanceContext.getConfig() == null) {
             return false;
         }
-        ScheduleModeEnum mode = balanceContext.getScheduleMode();
-        if (mode == ScheduleModeEnum.BATCH) {
-            return true;
-        }
         FlexlbConfig config = balanceContext.getConfig();
-        return mode == ScheduleModeEnum.QUEUE
-                && config != null
-                && config.isAutoTpmEnabled();
+        return config.isQueue();
     }
 
     /** Whether this strategy, rather than PriorityScheduler, owns Prefill accounting. */
-    private static boolean usesStrategyInflightTracking(BalanceContext balanceContext) {
-        return !usesPriorityScheduler(balanceContext);
+    private static boolean strategyOwnsInflightTracking(BalanceContext balanceContext) {
+        return !queueSchedulerOwnsRequest(balanceContext);
     }
 }

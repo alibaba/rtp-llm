@@ -6,16 +6,19 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -121,8 +124,7 @@ class ShortestTTFTStrategyTest {
     @Test
     void candidatePoolFixedSizeOneShortCircuits() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setShortestTtftCandidatePoolMode("FIXED");
-        config.setShortestTtftCandidatePoolSize(1);
+        useFixedCandidatePool(config, 1);
 
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         // TTFTs: 600, 510, 700 — worker 2 has the lowest
@@ -141,8 +143,7 @@ class ShortestTTFTStrategyTest {
     void casFairnessSpreadsAcrossSimilarWorkers() {
         // ratio=1.0 so candidateCount = max(1, floor(2*1.0)) = 2 — both workers in pool
         FlexlbConfig config = new FlexlbConfig();
-        config.setShortestTtftCandidatePoolMode("RATIO");
-        config.setShortestTtftCandidatePoolRatio(1.0);
+        useRatioCandidatePool(config, 1.0, 1);
 
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         // Both have same TTFT (estimateMs(500,0)=500 + wait 0 = 500)
@@ -210,12 +211,13 @@ class ShortestTTFTStrategyTest {
     @Test
     void directPathCommitsOnlyMarginalPrefillTime() {
         FlexlbConfig config = new FlexlbConfig();
+        config.setScheduler(new DirectSchedulerConfig());
+        config.setDispatcher(new NonBatchDispatcherConfig());
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 1000));
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
         BalanceContext context = buildContext(500, 43L, config);
-        context.setScheduleMode(ScheduleModeEnum.DIRECT);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
@@ -238,9 +240,7 @@ class ShortestTTFTStrategyTest {
         // Config: minSize=0, ratio=0.3, 1 worker → resolveCandidateCount returns max(1, max(0, 0)) = 1
         // Without the floor of 1 this would yield 0 → empty candidate pool → NoSuchElementException
         FlexlbConfig config = new FlexlbConfig();
-        config.setShortestTtftCandidatePoolMode("RATIO");
-        config.setShortestTtftCandidatePoolMinSize(0);
-        config.setShortestTtftCandidatePoolRatio(0.3);
+        useRatioCandidatePool(config, 0.3, 0);
 
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
@@ -254,9 +254,7 @@ class ShortestTTFTStrategyTest {
     @Test
     void candidatePoolRatioMode() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setShortestTtftCandidatePoolMode("RATIO");
-        config.setShortestTtftCandidatePoolRatio(0.3);
-        config.setShortestTtftCandidatePoolMinSize(1);
+        useRatioCandidatePool(config, 0.3, 1);
 
         // ---- Scenario 1: 5 workers → candidateCount = max(1, floor(5*0.3)) = 1 ----
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
@@ -356,6 +354,7 @@ class ShortestTTFTStrategyTest {
         req.setSeqLen(seqLen);
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(req);
+        ctx.setConfig(SchedulingTestConfig.batchConfig());
         if (hitCache > 0) {
             org.flexlb.dao.loadbalance.DebugInfo di = new org.flexlb.dao.loadbalance.DebugInfo();
             di.setHitCacheLen(hitCache);
@@ -378,7 +377,31 @@ class ShortestTTFTStrategyTest {
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(req);
         ctx.setConfig(config);
-        ctx.setScheduleMode(config.getDefaultScheduleModeEnum());
         return ctx;
+    }
+
+    private static void useFixedCandidatePool(FlexlbConfig config, int workers) {
+        RoutingConfig.FixedCandidatePoolConfig pool = new RoutingConfig.FixedCandidatePoolConfig();
+        pool.setWorkers(workers);
+        useLruPool(config, pool);
+    }
+
+    private static void useRatioCandidatePool(
+            FlexlbConfig config, double ratio, int minimumWorkers) {
+        RoutingConfig.RatioCandidatePoolConfig pool = new RoutingConfig.RatioCandidatePoolConfig();
+        pool.setRatio(ratio);
+        pool.setMinimumWorkers(minimumWorkers);
+        useLruPool(config, pool);
+    }
+
+    private static void useLruPool(
+            FlexlbConfig config, RoutingConfig.CandidatePoolConfig pool) {
+        RoutingConfig.LeastRecentlyUsedInPoolConfig choice =
+                new RoutingConfig.LeastRecentlyUsedInPoolConfig();
+        choice.setPool(pool);
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
+                        .getPrefill().getSelector();
+        selector.setCandidateChoice(choice);
     }
 }

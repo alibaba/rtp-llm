@@ -25,7 +25,6 @@ import org.flexlb.enums.DecodeTaskPhase;
  * @param createdAtMs      epoch-millis when this entry was created
  * @param priority         Auto-TPM normalized priority (30/40/50/60/70);
  *                         0 = no priority (task40) — never evictable
- * @param deadlineMs       Auto-TPM admission deadline (epoch ms); 0 = unset
  * @param phase            shadow admission phase
  */
 public record RequestInflight(
@@ -33,24 +32,23 @@ public record RequestInflight(
         long expectedKvTokens,
         long createdAtMs,
         int priority,
-        long deadlineMs,
         DecodeTaskPhase phase
 ) implements InflightEvictor.TtlTracked {
 
     /**
      * Priority recorded when the caller carries no Auto-TPM priority: the
-     * NO_PRIORITY sentinel (0, task40) — such entries never participate in
+     * NO_PRIORITY sentinel (0) — such entries never participate in
      * priority mechanisms and are never selected as eviction victims.
      */
     static final int DEFAULT_PRIORITY = 0;
 
     RequestInflight(long kvTokens, long expectedKvTokens) {
-        this(kvTokens, expectedKvTokens, DEFAULT_PRIORITY, 0);
+        this(kvTokens, expectedKvTokens, DEFAULT_PRIORITY);
     }
 
-    RequestInflight(long kvTokens, long expectedKvTokens, int priority, long deadlineMs) {
+    RequestInflight(long kvTokens, long expectedKvTokens, int priority) {
         this(kvTokens, expectedKvTokens, System.currentTimeMillis(),
-                priority, deadlineMs, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN);
+                priority, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN);
     }
 
     /**

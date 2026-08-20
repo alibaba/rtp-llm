@@ -164,7 +164,7 @@ class RealisticTimingTest {
      * Creates a performance model with realistic timing:
      * {@code sleep_scale=1.0}, prefill {@code fixed_ms=100}, decode {@code step_ms=5}.
      *
-     * <p>No PREFILL_TIME_FORMULA is set in the master config, so the model
+     * <p>No FORMULA estimator is supplied through FLEXLB_CONFIG, so the model
      * falls through to {@code fixed_ms} for prefill duration.
      */
     private MockPerformanceModel model() throws Exception {

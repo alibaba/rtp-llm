@@ -19,7 +19,6 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_ENGINE_LOAD;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RESERVED_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RUNNING_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_SHADOW_KV_RESERVED;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_DEADLINE_MISS_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_EVICTION_COMMIT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_EVICTION_PLAN_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_INFLIGHT_SETTLE_MISS;
@@ -29,7 +28,6 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_PLAN_CONFLICT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREFILL_QUEUE_DEPTH;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PRIORITY_PREEMPT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_COUNT;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_SLO_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
@@ -38,10 +36,8 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
 /**
  * Auto-TPM priority scheduling metrics reporter.
  *
- * <p>Phase 0 observability: per-priority request count, per-request SLO,
- * schedule latency by result, and normal-placement success count. Reported
- * for both the legacy path and the priority scheduler path so that enabling
- * {@code AUTO_TPM_ENABLED} can be compared against the baseline.
+ * <p>Observability for per-priority request volume, schedule latency,
+ * placement, preemption, cancellation, and resource ownership.
  */
 @Slf4j
 @Component
@@ -57,7 +53,6 @@ public class PrioritySchedulerReporter {
     @PostConstruct
     public void init() {
         monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_REQUEST_SLO_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_NORMAL_PLACEMENT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_EVICTION_PLAN_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -66,7 +61,6 @@ public class PrioritySchedulerReporter {
         monitor.register(AUTO_TPM_PLAN_CONFLICT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_PREFILL_QUEUE_DEPTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_TTFT_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_DEADLINE_MISS_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_RUNNING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_ACCEPTED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -80,23 +74,15 @@ public class PrioritySchedulerReporter {
         monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        log.info("PrioritySchedulerReporter initialized (24 metrics)");
+        log.info("PrioritySchedulerReporter initialized");
     }
 
     /**
-     * Report request arrival with its per-request SLO via
-     * {@code auto_tpm.request.count} and {@code auto_tpm.request.slo_ms}.
-     *
-     * @param priority     normalized priority (30/40/50/60/70)
-     * @param seqBucket    SLO length-bucket label of the request seqLen
-     * @param requestSloMs per-request SLO in ms
+     * Report request arrival by normalized priority.
      */
-    public void reportRequest(int priority, String seqBucket, long requestSloMs) {
-        String priorityTag = String.valueOf(priority);
+    public void reportRequest(int priority) {
         monitor.report(AUTO_TPM_REQUEST_COUNT,
-                FlexMetricTags.of("priority", priorityTag), 1.0);
-        monitor.report(AUTO_TPM_REQUEST_SLO_MS,
-                FlexMetricTags.of("priority", priorityTag, "seq_bucket", seqBucket), requestSloMs);
+                FlexMetricTags.of("priority", String.valueOf(priority)), 1.0);
     }
 
     /**
@@ -236,15 +222,6 @@ public class PrioritySchedulerReporter {
     }
 
     /**
-     * Report one deadline miss via {@code auto_tpm.deadline_miss.count}
-     * (schedule completion exceeded the request deadlineMs, §19.2).
-     */
-    public void reportDeadlineMiss(int priority) {
-        monitor.report(AUTO_TPM_DEADLINE_MISS_COUNT,
-                FlexMetricTags.of("priority", String.valueOf(priority)), 1.0);
-    }
-
-    /**
      * Report one priority preemption via
      * {@code auto_tpm.priority_preempt.count} (§19.2).
      *
@@ -285,8 +262,7 @@ public class PrioritySchedulerReporter {
      * with the cancelled request's priority and the cancel reason
      * (PRIORITY_PREEMPTED / USER_CANCELLED / DEADLINE_EXCEEDED).
      *
-     * @param priority normalized priority of the cancelled request; 0 when
-     *                 the request carried no Auto-TPM budget
+     * @param priority normalized priority of the cancelled request
      * @param reason   cancel reason metric label
      */
     public void reportCancel(int priority, String reason) {
@@ -311,8 +287,7 @@ public class PrioritySchedulerReporter {
      * {@code auto_tpm.cancel.confirm.count} — inside the commit wait window
      * or via the later WorkerStatus settle path, whichever happens.
      *
-     * @param victimPriority normalized priority of the cancelled victim; 0
-     *                       when the settled item carried no Auto-TPM budget
+     * @param victimPriority normalized priority of the cancelled victim
      */
     public void reportCancelConfirm(String endpoint, int victimPriority) {
         monitor.report(AUTO_TPM_CANCEL_CONFIRM_COUNT,

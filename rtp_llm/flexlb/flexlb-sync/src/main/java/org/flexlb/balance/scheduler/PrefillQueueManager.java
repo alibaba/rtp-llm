@@ -8,19 +8,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Auto-TPM facade over one {@link WorkerBatcher} queue (design doc 8.2).
+ * Priority scheduling facade over one {@link WorkerBatcher} queue.
  *
  * <p>One instance per prefill endpoint, created by the batcher itself. It does
  * not own any state: every operation delegates to the batcher/context so the
  * active queue plus ready-delivery backlog stay the single source of truth
- * and every mutation goes through the shared queue lock and bumps
- * {@code queueVersion} (optimistic plan validation — "version unchanged ⇒
- * actionable queued content unchanged").
+ * and every mutation goes through the shared queue lock.
  *
  * <p>Read operations ({@link #snapshot()}, {@link #estimateWaitMs}) capture a
- * consistent view under the queue lock; version-checked mutations
- * ({@link #tryOffer}, {@link #tryRemove}, {@link #tryReplaceVictimsWithIncoming})
- * are atomic against the version captured by a prior snapshot.
+ * consistent view under the queue lock. Victim replacement validates the
+ * selected victims under that same lock rather than invalidating a plan for
+ * unrelated queue mutations.
  */
 public final class PrefillQueueManager {
 
@@ -32,7 +30,7 @@ public final class PrefillQueueManager {
         this.ctx = ctx;
     }
 
-    /** Current queue version (monotonic, bumped on every mutation). */
+    /** Current queue mutation generation (monotonic, bumped on every mutation). */
     public long queueVersion() {
         return batcher.queueVersion();
     }
@@ -45,24 +43,24 @@ public final class PrefillQueueManager {
     /**
      * Consistent point-in-time view of the queue for eviction planning:
      * version + per-item {@link QueuedRequestSnapshot} in queue order.
-     * The hard capacity reuses {@code flexlbBatchQueueMaxSize} (0 = unbounded).
+     * The hard capacity comes from the active scheduler/dispatcher variants.
      */
     public PrefillQueueSnapshot snapshot() {
         ctx.queueLock().lock();
         try {
             // Only live queue members are actionable eviction victims. A
-            // staged callback member remains capacity-charged, but cannot be
-            // removed by the versioned queue mutation APIs.
+            // staged callback member remains capacity-charged, but is no
+            // longer an actionable queue victim.
             List<BatchItem> queued = ctx.sortedQueuedItems();
             List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
             for (BatchItem item : queued) {
                 items.add(new QueuedRequestSnapshot(
-                        item.requestId(), item.priority(), item.deadlineMs(),
-                        item.enqueuedAtMs(), item.seqLen(), item.hitCache(),
+                        item.requestId(), item.priority(), item.enqueuedAtMs(),
+                        item.seqLen(), item.hitCache(),
                         QueuedRequestSnapshot.PREFILL_QUEUED));
             }
             return new PrefillQueueSnapshot(ctx.key(), batcher.queueVersion(),
-                    ctx.cfg().getFlexlbBatchQueueMaxSize(), items);
+                    ctx.maxQueueCapacity(), items);
         } finally {
             ctx.queueLock().unlock();
         }
@@ -75,7 +73,7 @@ public final class PrefillQueueManager {
      * ready. The decision-interval sliding average is the per-cycle cost and
      * the active head's remaining window is the partial first cycle.
      */
-    public long estimateWaitMs(int priority, long deadlineMs, long requestId) {
+    public long estimateWaitMs(int priority, long requestId) {
         long now = ctx.now();
         int activeItemsAhead = 0;
         int readyItemsAhead = 0;
@@ -95,14 +93,14 @@ public final class PrefillQueueManager {
                 if (head == null) {
                     head = item;
                 }
-                if (ordersBefore(item, priority, deadlineMs, now, requestId)) {
+                if (ordersBefore(item, priority, now, requestId)) {
                     activeItemsAhead++;
                 }
             }
         } finally {
             ctx.queueLock().unlock();
         }
-        int maxBatchSize = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
+        int maxBatchSize = ctx.maxDecisionRequests();
         long intervalMs = ctx.avgDecisionIntervalMs();
         long batchCyclesAhead = activeItemsAhead / maxBatchSize;
         long headRemainingWindowMs = 0;
@@ -134,63 +132,29 @@ public final class PrefillQueueManager {
 
     /**
      * Whether a queued item is ordered before an incoming probe under
-     * {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER} (priority desc → enqueue-seq
+     * {@link WorkerBatcher#PRIORITY_QUEUE_ORDER} (priority desc → enqueue-seq
      * asc → requestId asc). The probe's enqueue-seq is its would-be arrival
      * time ({@code now}) — it has not been enqueued yet.
      *
      * <p>Delegates the priority + enqueue-seq + request-id comparison to the
      * allocation-free primitive overload in {@link PriorityOrdering}.
-     * The {@code deadlineMs} parameter is retained for call-site stability
-     * but is no longer part of the ordering rule (PR-B removed the deadline
-     * key).
      */
-    private static boolean ordersBefore(BatchItem item, int priority, long deadlineMs,
+    private static boolean ordersBefore(BatchItem item, int priority,
                                         long arrivalMs, long requestId) {
         return PriorityOrdering.comesBefore(
                 item, item.requestId(), priority, arrivalMs, requestId);
     }
 
     /**
-     * Version-checked enqueue: applies only if the queue version still equals
-     * {@code expectedVersion} (used by commit paths built on a snapshot).
-     */
-    public boolean tryOffer(BatchItem item, long expectedVersion) {
-        return batcher.tryOfferAtVersion(item, expectedVersion);
-    }
-
-    /**
-     * Version-checked removal of the given requests.
-     *
-     * @return removed items, or {@code null} on version mismatch
-     */
-    public List<BatchItem> tryRemove(List<Long> requestIds, long expectedVersion, String reason) {
-        return batcher.tryRemoveAtVersion(requestIds, expectedVersion, reason);
-    }
-
-    /**
-     * Version-agnostic idempotent removal (PR-D §2.7): removes the given
-     * request from the queue without a version precondition. Used by
-     * {@code AdmissionLease.close()} for deadline-timeout cleanup where the
-     * snapshot version is long stale. No-op when the item is not queued
-     * (already delivered / evicted / removed).
+     * Idempotently remove a request during cancellation or expiration. No-op
+     * when the item is already delivered, evicted, or removed.
      */
     public void tryRemove(long requestId, String reason) {
-        batcher.tryRemoveNoVersion(List.of(requestId), reason);
+        batcher.tryRemove(List.of(requestId), reason);
     }
 
     /**
-     * Atomic victim replacement (design doc 17.2): under the queue lock,
-     * validate the version, remove all victims, enqueue the incoming item.
-     */
-    public ReplaceOutcome tryReplaceVictimsWithIncoming(List<Long> victimIds,
-                                                        BatchItem incoming,
-                                                        long expectedVersion) {
-        return batcher.tryReplaceVictimsWithIncoming(victimIds, incoming, expectedVersion);
-    }
-
-    /**
-     * Atomic victim replacement with victim-level presence guard (redesign N3
-     * §3.4, {@code autoTpmVictimGuardMode=victim_presence}): no version
+     * Atomic victim replacement with a victim-level presence guard: no version
      * check — any missing victim aborts with a zero-side-effect
      * {@code VICTIM_GONE} carrying the missing ids.
      */
@@ -201,8 +165,7 @@ public final class PrefillQueueManager {
     // ==================== Replace outcome ====================
 
     /**
-     * Result of {@link #tryReplaceVictimsWithIncoming} /
-     * {@link #tryReplaceVictimsPresent}. {@code removed} holds the victims
+     * Result of {@link #tryReplaceVictimsPresent}. {@code removed} holds the victims
      * actually taken out of the queue — non-empty on success and on the
      * (defensively handled) partial failure, where victims are never
      * re-inserted (design doc 9.5) and must be driven to a terminal state by
@@ -211,7 +174,7 @@ public final class PrefillQueueManager {
      */
     public static final class ReplaceOutcome {
 
-        public enum Status { SUCCESS, VERSION_MISMATCH, PARTIAL_FAILURE, VICTIM_GONE }
+        public enum Status { SUCCESS, PARTIAL_FAILURE, VICTIM_GONE }
 
         private final Status status;
         private final List<BatchItem> removed;
@@ -225,10 +188,6 @@ public final class PrefillQueueManager {
 
         static ReplaceOutcome success(List<BatchItem> removed) {
             return new ReplaceOutcome(Status.SUCCESS, removed, List.of());
-        }
-
-        static ReplaceOutcome versionMismatch() {
-            return new ReplaceOutcome(Status.VERSION_MISMATCH, List.of(), List.of());
         }
 
         static ReplaceOutcome partialFailure(List<BatchItem> removed) {
@@ -245,10 +204,6 @@ public final class PrefillQueueManager {
 
         public boolean isSuccess() {
             return status == Status.SUCCESS;
-        }
-
-        public boolean isVersionMismatch() {
-            return status == Status.VERSION_MISMATCH;
         }
 
         public boolean isPartialFailure() {

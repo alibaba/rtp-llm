@@ -40,24 +40,8 @@ FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPS
 MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"
 START_MOCK="${START_MOCK:-1}"
 
-# -- Common FlexLB config (constant across all groups) ---------------------
+# -- Common process config -------------------------------------------------
 
-DECODE_LOAD_BALANCE_STRATEGY="${DECODE_LOAD_BALANCE_STRATEGY:-COST_BASED_DECODE}"
-DECODE_CONCURRENCY_LIMIT="${DECODE_CONCURRENCY_LIMIT:-132}"
-FLEXLB_BATCH_ALGORITHM="${FLEXLB_BATCH_ALGORITHM:-fixed_window}"
-FLEXLB_BATCH_FIXED_WAIT_MS="${FLEXLB_BATCH_FIXED_WAIT_MS:-10}"
-FLEXLB_BATCH_PREDICT_THRESHOLD_MS="${FLEXLB_BATCH_PREDICT_THRESHOLD_MS:-550}"
-FLEXLB_BATCH_SIZE_MAX="${FLEXLB_BATCH_SIZE_MAX:-32}"
-FLEXLB_BATCH_MIN_SIZE="${FLEXLB_BATCH_MIN_SIZE:-1}"
-FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES="${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES:-4}"
-# Hysteresis bias disabled for scheduling tests — ensures deterministic
-# routing so distribution assertions are reliable.
-HYSTERESIS_BIAS_PERCENT="${HYSTERESIS_BIAS_PERCENT:-0}"
-MAX_QUEUE_SIZE="${MAX_QUEUE_SIZE:-5000}"
-PREFILL_QUEUE_SIZE_THRESHOLD="${PREFILL_QUEUE_SIZE_THRESHOLD:-100000}"
-COST_SLO_MS="${COST_SLO_MS:-30000}"
-COST_HOTSPOT_MULTIPLIER="${COST_HOTSPOT_MULTIPLIER:-1.5}"
-STRATEGY_CONFIGS='{}'
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_matrix_smoke_master}"
@@ -224,23 +208,22 @@ fi
 
 # -- Group configuration ----------------------------------------------------
 
-# Sets group-specific variables: LOAD_BALANCE_STRATEGY,
-# DEFAULT_SCHEDULE_MODE.
+# Sets the one strict FlexLB JSON document for each matrix axis combination.
 set_group_config() {
   case "$1" in
     batch)
-      LOAD_BALANCE_STRATEGY="COST_BASED_PREFILL"
-      DEFAULT_SCHEDULE_MODE="BATCH"
+      SCHEDULING_PROFILE="queue-priority-batch"
+      FLEXLB_CONFIG='{"schemaVersion":1,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxRequests":32,"maxCollectionWaitMs":10,"maxWaitingRequestsPerPrefillWorker":1024,"earlyDispatchPredictedExecutionMs":550,"maxInflightBatchesPerPrefillWorker":4,"enqueueRpcTimeoutMs":5000},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"executionTimeEstimator":{"type":"FORMULA"},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxWaitVsAverageMultiplier":3.0}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}},"vit":{"selector":{"type":"RANDOM"}}}}}'
       TEST_RID_BASES=(10000 20000 30000)
       ;;
     direct)
-      LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
-      DEFAULT_SCHEDULE_MODE="DIRECT"
+      SCHEDULING_PROFILE="direct-non-batch"
+      FLEXLB_CONFIG='{"schemaVersion":1,"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH"},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"executionTimeEstimator":{"type":"FORMULA"},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}},"vit":{"selector":{"type":"RANDOM"}}}}}'
       TEST_RID_BASES=(40000 50000 60000)
       ;;
     queue)
-      LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
-      DEFAULT_SCHEDULE_MODE="QUEUE"
+      SCHEDULING_PROFILE="queue-fifo-non-batch"
+      FLEXLB_CONFIG='{"schemaVersion":1,"scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"NON_BATCH"},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"executionTimeEstimator":{"type":"FORMULA"},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}},"vit":{"selector":{"type":"RANDOM"}}}}}'
       TEST_RID_BASES=(70000 80000 90000)
       ;;
     *)
@@ -254,24 +237,9 @@ start_master() {
   local group="$1"
   local group_dir="${RUN_DIR}/${group}"
   mkdir -p "${group_dir}"
-  echo "  starting master (group=${group}, mode=${DEFAULT_SCHEDULE_MODE}) ..."
+  echo "  starting master (group=${group}, profile=${SCHEDULING_PROFILE}) ..."
   env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
-    "LOAD_BALANCE_STRATEGY=${LOAD_BALANCE_STRATEGY}" \
-    "DECODE_LOAD_BALANCE_STRATEGY=${DECODE_LOAD_BALANCE_STRATEGY}" \
-    "DECODE_CONCURRENCY_LIMIT=${DECODE_CONCURRENCY_LIMIT}" \
-    "FLEXLB_BATCH_ALGORITHM=${FLEXLB_BATCH_ALGORITHM}" \
-    "FLEXLB_BATCH_FIXED_WAIT_MS=${FLEXLB_BATCH_FIXED_WAIT_MS}" \
-    "FLEXLB_BATCH_PREDICT_THRESHOLD_MS=${FLEXLB_BATCH_PREDICT_THRESHOLD_MS}" \
-    "FLEXLB_BATCH_SIZE_MAX=${FLEXLB_BATCH_SIZE_MAX}" \
-    "FLEXLB_BATCH_MIN_SIZE=${FLEXLB_BATCH_MIN_SIZE}" \
-    "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES=${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES}" \
-    "HYSTERESIS_BIAS_PERCENT=${HYSTERESIS_BIAS_PERCENT}" \
-    "MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE}" \
-    "PREFILL_QUEUE_SIZE_THRESHOLD=${PREFILL_QUEUE_SIZE_THRESHOLD}" \
-    "DEFAULT_SCHEDULE_MODE=${DEFAULT_SCHEDULE_MODE}" \
-    "COST_SLO_MS=${COST_SLO_MS}" \
-    "COST_HOTSPOT_MULTIPLIER=${COST_HOTSPOT_MULTIPLIER}" \
-    "STRATEGY_CONFIGS=${STRATEGY_CONFIGS}" \
+    "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
     "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \

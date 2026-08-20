@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -14,9 +16,8 @@ import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -49,7 +50,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -67,7 +67,7 @@ import static org.mockito.Mockito.when;
  *       terminating the request on the first attempt.</li>
  *   <li>A-1: an orphan decode reservation (no scheduler inflight entry) must
  *       be reclaimed by the inflight TTL cleanup pass (P1-4).</li>
- *   <li>B-1: the SLO-deadline rejection must carry a machine-readable
+ *   <li>B-1: request expiration must carry a machine-readable
  *       {@code reason=} tag so 8400s are attributable.</li>
  *   <li>D-1: the infeasible-eviction observability log must carry the plan
  *       phase and candidate counters.</li>
@@ -98,12 +98,9 @@ class PlanCommitConcurrencyRedesignTest {
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        config.setScheduleWorkerSize(1);
-        config.setFlexlbBatchSizeMax(2);
-        config.setFlexlbBatchWindowMs(10_000);
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setAutoTpmEnabled(true);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.usePriorityQueue(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
@@ -121,11 +118,10 @@ class PlanCommitConcurrencyRedesignTest {
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
-                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel());
         scheduler = new PriorityScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+                endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                new UnsupportedEngineCancelChannel());
 
         WorkerStatus prefillWs = new WorkerStatus();
         prefillWs.setIp("10.0.0.1");
@@ -159,8 +155,8 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void c1_queued_reservations_do_not_saturate_engine_concurrency() throws Exception {
-        config.setDecodeConcurrencyLimit(4);
-        config.setFlexlbBatchSizeMax(100); // batch never fills → items stay queued
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100); // batch never fills → items stay queued
         decodeWs.setAlive(true);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
@@ -202,8 +198,8 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void p1_1_immediate_dispatch_does_not_leave_stale_queued_mark() throws Exception {
-        config.setDecodeConcurrencyLimit(4);
-        config.setFlexlbBatchSizeMax(1); // dispatch immediately on offer
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1); // dispatch immediately on offer
         decodeWs.setAlive(true);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
@@ -256,13 +252,13 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void c2_infeasible_decode_eviction_retries_and_tags_capacity_reason() throws Exception {
-        config.setAutoTpmDecodeReservedEvictEnabled(true);
-        config.setDecodeConcurrencyLimit(4);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         // Four same-priority (50) reservations: slotDeficit=1, but no
         // strictly-lower-priority candidate → planDecode is INFEASIBLE.
         for (long id = 801; id <= 804; id++) {
-            decodeEp.reserve(id, 128, 136, 50, 0);
+            decodeEp.reserve(id, 128, 136, 50);
         }
         // Router reports a decode-capacity failure (8403) → Phase 4 eviction path
         when(router.route(any(BalanceContext.class)))
@@ -291,7 +287,7 @@ class PlanCommitConcurrencyRedesignTest {
         decodeEp.reserve(888, 128, 136); // orphan: never inflight-registered
         assertEquals(1, decodeEp.getInflightCount());
 
-        config.setFlexlbInflightTtlMs(0);
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(0);
         Thread.sleep(10); // ensure the orphan is past the (zero) TTL
         scheduler.cleanupInflight();
 
@@ -303,13 +299,13 @@ class PlanCommitConcurrencyRedesignTest {
         assertEquals(0, decodeEp.inflightHardKvReserved());
     }
 
-    // ==================== B-1: SLO rejection carries a reason tag ====================
+    // ==================== B-1: request expiration carries a reason tag ====================
 
     @Test
-    void b1_slo_deadline_rejection_is_typed_resource_exhaustion() throws Exception {
+    void b1_preexpired_priority_request_preserves_admission_contract() throws Exception {
         BalanceContext ctx = context(300);
-        ctx.setBudget(ScheduleBudget.forDeadline(50,
-                ctx.getStartTime(), System.currentTimeMillis() - 1_000));
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
+                50, System.currentTimeMillis() - 1_000));
 
         Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 
@@ -317,18 +313,18 @@ class PlanCommitConcurrencyRedesignTest {
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
         assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
-        assertTrue(response.getErrorMessage().contains("admission budget already expired"));
+        assertTrue(response.getErrorMessage().contains("request expired"));
     }
 
     // ==================== D-1: infeasible log carries phase + candidate counters ====================
 
     @Test
     void d1_infeasible_log_carries_phase_and_candidate_counters() throws Exception {
-        config.setAutoTpmDecodeReservedEvictEnabled(true);
-        config.setDecodeConcurrencyLimit(4);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         for (long id = 811; id <= 814; id++) {
-            decodeEp.reserve(id, 128, 136, 50, 0);
+            decodeEp.reserve(id, 128, 136, 50);
         }
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
@@ -354,18 +350,17 @@ class PlanCommitConcurrencyRedesignTest {
         }
     }
 
-    // ==================== N3: lockfree commit & presence guard ====================
+    // ==================== commit and victim-presence guard ====================
 
     /**
-     * N3 §3.3: the default lockfree commit must not abort on unrelated
+     * The commit must not abort on unrelated
      * prefill queue-version churn between the plan snapshot and the commit.
-     * Under the legacy versioned strategy this exact interference costs a
-     * VERSION_MISMATCH plus a full re-route (85%+ commit failures at
-     * production QPS — the 8515 storm).
+     * The target queue decides capacity locally, so the request does not need
+     * a full re-route merely because another request touched that queue.
      */
     @Test
-    void n3_lockfree_commit_ignores_queue_version_drift() throws Exception {
-        config.setFlexlbBatchSizeMax(100); // items stay queued, no dispatch
+    void commit_ignores_unrelated_queue_mutation() throws Exception {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
 
         AtomicInteger routeCalls = new AtomicInteger();
@@ -377,30 +372,28 @@ class PlanCommitConcurrencyRedesignTest {
             }
             endpointRegistry.getDecode(DECODE_IP_PORT)
                     .reserve(ctx.getRequestId(), 128, 136,
-                            ctx.getPriority(), ctx.getDeadlineMs());
+                            ctx.getPriority());
             return successRoute(ctx.getRequestId());
         });
 
         Response response = scheduler.submit(context(501)).get(2, TimeUnit.SECONDS);
 
         assertTrue(response.isSuccess());
-        // Single attempt: no VERSION_MISMATCH abort, no re-route
+        // Single attempt: unrelated queue mutation does not force re-route.
         verify(router, times(1)).route(any(BalanceContext.class));
-        verify(priorityReporter, never()).reportPlanConflict("normal_placement_version");
         // N3 observability: committed plan age is reported
         verify(priorityReporter).reportPlanAge(eq(50), anyLong());
     }
 
     /**
-     * N3 §3.3 retry shrink: on the lockfree path a capacity failure is not a
-     * transient conflict — after the primary offer and one fallback re-route
-     * both hit OFFER_FAILED, reject fast with a reason tag instead of burning
-     * the full re-route budget.
+     * A capacity failure is not an optimistic-concurrency conflict: after the
+     * primary offer and one fallback re-route both fail, reject without
+     * burning the full retry budget.
      */
     @Test
-    void n3_lockfree_fast_rejects_after_primary_and_one_fallback_offer() throws Exception {
-        config.setFlexlbBatchQueueMaxSize(1);
-        config.setFlexlbBatchSizeMax(100);
+    void capacity_fast_rejects_after_primary_and_one_fallback_offer() throws Exception {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
         // Route performs the decode reservation (D reserve first), like production
@@ -416,12 +409,9 @@ class PlanCommitConcurrencyRedesignTest {
         Response response = scheduler.submit(context(502)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        // The queue is occupied by a legacy item created without an Auto-TPM
-        // ScheduleBudget, so its priority is the untrusted 0 sentinel.  The
-        // fast-reject timing remains N3's contract, but the causal result
-        // cannot truthfully claim typed priority or pure resource exhaustion.
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED,
+        // A legal same-priority occupant is the causal blocker.
+        assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
                 response.getAdmissionRejectReason());
         // Primary + one fallback re-route — not the full 3-attempt budget
         verify(router, times(2)).route(any(BalanceContext.class));
@@ -431,23 +421,17 @@ class PlanCommitConcurrencyRedesignTest {
     }
 
     /**
-     * N3 §3.4: the victim-presence replace commits as long as the victims are
-     * still queued — the same unrelated version churn that aborts the legacy
-     * queue_version guard no longer matters.
+     * Victim-presence replacement commits as long as the selected victims are
+     * still queued; unrelated queue mutations do not invalidate the plan.
      */
     @Test
-    void n3_presence_replace_survives_version_drift_where_versioned_guard_aborts() {
-        config.setFlexlbBatchSizeMax(100);
+    void presence_replace_survives_unrelated_queue_mutation() {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
         assertTrue(batcher.tryOffer(dummyItem(601))); // victim
-        long staleVersion = queueManager.queueVersion();
         assertTrue(batcher.tryOffer(dummyItem(602))); // unrelated churn → version bump
 
-        // Red (legacy guard): unrelated churn aborts the commit …
-        assertTrue(queueManager.tryReplaceVictimsWithIncoming(
-                List.of(601L), dummyItem(611), staleVersion).isVersionMismatch());
-        // … green (presence guard): the victim is still queued → replace lands
         PrefillQueueManager.ReplaceOutcome outcome =
                 queueManager.tryReplaceVictimsPresent(List.of(601L), dummyItem(612));
         assertTrue(outcome.isSuccess());
@@ -461,7 +445,7 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void n3_presence_replace_victim_gone_is_zero_side_effect() {
-        config.setFlexlbBatchSizeMax(100);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
         assertTrue(batcher.tryOffer(dummyItem(701)));
@@ -503,13 +487,13 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void n3_presence_decode_eviction_partial_release_keeps_freed_and_replans() {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(41, 128, 136, 30, 0);
+        decodeEp.reserve(41, 128, 136, 30);
         decodeEp.markQueuedPhase(41);
         // Victim 42 no longer holds a reservation (already dispatched/settled)
 
         DecodeEndpoint.PresenceEvictionOutcome outcome =
                 decodeEp.tryReleaseVictimsIfHeldAndReserveIncoming(
-                        List.of(41L, 42L), 900, 128, 136, 70, 0);
+                        List.of(41L, 42L), 900, 128, 136, 70);
 
         assertFalse(outcome.success());
         assertEquals(List.of(41L), outcome.freedVictimIds());
@@ -556,7 +540,7 @@ class PlanCommitConcurrencyRedesignTest {
         return response.build();
     }
 
-    private static BalanceContext context(long requestId) {
+    private BalanceContext context(long requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);
@@ -567,7 +551,7 @@ class PlanCommitConcurrencyRedesignTest {
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
-        ctx.setConfig(new FlexlbConfig());
+        ctx.setConfig(config);
         ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
         return ctx;
     }

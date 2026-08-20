@@ -179,10 +179,7 @@ class PrefillWaitingQueueCapTest {
                 "jitter_pct", 0.0,
                 "prefill", Map.of("scale", 1.0, "max_waiting_batches", maxWaitingBatches),
                 "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MAPPER.writeValue(master.toFile(), Map.of(
-                "zone_process_setting", Map.of(
-                        "process_info", Map.of(
-                                "envs", List.of(List.of("PREFILL_TIME_FORMULA", prefillFormula))))));
+        MockMasterConfig.writeWithPrefillExpression(master, prefillFormula);
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
 

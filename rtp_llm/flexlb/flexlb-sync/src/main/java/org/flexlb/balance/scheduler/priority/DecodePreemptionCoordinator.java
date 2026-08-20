@@ -46,7 +46,6 @@ public final class DecodePreemptionCoordinator {
                           long incomingKvTokens,
                           long incomingExpectedKvTokens,
                           int incomingPriority,
-                          long incomingDeadlineMs,
                           List<DecodeRequestSnapshot> victims,
                           long cancelAckTimeoutMs,
                           long cancelCompletionTimeoutMs,
@@ -109,8 +108,7 @@ public final class DecodePreemptionCoordinator {
                 token, victims.stream().map(PreemptionAttempt.Victim::requestId).toList(),
                 request.incomingRequestId(), request.incomingKvTokens(),
                 request.incomingExpectedKvTokens(), request.incomingPriority(),
-                request.incomingDeadlineMs(), request.snapshotVersion(),
-                request.requireVersionMatch());
+                request.snapshotVersion(), request.requireVersionMatch());
         if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
             for (Long claimed : claimedInflight) {
                 registrar.releasePreemptionClaim(claimed, token);

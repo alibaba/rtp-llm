@@ -41,8 +41,8 @@ class FaultInjectionE2ETest {
 
     /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
     private static void arm(AutoTpmE2EHarness h) {
-        h.config.setFlexlbBatchSizeMax(1);
-        h.config.setFlexlbBatchFixedWaitMs(5);
+        h.config.batchDispatcher().setMaxRequests(1);
+        h.config.batchDispatcher().setMaxCollectionWaitMs(5);
         h.startAutoPump(10);
     }
 

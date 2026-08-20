@@ -1,5 +1,10 @@
 # FlexLB Master + Mock Engine 性能测试 Handoff 手册
 
+> 历史记录说明：本文记录的是 2026-07-17 的性能方法和结果。文中带
+> `slo` 的文件名、脚本变量和结果字段是测试工具的历史命名，不是当前
+> FlexLB 的 SLO 配置接口。当前调度、凑批和路由行为只从进程配置中的
+> `FLEXLB_CONFIG` JSON 读取；不要把历史环境变量名称复制到生产配置。
+
 本文用于交接 FlexLB Master 的 batch 调度性能测试。目标是让接手人能够复现测试、逐级寻找容量拐点，并判断瓶颈在发压端、FlexLB Master 还是 mock engine。
 
 fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报告](flexlb-master-mock-engine-performance-20260717.md)。500 ms 预测阈值、160 ms 固定等待的评估见 [FlexLB Master SLO Batch 性能评估](flexlb-master-slo-batch-evaluation-20260717.md)。
@@ -12,7 +17,14 @@ fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报�
 
 本手册只测 Master 调度能力：
 
-- 必须使用 `SCHEDULE_MODE=batch` 和 `SCHEDULE_ONLY=1`。10 ms base case 使用 `FLEXLB_BATCH_FIXED_WAIT_MS=10`；SLO case 使用独立配置文件中的 500 ms 预测阈值和 160 ms 固定等待。
+- Master 进程配置必须在 `FLEXLB_CONFIG` 中选择
+  `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`SCHEDULE_ONLY=1` 只是
+  load client 的测试开关。历史 10 ms base case 需要在独立进程 JSON 中
+  配置 `dispatcher.maxCollectionWaitMs=10`；当前仓库的
+  `master_fixed_window.json` 已不是该 10 ms fixture，不能用已删除的标量
+  环境变量覆盖。历史 `slo500_wait160` case 在独立 JSON 中配置
+  `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
+  `dispatcher.maxCollectionWaitMs=160`。
 - 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
 - 延迟以 Master 服务端的 `schedule_latency_ms` 为准，不以 client RTT 作为最终报告口径。
@@ -87,7 +99,8 @@ test -s "$EVAL_DIR/data/performance/dsv4_flash_performance.fast_ab.json"
 三份文件的作用：
 
 - `trace_30min.jsonl`：脱敏后的相对到达时间、输入/输出 token 长度和伪名 cache key。
-- `master_fixed_window.json`：Master 进程配置，也是 `PREFILL_TIME_FORMULA` 的唯一来源。
+- `master_fixed_window.json`：Master 进程配置；公式位于其中
+  `FLEXLB_CONFIG.router.roles.prefill.executionTimeEstimator.expression`。
 - `dsv4_flash_performance.fast_ab.json`：mock 的 decode batch 曲线和 `sleep_scale`。
 
 ## 4. 编译和快速校验
@@ -102,27 +115,32 @@ bash -n tools/online_eval/run_online_eval.sh
 python3 -m py_compile tools/online_eval/flexlb_load_client.py
 ```
 
-重新编译后再压测，避免代码和旧 jar 不一致。完整验证可以执行：
+重新编译后再压测，避免代码和旧 jar 不一致。功能测试和两组性能门禁使用独立 Maven invocation：
 
 ```bash
 ./mvnw test -P '!internal'
+./mvnw test -P '!internal,sync-performance-regression' -pl flexlb-sync -am
+./mvnw test -P '!internal,api-performance-regression' -pl flexlb-api -am
 python3 -m unittest discover -s tools/online_eval/tests
 ```
 
+不要把两个性能 profile 合并到同一条命令。API 端到端门禁对 CPU 竞争敏感，和 Sync 性能门禁或功能测试串在同一 reactor 热周期会制造假回归。
+
 ### 4.1 Master 性能回归 UT
 
-普通 Maven 测试包含两层性能门禁：
+普通 `./mvnw test` 只运行功能测试，并排除 `performance-regression` tag。性能回归分为两个显式 profile，必须分别运行：
 
-- `CostBasedPrefillRoutingPerformanceTest`：750 个 prefill endpoint 的 cost-based 选点热路径。
-- `MasterBatchEndToEndPerformanceTest`：真实 Netty client/Master gRPC、`DefaultRouter`、cost-based prefill/decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路。
+- `sync-performance-regression`：`SchedulingConfigAndExpirationPerformanceTest`、`AutoTpmSchedulingOverheadPerfTest` 和 `CostBasedPrefillRoutingPerformanceTest`。其中后者覆盖 750 个 prefill endpoint 的 cost-based 选点热路径。
+- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路；cost-based prefill 热路径由 Sync profile 的 750-endpoint 门禁独立覆盖。
 
-单独运行端到端门禁：
+分别运行两组门禁：
 
 ```bash
-./mvnw -P '!internal' -pl flexlb-api -am \
-  -Dtest=MasterBatchEndToEndPerformanceTest \
-  -Dsurefire.failIfNoSpecifiedTests=false test
+./mvnw test -P '!internal,sync-performance-regression' -pl flexlb-sync -am
+./mvnw test -P '!internal,api-performance-regression' -pl flexlb-api -am
 ```
+
+profile 已内置精确的测试类 includes；不需要手写 `-Dtest`。上游无匹配性能类的模块会正常放行，每个性能类都在不可复用的新 fork 中执行。
 
 E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 8192 条请求。请求不是 2-token 或全 0 的 synthetic input：
 
@@ -171,7 +189,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 基准必须使用 `MOCK_ENGINE_IMPL=java`，不使用 Python mock 做高 QPS 容量结论。
 
-Java mock 不是固定延迟返回。它从每个请求读取输入 token、输出 token 和 cache key，并维护每个 engine 的运行任务、等待任务、KV 使用量和 cache 命中。Prefill 时间优先使用 `master_fixed_window.json` 中和 Master 相同的 `PREFILL_TIME_FORMULA`：
+Java mock 不是固定延迟返回。它从每个请求读取输入 token、输出 token 和 cache key，并维护每个 engine 的运行任务、等待任务、KV 使用量和 cache 命中。Prefill 时间优先使用 `master_fixed_window.json` 中和 Master 相同的 `FLEXLB_CONFIG.router.roles.prefill.executionTimeEstimator.expression`：
 
 ```text
 prefill_ms = formula(batchSize, inputTokens, computeTokens,
@@ -238,10 +256,7 @@ MOCK_BASE_GRPC_PORT=61000 \
 JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.fast_ab.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window.json" \
-SCHEDULE_MODE=batch \
 SCHEDULE_ONLY=1 \
-FLEXLB_BATCH_ALGORITHM=fixed_window \
-FLEXLB_BATCH_FIXED_WAIT_MS=10 \
 SCHEDULE_WORKER_SIZE=16 \
 LOAD_CLIENT_WORKERS=1 \
 REPLAY_SPEED=13 \
@@ -276,10 +291,7 @@ BASE_ENV=(
   JAVA_MOCK_EVENT_LOOP_THREADS=32
   "PERFORMANCE_FILE=$PWD/data/performance/dsv4_flash_performance.fast_ab.json"
   "PROCESS_CONFIG_FILE=$PWD/data/config/master_fixed_window.json"
-  SCHEDULE_MODE=batch
   SCHEDULE_ONLY=1
-  FLEXLB_BATCH_ALGORITHM=fixed_window
-  FLEXLB_BATCH_FIXED_WAIT_MS=10
   SCHEDULE_WORKER_SIZE=16
   DURATION_S=60
   LOOP=1
@@ -317,7 +329,7 @@ run_case 8 1400 10000
 
 不要同时并行跑多个 case。每个 case 都会占用相同端口，并且并行运行会污染 CPU、网络和延迟数据。
 
-### 8.1 SLO batch 评估
+### 8.1 历史 `slo500_wait160` batch 评估
 
 下面命令固定 Master 16 worker 和 load client 8 worker，使用 500 ms 预测阈值、160 ms 固定等待、最大 batch 32，并在 10K 目标档运行 30 秒：
 
@@ -339,7 +351,6 @@ JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 JAVA_MOCK_ENGINE_HEAP_SIZE=32g \
 PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.formula_1x.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window_slo500_wait160.json" \
-SCHEDULE_MODE=batch \
 SCHEDULE_ONLY=1 \
 SCHEDULE_WORKER_SIZE=16 \
 LOAD_CLIENT_WORKERS=8 \

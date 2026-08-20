@@ -107,20 +107,20 @@ public final class AdmissionFailureClassifier {
     }
 
     /**
-     * Classify a priority request that reached its admission deadline after it
-     * had already entered the selected Prefill queue.
+     * Classify a priority-admitted request that timed out after it had already
+     * entered the selected Prefill queue.
      *
-     * <p>{@code itemsAhead} is the exact queue prefix from the deadline
+     * <p>{@code itemsAhead} is the exact queue prefix from the timeout
      * decision snapshot. A higher-priority request is the primary blocker
      * whenever one exists. Otherwise an earlier request with the same priority
      * proves FIFO blocking. If the causal prefix only contains an occupant
      * without priority provenance, attribution is unavailable. If none of
      * those cases applies, the selected route failed to provide dispatch or
-     * engine-admission capacity within the budget and is classified as
+     * engine-admission capacity before expiration and is classified as
      * resource exhaustion. Lower-priority items and items behind the request
      * cannot explain its wait.
      */
-    public static AdmissionFailure classifyQueuedDeadline(
+    public static AdmissionFailure classifyQueuedTimeout(
             int incomingPriority,
             List<QueuedRequestSnapshot> itemsAhead) {
         boolean higher = false;

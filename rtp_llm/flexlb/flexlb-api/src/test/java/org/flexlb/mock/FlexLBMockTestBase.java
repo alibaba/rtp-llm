@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.priority.UnsupportedEngineCancelChannel;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.config.ConfigService;
@@ -149,10 +150,10 @@ public abstract class FlexLBMockTestBase {
                 engineLocalView, globalCacheIndex, grpcReporter);
 
         // 4. Create real dispatcher
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+        dispatcher = createDispatcher();
 
-        // 5. Mock reporter (metrics no-op)
-        reporter = mock(BatchSchedulerReporter.class);
+        // 5. Reporter (metrics no-op by default)
+        reporter = createBatchSchedulerReporter();
 
         // 6. Create real EndpointRegistry (scheduler=null for now, replaced below)
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
@@ -192,7 +193,8 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new PriorityScheduler(
                 configService, router,
-                endpointRegistry, dispatcher, reporter, null, null);
+                endpointRegistry, dispatcher, reporter, null, null,
+                new UnsupportedEngineCancelChannel());
 
         // 12. Register prefill endpoint with the real scheduler as DecisionGroupHandler
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
@@ -206,7 +208,15 @@ public abstract class FlexLBMockTestBase {
 
     @AfterEach
     public void tearDownBase() {
-        // Stop additional prefill workers started by tests
+        // Stop scheduler-owned work before tearing down its dispatcher or workers.
+        if (scheduler != null) {
+            scheduler.shutdown();
+        }
+        if (dispatcher != null) {
+            dispatcher.shutdown();
+        }
+
+        // Stop additional prefill workers started by tests.
         for (MockPrefillWorker worker : additionalPrefillWorkers) {
             worker.stop();
         }
@@ -220,9 +230,6 @@ public abstract class FlexLBMockTestBase {
         }
         additionalDecodeIpPorts.clear();
 
-        if (scheduler != null) {
-            scheduler.shutdown();
-        }
         if (mockPrefillWorker != null) {
             mockPrefillWorker.stop();
         }
@@ -234,9 +241,15 @@ public abstract class FlexLBMockTestBase {
         }
         if (grpcExecutor != null) {
             grpcExecutor.shutdownNow();
+            try {
+                grpcExecutor.awaitTermination(2, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
         if (eventLoopGroup != null) {
-            eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS);
+            eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS)
+                    .syncUninterruptibly();
         }
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
@@ -268,9 +281,31 @@ public abstract class FlexLBMockTestBase {
         Router fixedRouter = mock(Router.class);
         when(fixedRouter.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            reserveDecode(ctx);
             return successRoute(ctx.getRequestId());
         });
         return fixedRouter;
+    }
+
+    protected BatchSchedulerReporter createBatchSchedulerReporter() {
+        return mock(BatchSchedulerReporter.class);
+    }
+
+    /** Override when an integration fixture needs deterministic dispatcher sizing. */
+    protected DefaultBatchDispatcher createDispatcher() {
+        return new DefaultBatchDispatcher(grpcClient, configService, null);
+    }
+
+    /** Mirror the Decode ownership side effect performed by production routing strategies. */
+    protected void reserveDecode(BalanceContext ctx) {
+        DecodeEndpoint decodeEndpoint = getDecodeEndpoint();
+        long seqLen = ctx.getRequest().getSeqLen();
+        long expectedKvTokens = config.decodeKvReservationTokens(
+                seqLen,
+                ctx.getRequest().getMaxNewTokens(),
+                decodeEndpoint.realKvTotal());
+        decodeEndpoint.reserve(ctx.getRequestId(), Math.max(0L, seqLen),
+                expectedKvTokens, ctx.getPriority());
     }
 
     /**
@@ -279,12 +314,10 @@ public abstract class FlexLBMockTestBase {
      */
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchSizeMax(1);        // single request triggers dispatch
-        cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
-        cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
-        cfg.setFlexlbInflightTtlMs(300_000L);
+        cfg.batchDispatcher().setMaxRequests(1); // single request triggers dispatch
+        cfg.batchDispatcher().setMaxCollectionWaitMs(300);
+        cfg.batchDispatcher().setEnqueueRpcTimeoutMs(5_000L);
+        cfg.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(300_000L);
         return cfg;
     }
 

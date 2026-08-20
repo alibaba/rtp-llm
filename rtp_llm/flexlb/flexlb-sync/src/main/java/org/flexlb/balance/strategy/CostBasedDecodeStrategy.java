@@ -4,8 +4,8 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -28,15 +28,11 @@ import java.util.concurrent.ThreadLocalRandom;
 public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private final EngineWorkerStatus engineWorkerStatus;
-    private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
 
-    public CostBasedDecodeStrategy(ConfigService configService,
-                                    EngineWorkerStatus engineWorkerStatus,
+    public CostBasedDecodeStrategy(EngineWorkerStatus engineWorkerStatus,
                                     ResourceMeasureFactory resourceMeasureFactory) {
         this.engineWorkerStatus = engineWorkerStatus;
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
     }
@@ -47,9 +43,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long seqLen = request.getSeqLen();
         long maxNewTokens = request.getMaxNewTokens();
         FlexlbConfig config = balanceContext.getConfig();
-        long expectedKvTokens = seqLen + config.effectiveMaxNewTokensForReservation(maxNewTokens);
+        RoutingConfig.KvUsageWeightedRandomConfig selector =
+                (RoutingConfig.KvUsageWeightedRandomConfig) config.getRouter().getRoles()
+                        .getDecode().getSelector();
 
-        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
+        EndpointFilterResult filterResult = getAvailableEndpoints(
+                roleType, group, config.resourceMeasureFor(roleType));
         List<DecodeEndpoint> eligible = filterResult.endpoints();
         if (CollectionUtils.isEmpty(eligible)) {
             Logger.debug("Decode select failed: no available endpoints, request_id={}, registered={}, eligible=0, rejections={}",
@@ -57,13 +56,14 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config);
+        FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, selector);
         List<DecodeEndpoint> survivors = hardFilterResult.endpoints();
 
-        DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
+        DecodeEndpoint selectedEndpoint = weightedRandomSelection(
+                survivors, selector.getDecayPerToken());
 
         if (selectedEndpoint != null) {
-            return buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens,
+            return buildServerStatus(selectedEndpoint, seqLen, maxNewTokens,
                     roleType, balanceContext);
         }
 
@@ -113,9 +113,15 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
     }
 
-    private FilterResult applyHardFilters(List<DecodeEndpoint> eligible, long seqLen, FlexlbConfig config) {
-        double hotspotMultiplier = config.getDecodeHotspotMultiplier();
-        double imbalanceMultiplier = config.getDecodeImbalanceMultiplier();
+    private FilterResult applyHardFilters(
+            List<DecodeEndpoint> eligible,
+            long seqLen,
+            RoutingConfig.KvUsageWeightedRandomConfig selector) {
+        RoutingConfig.DecodeOutlierRejectionConfig outlier = selector.getOutlierRejection();
+        double hotspotMultiplier = outlier == null
+                ? 0.0 : outlier.getMaxEngineLoadVsAverageMultiplier();
+        double imbalanceMultiplier = outlier == null
+                ? 0.0 : outlier.getMaxKvUsedVsAverageMultiplier();
 
         int n = eligible.size();
         // 缓存每个 endpoint 的值，避免重复调用
@@ -159,7 +165,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return new FilterResult(survivors, rejections);
     }
 
-    private DecodeEndpoint weightedRandomSelection(List<DecodeEndpoint> candidateEndpoints) {
+    private DecodeEndpoint weightedRandomSelection(
+            List<DecodeEndpoint> candidateEndpoints, double decayFactor) {
         if (candidateEndpoints.isEmpty()) {
             return null;
         }
@@ -223,7 +230,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
-                                           long expectedKvTokens, RoleType roleType,
+                                           long declaredOutputTokens, RoleType roleType,
                                            BalanceContext balanceContext) {
         long requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
@@ -236,14 +243,13 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             // maxNewTokens may exceed the physical KV limit, causing
             // inflightKvReserved() to be artificially inflated and scoring
             // to become overly conservative.
-            long totalKv = optimalEndpoint.realKvTotal();
-            if (totalKv > 0 && expectedKvTokens > totalKv) {
-                expectedKvTokens = totalKv;
-            }
-            // Carry the Auto-TPM priority/deadline into the shadow reservation
-            // so it can be ranked as a decode eviction candidate (Phase 4).
-            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens,
-                    balanceContext.getPriority(), balanceContext.getDeadlineMs());
+            long expectedKvTokens = balanceContext.getConfig()
+                    .decodeKvReservationTokens(seqLen, declaredOutputTokens,
+                            optimalEndpoint.realKvTotal());
+            // Carry the Auto-TPM priority into the shadow reservation so it
+            // can be ranked as a decode eviction candidate (Phase 4).
+            optimalEndpoint.reserve(requestId, Math.max(0L, seqLen), expectedKvTokens,
+                    balanceContext.getPriority());
 
             result.setSuccess(true);
             result.setRole(roleType);

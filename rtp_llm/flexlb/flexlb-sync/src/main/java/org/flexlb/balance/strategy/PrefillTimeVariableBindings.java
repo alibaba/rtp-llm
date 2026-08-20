@@ -5,7 +5,6 @@ import org.flexlb.balance.scheduler.BatchItem;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Builds variable bindings for {@link PrefillTimeFormula} evaluation.
@@ -17,17 +16,9 @@ import java.util.Set;
  */
 final class PrefillTimeVariableBindings {
 
-    private static final String BATCH_SIZE = "batchSize";
-    private static final Set<String> BATCH_VAR_NAMES = Set.of(
-            "totalInputTokens", "totalHitCacheTokens", "totalComputeTokens",
-            "maxInputTokens", "maxComputeTokens");
     private static final ThreadLocal<BindingContext> BINDING_CTX = ThreadLocal.withInitial(BindingContext::new);
 
     private PrefillTimeVariableBindings() {
-    }
-
-    static boolean isBatchScoped(String name) {
-        return BATCH_SIZE.equals(name) || BATCH_VAR_NAMES.contains(name);
     }
 
     static EvaluationVariables singleRequestVariables(long totalTokens, long hitCacheTokens) {

@@ -56,8 +56,19 @@ class AnalyzeSloBatchTest(unittest.TestCase):
                         "zone_process_setting": {
                             "process_info": {
                                 "envs": [
-                                    ["FLEXLB_BATCH_ALGORITHM", "fixed_window"],
-                                    ["COST_SLO_MS", "1000"],
+                                    [
+                                        "FLEXLB_CONFIG",
+                                        json.dumps(
+                                            {
+                                                "schemaVersion": 1,
+                                                "scheduler": {
+                                                    "type": "QUEUE",
+                                                    "ordering": {"type": "PRIORITY"},
+                                                },
+                                                "dispatcher": {"type": "BATCH"},
+                                            }
+                                        ),
+                                    ],
                                 ]
                             }
                         }
@@ -77,6 +88,9 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             self.assertEqual(1, result["completions"]["matched_decision_count"])
             self.assertEqual(500, result["config"]["predict_threshold_ms"])
             self.assertEqual(160, result["config"]["fixed_wait_ms"])
+            self.assertEqual("QUEUE", result["config"]["scheduler_type"])
+            self.assertEqual("PRIORITY", result["config"]["ordering_type"])
+            self.assertEqual("BATCH", result["config"]["dispatcher_type"])
             self.assertEqual(31, result["mock"]["last"]["max_batch_size"])
             self.assertEqual(3, result["mock"]["max_observed_prefill_waiting"])
 

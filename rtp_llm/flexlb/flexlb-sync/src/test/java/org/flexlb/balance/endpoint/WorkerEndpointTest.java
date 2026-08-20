@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
@@ -35,7 +36,8 @@ class WorkerEndpointTest {
         status.setPort(8080);
         status.setGrpcPort(8081);
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostFormula("sum(computeTokens)");
+        ((RoutingConfig.FormulaEstimatorConfig) config.getRouter().getRoles().getPrefill()
+                .getExecutionTimeEstimator()).setExpression("sum(computeTokens)");
         DecisionGroupHandler handler = Mockito.mock(DecisionGroupHandler.class);
         endpoint = new PrefillEndpoint(status, config, handler, Mockito.mock(BatchSchedulerReporter.class));
     }
@@ -291,6 +293,7 @@ class WorkerEndpointTest {
         req.setSeqLen(seqLen);
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(req);
+        ctx.setConfig(new FlexlbConfig());
         return ctx;
     }
 

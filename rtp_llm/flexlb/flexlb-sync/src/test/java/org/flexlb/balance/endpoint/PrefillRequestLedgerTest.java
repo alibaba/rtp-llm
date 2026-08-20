@@ -4,6 +4,7 @@ import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DecisionGroupMetadata;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
@@ -59,9 +60,11 @@ class PrefillRequestLedgerTest {
         status.setRole(RoleType.PREFILL);
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setFlexlbBatchQueueMaxSize(128);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+        config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(128);
+        config.batchDispatcher().setMaxCollectionWaitMs(60_000);
+        ((RoutingConfig.FormulaEstimatorConfig) config.getRouter().getRoles().getPrefill()
+                .getExecutionTimeEstimator()).setExpression(
+                        "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
         monitor = new RecordingMonitor();
         reporter = new BatchSchedulerReporter(monitor);
@@ -557,6 +560,7 @@ class PrefillRequestLedgerTest {
 
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
+        context.setConfig(new FlexlbConfig());
 
         ServerStatus prefill = new ServerStatus();
         prefill.setRole(RoleType.PREFILL);

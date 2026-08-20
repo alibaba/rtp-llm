@@ -138,18 +138,20 @@ def distribution(values: Iterable[int]) -> dict[str, float | int]:
     }
 
 
-def load_process_config(path: Path | None) -> dict[str, str]:
+def load_flexlb_config(path: Path | None) -> dict:
     if path is None:
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     envs = (
         payload.get("zone_process_setting", {}).get("process_info", {}).get("envs", [])
     )
-    return {
+    process_env = {
         str(item[0]): str(item[1])
         for item in envs
         if isinstance(item, list) and len(item) == 2
     }
+    document = process_env.get("FLEXLB_CONFIG")
+    return json.loads(document) if document else {}
 
 
 def load_json(path: Path) -> dict:
@@ -170,7 +172,7 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
     prometheus_reasons = parse_prometheus_dispatch_counts(
         run_dir / "master_prometheus_after.prom"
     )
-    process_env = load_process_config(master_config)
+    flexlb_config = load_flexlb_config(master_config)
     summary = load_json(run_dir / "load_client" / "summary.json")
     server_latency = load_json(run_dir / "load_client" / "server_latency.json")
 
@@ -199,9 +201,10 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
 
     completion_by_batch = {item["batch_id"]: item for item in completions}
     matched = sum(1 for item in decisions if item["batch_id"] in completion_by_batch)
-    slo_ms = int(process_env.get("COST_SLO_MS", "0") or 0)
-    estimated_budget = [item["wait_ms"] + item["predicted_ms"] for item in decisions]
+    estimated_latency = [item["wait_ms"] + item["predicted_ms"] for item in decisions]
     first_decision = decisions[0] if decisions else {}
+    scheduler = flexlb_config.get("scheduler", {})
+    dispatcher = flexlb_config.get("dispatcher", {})
     log_reasons = dict(sorted(Counter(item["reason"] for item in decisions).items()))
     exact_decision_count = sum(prometheus_reasons.values())
     decision_count = exact_decision_count or len(decisions)
@@ -210,11 +213,12 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
         "run_dir": str(run_dir),
         "flexlb_logs": [str(path) for path in log_paths],
         "config": {
-            "algorithm": process_env.get("FLEXLB_BATCH_ALGORITHM"),
             "predict_threshold_ms": first_decision.get("threshold_ms", 0),
             "fixed_wait_ms": first_decision.get("fixed_wait_ms", 0),
             "batch_size_max": first_decision.get("batch_size_max", 0),
-            "cost_slo_ms": slo_ms,
+            "scheduler_type": scheduler.get("type"),
+            "ordering_type": scheduler.get("ordering", {}).get("type"),
+            "dispatcher_type": dispatcher.get("type"),
         },
         "master": {
             "actual_send_qps": summary.get(
@@ -247,10 +251,7 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
             "batch_size": distribution(item["batch_size"] for item in decisions),
             "wait_ms": distribution(item["wait_ms"] for item in decisions),
             "predicted_ms": distribution(item["predicted_ms"] for item in decisions),
-            "estimated_wait_plus_prefill_ms": distribution(estimated_budget),
-            "estimated_over_cost_slo_count": (
-                sum(value > slo_ms for value in estimated_budget) if slo_ms > 0 else 0
-            ),
+            "estimated_wait_plus_prefill_ms": distribution(estimated_latency),
             "invariant_violation_count": violation_count,
             "invariant_violation_samples": violations,
         },

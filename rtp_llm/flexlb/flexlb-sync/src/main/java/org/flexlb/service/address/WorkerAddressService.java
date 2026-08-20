@@ -52,7 +52,7 @@ public class WorkerAddressService {
         FlexlbConfig config = configService.loadBalanceConfig();
         serviceDiscoveryExecutor = new ThreadPoolExecutor(
                 10,
-                config.getServiceDiscoveryMaxSize(),
+                config.getInternalRuntime().getServiceDiscoveryMaxThreads(),
                 60L,
                 TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
                 new NamedThreadFactory("service-discovery-executor"),

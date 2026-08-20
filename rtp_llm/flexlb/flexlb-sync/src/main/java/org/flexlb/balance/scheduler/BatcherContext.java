@@ -1,7 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.PriorityOrdering;
@@ -27,7 +29,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * without directly depending on WorkerBatcher internals.
  *
  * <p>Every queue mutation is performed under the shared queue lock and bumps
- * the queue version, keeping the Auto-TPM invariant "version unchanged ⇒
+ * the queue version, keeping the priority scheduling invariant "version unchanged ⇒
  * queue content unchanged" (optimistic plan validation).
  */
 public class BatcherContext {
@@ -44,7 +46,7 @@ public class BatcherContext {
     private final BatchSchedulerReporter reporter;
 
     /**
-     * Route decisions whose logical Fixed/SLO group is already ready, but
+     * Route decisions whose logical dispatch group is already ready, but
      * whose delivery is waiting for a request-mode inflight slot.
      *
      * <p>The backlog is guarded by the existing per-worker {@link #queueLock}
@@ -120,7 +122,7 @@ public class BatcherContext {
                    AtomicInteger queueDepth,
                    BatchSchedulerReporter reporter) {
         this(key, prefillEp, cfg, decisionHandler, queue, queueDepth, new AtomicLong(),
-                new ReentrantLock(), Comparator.comparingLong(BatchItem::sortKey), reporter);
+                new ReentrantLock(), WorkerBatcher.FIFO_QUEUE_ORDER, reporter);
     }
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
@@ -156,6 +158,19 @@ public class BatcherContext {
 
     FlexlbConfig cfg() {
         return cfg;
+    }
+
+    int maxQueueCapacity() {
+        if (cfg.getDispatcher() instanceof BatchDispatcherConfig batch) {
+            return batch.getMaxWaitingRequestsPerPrefillWorker();
+        }
+        return cfg.getInternalRuntime().getNonBatchWaitingRequestsPerPrefillWorker();
+    }
+
+    int maxDecisionRequests() {
+        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
+                ? Math.max(1, batch.getMaxRequests())
+                : 1;
     }
 
     BatchSchedulerReporter reporter() {
@@ -261,8 +276,8 @@ public class BatcherContext {
     }
 
     /**
-     * Items in active queue order (legacy: {@link BatchItem#sortKey()};
-     * Auto-TPM: {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER}, which delegates
+     * Items in active queue order (FIFO: {@link BatchItem#enqueueSeq()};
+     * PRIORITY: {@link WorkerBatcher#PRIORITY_QUEUE_ORDER}, which delegates
      * to {@link PriorityOrdering#STRICT}), suitable for greedy-fill iteration
      * in grouping algorithms.
      */
@@ -324,11 +339,12 @@ public class BatcherContext {
      * shape ({@code maxSeqLen * batchSize}) is greater than or equal to
      * {@code max_batch_tokens_size}. Prefer
      * that exact worker-reported limit; {@code max_seq_len} is a conservative
-     * fallback for workers that have not populated the newer field yet. The
-     * FlexLB setting remains an operator-controlled upper bound.
+     * fallback for workers that have not populated the newer field yet. An
+     * internal safety ceiling covers the interval before either value arrives.
      */
     long batchTokenCapacity() {
-        long capacity = positiveOrUnlimited(cfg.getFlexlbBatchMaxCapacity());
+        long capacity = positiveOrUnlimited(
+                cfg.getInternalRuntime().getFallbackBatchTokenCapacity());
         WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
         if (status == null) {
             return capacity;
@@ -358,7 +374,7 @@ public class BatcherContext {
     /**
      * Request-mode capacity visible to the current decision.
      *
-     * <p>This value must not be used as the logical batch target: Auto-TPM
+     * <p>This value must not be used as the logical batch target: priority scheduling
      * still decides <em>when</em> work is ready with the existing batch policy.
      * The request cap only limits the subset delivered to the caller after that
      * decision has been made. {@link PrefillEndpoint#tryCommitRequest} remains
@@ -368,8 +384,10 @@ public class BatcherContext {
         if (prefillEp == null) {
             return Integer.MAX_VALUE;
         }
-        return prefillEp.availableRequestSlots(
-                cfg.getAutoTpmPrefillMaxInflightRequestsPerWorker());
+        Integer maximum = cfg.getDispatcher() instanceof NonBatchDispatcherConfig nonBatch
+                ? nonBatch.getMaxInflightRequestsPerPrefillWorker()
+                : null;
+        return prefillEp.availableRequestSlots(maximum == null ? 0 : maximum);
     }
 
     /** Delivery-unit inflight count used only for decision diagnostics. */
@@ -399,17 +417,17 @@ public class BatcherContext {
      * before calling this.
      */
     void stageForDelivery(List<BatchItem> items, DecisionGroupMetadata metadata) {
-        // The decision-interval EMA only feeds the Auto-TPM queue-wait
-        // estimate (PrefillQueueManager.estimateWaitMs); skip the synchronized
-        // bookkeeping entirely on the legacy path (task10 P2-9).
-        if (cfg.isAutoTpmEnabled()) {
+        // The decision-interval EMA only feeds the PRIORITY queue-wait
+        // estimate (PrefillQueueManager.estimateWaitMs); FIFO does not need
+        // this synchronized bookkeeping.
+        if (cfg.isPriorityOrdering()) {
             recordDecisionInterval(now());
         }
         deliverStaged(stageRequests(items), metadata);
     }
 
     /**
-     * Publish one logical Fixed/SLO decision group.
+     * Publish one logical dispatch group.
      *
      * <p>The batch-only fast path is the established delivery protocol. If a
      * route-decision member is present, every such member becomes delivery
@@ -433,7 +451,7 @@ public class BatcherContext {
             return;
         }
 
-        if (cfg.isAutoTpmEnabled()) {
+        if (cfg.isPriorityOrdering()) {
             recordDecisionInterval(now());
         }
         List<BatchItem> staged = stageDecisionGroup(
@@ -451,7 +469,7 @@ public class BatcherContext {
         if (availableSlots == 0) {
             return ReadyDeliveryResult.CAPACITY_BLOCKED;
         }
-        int maxDelivery = Math.max(1, cfg.getFlexlbBatchSizeMax());
+        int maxDelivery = 1;
         int deliveryLimit = availableSlots == Integer.MAX_VALUE
                 ? maxDelivery : Math.min(maxDelivery, availableSlots);
         ReadyStage readyStage = stageReadyRequests(deliveryLimit);
@@ -685,8 +703,8 @@ public class BatcherContext {
                 return PendingClaimResult.NOT_PENDING;
             }
             pendingDeliveries.put(item, pending.claimedState());
-            // Fence the queue-to-delivery ownership transition so a versioned
-            // queue-side plan cannot commit across it.
+            // Fence the queue-to-delivery ownership transition so a concurrent
+            // queue-side admission cannot commit across it.
             queueVersion.incrementAndGet();
             return PendingClaimResult.CLAIMED;
         } finally {
@@ -858,8 +876,8 @@ public class BatcherContext {
     }
 
     /**
-     * Remove head from queue and notify decisionHandler of expiry.
-     * Only called by algorithms that support deadline-based expiry.
+     * Remove the head from the queue and notify the decision handler that the
+     * request's absolute expiration has been reached.
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
@@ -881,16 +899,15 @@ public class BatcherContext {
 
     /**
      * Sliding-average interval between logical decision releases; before any
-     * release is observed, falls back to the algorithm's grouping window.
+     * release is observed, falls back to the fixed grouping window.
      */
     long avgDecisionIntervalMs() {
         double ema = decisionIntervalEmaMs;
         if (ema > 0) {
             return Math.max(1, Math.round(ema));
         }
-        long windowMs = "fixed_window".equalsIgnoreCase(cfg.getFlexlbBatchAlgorithm())
-                ? cfg.getFlexlbBatchFixedWaitMs()
-                : cfg.getFlexlbBatchWindowMs();
-        return Math.max(1, windowMs);
+        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
+                ? Math.max(1, batch.getMaxCollectionWaitMs())
+                : 1;
     }
 }

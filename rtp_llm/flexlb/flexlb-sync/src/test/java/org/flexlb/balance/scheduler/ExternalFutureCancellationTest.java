@@ -9,15 +9,15 @@ import org.flexlb.balance.scheduler.priority.InflightRegistrar.PostDeliveryFence
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -66,12 +66,11 @@ class ExternalFutureCancellationTest {
         Router router = mock(Router.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         config = new FlexlbConfig();
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchSizeMax(100);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(100);
-        config.setDecodeConcurrencyLimit(100);
-        config.setAutoTpmCancelAckTimeoutMs(30_000);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(100);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100));
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         batchDispatcher = new CapturingBatchDispatcher();
@@ -113,7 +112,7 @@ class ExternalFutureCancellationTest {
     @Test
     void batchCancellationBetweenSendAndAckRetainsLedgersUntilEngineTombstone() {
         long requestId = 10_001L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
 
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
 
@@ -155,10 +154,9 @@ class ExternalFutureCancellationTest {
     @Test
     void batchFutureCancelAfterSendDoesNotDependOnAdmissionLease() {
         long requestId = 10_115L;
-        BatchItem item = admittedItemWithoutRegistration(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItemWithoutRegistration(requestId, DeliveryMode.BATCH_ENQUEUE);
         assertTrue(scheduler.registerInflight(item));
-        decodeEndpoint.reserve(requestId, 128, 136, 50,
-                System.currentTimeMillis() + 30_000);
+        decodeEndpoint.reserve(requestId, 128, 136, 50);
         decodeEndpoint.markQueuedPhase(requestId);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
@@ -179,7 +177,7 @@ class ExternalFutureCancellationTest {
     @Test
     void batchSettlementBeforeProtectionDoesNotPublishEngineFence() {
         long requestId = 10_003L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
 
         long batchId = batchDispatcher.batchId;
@@ -203,7 +201,7 @@ class ExternalFutureCancellationTest {
     @Test
     void routeCancellationBeforePublicationRollsBackLocally() {
         long requestId = 10_002L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.QUEUE);
+        BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
 
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
 
@@ -232,7 +230,7 @@ class ExternalFutureCancellationTest {
     @Test
     void masterCancelBeforeDeliveryIsTerminalAndIdempotent() throws Exception {
         long requestId = 10_101L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
 
         RequestLifecycleSnapshot cancelled = scheduler.cancelRequest(
                 requestId, 0, CancelReason.CLIENT_CANCELLED);
@@ -252,7 +250,7 @@ class ExternalFutureCancellationTest {
                 99_999L, 0, CancelReason.CLIENT_CANCELLED));
 
         BatchItem reused = admittedItemWithoutRegistration(
-                requestId, ScheduleModeEnum.BATCH);
+                requestId, DeliveryMode.BATCH_ENQUEUE);
         assertFalse(scheduler.registerInflight(reused),
                 "the terminal tombstone must fence request-id reuse");
     }
@@ -260,7 +258,7 @@ class ExternalFutureCancellationTest {
     @Test
     void deadlineBeforeDeliveryTerminatesAsTimedOut() throws Exception {
         long requestId = 10_106L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
 
         RequestLifecycleSnapshot timedOut = scheduler.cancelRequest(
                 requestId, 0, CancelReason.DEADLINE_EXCEEDED);
@@ -277,7 +275,7 @@ class ExternalFutureCancellationTest {
     void batchCancelUsesGenerationFenceAndOneEngineOwnerUnderConcurrency()
             throws Exception {
         long requestId = 10_102L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
@@ -331,7 +329,7 @@ class ExternalFutureCancellationTest {
     void batchCancelDoesNotClaimAcceptanceWhenSettlementWinsProtectionRace()
             throws Exception {
         long requestId = 10_109L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         WorkerStatusResponse finished = prefillFinished(requestId, batchId, 500);
@@ -357,7 +355,7 @@ class ExternalFutureCancellationTest {
     void acknowledgedBatchCancelDoesNotRequireSettledBatchProtection()
             throws Exception {
         long requestId = 10_110L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         batchDispatcher.callback.onSuccess(item, batchId);
@@ -378,7 +376,7 @@ class ExternalFutureCancellationTest {
     void decodeAcceptanceBeforeBatchAckStillInstallsExplicitCancelOwner()
             throws Exception {
         long requestId = 10_111L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         scheduler.onWorkerStatusUpdate(runningDecode(requestId, TaskPhase.KV_ALLOCATED));
@@ -397,7 +395,7 @@ class ExternalFutureCancellationTest {
     @Test
     void batchDeadlineSettlesAsTimedOutAfterEngineTombstone() throws Exception {
         long requestId = 10_107L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
@@ -419,11 +417,11 @@ class ExternalFutureCancellationTest {
     void batchAdmissionDeadlineRemainsFirstCauseAfterLateClientCancel()
             throws Exception {
         long requestId = 10_112L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
-        scheduler.onAdmissionDeadline(requestId, item.future());
+        scheduler.onRequestExpired(requestId, item.future());
         assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
                 scheduler.getRequestState(requestId, batchId).state());
 
@@ -446,7 +444,7 @@ class ExternalFutureCancellationTest {
     @Test
     void explicitCancelTakesOwnershipFromPriorityNotFound() throws Exception {
         long requestId = 10_113L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         long attemptToken = 503L;
         prepareNotFoundPreemption(item, attemptToken, 90_001L);
 
@@ -466,7 +464,7 @@ class ExternalFutureCancellationTest {
     void softTimeoutTakesOwnershipFromPriorityNotFoundWithoutLaterStatus()
             throws Exception {
         long requestId = 10_114L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.QUEUE);
+        BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         routeDelivery.callback.onDelivered(item);
         assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
@@ -487,7 +485,7 @@ class ExternalFutureCancellationTest {
     @Test
     void routeCancelStaysPendingUntilWorkerTerminal() throws Exception {
         long requestId = 10_103L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.QUEUE);
+        BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         routeDelivery.callback.onDelivered(item);
         assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
@@ -514,7 +512,7 @@ class ExternalFutureCancellationTest {
     @Test
     void completedRouteDeliveryIgnoresLateAdmissionDeadline() throws Exception {
         long requestId = 10_108L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.QUEUE);
+        BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         routeDelivery.callback.onDelivered(item);
         assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
@@ -536,7 +534,7 @@ class ExternalFutureCancellationTest {
     @Test
     void clientCancelBeforePriorityRpcKeepsClientTerminalCause() throws Exception {
         long requestId = 10_104L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         long token = 501L;
         assertTrue(scheduler.claimForPreemption(requestId, token, "priority attempt"));
 
@@ -558,7 +556,7 @@ class ExternalFutureCancellationTest {
     @Test
     void priorityRpcAlreadyInFlightKeepsPriorityTerminalCause() throws Exception {
         long requestId = 10_105L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         long token = 502L;
         assertTrue(scheduler.claimForPreemption(requestId, token, "priority attempt"));
         assertTrue(scheduler.markPreemptionCancelInFlight(requestId, token));
@@ -583,7 +581,7 @@ class ExternalFutureCancellationTest {
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelOutcome.tombstoned()));
-        ScheduleModeEnum[] modes = {ScheduleModeEnum.BATCH, ScheduleModeEnum.QUEUE};
+        DeliveryMode[] modes = {DeliveryMode.BATCH_ENQUEUE, DeliveryMode.ROUTE_DECISION};
         for (int index = 0; index < modes.length; index++) {
             long requestId = 10_116L + index;
             long attemptToken = 505L + index;
@@ -591,7 +589,7 @@ class ExternalFutureCancellationTest {
             assertTrue(scheduler.claimForPreemption(
                     requestId, attemptToken, "priority attempt"));
 
-            scheduler.onAdmissionDeadline(requestId, item.future());
+            scheduler.onRequestExpired(requestId, item.future());
 
             assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
                     scheduler.getRequestState(requestId, 0).state());
@@ -599,7 +597,8 @@ class ExternalFutureCancellationTest {
                     requestId, attemptToken),
                     "deadline first-cause must prevent a later priority RPC");
             assertTrue(scheduler.releasePreemptionClaim(requestId, attemptToken));
-            assertEquals(8511, item.future().get(1, TimeUnit.SECONDS).getCode());
+            assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                    item.future().get(1, TimeUnit.SECONDS).getCode());
             assertEquals(RequestLifecycleState.TIMED_OUT,
                     scheduler.getRequestState(requestId, 0).state());
         }
@@ -608,11 +607,11 @@ class ExternalFutureCancellationTest {
     @Test
     void admissionDeadlineTakesOwnershipFromPriorityNotFound() throws Exception {
         long requestId = 10_118L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         long attemptToken = 507L;
         prepareNotFoundPreemption(item, attemptToken, 90_003L);
 
-        scheduler.onAdmissionDeadline(requestId, item.future());
+        scheduler.onRequestExpired(requestId, item.future());
 
         assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
                 scheduler.getRequestState(requestId, 0).state());
@@ -628,13 +627,13 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_119L;
         long attemptToken = 508L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         assertTrue(scheduler.claimForPreemption(
                 requestId, attemptToken, "priority attempt"));
         scheduler.onWorkerStatusUpdate(runningDecode(requestId, TaskPhase.KV_ALLOCATED));
 
-        scheduler.onAdmissionDeadline(requestId, item.future());
+        scheduler.onRequestExpired(requestId, item.future());
 
         assertEquals(RequestLifecycleState.DISPATCHING,
                 scheduler.getRequestState(requestId, batchDispatcher.batchId).state());
@@ -650,12 +649,12 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_120L;
         long attemptToken = 509L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         prepareNotFoundPreemption(item, attemptToken, 90_004L);
         scheduler.onWorkerStatusUpdate(runningDecode(requestId, TaskPhase.KV_ALLOCATED));
 
-        scheduler.onAdmissionDeadline(requestId, item.future());
+        scheduler.onRequestExpired(requestId, item.future());
 
         assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
         assertEquals(RequestLifecycleState.ACKNOWLEDGED,
@@ -671,7 +670,7 @@ class ExternalFutureCancellationTest {
         CountDownLatch releaseWorkers = new CountDownLatch(1);
         List<BatchItem> blockers = new java.util.ArrayList<>(completionWorkers);
         for (int index = 0; index < completionWorkers; index++) {
-            BatchItem blocker = admittedItem(10_130L + index, ScheduleModeEnum.QUEUE);
+            BatchItem blocker = admittedItem(10_130L + index, DeliveryMode.ROUTE_DECISION);
             blockers.add(blocker);
             blocker.future().thenRun(() -> {
                 workersBlocked.countDown();
@@ -683,8 +682,8 @@ class ExternalFutureCancellationTest {
         }
         assertTrue(workersBlocked.await(1, TimeUnit.SECONDS));
 
-        BatchItem batch = admittedItem(10_140L, ScheduleModeEnum.BATCH);
-        BatchItem route = admittedItem(10_141L, ScheduleModeEnum.QUEUE);
+        BatchItem batch = admittedItem(10_140L, DeliveryMode.BATCH_ENQUEUE);
+        BatchItem route = admittedItem(10_141L, DeliveryMode.ROUTE_DECISION);
         try {
             scheduler.onDecisionGroupReady(
                     List.of(batch), new DecisionGroupMetadata("batch_response_claim", 0));
@@ -701,8 +700,8 @@ class ExternalFutureCancellationTest {
             assertEquals(RequestLifecycleState.ACKNOWLEDGED,
                     scheduler.getRequestState(route.requestId(), 0).state());
 
-            scheduler.onAdmissionDeadline(batch.requestId(), batch.future());
-            scheduler.onAdmissionDeadline(route.requestId(), route.future());
+            scheduler.onRequestExpired(batch.requestId(), batch.future());
+            scheduler.onRequestExpired(route.requestId(), route.future());
 
             assertEquals(RequestLifecycleState.ACKNOWLEDGED,
                     scheduler.getRequestState(batch.requestId(), batchId).state());
@@ -729,11 +728,11 @@ class ExternalFutureCancellationTest {
     @Test
     void ttlWaitsForBatchDeliveryCommitThenFencesTheEngine() throws Exception {
         long requestId = 10_142L;
-        config.setFlexlbInflightTtlMs(-1);
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(-1);
         CountDownLatch dispatchEntered = new CountDownLatch(1);
         CountDownLatch releaseDispatch = new CountDownLatch(1);
         batchDispatcher.blockDispatch(dispatchEntered, releaseDispatch);
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
 
         CompletableFuture<Void> delivery = CompletableFuture.runAsync(() ->
                 scheduler.onDecisionGroupReady(
@@ -774,11 +773,11 @@ class ExternalFutureCancellationTest {
     @Test
     void ttlRetainsAcknowledgedBatchAndRouteLedgersUntilEngineProof()
             throws Exception {
-        config.setFlexlbInflightTtlMs(-1);
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(-1);
         long batchRequestId = 10_143L;
         long routeRequestId = 10_144L;
-        BatchItem batch = admittedItem(batchRequestId, ScheduleModeEnum.BATCH);
-        BatchItem route = admittedItem(routeRequestId, ScheduleModeEnum.QUEUE);
+        BatchItem batch = admittedItem(batchRequestId, DeliveryMode.BATCH_ENQUEUE);
+        BatchItem route = admittedItem(routeRequestId, DeliveryMode.ROUTE_DECISION);
 
         scheduler.onDecisionGroupReady(
                 List.of(batch), new DecisionGroupMetadata("ttl_batch_ack", 0));
@@ -829,7 +828,7 @@ class ExternalFutureCancellationTest {
     void shutdownCompletesScheduleFutureWaitingForClientCancelProof()
             throws Exception {
         long requestId = 10_121L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         RequestLifecycleSnapshot pending = scheduler.cancelRequest(
@@ -848,7 +847,7 @@ class ExternalFutureCancellationTest {
     void shutdownCompletesScheduleFutureWaitingForDeadlineCancelProof()
             throws Exception {
         long requestId = 10_122L;
-        BatchItem item = admittedItem(requestId, ScheduleModeEnum.BATCH);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         RequestLifecycleSnapshot pending = scheduler.cancelRequest(
@@ -863,22 +862,22 @@ class ExternalFutureCancellationTest {
         assertEquals(0, scheduler.generationGateCount());
     }
 
-    private BatchItem admittedItem(long requestId, ScheduleModeEnum scheduleMode) {
+    private BatchItem admittedItem(long requestId, DeliveryMode scheduleMode) {
         BatchItem item = admittedItemWithoutRegistration(requestId, scheduleMode);
 
         assertTrue(scheduler.registerInflight(item));
         AdmissionLease lease = new AdmissionLease(item, decodeEndpoint,
-                prefillEndpoint.getBatcher().queueManager(), scheduler);
+                prefillEndpoint.getBatcher().queueManager(), scheduler,
+                0, null, null);
         assertTrue(scheduler.attachAdmissionLease(item, lease));
         lease.bindTo(item.future());
-        decodeEndpoint.reserve(requestId, 128, 136, 50,
-                System.currentTimeMillis() + 30_000);
+        decodeEndpoint.reserve(requestId, 128, 136, 50);
         decodeEndpoint.markQueuedPhase(requestId);
         return item;
     }
 
     private BatchItem admittedItemWithoutRegistration(
-            long requestId, ScheduleModeEnum scheduleMode) {
+            long requestId, DeliveryMode scheduleMode) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setPriority(50);
@@ -888,8 +887,12 @@ class ExternalFutureCancellationTest {
         long nowMs = System.currentTimeMillis();
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
-        context.setScheduleMode(scheduleMode);
-        context.setBudget(ScheduleBudget.forDeadline(50, nowMs, nowMs + 30_000));
+        FlexlbConfig itemConfig = new FlexlbConfig();
+        if (scheduleMode == DeliveryMode.ROUTE_DECISION) {
+            SchedulingTestConfig.useNonBatchDispatcher(itemConfig);
+        }
+        context.setConfig(itemConfig);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, nowMs + 30_000));
 
         ServerStatus prefill = server(
                 RoleType.PREFILL, "10.0.0.1", 8080, 8081, requestId);
@@ -926,7 +929,6 @@ class ExternalFutureCancellationTest {
                         128,
                         136,
                         90,
-                        System.currentTimeMillis() + 30_000,
                         decodeEndpoint.admissionVersion(),
                         true));
         assertTrue(decodeEndpoint.markPriorityCancelInFlight(attemptToken));

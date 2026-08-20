@@ -1,13 +1,19 @@
 package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.RequestInflight;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
+import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -27,6 +33,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -41,15 +48,18 @@ class RandomStrategyTest {
     private RandomStrategy randomStrategy;
     private ResourceMeasure resourceMeasure;
     private EndpointRegistry endpointRegistry;
+    private ConfigService configService;
+    private FlexlbConfig config;
 
     @BeforeEach
     void setUp() {
-        ConfigService configService = Mockito.mock(ConfigService.class);
+        configService = Mockito.mock(ConfigService.class);
+        config = new FlexlbConfig();
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         endpointRegistry = new EndpointRegistry(configService, () -> null,
                 Mockito.mock(BatchSchedulerReporter.class));
         resourceMeasure = Mockito.mock(ResourceMeasure.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
         randomStrategy = new RandomStrategy(
@@ -342,6 +352,24 @@ class RandomStrategyTest {
     }
 
     @Test
+    void decode_random_should_reserve_and_release_capacity_in_direct_and_queue_modes() {
+        WorkerStatus worker = createWorkerStatus("127.0.0.4");
+        worker.getTotalKvCacheTokens().set(1_000L);
+        worker.getAvailableKvCacheTokens().set(1_000L);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+                .put("127.0.0.4:8080", worker);
+        registerDecode("127.0.0.4:8080", worker);
+        DecodeEndpoint endpoint = endpointRegistry.getDecode("127.0.0.4:8080");
+
+        config.setScheduler(new DirectSchedulerConfig());
+        config.setDispatcher(new NonBatchDispatcherConfig());
+        assertDecodeReservation(endpoint, 41L, 73);
+
+        config.setScheduler(new QueueSchedulerConfig());
+        assertDecodeReservation(endpoint, 42L, 81);
+    }
+
+    @Test
     void should_properly_set_server_status_fields() {
         Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
@@ -388,6 +416,32 @@ class RandomStrategyTest {
     @Test
     void should_handle_rollback_without_error() {
         randomStrategy.rollBack(null, 0);
+    }
+
+    private void assertDecodeReservation(DecodeEndpoint endpoint,
+                                         long requestId,
+                                         int priority) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(600L);
+        request.setMaxNewTokens(900);
+        BalanceContext context = new BalanceContext();
+        context.setConfig(config);
+        context.setRequest(request);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(
+                priority, System.currentTimeMillis() + 60_000L));
+
+        ServerStatus result = randomStrategy.select(context, RoleType.DECODE, null);
+
+        assertTrue(result.isSuccess());
+        RequestInflight reservation = endpoint.reservationFor(requestId);
+        assertNotNull(reservation);
+        assertEquals(600L, reservation.kvTokens());
+        assertEquals(1_000L, reservation.expectedKvTokens());
+        assertEquals(priority, reservation.priority());
+
+        randomStrategy.rollBack(endpoint, requestId);
+        assertNull(endpoint.reservationFor(requestId));
     }
 
     private WorkerStatus createWorkerStatus(String ip) {

@@ -4,8 +4,9 @@ import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DecisionGroupMetadata;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -59,9 +60,8 @@ class PrefillEndpointTest {
         status.setRole(RoleType.PREFILL);
 
         config = new FlexlbConfig();
-        config.setFlexlbBatchQueueMaxSize(100);
-        config.setFlexlbBatchFixedWaitMs(300);
-        config.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+        configureBatch(config, 100, config.batchDispatcher().getMaxRequests(), 300, null);
+        setFormula(config, "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
         endpointReporter = mock(BatchSchedulerReporter.class);
         endpoint = new PrefillEndpoint(status, config, noopHandler(), endpointReporter);
@@ -360,12 +360,8 @@ class PrefillEndpointTest {
     @Test
     void partialCompletionKeepsFixedWindowMaxInflightGateClosed() throws Exception {
         FlexlbConfig limitedConfig = new FlexlbConfig();
-        limitedConfig.setFlexlbBatchQueueMaxSize(100);
-        limitedConfig.setFlexlbBatchAlgorithm("fixed_window");
-        limitedConfig.setFlexlbBatchSizeMax(1);
-        limitedConfig.setFlexlbBatchFixedWaitMs(0);
-        limitedConfig.setFlexlbBatchFixedMaxInflightBatches(1);
-        limitedConfig.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+        configureBatch(limitedConfig, 100, 1, 0, 1);
+        setFormula(limitedConfig, "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
         WorkerStatus status = new WorkerStatus();
         status.setIp("127.0.0.3");
@@ -614,12 +610,8 @@ class PrefillEndpointTest {
     @Test
     void missingBatchIdCleanupUnblocksFixedWindowMaxInflightOne() throws Exception {
         FlexlbConfig limitedConfig = new FlexlbConfig();
-        limitedConfig.setFlexlbBatchQueueMaxSize(100);
-        limitedConfig.setFlexlbBatchAlgorithm("fixed_window");
-        limitedConfig.setFlexlbBatchSizeMax(1);
-        limitedConfig.setFlexlbBatchFixedWaitMs(0);
-        limitedConfig.setFlexlbBatchFixedMaxInflightBatches(1);
-        limitedConfig.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+        configureBatch(limitedConfig, 100, 1, 0, 1);
+        setFormula(limitedConfig, "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
         WorkerStatus status = new WorkerStatus();
         status.setIp("127.0.0.2");
@@ -927,7 +919,6 @@ class PrefillEndpointTest {
             slowEndpoint.reportBatchMetrics(reporter);
 
             // Single-report with priority tag (no global untagged series)
-            verify(reporter, never()).reportBatcherQueueDepth(anyString(), anyString(), anyInt());
             verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1", 2);
             // Priority buckets on the same routing.queue.length metric
             verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1", 70, 1);
@@ -942,7 +933,6 @@ class PrefillEndpointTest {
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         endpoint.reportBatchMetrics(reporter);
 
-        verify(reporter, never()).reportBatcherQueueDepth(anyString(), anyString(), anyInt());
         verify(reporter).reportBatcherQueueSize("PREFILL", "127.0.0.1", 0);
         // Empty queue fallback: single priority=0 depth=0 report so tagged panels don't gap
         verify(reporter).reportBatcherQueueDepthByPriority("PREFILL", "127.0.0.1", 0, 0);
@@ -986,10 +976,7 @@ class PrefillEndpointTest {
         status.setRole(RoleType.PREFILL);
 
         FlexlbConfig slowConfig = new FlexlbConfig();
-        slowConfig.setFlexlbBatchQueueMaxSize(100);
-        slowConfig.setFlexlbBatchSizeMax(100);
-        slowConfig.setFlexlbBatchAlgorithm("fixed_window");
-        slowConfig.setFlexlbBatchFixedWaitMs(fixedWaitMs);
+        configureBatch(slowConfig, 100, 100, fixedWaitMs, null);
         return new PrefillEndpoint(status, slowConfig, noopHandler(), mock(BatchSchedulerReporter.class));
     }
 
@@ -1002,7 +989,8 @@ class PrefillEndpointTest {
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
-        ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 60_000));
+        ctx.setConfig(config);
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 60_000));
 
         return new BatchItem(ctx, null, null, null, null, null, null, now);
     }
@@ -1028,6 +1016,7 @@ class PrefillEndpointTest {
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
+        ctx.setConfig(new FlexlbConfig());
 
         ServerStatus prefill = new ServerStatus();
         prefill.setRole(RoleType.PREFILL);
@@ -1039,6 +1028,25 @@ class PrefillEndpointTest {
         prefill.setDebugInfo(debugInfo);
 
         return new BatchItem(ctx, null, null, prefill, null, owner, null, System.currentTimeMillis());
+    }
+
+    private static void configureBatch(
+            FlexlbConfig target,
+            int maxWaiting,
+            int maxRequests,
+            long maxCollectionWaitMs,
+            Integer maxInflightBatches) {
+        target.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(maxWaiting);
+        target.batchDispatcher().setMaxRequests(maxRequests);
+        target.batchDispatcher().setMaxCollectionWaitMs(maxCollectionWaitMs);
+        target.batchDispatcher().setMaxInflightBatchesPerPrefillWorker(maxInflightBatches);
+    }
+
+    private static void setFormula(FlexlbConfig target, String expression) {
+        RoutingConfig.FormulaEstimatorConfig estimator =
+                (RoutingConfig.FormulaEstimatorConfig) target.getRouter().getRoles()
+                        .getPrefill().getExecutionTimeEstimator();
+        estimator.setExpression(expression);
     }
 
     private static TaskInfo priorityCanceledTask(long requestId, long batchId) {

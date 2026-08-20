@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
@@ -367,14 +368,14 @@ class FormulaPredictorTest {
     // ---- learn (interface stub) ----
 
     @Test
-    @DisplayName("learn method accepts batch items, predicted and actual time without error")
+    @DisplayName("learn method accepts immutable batch features without error")
     void learnAcceptsBatchInfo() {
         FormulaPredictor p = new FormulaPredictor("100");
         List<BatchItem> items = List.of(
                 batchItem(100, 20),
                 batchItem(200, 50)
         );
-        p.learn(items, 150, 300);  // legacy callback remains source-compatible
+        p.learn(PrefillBatchFeatures.from(items), 150, 300);
     }
 
     // ---- param() learnable parameters ----
@@ -449,6 +450,7 @@ class FormulaPredictorTest {
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext();
+        ctx.setConfig(SchedulingTestConfig.batchConfig());
         ctx.setRequest(request);
 
         ServerStatus prefill = new ServerStatus();

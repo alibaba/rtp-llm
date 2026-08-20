@@ -3,6 +3,9 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.strategy.PrefillTimeFormula;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
 import org.flexlb.engine.grpc.EngineRpcService;
 
 import java.io.IOException;
@@ -19,10 +22,10 @@ final class MockPerformanceModel {
      * Default cap on queued (not running) prefill batches per engine, JSON
      * "prefill.max_waiting_batches". Derivation for the recommended value 4:
      * prefill batches run FIFO, so the k-th queued batch waits k × batch_ms
-     * before it starts. With SLO ≈ 1000 ms and a prefill execution of ~150 ms
-     * the wait budget is SLO − execution ≈ 850 ms; n = 4 bounds the deepest
+     * before it starts. With a 1000 ms target latency and a prefill execution
+     * of ~150 ms, the wait allowance is about 850 ms; n = 4 bounds the deepest
      * wait at 4 × 150 = 600 ms (750 ms total), leaving ~25% headroom. Rule of
-     * thumb: n ≈ SLO_ms / batch_ms − 1.
+     * thumb: n ≈ target_latency_ms / batch_ms − 1.
      *
      * <p>The default here is 0 (unbounded, legacy behavior): the Auto-TPM E2E
      * suites deliberately build deep prefill queues (queue-evict scenarios), so
@@ -117,8 +120,8 @@ final class MockPerformanceModel {
         int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
                 .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
 
-        String formulaSource = loadPrefillFormula(masterConfigFile);
-        PrefillTimeFormula formula = formulaSource == null ? null : PrefillTimeFormula.parse(formulaSource);
+        String expression = loadPrefillExpression(masterConfigFile);
+        PrefillTimeFormula formula = expression == null ? null : PrefillTimeFormula.parse(expression);
 
         JsonNode decode = performance.path("decode");
         Double perTokenMs = decode.has("per_token_ms") ? decode.get("per_token_ms").asDouble() : null;
@@ -146,13 +149,17 @@ final class MockPerformanceModel {
                 reportQueuedAsKvAllocated, jitterPct, cacheAdmissionRate);
     }
 
-    private static String loadPrefillFormula(String masterConfigFile) throws IOException {
+    private static String loadPrefillExpression(String masterConfigFile) throws IOException {
         JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
         JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
         for (JsonNode item : envs) {
             if (item.isArray() && item.size() >= 2
-                    && "PREFILL_TIME_FORMULA".equals(item.get(0).asText())) {
-                return item.get(1).asText();
+                    && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
+                FlexlbConfig config = ConfigService.parse(item.get(1).asText());
+                var estimator = config.getRouter().getRoles().getPrefill()
+                        .getExecutionTimeEstimator();
+                return estimator instanceof FormulaEstimatorConfig formula
+                        ? formula.getExpression() : null;
             }
         }
         return null;

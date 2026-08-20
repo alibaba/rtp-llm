@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import ch.qos.logback.classic.Level;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.netty.NettyChannelBuilder;
@@ -9,7 +10,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -18,9 +18,12 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.slf4j.LoggerFactory;
 
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
@@ -76,11 +79,32 @@ class FollowerAsyncForwardingNettyTest {
     private static final long WARMUP_REQUEST_ID = 80_000L;
     private static final long FIRST_REQUEST_ID = 81_000L;
 
+    private ch.qos.logback.classic.Logger nettyLogger;
+    private ch.qos.logback.classic.Logger grpcLogger;
+    private Level previousNettyLogLevel;
+    private Level previousGrpcLogLevel;
+
+    @BeforeEach
+    void suppressTransportLogs() {
+        nettyLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("io.netty");
+        grpcLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("io.grpc");
+        previousNettyLogLevel = nettyLogger.getLevel();
+        previousGrpcLogLevel = grpcLogger.getLevel();
+        nettyLogger.setLevel(Level.WARN);
+        grpcLogger.setLevel(Level.WARN);
+    }
+
+    @AfterEach
+    void restoreTransportLogs() {
+        nettyLogger.setLevel(previousNettyLogLevel);
+        grpcLogger.setLevel(previousGrpcLogLevel);
+    }
+
     @Test
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     void slowMasterDoesNotOccupyOrQueueFollowerRequestThreads() throws Exception {
         try (SlowMaster master = SlowMaster.start(REQUEST_COUNT);
-             Follower follower = Follower.start(master.httpAddress());
+             Follower follower = Follower.start(master.httpAddress(), REQUEST_COUNT);
              Client client = Client.connect(follower.grpcPort())) {
             client.warmUp(WARMUP_REQUEST_ID);
             awaitCondition(
@@ -146,7 +170,8 @@ class FollowerAsyncForwardingNettyTest {
             matches = "true")
     void benchmarkFollowerCapacityAgainstDelayedMaster() throws Exception {
         try (DelayedMaster master = DelayedMaster.start(LEADER_DELAY_MS);
-             Follower follower = Follower.start(master.httpAddress());
+             Follower follower = Follower.start(
+                     master.httpAddress(), EXECUTOR_QUEUE_SIZE);
              BenchmarkClient client = BenchmarkClient.connect(
                      follower.grpcPort(), REQUEST_COUNT)) {
             client.warmUp(WARMUP_REQUEST_ID);
@@ -233,7 +258,7 @@ class FollowerAsyncForwardingNettyTest {
                         + "rejections=%d active_tokens=%d all_forwarded=%s executor_idle=%s%n",
                 EXECUTOR_CORE_SIZE,
                 EXECUTOR_MAX_SIZE,
-                EXECUTOR_QUEUE_SIZE,
+                follower.requestQueueCapacity,
                 TARGET_QPS,
                 REQUEST_COUNT,
                 master.receivedRequestCount(),
@@ -483,13 +508,15 @@ class FollowerAsyncForwardingNettyTest {
         private final AtomicInteger channelRejections = new AtomicInteger();
         private final RouteService routeService = mock(RouteService.class);
         private final ActiveRequestCounter activeRequests = new ActiveRequestCounter();
+        private final int requestQueueCapacity;
         private final ThreadPoolExecutor requestExecutor;
         private final ThreadPoolExecutor channelExecutor;
         private final EventLoopGroup channelEventLoop;
         private final FlexlbGrpcForwarder forwarder;
         private final Server server;
 
-        private Follower(String masterHttpAddress) throws Exception {
+        private Follower(String masterHttpAddress, int requestQueueCapacity) throws Exception {
+            this.requestQueueCapacity = requestQueueCapacity;
             LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
             when(consistency.isNeedConsistency()).thenReturn(true);
             when(consistency.isMaster()).thenReturn(false);
@@ -531,9 +558,6 @@ class FollowerAsyncForwardingNettyTest {
                     configService,
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
-                    new PrioritySloPolicy(
-                            PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                            PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                     mock(PrioritySchedulerReporter.class));
 
             requestExecutor = new ThreadPoolExecutor(
@@ -541,7 +565,7 @@ class FollowerAsyncForwardingNettyTest {
                     EXECUTOR_MAX_SIZE,
                     0L,
                     TimeUnit.MILLISECONDS,
-                    new ArrayBlockingQueue<>(EXECUTOR_QUEUE_SIZE),
+                    new ArrayBlockingQueue<>(requestQueueCapacity),
                     runnable -> new Thread(runnable, "follower-root-cause-test"),
                     (runnable, executor) -> {
                         rejections.incrementAndGet();
@@ -556,8 +580,9 @@ class FollowerAsyncForwardingNettyTest {
                     .start();
         }
 
-        static Follower start(String masterHttpAddress) throws Exception {
-            return new Follower(masterHttpAddress);
+        static Follower start(String masterHttpAddress, int requestQueueCapacity)
+                throws Exception {
+            return new Follower(masterHttpAddress, requestQueueCapacity);
         }
 
         int grpcPort() {

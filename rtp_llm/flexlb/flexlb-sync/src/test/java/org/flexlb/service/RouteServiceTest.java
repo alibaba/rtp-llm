@@ -2,24 +2,29 @@ package org.flexlb.service;
 
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
+import org.flexlb.config.PriorityOrderingConfig;
+import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import reactor.core.publisher.Mono;
-
 import java.util.concurrent.CompletableFuture;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -31,14 +36,10 @@ class RouteServiceTest {
     @Mock
     private ConfigService configService;
 
-    @Mock
     private FlexlbConfig flexlbConfig;
 
     @Mock
     private DefaultRouter defaultRouter;
-
-    @Mock
-    private QueueManager queueManager;
 
     @Mock
     private PriorityScheduler priorityScheduler;
@@ -53,35 +54,35 @@ class RouteServiceTest {
 
     @BeforeEach
     void setUp() {
+        flexlbConfig = new FlexlbConfig();
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
-        routeService = new RouteService(configService, defaultRouter, queueManager,
+        routeService = new RouteService(configService, defaultRouter,
                 priorityScheduler, recentCacheKeyTraceReporter);
     }
 
     @Test
-    void queue_without_auto_tpm_should_use_legacy_queue_manager() {
+    void fifo_queue_with_non_batch_dispatch_should_use_common_scheduler() {
         Response response = successResponse();
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.QUEUE);
-        when(flexlbConfig.usesRouteDecisionDelivery()).thenReturn(false);
-        when(queueManager.tryRouteAsync(balanceContext)).thenReturn(Mono.just(response));
+        CompletableFuture<Response> schedulerFuture = CompletableFuture.completedFuture(response);
+        useFifoNonBatch();
+        when(priorityScheduler.submit(balanceContext)).thenReturn(schedulerFuture);
 
         Response actual = routeService.route(balanceContext).join();
 
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
-        verify(queueManager).tryRouteAsync(balanceContext);
-        verify(priorityScheduler, never()).submit(any(BalanceContext.class));
+        verify(priorityScheduler).submit(balanceContext);
+        verify(balanceContext).setFuture(schedulerFuture);
         verify(defaultRouter, never()).route(any(BalanceContext.class));
         verify(balanceContext).setResponse(response);
         verify(recentCacheKeyTraceReporter).report(balanceContext);
     }
 
     @Test
-    void queue_with_auto_tpm_should_use_priority_scheduler_without_generate_input() {
+    void priority_queue_with_non_batch_dispatch_should_use_common_scheduler_without_generate_input() {
         Response response = successResponse();
         CompletableFuture<Response> schedulerFuture = CompletableFuture.completedFuture(response);
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.QUEUE);
-        when(flexlbConfig.usesRouteDecisionDelivery()).thenReturn(true);
+        usePriorityNonBatch();
         when(priorityScheduler.submit(balanceContext)).thenReturn(schedulerFuture);
 
         Response actual = routeService.route(balanceContext).join();
@@ -90,17 +91,15 @@ class RouteServiceTest {
         verify(priorityScheduler).submit(balanceContext);
         verify(balanceContext).setFuture(schedulerFuture);
         verify(balanceContext, never()).getGenerateInputPbBytes();
-        verify(queueManager, never()).tryRouteAsync(any(BalanceContext.class));
         verify(defaultRouter, never()).route(any(BalanceContext.class));
         verify(balanceContext).setResponse(response);
         verify(recentCacheKeyTraceReporter).report(balanceContext);
     }
 
     @Test
-    void priorityRouteReturnsSchedulerFutureSoCallerCancelReachesItsOwner() {
+    void queueRouteReturnsSchedulerFutureSoCallerCancelReachesItsOwner() {
         CompletableFuture<Response> schedulerFuture = new CompletableFuture<>();
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.QUEUE);
-        when(flexlbConfig.usesRouteDecisionDelivery()).thenReturn(true);
+        usePriorityNonBatch();
         when(priorityScheduler.submit(balanceContext)).thenReturn(schedulerFuture);
 
         CompletableFuture<Response> publicFuture = routeService.route(balanceContext);
@@ -114,8 +113,7 @@ class RouteServiceTest {
     void completionSideEffectFailureCannotReplaceSuccessfulSchedulerResult() {
         Response response = successResponse();
         CompletableFuture<Response> schedulerFuture = new CompletableFuture<>();
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.QUEUE);
-        when(flexlbConfig.usesRouteDecisionDelivery()).thenReturn(true);
+        usePriorityNonBatch();
         when(priorityScheduler.submit(balanceContext)).thenReturn(schedulerFuture);
         doThrow(new IllegalStateException("telemetry failed"))
                 .when(recentCacheKeyTraceReporter).report(balanceContext);
@@ -131,7 +129,7 @@ class RouteServiceTest {
     void batch_with_generate_input_should_preserve_priority_scheduler_path() {
         Response response = successResponse();
         CompletableFuture<Response> schedulerFuture = CompletableFuture.completedFuture(response);
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.BATCH);
+        useBatch();
         when(balanceContext.getGenerateInputPbBytes()).thenReturn(new byte[]{1});
         when(priorityScheduler.submit(balanceContext)).thenReturn(schedulerFuture);
 
@@ -140,29 +138,40 @@ class RouteServiceTest {
         assertSame(response, actual);
         verify(priorityScheduler).submit(balanceContext);
         verify(balanceContext).setFuture(schedulerFuture);
-        verify(queueManager, never()).tryRouteAsync(any(BalanceContext.class));
         verify(defaultRouter, never()).route(any(BalanceContext.class));
     }
 
     @Test
-    void batch_without_generate_input_should_preserve_direct_fallback() {
+    void priority_batch_dispatch_should_use_same_common_scheduler() {
         Response response = successResponse();
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.BATCH);
-        when(defaultRouter.route(balanceContext)).thenReturn(response);
+        CompletableFuture<Response> schedulerFuture = CompletableFuture.completedFuture(response);
+        usePriorityBatch();
+        when(balanceContext.getGenerateInputPbBytes()).thenReturn(new byte[]{1});
+        when(priorityScheduler.submit(balanceContext)).thenReturn(schedulerFuture);
+
+        assertSame(response, routeService.route(balanceContext).join());
+
+        verify(priorityScheduler).submit(balanceContext);
+        verify(balanceContext).setFuture(schedulerFuture);
+        verify(defaultRouter, never()).route(any(BalanceContext.class));
+    }
+
+    @Test
+    void batch_without_generate_input_should_fail_instead_of_changing_delivery_protocol() {
+        useBatch();
 
         Response actual = routeService.route(balanceContext).join();
 
-        assertSame(response, actual);
+        assertFalse(actual.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_BUILD_FAILED.getErrorCode(), actual.getCode());
         verify(priorityScheduler, never()).submit(any(BalanceContext.class));
-        verify(balanceContext).setScheduleMode(ScheduleModeEnum.DIRECT);
-        verify(defaultRouter).route(balanceContext);
-        verify(queueManager, never()).tryRouteAsync(any(BalanceContext.class));
+        verify(defaultRouter, never()).route(any(BalanceContext.class));
     }
 
     @Test
     void should_report_recent_cache_key_once_after_direct_route_success() {
         Response response = successResponse();
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.DIRECT);
+        useDirect();
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
         Response actual = routeService.route(balanceContext).join();
@@ -170,16 +179,27 @@ class RouteServiceTest {
         assertSame(response, actual);
         verify(balanceContext).setConfig(flexlbConfig);
         verify(defaultRouter).route(balanceContext);
-        verify(queueManager, never()).tryRouteAsync(any(BalanceContext.class));
         verify(balanceContext).setResponse(response);
         verify(recentCacheKeyTraceReporter).report(balanceContext);
+    }
+
+    @Test
+    void expired_direct_request_fails_before_worker_reservation() {
+        useDirect();
+        when(balanceContext.requestExpired(anyLong())).thenReturn(true);
+
+        Response actual = routeService.route(balanceContext).join();
+
+        assertFalse(actual.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), actual.getCode());
+        verify(defaultRouter, never()).route(any(BalanceContext.class));
     }
 
     @Test
     void should_not_report_recent_cache_key_after_route_failure() {
         Response response = new Response();
         response.setSuccess(false);
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.DIRECT);
+        useDirect();
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
         Response actual = routeService.route(balanceContext).join();
@@ -189,6 +209,38 @@ class RouteServiceTest {
         verify(defaultRouter).route(balanceContext);
         verify(balanceContext).setResponse(response);
         verify(recentCacheKeyTraceReporter, never()).report(any(BalanceContext.class));
+    }
+
+    private void useFifoNonBatch() {
+        flexlbConfig.setScheduler(new QueueSchedulerConfig());
+        flexlbConfig.setDispatcher(new NonBatchDispatcherConfig());
+        when(balanceContext.getConfig()).thenReturn(flexlbConfig);
+    }
+
+    private void usePriorityNonBatch() {
+        QueueSchedulerConfig scheduler = new QueueSchedulerConfig();
+        scheduler.setOrdering(new PriorityOrderingConfig());
+        flexlbConfig.setScheduler(scheduler);
+        flexlbConfig.setDispatcher(new NonBatchDispatcherConfig());
+        when(balanceContext.getConfig()).thenReturn(flexlbConfig);
+    }
+
+    private void useBatch() {
+        flexlbConfig.setScheduler(new QueueSchedulerConfig());
+        flexlbConfig.setDispatcher(new BatchDispatcherConfig());
+        when(balanceContext.getConfig()).thenReturn(flexlbConfig);
+    }
+
+    private void usePriorityBatch() {
+        QueueSchedulerConfig scheduler = new QueueSchedulerConfig();
+        scheduler.setOrdering(new PriorityOrderingConfig());
+        flexlbConfig.setScheduler(scheduler);
+        flexlbConfig.setDispatcher(new BatchDispatcherConfig());
+        when(balanceContext.getConfig()).thenReturn(flexlbConfig);
+    }
+
+    private void useDirect() {
+        flexlbConfig.setScheduler(new DirectSchedulerConfig());
     }
 
     private static Response successResponse() {

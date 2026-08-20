@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -91,8 +92,16 @@ class FlexLBSmokeBase:
 
     @property
     def _deploy_mode(self) -> str:
-        """Read deployment schedule mode from DEFAULT_SCHEDULE_MODE env var."""
-        return os.environ.get("DEFAULT_SCHEDULE_MODE", "BATCH").lower()
+        """Derive the smoke-test path label from strict FLEXLB_CONFIG axes."""
+        document = os.environ.get("FLEXLB_CONFIG")
+        if not document:
+            return "batch"
+        config = json.loads(document)
+        if config.get("dispatcher", {}).get("type") == "BATCH":
+            return "batch"
+        if config.get("scheduler", {}).get("type") == "DIRECT":
+            return "direct"
+        return "queue"
 
     def _master_target(self) -> str:
         return f"{self.args.master_ip}:{self.args.master_http_port + 2}"

@@ -34,9 +34,14 @@ REPLAY_SPEED=20 \
 N_PREFILL=4 \
 N_DECODE=16 \
 SLA_TTFT_MS=800 \
-FLEXLB_CONFIG='{"deploy":"DISAGGREGATED","loadBalanceStrategy":"SHORTEST_TTFT","prefillBatchWaitTimeMs":200,"kvCache":"LOCAL_STATIC","staticCacheBlockSize":1024,"batchSize":32,"prefillLbTimeoutMs":300,"prefillGenerateTimeoutMs":30000,"enableGrpcPrefillMaster":true,"decodeConcurrencyLimit":64}' \
+FLEXLB_CONFIG='{"schemaVersion":1,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50}},"dispatcher":{"type":"BATCH","maxRequests":32,"maxCollectionWaitMs":200},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA","expression":"sum(computeTokens) + 0.3*sum(hitCacheTokens)"},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":64},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}}}}}' \
 rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 ```
+
+`FLEXLB_CONFIG` is the only FlexLB behavior document. In particular, the
+prefill performance formula is
+`router.roles.prefill.executionTimeEstimator.expression`; there is no separate
+formula environment variable.
 
 If `flexlb-api` is already running, use:
 

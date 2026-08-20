@@ -4,7 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -21,6 +21,7 @@ import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
+import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
@@ -30,19 +31,28 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
 import static org.springframework.web.reactive.function.server.RouterFunctions.route;
 
 @Component
 public class HttpLoadBalanceServer {
+    private static final Path SCHEDULER_SNAPSHOT_DIR =
+            Paths.get("/tmp/flexlb-scheduler-snapshots");
+    private static final String SCHEDULER_SNAPSHOT_PREFIX = "scheduler-snapshot-";
+    private static final int MAX_SNAPSHOT_FILES = 10;
+
     private final LBStatusConsistencyService lbStatusConsistencyService;
-    private final QueueManager queueManager;
     private final ConfigService configService;
     private final PriorityScheduler priorityScheduler;
     private final EndpointRegistry endpointRegistry;
@@ -50,7 +60,6 @@ public class HttpLoadBalanceServer {
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
-                                 QueueManager queueManager,
                                  ConfigService configService,
                                  PriorityScheduler priorityScheduler,
                                  EndpointRegistry endpointRegistry,
@@ -58,7 +67,6 @@ public class HttpLoadBalanceServer {
                                  MasterEngineSynchronizer masterEngineSynchronizer,
                                  ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
-        this.queueManager = queueManager;
         this.configService = configService;
         this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
@@ -143,7 +151,7 @@ public class HttpLoadBalanceServer {
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    result.setQueueLength(queueManager.queueSize());
+                    result.setQueueLength(priorityScheduler.getQueuedRequestCount());
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
@@ -195,7 +203,9 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            QueueSnapshotResponse response = queueManager.snapshotQueue();
+            List<RequestLifecycleSnapshot> snapshot =
+                    priorityScheduler.snapshotActiveRequests();
+            QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Mono.just(response), QueueSnapshotResponse.class);
@@ -204,6 +214,33 @@ public class HttpLoadBalanceServer {
             return ServerResponse.status(500)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Mono.just(e.getMessage()), String.class);
+        }
+    }
+
+    private QueueSnapshotResponse persistSchedulerSnapshot(
+            List<RequestLifecycleSnapshot> snapshot) throws IOException {
+        Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
+        cleanOldSchedulerSnapshots();
+
+        long timestamp = System.currentTimeMillis();
+        Path file = SCHEDULER_SNAPSHOT_DIR.resolve(
+                SCHEDULER_SNAPSHOT_PREFIX + timestamp + ".json");
+        Files.writeString(file, JsonUtils.toFormattedString(snapshot));
+        return new QueueSnapshotResponse(
+                file.toAbsolutePath().toString(), timestamp, snapshot.size());
+    }
+
+    private void cleanOldSchedulerSnapshots() throws IOException {
+        List<Path> files;
+        try (Stream<Path> entries = Files.list(SCHEDULER_SNAPSHOT_DIR)) {
+            files = entries
+                    .filter(path -> path.getFileName().toString()
+                            .startsWith(SCHEDULER_SNAPSHOT_PREFIX))
+                    .sorted()
+                    .toList();
+        }
+        for (int index = 0; index <= files.size() - MAX_SNAPSHOT_FILES; index++) {
+            Files.deleteIfExists(files.get(index));
         }
     }
 

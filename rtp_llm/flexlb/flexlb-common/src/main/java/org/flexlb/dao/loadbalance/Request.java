@@ -14,6 +14,8 @@ import java.util.List;
 @ToString
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Request {
+    public static final long DEFAULT_GENERATE_TIMEOUT_MS = 60L * 60L * 1000L;
+
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
     private List<Long> blockCacheKeys;
@@ -27,8 +29,9 @@ public class Request {
     @JsonProperty("request_id")
     private long requestId;
 
+    /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")
-    private long generateTimeout = 3600 * 1000;
+    private long generateTimeout = DEFAULT_GENERATE_TIMEOUT_MS;
 
     @JsonProperty("request_time_ms")
     private long requestTimeMs;
@@ -51,11 +54,12 @@ public class Request {
     private String model = "";
 
     /**
-     * Auto-TPM QoS priority. Valid range: 1-100 (higher = more important).
+     * priority scheduling QoS priority. Valid range: 1-100 (higher = more important).
      * Set by {@code PriorityNormalizer.normalize()} upstream — always 1-100
      * in production; the proto3 default 0 only appears before normalization.
      * See {@code PriorityNormalizer}.
      */
     @JsonProperty("priority")
     private int priority = 0;
+
 }

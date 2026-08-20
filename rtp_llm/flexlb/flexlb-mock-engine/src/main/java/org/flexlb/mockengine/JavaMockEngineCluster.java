@@ -427,6 +427,13 @@ public final class JavaMockEngineCluster {
         private final ArrayDeque<PrefillPendingBatch> prefillPendingQueue = new ArrayDeque<>();
         private final Object prefillQueueLock = new Object();
         private final ConcurrentLinkedQueue<VersionedTask> completions = new ConcurrentLinkedQueue<>();
+        /**
+         * Publishes completion records and their cursor as one ordered operation.
+         * A status reader must never observe a latest version whose record has
+         * not yet been inserted, otherwise advancing its cursor loses that
+         * completion permanently.
+         */
+        private final Object completionLock = new Object();
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
         private final Map<Long, String> requestStates = new ConcurrentHashMap<>();
@@ -619,11 +626,22 @@ public final class JavaMockEngineCluster {
                                     StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
             stats.statusRpcs.increment();
             long requestedVersion = request.getLatestFinishedVersion();
-            VersionedTask head;
-            while ((head = completions.peek()) != null && head.version <= requestedVersion) {
-                completions.poll();
+            long latestVersion;
+            List<VersionedTask> visibleCompletions = new ArrayList<>();
+            synchronized (completionLock) {
+                VersionedTask head;
+                while ((head = completions.peek()) != null
+                        && head.version <= requestedVersion) {
+                    completions.poll();
+                }
+                latestVersion = completionVersion.get();
+                for (VersionedTask completion : completions) {
+                    if (completion.version > requestedVersion
+                            && completion.version <= latestVersion) {
+                        visibleCompletions.add(completion);
+                    }
+                }
             }
-            long latestVersion = completionVersion.get();
             long runningCount = runningTasks.values().stream()
                     .filter(task -> task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .count();
@@ -653,10 +671,8 @@ public final class JavaMockEngineCluster {
             status.addAllRunningTaskInfo(runningTasks.values().stream()
                     .map(FastRpcService::withLegacyTaskState)
                     .toList());
-            for (VersionedTask completion : completions) {
-                if (completion.version > requestedVersion && completion.version <= latestVersion) {
-                    status.addFinishedTaskList(withLegacyTaskState(completion.task));
-                }
+            for (VersionedTask completion : visibleCompletions) {
+                status.addFinishedTaskList(withLegacyTaskState(completion.task));
             }
             observer.onNext(status.build());
             observer.onCompleted();
@@ -870,7 +886,6 @@ public final class JavaMockEngineCluster {
             }
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
-            long version = completionVersion.incrementAndGet();
             EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     // Pass the ACTUAL phase the request was cancelled in through
@@ -895,7 +910,7 @@ public final class JavaMockEngineCluster {
                                 .PRIORITY_PREEMPTION_CANCELED);
             }
             EngineRpcService.TaskInfoPB task = taskBuilder.build();
-            completions.add(new VersionedTask(version, task));
+            publishCompletion(task);
             statusVersion.incrementAndGet();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(requestId);
             if (queue != null) {
@@ -1039,7 +1054,6 @@ public final class JavaMockEngineCluster {
         private void recordPriorityPreemptionCanceled(long requestId,
                                                       EngineRpcService.TaskPhase phase) {
             addPriorityCancelTombstone(requestId);
-            long version = completionVersion.incrementAndGet();
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     .setPhase(phase)
@@ -1052,7 +1066,7 @@ public final class JavaMockEngineCluster {
                     .setEndTimeMs(System.currentTimeMillis())
                     .setDpRank(0)
                     .build();
-            completions.add(new VersionedTask(version, task));
+            publishCompletion(task);
             statusVersion.incrementAndGet();
         }
 
@@ -1075,10 +1089,11 @@ public final class JavaMockEngineCluster {
          * <p>The cap (performance JSON {@code prefill.max_waiting_batches},
          * default 0 = unbounded) bounds QUEUED batches only — running
          * batches never count toward it. Derivation: batches run FIFO, so the
-         * k-th queued batch starts after k × batch_ms; with SLO ≈ 1000 ms and
-         * ~150 ms prefill execution the wait budget is ~850 ms, and n = 4 keeps
+         * k-th queued batch starts after k × batch_ms; with a 1000 ms target
+         * latency and ~150 ms prefill execution, the wait allowance is ~850 ms,
+         * and n = 4 keeps
          * the deepest wait at 600 ms (750 ms total, ~25% headroom). Rule of
-         * thumb: n ≈ SLO_ms / batch_ms − 1.
+         * thumb: n ≈ target_latency_ms / batch_ms − 1.
          *
          * <p>Independent of the fault-injection {@code queue_depth_limit} gate in
          * enqueueBatch: that one is request-level (pendingRequests, waiting +
@@ -1559,7 +1574,6 @@ public final class JavaMockEngineCluster {
                                       long executionMs,
                                       int dpRank) {
             recordRecentExecutionTime(executionMs);
-            long version = completionVersion.incrementAndGet();
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(shape.input().getRequestId())
                     .setInputLength(shape.inputLen())
@@ -1571,7 +1585,14 @@ public final class JavaMockEngineCluster {
                     .setIterateCount(1)
                     .setDpRank(dpRank)
                     .build();
-            completions.add(new VersionedTask(version, task));
+            publishCompletion(task);
+        }
+
+        private void publishCompletion(EngineRpcService.TaskInfoPB task) {
+            synchronized (completionLock) {
+                long version = completionVersion.incrementAndGet();
+                completions.add(new VersionedTask(version, task));
+            }
         }
 
         private EngineRpcService.GenerateOutputsPB buildOutput(MockPerformanceModel.RequestShape shape,

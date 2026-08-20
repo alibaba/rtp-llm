@@ -13,11 +13,11 @@ export PATH="/opt/homebrew/bin:${JAVA_HOME}/bin:${PATH}"
 
 export N_PREFILL=2
 export N_DECODE=4
-export LOAD_BALANCE_STRATEGY=COST_BASED_PREFILL
-export SCHEDULE_MODE=batch
 export MAX_CONCURRENCY=16384
 export SLA_TTFT_MS=500
 export ZERO_OUTPUT_POLICY=one
+PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
+export PROCESS_CONFIG_FILE
 
 # Ports to clean between experiments
 PORTS="7001,7002,55150,55151,55152,55153,55154,55155,55156,55157"
@@ -43,8 +43,21 @@ run_experiment() {
   echo ""
 
   export REPLAY_SPEED="${speed}"
-  export FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES="${max_inflight}"
-  export FLEXLB_BATCH_FIXED_WAIT_MS="${wait_ms}"
+  FLEXLB_CONFIG="$(python3 - "${PROCESS_CONFIG_FILE}" "${max_inflight}" "${wait_ms}" <<'PY'
+import json
+import sys
+
+path, max_batches, wait_ms = sys.argv[1:]
+payload = json.load(open(path, "r", encoding="utf-8"))
+envs = payload["zone_process_setting"]["process_info"]["envs"]
+document = next(value for key, value in envs if key == "FLEXLB_CONFIG")
+config = json.loads(document)
+config["dispatcher"]["maxInflightBatchesPerPrefillWorker"] = int(max_batches)
+config["dispatcher"]["maxCollectionWaitMs"] = int(wait_ms)
+print(json.dumps(config, separators=(",", ":")))
+PY
+)"
+  export FLEXLB_CONFIG
   export RUN_ID="${name}"
 
   /opt/homebrew/bin/bash run_online_eval.sh 2>&1 | tee "run/${name}.log"

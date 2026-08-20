@@ -35,9 +35,6 @@ fi
 
 N_PREFILL="${N_PREFILL:-2}"
 N_DECODE="${N_DECODE:-4}"
-SCHEDULE_MODE="${SCHEDULE_MODE:-batch}"
-LOAD_BALANCE_STRATEGY="${LOAD_BALANCE_STRATEGY:-COST_BASED_PREFILL}"
-DECODE_LOAD_BALANCE_STRATEGY="${DECODE_LOAD_BALANCE_STRATEGY:-COST_BASED_DECODE}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-16384}"
 SLA_TTFT_MS="${SLA_TTFT_MS:-500}"
 ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY:-one}"
@@ -45,13 +42,38 @@ LIMIT="${LIMIT:-0}"
 DURATION_S="${DURATION_S:-0}"
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-2}"
 
-# Batcher defaults (consistent with run_online_eval.sh)
-FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES="${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES:-2}"
-FLEXLB_BATCH_FIXED_WAIT_MS="${FLEXLB_BATCH_FIXED_WAIT_MS:-220}"
-FLEXLB_BATCH_PREDICT_THRESHOLD_MS="${FLEXLB_BATCH_PREDICT_THRESHOLD_MS:-550}"
+# Experiment-profile inputs used only to construct FLEXLB_CONFIG.
+EXPERIMENT_MAX_INFLIGHT_BATCHES="${EXPERIMENT_MAX_INFLIGHT_BATCHES:-2}"
+EXPERIMENT_BATCH_WAIT_MS="${EXPERIMENT_BATCH_WAIT_MS:-220}"
+EXPERIMENT_EARLY_DISPATCH_MS="${EXPERIMENT_EARLY_DISPATCH_MS:-550}"
 
-# Decode concurrency limit (was 132 in previous test; 2000 to eliminate NO_AVAILABLE_WORKER rejections)
-DECODE_CONCURRENCY_LIMIT="${DECODE_CONCURRENCY_LIMIT:-2000}"
+# Raised to eliminate NO_AVAILABLE_WORKER rejections during this stress test.
+EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS="${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS:-2000}"
+PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
+
+if [[ -z "${FLEXLB_CONFIG:-}" ]]; then
+    FLEXLB_CONFIG="$(python3 - \
+        "${PROCESS_CONFIG_FILE}" \
+        "${EXPERIMENT_MAX_INFLIGHT_BATCHES}" \
+        "${EXPERIMENT_BATCH_WAIT_MS}" \
+        "${EXPERIMENT_EARLY_DISPATCH_MS}" \
+        "${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS}" <<'PY'
+import json
+import sys
+
+path, max_batches, wait_ms, early_ms, decode_limit = sys.argv[1:]
+payload = json.load(open(path, "r", encoding="utf-8"))
+envs = payload["zone_process_setting"]["process_info"]["envs"]
+document = next(value for key, value in envs if key == "FLEXLB_CONFIG")
+config = json.loads(document)
+config["dispatcher"]["maxInflightBatchesPerPrefillWorker"] = int(max_batches)
+config["dispatcher"]["maxCollectionWaitMs"] = int(wait_ms)
+config["dispatcher"]["earlyDispatchPredictedExecutionMs"] = int(early_ms)
+config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = int(decode_limit)
+print(json.dumps(config, separators=(",", ":")))
+PY
+)"
+fi
 
 # gRPC timeout: 3600s (1 hour) — large output_len requests need long decode time
 TIMEOUT_MS="${TIMEOUT_MS:-3600000}"
@@ -108,12 +130,11 @@ echo "(Real trace + multi-speed replay)"
 echo "============================================"
 echo "Speeds: ${SPEEDS[*]}"
 echo "Trace:  data/online_logs/trace_30min.jsonl (8332 requests, 13.3 min)"
-echo "Config: N_PREFILL=${N_PREFILL} N_DECODE=${N_DECODE} SCHEDULE_MODE=${SCHEDULE_MODE}"
-echo "        LOAD_BALANCE_STRATEGY=${LOAD_BALANCE_STRATEGY} DECODE_LOAD_BALANCE_STRATEGY=${DECODE_LOAD_BALANCE_STRATEGY}"
+echo "Config: N_PREFILL=${N_PREFILL} N_DECODE=${N_DECODE}"
 echo "        MAX_CONCURRENCY=${MAX_CONCURRENCY} SLA_TTFT_MS=${SLA_TTFT_MS}"
 echo "        LIMIT=${LIMIT} ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY} DURATION_S=${DURATION_S}"
-echo "        MAX_INFLIGHT_BATCHES=${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES} WAIT_MS=${FLEXLB_BATCH_FIXED_WAIT_MS}"
-echo "        DECODE_CONCURRENCY_LIMIT=${DECODE_CONCURRENCY_LIMIT}"
+echo "        MAX_INFLIGHT_BATCHES=${EXPERIMENT_MAX_INFLIGHT_BATCHES} WAIT_MS=${EXPERIMENT_BATCH_WAIT_MS}"
+echo "        DECODE_MAX_ENGINE_REQUESTS=${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS}"
 echo "        TIMEOUT_MS=${TIMEOUT_MS}"
 echo "Monitor interval: ${MONITOR_INTERVAL}s"
 echo "Output: ${BURST_DIR}"
@@ -151,15 +172,10 @@ for speed in "${SPEEDS[@]}"; do
         RUN_ID="${ROUND_ID}" \
         N_PREFILL="${N_PREFILL}" \
         N_DECODE="${N_DECODE}" \
-        SCHEDULE_MODE="${SCHEDULE_MODE}" \
-        LOAD_BALANCE_STRATEGY="${LOAD_BALANCE_STRATEGY}" \
-        DECODE_LOAD_BALANCE_STRATEGY="${DECODE_LOAD_BALANCE_STRATEGY}" \
+        PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE}" \
+        FLEXLB_CONFIG="${FLEXLB_CONFIG}" \
         MAX_CONCURRENCY="${MAX_CONCURRENCY}" \
         SLA_TTFT_MS="${SLA_TTFT_MS}" \
-        FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES="${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES}" \
-        FLEXLB_BATCH_FIXED_WAIT_MS="${FLEXLB_BATCH_FIXED_WAIT_MS}" \
-        FLEXLB_BATCH_PREDICT_THRESHOLD_MS="${FLEXLB_BATCH_PREDICT_THRESHOLD_MS}" \
-        DECODE_CONCURRENCY_LIMIT="${DECODE_CONCURRENCY_LIMIT}" \
         TIMEOUT_MS="${TIMEOUT_MS}" \
         bash "${SCRIPT_DIR}/run_online_eval.sh" 2>&1 | tee "${ROUND_DIR}/eval.stdout"
     EVAL_EXIT=$?

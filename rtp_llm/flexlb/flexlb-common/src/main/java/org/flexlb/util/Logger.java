@@ -39,6 +39,16 @@ public class Logger {
         log.debug(format, args);
     }
 
+    /**
+     * Returns whether DEBUG logging is enabled for the FlexLB logger.
+     *
+     * <p>Callers that need to build expensive diagnostic arguments can use
+     * this guard to keep the disabled logging path allocation-free.</p>
+     */
+    public static boolean isDebugEnabled() {
+        return log.isDebugEnabled();
+    }
+
     public static void info(String format, Object... args) {
         log.info(format, args);
     }

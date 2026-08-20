@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
@@ -68,8 +69,9 @@ class LearningPredictorTest {
                 batchItem(500, 200),
                 batchItem(300, 100),
                 batchItem(1000, 500));
+        PrefillBatchFeatures features = PrefillBatchFeatures.from(batchItems);
         for (int i = 0; i < 4; i++) {
-            assertDoesNotThrow(() -> p.learn(batchItems, 300, 400));
+            assertDoesNotThrow(() -> p.learn(features, 300, 400));
         }
     }
 
@@ -111,6 +113,7 @@ class LearningPredictorTest {
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext();
+        ctx.setConfig(SchedulingTestConfig.batchConfig());
         ctx.setRequest(request);
 
         ServerStatus prefill = new ServerStatus();

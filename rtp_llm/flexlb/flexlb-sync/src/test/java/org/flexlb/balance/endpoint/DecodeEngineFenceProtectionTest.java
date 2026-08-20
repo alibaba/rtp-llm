@@ -116,11 +116,11 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void priorityNotFoundOrdinaryFinishedDoesNotRetainGenerationFence() {
-        endpoint.reserve(1L, 500, 700, 30, 1_000);
+        endpoint.reserve(1L, 500, 700, 30);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPriorityPreemption(101L, List.of(1L),
-                        9L, 100, 120, 70, 2_000,
+                        9L, 100, 120, 70,
                         endpoint.admissionVersion(), true));
         assertTrue(endpoint.markPriorityCancelInFlight(101L));
         assertTrue(endpoint.markPriorityCancelNotFound(101L, 1L));
@@ -259,11 +259,11 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void genericAndPriorityFenceOwnersFormOneAccountingUnion() {
-        endpoint.reserve(1L, 500, 700, 30, 1_000);
+        endpoint.reserve(1L, 500, 700, 30);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPriorityPreemption(101L, List.of(1L),
-                        9L, 100, 120, 70, 2_000,
+                        9L, 100, 120, 70,
                         endpoint.admissionVersion(), true));
         assertTrue(endpoint.markPriorityCancelInFlight(101L));
         assertTrue(endpoint.markPriorityCancelNotFound(101L, 1L));

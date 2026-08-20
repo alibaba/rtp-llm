@@ -20,14 +20,14 @@ class ConfigurableGroupRoutingPolicyTest {
     void should_select_group_before_host_load_balancing() {
         ConfigService configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
-        TrafficPolicyConfig.TrafficPolicyRule rule = new TrafficPolicyConfig.TrafficPolicyRule();
+        TrafficPolicyConfig.Rule rule = new TrafficPolicyConfig.Rule();
         rule.setName("long-context");
-        rule.setMinSeqLen(8192L);
-        rule.setTargetGroup("long-group");
+        rule.setMatch(inputTokensAtLeast(8192L));
+        rule.setTargets(List.of(target("long-group", 1)));
 
         TrafficPolicyConfig trafficPolicyConfig = new TrafficPolicyConfig();
         trafficPolicyConfig.setRules(List.of(rule));
-        flexlbConfig.setTrafficPolicy(trafficPolicyConfig);
+        flexlbConfig.getRouter().setGroupSelector(trafficPolicyConfig);
 
         Request request = new Request();
         request.setRequestId(12345L);
@@ -50,21 +50,14 @@ class ConfigurableGroupRoutingPolicyTest {
         ConfigService configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
 
-        TrafficPolicyConfig.TrafficTargetGroup blue = new TrafficPolicyConfig.TrafficTargetGroup();
-        blue.setGroup("blue");
-        blue.setWeight(0);
-        TrafficPolicyConfig.TrafficTargetGroup green = new TrafficPolicyConfig.TrafficTargetGroup();
-        green.setGroup("green");
-        green.setWeight(100);
-
-        TrafficPolicyConfig.TrafficPolicyRule rule = new TrafficPolicyConfig.TrafficPolicyRule();
+        TrafficPolicyConfig.Rule rule = new TrafficPolicyConfig.Rule();
         rule.setName("split");
-        rule.setMinSeqLen(1L);
-        rule.setTargetGroups(List.of(blue, green));
+        rule.setMatch(inputTokensAtLeast(1L));
+        rule.setTargets(List.of(target("blue", 1), target("green", 100)));
 
         TrafficPolicyConfig trafficPolicyConfig = new TrafficPolicyConfig();
         trafficPolicyConfig.setRules(List.of(rule));
-        flexlbConfig.setTrafficPolicy(trafficPolicyConfig);
+        flexlbConfig.getRouter().setGroupSelector(trafficPolicyConfig);
 
         Request request = new Request();
         request.setRequestId(12345L);
@@ -98,5 +91,20 @@ class ConfigurableGroupRoutingPolicyTest {
         GroupRoutingDecision decision = policy.route(balanceContext);
 
         assertFalse(decision.hasGroup());
+    }
+
+    private static TrafficPolicyConfig.Match inputTokensAtLeast(long min) {
+        TrafficPolicyConfig.InputTokens inputTokens = new TrafficPolicyConfig.InputTokens();
+        inputTokens.setMin(min);
+        TrafficPolicyConfig.Match match = new TrafficPolicyConfig.Match();
+        match.setInputTokens(inputTokens);
+        return match;
+    }
+
+    private static TrafficPolicyConfig.Target target(String group, long weight) {
+        TrafficPolicyConfig.Target target = new TrafficPolicyConfig.Target();
+        target.setGroup(group);
+        target.setWeight(weight);
+        return target;
     }
 }

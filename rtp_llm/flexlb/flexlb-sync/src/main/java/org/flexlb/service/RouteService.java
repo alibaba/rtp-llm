@@ -3,14 +3,13 @@ package org.flexlb.service;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -21,18 +20,15 @@ public class RouteService {
 
     private final ConfigService configService;
     private final Router router;
-    private final QueueManager queueManager;
     private final PriorityScheduler priorityScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
-                        QueueManager queueManager,
                         PriorityScheduler priorityScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
         this.router = defaultScheduler;
-        this.queueManager = queueManager;
         this.priorityScheduler = priorityScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
@@ -46,16 +42,12 @@ public class RouteService {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(flexlbConfig);
 
-        ScheduleModeEnum mode = flexlbConfig.getDefaultScheduleModeEnum();
-        balanceContext.setScheduleMode(mode);
-
-        CompletableFuture<Response> resultFuture = switch (mode) {
-            case BATCH -> routeBatch(balanceContext);
-            case QUEUE -> flexlbConfig.usesRouteDecisionDelivery()
-                    ? submitScheduled(balanceContext)
-                    : queueManager.tryRouteAsync(balanceContext).toFuture();
-            case DIRECT -> routeDirect(balanceContext);
-        };
+        CompletableFuture<Response> resultFuture;
+        if (flexlbConfig.isDirect()) {
+            resultFuture = routeDirect(balanceContext);
+        } else {
+            resultFuture = routeScheduled(balanceContext);
+        }
 
         // Observe the scheduler-owned future without replacing it with a
         // dependent stage. Returning the exact source preserves external
@@ -77,15 +69,17 @@ public class RouteService {
         return resultFuture;
     }
 
-    /**
-     * BATCH retains its established compatibility behavior: an unavailable
-     * scheduler or missing serialized generate input falls back to DIRECT.
-     */
-    private CompletableFuture<Response> routeBatch(BalanceContext balanceContext) {
-        if (priorityScheduler == null || !hasValidGenerateInput(balanceContext)) {
-            Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
-            balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
-            return routeDirect(balanceContext);
+    private CompletableFuture<Response> routeScheduled(BalanceContext balanceContext) {
+        if (priorityScheduler == null) {
+            return CompletableFuture.failedFuture(new IllegalStateException(
+                    "PriorityScheduler is required for the configured scheduling path"));
+        }
+        if (balanceContext.getConfig().isBatchDispatch()
+                && !hasValidGenerateInput(balanceContext)) {
+            Logger.warn("BATCH dispatcher rejected request without serialized generate input: request_id={}",
+                    balanceContext.getRequestId());
+            return CompletableFuture.completedFuture(
+                    Response.error(StrategyErrorType.BATCH_BUILD_FAILED));
         }
         return submitScheduled(balanceContext);
     }
@@ -107,6 +101,10 @@ public class RouteService {
 
     private CompletableFuture<Response> routeDirect(BalanceContext balanceContext) {
         try {
+            if (balanceContext.requestExpired(System.currentTimeMillis())) {
+                return CompletableFuture.completedFuture(
+                        Response.error(StrategyErrorType.BATCH_SLO_EXPIRED));
+            }
             return CompletableFuture.completedFuture(router.route(balanceContext));
         } catch (Exception e) {
             return CompletableFuture.failedFuture(e);

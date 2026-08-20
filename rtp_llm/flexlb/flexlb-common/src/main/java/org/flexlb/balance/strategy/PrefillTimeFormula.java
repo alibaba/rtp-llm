@@ -8,7 +8,7 @@ import java.util.function.DoubleBinaryOperator;
 import java.util.function.DoubleUnaryOperator;
 
 /**
- * Configurable prefill-time formula engine.
+ * Shared configurable prefill-time formula engine.
  *
  * <h3>Syntax</h3>
  * <ul>
@@ -65,6 +65,10 @@ public final class PrefillTimeFormula {
     );
 
     private static final Set<String> AGGREGATE_FUNCTIONS = Set.of("sum");
+
+    private static final Set<String> BATCH_SCOPED_VARIABLES = Set.of(
+            "batchSize", "totalInputTokens", "totalHitCacheTokens",
+            "totalComputeTokens", "maxInputTokens", "maxComputeTokens");
 
     static final int IDX_BATCH_SIZE = 0;
     static final int IDX_INPUT_TOKENS = 1;
@@ -326,7 +330,7 @@ public final class PrefillTimeFormula {
                 if (name.equals("param")) {
                     throw error("'param' must be used as param(name, initialValue)");
                 }
-                if (aggregateDepth > 0 && PrefillTimeVariableBindings.isBatchScoped(name)) {
+                if (aggregateDepth > 0 && BATCH_SCOPED_VARIABLES.contains(name)) {
                     throw error("Batch-scoped variable cannot be used inside sum(): " + name);
                 }
                 Integer idx = VAR_INDEX_MAP.get(name);
