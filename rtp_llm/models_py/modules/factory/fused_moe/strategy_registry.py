@@ -70,6 +70,26 @@ class StrategyRegistry:
         ]
         logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
 
+        # A pre-quantized checkpoint may require MOE experts to consume a
+        # specific activation format. Granularity is part of the contract: an
+        # INT8 per-tensor strategy must not satisfy a scheme that needs INT8 per
+        # token.
+        model_quant_config = config.model_config.quant_config
+        required_act_spec = (
+            model_quant_config.get_moe_activation_quant_spec()
+            if model_quant_config is not None
+            else None
+        )
+        spec_hint = ""
+        if required_act_spec is not None:
+            required_dtype, required_per_act_token = required_act_spec
+            spec_hint = (
+                f" Quantization method {model_quant_config.get_method()} needs a "
+                f"strategy producing {required_dtype} activations "
+                f"({'per token' if required_per_act_token else 'not per token'}); "
+                "MOE layers cannot serve this checkpoint unless one is registered."
+            )
+
         if not candidates:
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
@@ -82,25 +102,60 @@ class StrategyRegistry:
             raise ValueError(
                 f"No suitable MOE strategy found for configuration. "
                 f"Please check quant_config, ep_size, and parallelism settings."
+                f"{spec_hint}"
             )
 
-        # Sort candidates by priority (descending, higher priority first)
-        candidates.sort(key=lambda s: s.priority, reverse=True)
+        # get_attributes() is not a plain accessor -- it does lazy imports and
+        # some backends log from it -- so resolve it once and reuse it for the
+        # activation-format filter, the candidate log and the selection.
+        scored = [(strategy, strategy.get_attributes()) for strategy in candidates]
+
+        if required_act_spec is not None:
+            matching = [
+                (strategy, attrs)
+                for strategy, attrs in scored
+                if (
+                    attrs.quant_config.quant_dtype,
+                    attrs.quant_config.per_act_token_quant,
+                )
+                == required_act_spec
+            ]
+            if not matching:
+                provided = sorted(
+                    str(
+                        (
+                            attrs.quant_config.quant_dtype,
+                            attrs.quant_config.per_act_token_quant,
+                        )
+                    )
+                    for _, attrs in scored
+                )
+                raise ValueError(
+                    f"None of the {len(scored)} candidate strategy(ies) matches the "
+                    f"required activation format (they provide {provided})."
+                    f"{spec_hint}"
+                )
+            # Narrow the selection too, so the strategy that gets picked is the
+            # one the check passed on rather than a higher-priority fallback.
+            scored = matching
+
+        # Sort by priority (descending, higher priority first)
+        scored.sort(key=lambda pair: pair[1].calculate_priority(), reverse=True)
 
         # Log all candidate strategies
-        logger.info(f"Found {len(candidates)} candidate strategy(ies) for MOE:")
-        for strategy in candidates:
+        logger.info(f"Found {len(scored)} candidate strategy(ies) for MOE:")
+        for strategy, attrs in scored:
             logger.info(
                 f"  - {strategy.__class__.__name__}: "
-                f"{strategy.get_attributes()} (priority={strategy.priority})"
+                f"{attrs} (priority={attrs.calculate_priority()})"
             )
 
         # Select the strategy with highest priority (first in sorted list)
-        selected = candidates[0]
+        selected, selected_attrs = scored[0]
 
         logger.info(
             f"Selected strategy: {selected.__class__.__name__} "
-            f"with priority {selected.priority}"
+            f"with priority {selected_attrs.calculate_priority()}"
         )
 
         return selected
