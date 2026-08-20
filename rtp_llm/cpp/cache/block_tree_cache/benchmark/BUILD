@@ -35,7 +35,6 @@ cc_library(
     srcs = [
         "BenchmarkJsonWriter.cc",
         "CommonBenchmarkOptions.cc",
-        "DescriptorSizeProfile.cc",
         "ModelProfile.cc",
         "TreeBenchmarkOptions.cc",
         "TransferBenchmarkOptions.cc",
@@ -44,7 +43,6 @@ cc_library(
         "BenchmarkArgumentParser.h",
         "BenchmarkJsonWriter.h",
         "CommonBenchmarkOptions.h",
-        "DescriptorSizeProfile.h",
         "ModelProfile.h",
         "TreeBenchmarkOptions.h",
         "TransferBenchmarkOptions.h",
@@ -152,18 +150,6 @@ cc_test(
 )
 
 cc_test(
-    name = "descriptor_size_profile_test",
-    srcs = ["DescriptorSizeProfileTest.cc"],
-    copts = copts(),
-    tags = ["manual"],
-    deps = [
-        ":benchmark_common",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_test(
     name = "tree_workload_generator_test",
     srcs = ["TreeWorkloadGeneratorTest.cc"],
     copts = copts() + ["-fno-access-control"],
@@ -231,6 +217,9 @@ py_test(
     ],
     main = "run_block_tree_cache_benchmark_test.py",
     tags = ["manual"],
+    data = [
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
+    ],
 )
 
 py_binary(
@@ -243,8 +232,7 @@ py_binary(
     tags = ["manual"],
     data = [
         ":block_tree_cache_gpu_benchmark",
-        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_descriptor_sizes",
-        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
     ],
     deps = [],
 )
@@ -257,8 +245,7 @@ py_test(
         ":block_tree_cache_gpu_benchmark",
         "benchmark_cases.py",
         "run_block_tree_cache_benchmark.py",
-        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_descriptor_sizes",
-        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
     ],
     # Runs the CUDA benchmark binary; keep on GPU machines and off remote exec.
     tags = ["gpu", "local", "exclusive", "manual"],

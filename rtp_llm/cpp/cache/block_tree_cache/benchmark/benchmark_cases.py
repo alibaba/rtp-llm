@@ -19,7 +19,7 @@ Transfer profile design (12 cases):
   neither is expanded as a dimension
 - all transfer cases build the real group-set layout from the model profile
   (one multi-layer device pool per member group, e.g. full_context = 3 pools /
-  91 copy tiles, swa = 3 pools / 121 tiles), so results reflect the production
+  62 copy tiles, swa = 3 pools / 85 tiles), so results reflect the DSV4-Flash
   plan shape instead of a single contiguous copy
 - the host pair (Device<->Host) runs each group set twice, once with the CUDA
   batch-copy strategy and once with the staged SM copy strategy, for a direct

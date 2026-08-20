@@ -7,7 +7,7 @@ filegroup(
 )
 
 filegroup(
-    name = "deepseek_v4_pro_fp8_descriptor_sizes",
-    srcs = ["deepseek_v4_pro_fp8_descriptor_sizes.json"],
+    name = "deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
+    srcs = ["deepseek_v4_flash_fp8_tp1_cp1_tpb1024.json"],
     tags = ["manual"],
 )
