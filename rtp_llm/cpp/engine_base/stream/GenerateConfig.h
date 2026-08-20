@@ -96,6 +96,9 @@ public:
     bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
     std::optional<int> batch_group_timeout;
     std::string        unique_key;
+    // Stable request owner for K3 MLA-DP. It must be supplied explicitly when
+    // Prefill MLA cache TP fan-in is enabled; request_id modulo TP is forbidden.
+    std::optional<int> mla_cache_owner_rank;
 
     bool top1() {
         return top_k == 1;
@@ -157,7 +160,8 @@ public:
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
                      << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
-                     << ", unique_key: " << unique_key << "}";
+                     << ", unique_key: " << unique_key << ", mla_cache_owner_rank: "
+                     << (mla_cache_owner_rank.has_value() ? std::to_string(*mla_cache_owner_rank) : "none") << "}";
         return debug_string.str();
     }
 
@@ -247,6 +251,7 @@ public:
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(batch_group_timeout);
         JSONIZE(unique_key);
+        JSONIZE_OPTIONAL(mla_cache_owner_rank);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

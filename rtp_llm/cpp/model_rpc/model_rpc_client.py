@@ -207,6 +207,7 @@ def trans_input(input_py: GenerateInput):
     )
     trans_option(generate_config_pb, input_py.generate_config, "batch_group_timeout")
     trans_option(generate_config_pb, input_py.generate_config, "force_batch")
+    trans_option(generate_config_pb, input_py.generate_config, "mla_cache_owner_rank")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
