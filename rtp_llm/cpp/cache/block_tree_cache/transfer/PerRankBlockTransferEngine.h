@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -19,11 +21,20 @@ public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                         DeviceHostCopyOptions    device_host_options             = {},
                                         size_t                   device_disk_staging_block_count = 4,
-                                        size_t                   max_descriptors_per_batch       = 64);
+                                        size_t                   max_descriptors_per_batch       = 64,
+                                        size_t                   transfer_worker_count           = 1);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine() = default;
 
     virtual std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors);
+
+    void resetBenchmarkTimingStats();
+    int64_t benchmarkQueueWaitNs() const;
+    int64_t benchmarkExecutorNs() const;
+    size_t  benchmarkExecutorCount() const;
+    std::atomic<int64_t> benchmark_queue_wait_ns_{0};
+    std::atomic<int64_t> benchmark_executor_ns_{0};
+    std::atomic<size_t>  benchmark_executor_count_{0};
 
 private:
     TransferStatus execute(const std::vector<HostBufferView>&       hosts,

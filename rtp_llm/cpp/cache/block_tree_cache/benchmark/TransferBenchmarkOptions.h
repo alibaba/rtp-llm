@@ -18,6 +18,13 @@ struct TransferOptions {
     size_t transfer_operation_count{1024};
     size_t transfer_concurrency{1};
 
+    // End-to-end business request shape. Zero keeps the legacy wave-oriented
+    // benchmark path. In business mode each request owns this many
+    // same-direction descriptors and batches remain serial within a request.
+    size_t business_concurrency{0};
+    size_t descriptors_per_business{0};
+    size_t transfer_worker_count{1};
+
     // Number of same-direction descriptors submitted in one transfer-engine
     // API call. 0 follows transfer_concurrency. Device->Disk is the only
     // direction whose engine contract still requires singleton submissions.

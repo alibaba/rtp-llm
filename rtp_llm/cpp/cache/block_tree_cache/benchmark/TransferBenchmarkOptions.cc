@@ -29,6 +29,12 @@ TransferOptions TransferOptions::parse(int& argc, char**& argv) {
             opts.transfer_operation_count = parseUnsigned(key, next);
         else if (key == "transfer-concurrency")
             opts.transfer_concurrency = parseUnsigned(key, next);
+        else if (key == "business-concurrency")
+            opts.business_concurrency = parseUnsigned(key, next);
+        else if (key == "descriptors-per-business")
+            opts.descriptors_per_business = parseUnsigned(key, next);
+        else if (key == "transfer-worker-count")
+            opts.transfer_worker_count = parseUnsigned(key, next);
         else if (key == "transfer-descriptor-batch-size")
             opts.transfer_descriptor_batch_size = parseUnsigned(key, next);
         else if (key == "copy-strategy")
@@ -65,6 +71,9 @@ void TransferOptions::printHelp() {
         << "                               (d2h|h2d|d2disk|disk2d|h2disk|disk2h, default: d2h)\n"
         << "  --transfer-operation-count=N Number of transfer operations (default: 1024)\n"
         << "  --transfer-concurrency=N     Concurrent endpoint lanes per wave (default: 1)\n"
+        << "  --business-concurrency=N     Concurrent independent business requests (0 = legacy wave mode)\n"
+        << "  --descriptors-per-business=N Same-direction descriptors owned by each business request\n"
+        << "  --transfer-worker-count=N    Lower transfer workers (default: 1)\n"
         << "  --transfer-descriptor-batch-size=N  Descriptors per engine submit (0 = concurrency)\n"
         << "  --copy-strategy=STRATEGY     auto | batch | staged-sm (default: auto)\n"
         << "  --min-measured-seconds=N     Measured phase duration floor; pilot run scales op count (default: 30)\n"
