@@ -47,7 +47,8 @@ public:
                                  int  seq_len,
                                  int  reserve_step,
                                  int  reuse_blocks_len,
-                                 bool reuse_enabled = false) const override;
+                                 bool reuse_enabled = false,
+                                 const RequiredPositions& required_positions = {}) const override;
     void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
 private:
