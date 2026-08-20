@@ -596,17 +596,15 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_EvictsBeforeLastRelease) {
             BlockTreeMatchResult result = cache_->match({100});
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                matched_blocks[thread_id] = result.matched_device_blocks;
-                node_independent[thread_id] =
-                    std::all_of(result.matched_device_resources.begin(),
-                                result.matched_device_resources.end(),
-                                [](const MultiNodeResource& resource) {
-                                    return std::all_of(resource.node_blocks.begin(),
-                                                       resource.node_blocks.end(),
-                                                       [](const auto& node_blocks) {
-                                                           return node_blocks.first == nullptr;
-                                                       });
-                                });
+                matched_blocks[thread_id]   = result.matched_device_blocks;
+                node_independent[thread_id] = std::all_of(
+                    result.matched_device_resources.begin(),
+                    result.matched_device_resources.end(),
+                    [](const MultiNodeResource& resource) {
+                        return std::all_of(resource.node_blocks.begin(),
+                                           resource.node_blocks.end(),
+                                           [](const auto& node_blocks) { return node_blocks.first == nullptr; });
+                    });
                 ++matched_count;
                 cv.notify_all();
                 cv.wait(lock, [&] { return release_match[thread_id]; });
@@ -1987,7 +1985,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     unreferenceDeviceBlocksForTest(*resident_group, resident_holder, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(resident_device_pool->refCount(resident_block), 1u);
     ASSERT_EQ(host_pool->refCount(host_block), 1u);
-    cache->evictor_.refreshCandidate(insert_result.inserted_nodes.front(), /*group_set_id=*/0);
+    cache->evictor_.admitCandidate(insert_result.inserted_nodes.front(), /*group_set_id=*/0, Tier::DEVICE);
 
     BlockTreeMatchResult              result       = cache->match({100});
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
