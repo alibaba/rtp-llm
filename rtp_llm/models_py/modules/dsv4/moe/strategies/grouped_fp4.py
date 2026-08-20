@@ -547,7 +547,11 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         indices: torch.Tensor,
     ) -> torch.Tensor:
         """Run SM120 grouped MoE from linear-layout MXFP8 activations."""
-        if os.environ.get("DSV4_SM120_FUSED_MOE_PREFILL", "1") != "0":
+        # The fused SM120 prefill path accumulates enough numerical drift over
+        # the full DSV4 stack to reduce DSpark acceptance versus the B300
+        # baseline. Keep the numerically aligned FlashInfer groupwise path as
+        # the default; fused prefill remains available as an explicit opt-in.
+        if os.environ.get("DSV4_SM120_FUSED_MOE_PREFILL", "0") != "0":
             from flashinfer import block_scale_interleave
             from flashinfer.fused_moe import cutlass_fused_moe
             from flashinfer.fused_moe.core import ActivationType
