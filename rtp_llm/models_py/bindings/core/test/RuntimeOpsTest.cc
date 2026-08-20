@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/CacheStoreWriter.h"
 #include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/models/SamplingOps.h"
 #include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -1150,7 +1151,7 @@ TEST_F(RuntimeOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
 }
 
 #if USING_CUDA
-TEST_F(ExecOpsTest, testSampleFromProbsHandlesSingleAndMultiBlockVocab) {
+TEST_F(RuntimeOpsTest, testSampleFromProbsHandlesSingleAndMultiBlockVocab) {
     auto forced_probs  = torch::eye(4, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto forced_output = execSampleFromProbs(forced_probs);
     EXPECT_TRUE(torch::equal(forced_output.cpu(), torch::arange(4, torch::kInt32)));
@@ -1162,7 +1163,7 @@ TEST_F(ExecOpsTest, testSampleFromProbsHandlesSingleAndMultiBlockVocab) {
     EXPECT_TRUE(torch::equal(multi_block_output.cpu(), torch::tensor({2048, 1024}, torch::kInt32)));
 }
 
-TEST_F(ExecOpsTest, testSampleFromProbsUsesDefaultGenerator) {
+TEST_F(RuntimeOpsTest, testSampleFromProbsUsesDefaultGenerator) {
     auto probabilities =
         torch::full({64, 16}, 1.0f / 16.0f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto generator = at::cuda::detail::getDefaultCUDAGenerator();
@@ -1173,7 +1174,7 @@ TEST_F(ExecOpsTest, testSampleFromProbsUsesDefaultGenerator) {
     EXPECT_TRUE(torch::equal(first, second));
 }
 
-TEST_F(ExecOpsTest, testSampleFromProbsMatchesDistribution) {
+TEST_F(RuntimeOpsTest, testSampleFromProbsMatchesDistribution) {
     constexpr int64_t distribution_rows = 2048;
     auto              generator         = at::cuda::detail::getDefaultCUDAGenerator();
     generator.set_current_seed(23);
