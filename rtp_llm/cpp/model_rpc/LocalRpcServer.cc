@@ -451,6 +451,25 @@ void LocalRpcServer::installSleepHooks() {
                                     e.what());
             }
         }
+        // Hand back the NCCL communicator's GPU memory (opt-in via
+        // --sleep_release_collective_memory); see rtp_llm/utils/nccl_memory.py for the rules this
+        // call obeys.
+        //
+        // Its own step, not part of release_runtime_gpu_caches above, for two local reasons.
+        // Ordering: it must run after the engine is fully quiesced (suspend begins with a
+        // cudaDeviceSynchronize()) and before the best-effort emptyCache, whose per-role duration
+        // would otherwise add rank skew ahead of a collective. Failure semantics: unlike the
+        // best-effort reclaim above, a failure here leaves memory the wake path will dereference,
+        // so it must fail the sleep.
+        if (!weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("suspend_collectives_for_sleep")("sleep");
+            } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_ERROR("releaseRestorableGpuMemory: suspend_collectives_for_sleep failed: %s", e.what());
+                ok = false;
+            }
+        }
         // The engine is only paused (not torn down): the still-alive executor's transient
         // buffers (activations, attention/cuBLAS workspaces, sampler) can linger in the torch
         // device caching allocator as reserved-but-free blocks, which cudaMemGetInfo still
@@ -515,6 +534,31 @@ void LocalRpcServer::installSleepHooks() {
     };
     hooks.restoreRestorableGpuMemory = [this, engine, vmm_backend, local_rank]() {
         OptionalSleepDeviceGuard device_guard(local_rank);
+        // Remap the NCCL communicator FIRST, before anything else on the wake path. Not a
+        // preference but a requirement -- see rtp_llm/utils/nccl_memory.py rule (7).
+        //
+        // Ahead of the async memory-cache rebuild below on purpose, rather than concurrently with
+        // it: ncclCommResume restores from pinned host memory and restoreMemoryCacheBacking is a
+        // large cudaHostAlloc, so overlapping them would contend on exactly the pinned-allocation
+        // path that dominates resume's cost. Sequencing them keeps resume's few seconds
+        // predictable. No-op when nothing was suspended, so the default path pays nothing.
+        if (!weight_manager_.is_none()) {
+            try {
+                py::gil_scoped_acquire acquire;
+                weight_manager_.attr("resume_collectives_for_wake")("wake");
+            } catch (const py::error_already_set& e) {
+                // Bail out before the reload rather than letting it fault: the communicator's
+                // virtual addresses are unmapped and every collective from here on would fail.
+                //
+                // The bare `return false` is correct only because this block sits ABOVE the
+                // std::async below, so there is nothing yet to unwind. Keep it that way: if the
+                // memory_cache_restore_future_ launch is ever moved above this point, returning
+                // here would abandon a running background thread and this must become
+                // join-then-return.
+                RTP_LLM_LOG_ERROR("restoreRestorableGpuMemory: resume_collectives_for_wake failed: %s", e.what());
+                return false;
+            }
+        }
         // Overlap the host memory-cache pinned rebuild with the GPU weight reload below.
         // restoreMemoryCacheBacking is pure host work (torch pin_memory == cudaHostAlloc + memcpy),
         // independent of the GPU weights/KV pages. At large memory_cache sizes it costs ~size/2GBps
@@ -621,6 +665,28 @@ void LocalRpcServer::installSleepHooks() {
         }
         RTP_LLM_LOG_INFO("sleep warmup/self-check passed");
         return true;
+    };
+
+    // Keep the existing bool hook ABI, but enrich failures with the last
+    // NCCL adapter event. This is read-only and does not touch CUDA/NCCL; it
+    // makes GetSleepStatus/gRPC FAILED_PRECONDITION actionable without adding
+    // fields to the public protobuf.
+    hooks.hookFailureDetail = [this](const char* hook_name) -> std::string {
+        const std::string name = hook_name == nullptr ? "" : hook_name;
+        if (name != "releaseRestorableGpuMemory" && name != "restoreRestorableGpuMemory") {
+            return "";
+        }
+        if (weight_manager_.is_none()) {
+            return "weight manager unavailable; NCCL adapter status unavailable";
+        }
+        try {
+            py::gil_scoped_acquire acquire;
+            return py::cast<std::string>(weight_manager_.attr("nccl_memory_status")());
+        } catch (const py::error_already_set& e) {
+            return std::string("NCCL adapter status unavailable: ") + e.what();
+        } catch (const std::exception& e) {
+            return std::string("NCCL adapter status unavailable: ") + e.what();
+        }
     };
 
     engine_->sleepController().setHooks(hooks);

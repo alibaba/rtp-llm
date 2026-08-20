@@ -169,6 +169,12 @@ struct SleepHooks {
     // Release CPU-backed long-lived allocations, currently weights + cuda_graph tags.
     std::function<bool(const SleepOptions&)> releaseRestorableGpuMemory;
 
+    // Optional detail provider for a failed hook. It is intentionally separate
+    // from the bool hook contract so existing integrations remain source
+    // compatible. The LocalRpcServer uses it to surface the NCCL adapter's last
+    // event in SleepStatus.last_error without adding fields to the RPC schema.
+    std::function<std::string(const char* hook_name)> hookFailureDetail;
+
     // Re-map KV physical pages at the same VA and reset KV/prefix-cache metadata.
     std::function<bool()> restoreKvMemoryBackingAndResetMetadata;
     // Restore CPU-backed long-lived allocations, currently weights + cuda_graph tags.

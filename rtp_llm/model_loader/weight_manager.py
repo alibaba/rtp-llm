@@ -362,6 +362,65 @@ class WeightManager:
 
         release_and_trim(self._device, reason=reason)
 
+    def nccl_memory_status(self) -> str:
+        """Why NCCL failed the current sleep/wake transition, or ``""``.
+
+        Read-only and lock-free; touches neither CUDA nor NCCL. Its only caller is
+        a C++ hook that is already reporting a failure, so it must not become the
+        second failure: :func:`~rtp_llm.utils.nccl_memory.status_text` reads one
+        module global and formats it, and the hook catches a throw regardless.
+
+        The empty string is the normal answer and is load-bearing. The hook this
+        feeds appends the result to ``SleepStatus.last_error`` whenever it fails,
+        and it fails for several reasons that have nothing to do with NCCL (the
+        cuda_graph/weights VMM pause, the level-2 weight reload). Returning
+        anything non-empty on those paths would name a healthy subsystem in the
+        operator-visible error, so the C++ side drops an empty detail and keeps its
+        own message.
+        """
+        from rtp_llm.utils.nccl_memory import status_text
+
+        return status_text()
+
+    # This method and :meth:`resume_collectives_for_wake` are hosted here only
+    # because ``LocalRpcServer`` already holds a ``py::object weight_manager_`` and
+    # there is no other Python handle on the C++ sleep-hook seam. Neither touches
+    # weight state, so do not infer that collectives are a weight-manager concern.
+    def suspend_collectives_for_sleep(self, reason: str = "sleep") -> None:
+        """Sleep-hook entry: release NCCL communicator GPU memory.
+
+        A separate seam from :meth:`release_runtime_gpu_caches` rather than a step
+        inside it, because the two have opposite failure semantics: that one is
+        best-effort, whereas a failure here leaves memory the wake path will
+        dereference, so it must propagate and put the instance in ERROR.
+
+        No-op unless ``--sleep_release_collective_memory`` is on, and no-op on a
+        runtime NCCL without the suspend API.
+        """
+        from rtp_llm.model_loader.weight_memory_saver import release_collective_memory
+
+        if not release_collective_memory():
+            return
+        from rtp_llm.utils.nccl_memory import suspend_for_sleep
+
+        suspend_for_sleep(self._device, reason=reason)
+
+    def resume_collectives_for_wake(self, reason: str = "wake") -> None:
+        """Wake-hook entry: remap NCCL communicator memory. Must run FIRST.
+
+        Deliberately not gated on the config switch: what has to be undone is
+        whatever was actually suspended, and :func:`resume_after_wake` no-ops when
+        nothing was. Reading the switch here would turn a mid-sleep config change
+        into a communicator left unmapped.
+
+        Ordering is load-bearing, which is why this is not a step inside
+        :meth:`restore_runtime_gpu_caches` -- see
+        :mod:`rtp_llm.utils.nccl_memory` rule (7).
+        """
+        from rtp_llm.utils.nccl_memory import resume_after_wake
+
+        resume_after_wake(self._device, reason=reason)
+
     def restore_runtime_gpu_caches(self, reason: str = "wake") -> None:
         """Rebuild inexpensive Python-owned caches explicitly dropped at sleep."""
         # The TP symmetric-memory staging buffer is deliberately dropped while

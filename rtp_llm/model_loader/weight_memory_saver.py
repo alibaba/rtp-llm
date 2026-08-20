@@ -70,6 +70,7 @@ from typing import Any, Iterator, Optional
 
 ENV_SWITCH: str = "ENABLE_SLEEP_MODE"
 ENV_LEVEL: str = "SLEEP_MODE_LEVEL"
+ENV_COLLECTIVE_RELEASE: str = "SLEEP_RELEASE_COLLECTIVE_MEMORY"
 LEGACY_ENV_SWITCH: str = "RTP_LLM_WEIGHT_MEMORY_SAVER"
 WEIGHTS_TAG: str = "weights"
 
@@ -79,6 +80,7 @@ _import_attempted: bool = False
 _paused: bool = False
 _enabled_override: Optional[bool] = None
 _level_override: Optional[int] = None
+_collective_release_override: Optional[bool] = None
 _region_depth = threading.local()
 _region_suppressed = threading.local()
 _model_scope = threading.local()
@@ -178,7 +180,9 @@ def current_model_scope() -> Any:
 
 
 def configure_from_runtime(
-    enable_sleep_mode: bool, sleep_mode_level: Optional[int] = None
+    enable_sleep_mode: bool,
+    sleep_mode_level: Optional[int] = None,
+    release_collective_memory: Optional[bool] = None,
 ) -> None:
     """Mirror parsed RuntimeConfig sleep fields into this Python helper.
 
@@ -191,11 +195,14 @@ def configure_from_runtime(
     frozen at allocation time by torch_memory_saver, so it cannot change per
     /sleep request.
     """
-    global _enabled_override, _level_override, _tms, _import_attempted, _paused
+    global _enabled_override, _level_override, _collective_release_override
+    global _tms, _import_attempted, _paused
     with _lock:
         _enabled_override = bool(enable_sleep_mode)
         if sleep_mode_level is not None:
             _level_override = int(sleep_mode_level)
+        if release_collective_memory is not None:
+            _collective_release_override = bool(release_collective_memory)
         if not _enabled_override:
             _tms = None
             _import_attempted = False
@@ -225,6 +232,25 @@ def sleep_mode_level() -> int:
         return int(os.environ.get(ENV_LEVEL, "1"))
     except (TypeError, ValueError):
         return 1
+
+
+def release_collective_memory() -> bool:
+    """Whether sleep should also release NCCL communicator GPU memory.
+
+    Independent of the sleep level: the level selects what happens to the
+    *weights* (host backup vs discard-and-reload), whereas this selects whether
+    the communicator's transport buffers are handed back too. It is a separate
+    switch because it carries costs the level does not -- pinned host memory
+    equal to the GPU bytes released, a few seconds on each of sleep and wake, and
+    a runtime NCCL new enough to expose ``ncclCommSuspend`` -- so a deployment
+    that wants level 2 does not implicitly opt into those.
+
+    Defaults to off. Sleeping with the communicator resident is exactly today's
+    behaviour, so off is the no-change answer.
+    """
+    if _collective_release_override is not None:
+        return _collective_release_override
+    return os.environ.get(ENV_COLLECTIVE_RELEASE, "0") == "1"
 
 
 def _get_tms() -> Optional[Any]:
@@ -792,6 +818,7 @@ def resume_weights() -> bool:
 def _reset_for_testing() -> None:
     """Reset module-level caches/state. Test-only helper."""
     global _tms, _import_attempted, _paused, _enabled_override
+    global _level_override, _collective_release_override
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
     global _base_conf_captured, _split_cap_live
@@ -800,6 +827,11 @@ def _reset_for_testing() -> None:
         _import_attempted = False
         _paused = False
         _enabled_override = None
+        # Reset the level and collective-release overrides too: leaving them set
+        # leaks a previous test's configure_from_runtime into the next one, which
+        # silently changes the level a later test believes it is exercising.
+        _level_override = None
+        _collective_release_override = None
         _expandable_prepared = False
         _expandable_requested = False
         _expandable_active = False
@@ -808,3 +840,13 @@ def _reset_for_testing() -> None:
         _base_conf_captured = False
         _split_cap_live = False
     _region_depth.value = 0
+    # nccl_memory latches a suspended set, a poison flag and a vote sequence that
+    # outlive a single test just as stubbornly as the overrides above. Imported
+    # lazily and guarded because it pulls in torch.distributed, which must not
+    # become a hard dependency of resetting this module.
+    try:
+        from rtp_llm.utils.nccl_memory import _reset_for_testing as _reset_nccl
+
+        _reset_nccl()
+    except Exception:  # noqa: BLE001 - test helper must not fail on import order
+        pass

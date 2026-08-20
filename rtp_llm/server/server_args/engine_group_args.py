@@ -63,3 +63,21 @@ def init_engine_group_args(parser, runtime_config):
         "level 0（state-preserving）尚未实现，非法值在启动期即被 argparse 拒绝，避免 Python 权重层与 "
         "C++ RuntimeConfig 对 level 认知分歧",
     )
+    engine_group.add_argument(
+        "--sleep_release_collective_memory",
+        "--sleep-release-collective-memory",
+        env_name="SLEEP_RELEASE_COLLECTIVE_MEMORY",
+        # No bind_to, unlike the two switches above: nothing on the C++ side reads
+        # this, so RuntimeConfig has no field for it. The only consumer is
+        # rtp_llm.utils.nccl_memory, a leaf utils module with no config handle, so
+        # the os.environ mirror written in server_args.py is the whole transport.
+        type=str2bool,
+        default=False,
+        help="sleep 时是否同时释放 NCCL 通信器占用的显存（ncclCommSuspend/Resume，保留虚拟地址"
+        "所以 CUDA graph 里烘死的通信指针依然有效、无需重录）。实测 DSV4-Flash PD 单 DP_AND_TP "
+        "通信器每 rank 可回收 576 MiB。代价有三：等量的 pinned host 内存（NCCL 把这些 buffer 一律"
+        "按 ncclMemOffload 拷到锁页内存而非丢弃）、sleep/wake 各多几秒（成本由锁页分配次数决定，"
+        "≈ channels x peers x 通信器数）、以及运行时 NCCL 必须 >= 2.29.7 才有该 API。因为这三项"
+        "代价与 sleep level 无关，所以做成独立开关而不是跟随 level；默认关闭，即维持现有行为。"
+        "NCCL 版本不够时自动降级为无操作（只打一行日志），不影响启动",
+    )

@@ -525,16 +525,26 @@ TEST(SleepLifecycleControllerTest, SleepHalfReleasedFailureGoesToError) {
         return true;
     };
     hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
+    hooks.hookFailureDetail          = [](const char* hook_name) {
+        EXPECT_STREQ(hook_name, "releaseRestorableGpuMemory");
+        return std::string("[NcclMemory] [sleep] ncclCommSuspend failed for tp(rc=3); restart the instance");
+    };
     controller.setHooks(hooks);
 
     const auto result = controller.sleep(gracefulOptions());
     EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.code, SleepResult::Code::FAILED_PRECONDITION);
     EXPECT_EQ(controller.state(), SleepState::ERROR);
     EXPECT_FALSE(controller.admit());
     EXPECT_EQ(release_kv_called.load(), 1);
     EXPECT_EQ(controller.status().kv_memory_state, "PAUSED");
     EXPECT_FALSE(controller.status().device_kv_cache_valid);
     EXPECT_EQ(controller.status().gpu_resource_state, "UNKNOWN");
+    // The hook's own message survives, and the NCCL detail is appended to it.
+    EXPECT_EQ(
+        result.message,
+        "releaseRestorableGpuMemory failed: [NcclMemory] [sleep] ncclCommSuspend failed for tp(rc=3); restart the instance");
+    EXPECT_EQ(controller.status().last_error, result.message);
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpFailureGoesToError) {
@@ -558,7 +568,11 @@ TEST(SleepLifecycleControllerTest, WakeUpFailureDoesNotRunImplicitRollback) {
     SleepHooks       hooks;
     hooks.restoreKvMemoryBackingAndResetMetadata = []() { return true; };
     hooks.restoreRestorableGpuMemory             = []() { return false; };
-    hooks.releaseKvMemoryBacking                 = [&release_kv_called](const SleepOptions&) {
+    hooks.hookFailureDetail                      = [](const char* hook_name) {
+        EXPECT_STREQ(hook_name, "restoreRestorableGpuMemory");
+        return std::string("[NcclMemory] [wake] ncclCommResume failed for tp(rc=3); restart the instance");
+    };
+    hooks.releaseKvMemoryBacking = [&release_kv_called](const SleepOptions&) {
         release_kv_called++;
         return true;
     };
@@ -566,8 +580,95 @@ TEST(SleepLifecycleControllerTest, WakeUpFailureDoesNotRunImplicitRollback) {
 
     const auto result = controller.wakeUp();
     EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.code, SleepResult::Code::FAILED_PRECONDITION);
     EXPECT_EQ(controller.state(), SleepState::ERROR);
     EXPECT_EQ(release_kv_called.load(), 0);
+    EXPECT_EQ(
+        result.message,
+        "restoreRestorableGpuMemory failed: [NcclMemory] [wake] ncclCommResume failed for tp(rc=3); restart the instance");
+    EXPECT_EQ(controller.status().last_error, result.message);
+}
+
+// hookFailureDetail is a diagnostic on the failure path, so every way it can come
+// back short has to leave the verdict and the operator-visible message exactly as
+// they would be without it. An empty string is the *normal* answer -- NCCL is only
+// one of several reasons releaseRestorableGpuMemory can fail -- so appending a bare
+// ": " there would be a permanent cosmetic regression, not a corner case.
+TEST(SleepLifecycleControllerTest, SleepHookFailureDetailFallbacks) {
+    const std::string expected = "releaseRestorableGpuMemory failed";
+
+    {  // No provider installed at all: the pre-existing message, unchanged.
+        SleepLifecycleController controller(true);
+        SleepHooks               hooks;
+        hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
+        controller.setHooks(hooks);
+
+        const auto result = controller.sleep(gracefulOptions());
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.code, SleepResult::Code::FAILED_PRECONDITION);
+        EXPECT_EQ(result.message, expected);
+    }
+
+    {  // NCCL is not the cause: no separator, no trailing colon.
+        SleepLifecycleController controller(true);
+        std::atomic<int>         detail_calls{0};
+        SleepHooks               hooks;
+        hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
+        hooks.hookFailureDetail          = [&detail_calls](const char*) {
+            detail_calls++;
+            return std::string();
+        };
+        controller.setHooks(hooks);
+
+        const auto result = controller.sleep(gracefulOptions());
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.message, expected);
+        EXPECT_EQ(detail_calls.load(), 1);
+    }
+
+    {  // The provider throws std::exception: warn, fall back, verdict unchanged.
+        SleepLifecycleController controller(true);
+        SleepHooks               hooks;
+        hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
+        hooks.hookFailureDetail          = [](const char*) -> std::string { throw std::runtime_error("gil deadlock"); };
+        controller.setHooks(hooks);
+
+        const auto result = controller.sleep(gracefulOptions());
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.code, SleepResult::Code::FAILED_PRECONDITION);
+        EXPECT_EQ(controller.state(), SleepState::ERROR);
+        EXPECT_EQ(result.message, expected);
+    }
+
+    {  // A non-std throw (pybind11's error_already_set does not derive from
+       // std::exception on every toolchain) must not escape either.
+        SleepLifecycleController controller(true);
+        SleepHooks               hooks;
+        hooks.releaseRestorableGpuMemory = [](const SleepOptions&) { return false; };
+        hooks.hookFailureDetail          = [](const char*) -> std::string { throw 42; };
+        controller.setHooks(hooks);
+
+        const auto result = controller.sleep(gracefulOptions());
+        EXPECT_FALSE(result.ok);
+        EXPECT_EQ(result.code, SleepResult::Code::FAILED_PRECONDITION);
+        EXPECT_EQ(controller.state(), SleepState::ERROR);
+        EXPECT_EQ(result.message, expected);
+    }
+
+    {  // Healthy sleep: a diagnostic must never be invoked when nothing failed.
+        SleepLifecycleController controller(true);
+        std::atomic<int>         detail_calls{0};
+        SleepHooks               hooks;
+        hooks.hookFailureDetail = [&detail_calls](const char*) {
+            detail_calls++;
+            return std::string("should not be reached");
+        };
+        controller.setHooks(hooks);
+
+        EXPECT_TRUE(controller.sleep(gracefulOptions()).ok);
+        EXPECT_TRUE(controller.wakeUp().ok);
+        EXPECT_EQ(detail_calls.load(), 0);
+    }
 }
 
 TEST(SleepLifecycleControllerTest, WakeUpHookExceptionGoesToError) {

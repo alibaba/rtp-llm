@@ -264,6 +264,87 @@ class ServerArgsSetTest(TestCase):
             self.assertEqual(py_env_configs.runtime_config.enable_sleep_mode, True)
         self.assertTrue(wms.is_enabled())
 
+    def _setup_args_and_reload(self):
+        """Reload + setup_args with a clean weight_memory_saver, as the sleep tests do.
+
+        Returns the weight_memory_saver module so the caller can read the switches
+        the way the sleep hook path does.
+        """
+        import rtp_llm.server.server_args.server_args
+        from rtp_llm.model_loader import weight_memory_saver as wms
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        wms._reset_for_testing()
+        rtp_llm.server.server_args.server_args.setup_args()
+        return wms
+
+    # NOTE for the four tests below: unlike --enable-sleep-mode / --sleep-mode-level,
+    # --sleep_release_collective_memory has NO C++ RuntimeConfig field, so its
+    # `bind_to` resolves to None and the os.environ mirror written by setup_args() is
+    # the ONLY transport to the (leaf, config-less) sleep hook module. There is
+    # therefore nothing to assert on py_env_configs.runtime_config for this arg.
+
+    def test_sleep_release_collective_memory_defaults_off(self):
+        """Flag absent: the collective-release switch stays off (no-change default)."""
+        sys.argv = ["prog"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertFalse(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "0")
+
+    def test_sleep_release_collective_memory_arg_enables_switch(self):
+        """Both the underscored flag and its dashed alias must reach the env mirror."""
+        for flag in (
+            "--sleep_release_collective_memory",
+            "--sleep-release-collective-memory",
+        ):
+            with self.subTest(flag=flag):
+                os.environ.pop("SLEEP_RELEASE_COLLECTIVE_MEMORY", None)
+                sys.argv = ["prog", flag, "1"]
+
+                wms = self._setup_args_and_reload()
+
+                self.assertTrue(wms.release_collective_memory())
+                self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "1")
+
+    def test_sleep_release_collective_memory_env_only_is_honoured(self):
+        """env fallback: the env var alone turns the switch on (no CLI flag).
+
+        setup_args() unconditionally rewrites the mirror from the parsed value, so
+        the env surviving as "1" also proves the fallback was actually parsed: a
+        broken fallback would parse the default and stamp "0" over it.
+
+        Note this pins the effective env name, not the ``env_name=`` keyword --
+        EnvArgumentParser derives the same name from the ``--flag`` when env_name is
+        omitted, so dropping the keyword here would be invisible to any test.
+        """
+        os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"] = "1"
+        sys.argv = ["prog"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertTrue(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "1")
+
+    def test_sleep_release_collective_memory_explicit_zero_disables(self):
+        """Explicit 0 keeps the switch off, and overrides an env var asking for on."""
+        sys.argv = ["prog", "--sleep_release_collective_memory", "0"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertFalse(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "0")
+
+        # Command line wins over the environment (same precedence as every other arg).
+        os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"] = "1"
+        sys.argv = ["prog", "--sleep_release_collective_memory", "0"]
+
+        wms = self._setup_args_and_reload()
+
+        self.assertFalse(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "0")
+
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
         # Set environment variables

@@ -21,6 +21,23 @@ bool invokeHookNoThrow(const char* name, Hook& hook, Args&&... args) {
     return false;
 }
 
+std::string hookFailureMessage(const SleepHooks& hooks, const char* hook_name, const char* fallback) {
+    if (!hooks.hookFailureDetail) {
+        return fallback;
+    }
+    try {
+        const std::string detail = hooks.hookFailureDetail(hook_name);
+        if (!detail.empty()) {
+            return std::string(fallback) + ": " + detail;
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("sleep lifecycle hook %s diagnostic failed: %s", hook_name, e.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("sleep lifecycle hook %s diagnostic failed with unknown exception", hook_name);
+    }
+    return fallback;
+}
+
 }  // namespace
 
 AdmissionLease::~AdmissionLease() {
@@ -340,7 +357,7 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     if (ok && hooks_.releaseRestorableGpuMemory) {
         ok = invokeHookNoThrow("releaseRestorableGpuMemory", hooks_.releaseRestorableGpuMemory, opt);
         if (!ok) {
-            setLastError("releaseRestorableGpuMemory failed");
+            setLastError(hookFailureMessage(hooks_, "releaseRestorableGpuMemory", "releaseRestorableGpuMemory failed"));
         }
     }
 
@@ -432,7 +449,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     if (!opt.commit_only && ok && hooks_.restoreRestorableGpuMemory) {
         ok = invokeHookNoThrow("restoreRestorableGpuMemory", hooks_.restoreRestorableGpuMemory);
         if (!ok) {
-            setLastError("restoreRestorableGpuMemory failed");
+            setLastError(hookFailureMessage(hooks_, "restoreRestorableGpuMemory", "restoreRestorableGpuMemory failed"));
         }
     }
     if (!opt.commit_only && ok && hooks_.restoreKvMemoryBackingAndResetMetadata) {

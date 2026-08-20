@@ -25,6 +25,12 @@ py_test(
 )
 
 py_test(
+    name = "weight_manager_collectives_test",
+    srcs = ["weight_manager_collectives_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "weight_memory_saver_gpu_test",
     srcs = ["weight_memory_saver_gpu_test.py"],
     deps = py_test_deps,

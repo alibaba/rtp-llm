@@ -7,6 +7,7 @@ to be un-importable with a None sys.modules entry), so the tests validate:
   - region(tag="weights", enable_cpu_backup=True) call forwarding
   - pause/resume forwarding + is_paused state machine (idempotency)
   - region re-entrancy (nested regions enter the real region once)
+  - the collective-memory-release switch (env var vs runtime override precedence)
 """
 
 import contextlib
@@ -84,9 +85,16 @@ class _FakeProcess:
 
 class WeightMemorySaverTestBase(unittest.TestCase):
     def setUp(self) -> None:
+        # Every env var this module reads must be saved/restored here: a test that
+        # sets one and does not have it restored leaks into every later test in the
+        # process (they would silently exercise a different switch state than they
+        # believe). ENV_LEVEL / ENV_COLLECTIVE_RELEASE are included for that reason,
+        # not because a specific test needs them.
         self._saved_env = {
             wms.ENV_SWITCH: os.environ.get(wms.ENV_SWITCH),
             wms.LEGACY_ENV_SWITCH: os.environ.get(wms.LEGACY_ENV_SWITCH),
+            wms.ENV_LEVEL: os.environ.get(wms.ENV_LEVEL),
+            wms.ENV_COLLECTIVE_RELEASE: os.environ.get(wms.ENV_COLLECTIVE_RELEASE),
         }
         self._saved_module = sys.modules.get(_TMS_MODULE)
         self._had_module = _TMS_MODULE in sys.modules
@@ -556,6 +564,78 @@ class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
             self.applied[-1],
             "garbage_collection_threshold:0.9,expandable_segments:True",
         )
+
+
+class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):
+    """``release_collective_memory()`` -- whether sleep also releases the NCCL
+    communicator's GPU memory (ncclCommSuspend/Resume).
+
+    Deliberately independent of the sleep level and of the sleep-mode switch: it
+    carries costs the level does not (equal pinned host memory, seconds on each of
+    sleep/wake, NCCL >= 2.29.7), so it is read on its own. Defaults to off, because
+    sleeping with the communicator resident is exactly today's behaviour.
+
+    The CLI arg has no C++ RuntimeConfig field, so the env var (mirrored by
+    server_args.setup_args) and the explicit override installed by
+    configure_from_runtime are the only two inputs -- both covered here.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ.pop(wms.ENV_COLLECTIVE_RELEASE, None)
+
+    def test_default_is_off(self) -> None:
+        self.assertFalse(wms.release_collective_memory())
+
+    def test_env_one_enables(self) -> None:
+        os.environ[wms.ENV_COLLECTIVE_RELEASE] = "1"
+        self.assertTrue(wms.release_collective_memory())
+
+    def test_env_zero_disables(self) -> None:
+        os.environ[wms.ENV_COLLECTIVE_RELEASE] = "0"
+        self.assertFalse(wms.release_collective_memory())
+
+    def test_env_garbage_is_off(self) -> None:
+        # Anything that is not exactly "1" must read as off: a typo'd value must not
+        # silently opt a deployment into the pinned-host / extra-latency costs.
+        for value in ("", "true", "True", "yes", "2", "on", " 1"):
+            with self.subTest(value=value):
+                os.environ[wms.ENV_COLLECTIVE_RELEASE] = value
+                self.assertFalse(wms.release_collective_memory())
+
+    def test_runtime_override_enables_over_env_off(self) -> None:
+        os.environ[wms.ENV_COLLECTIVE_RELEASE] = "0"
+        wms.configure_from_runtime(True, release_collective_memory=True)
+        self.assertTrue(wms.release_collective_memory())
+
+    def test_runtime_override_disables_over_env_on(self) -> None:
+        os.environ[wms.ENV_COLLECTIVE_RELEASE] = "1"
+        wms.configure_from_runtime(True, release_collective_memory=False)
+        self.assertFalse(wms.release_collective_memory())
+
+    def test_runtime_none_leaves_env_in_charge(self) -> None:
+        os.environ[wms.ENV_COLLECTIVE_RELEASE] = "1"
+        wms.configure_from_runtime(True)
+        self.assertTrue(wms.release_collective_memory())
+
+        os.environ[wms.ENV_COLLECTIVE_RELEASE] = "0"
+        wms.configure_from_runtime(True, sleep_mode_level=2)
+        self.assertFalse(wms.release_collective_memory())
+
+    def test_independent_of_sleep_level(self) -> None:
+        # The level selects what happens to the weights; this switch selects whether
+        # the communicator buffers go too. Level 2 must not imply the release.
+        wms.configure_from_runtime(True, sleep_mode_level=2)
+        self.assertEqual(wms.sleep_mode_level(), 2)
+        self.assertFalse(wms.release_collective_memory())
+
+    def test_reset_for_testing_clears_override(self) -> None:
+        wms.configure_from_runtime(True, release_collective_memory=True)
+        self.assertTrue(wms.release_collective_memory())
+        wms._reset_for_testing()
+        self.assertIsNone(wms._collective_release_override)
+        # Back to env-driven (env is off in this class's setUp).
+        self.assertFalse(wms.release_collective_memory())
 
 
 class PausableAllocGuardTest(WeightMemorySaverTestBase):
