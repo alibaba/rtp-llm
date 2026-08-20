@@ -52,9 +52,15 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
     start_check_seq_length_ = seq_length_;
 
     size_t max_token_num = max_seq_len_ + extra_reserve_token_num;
+    if (generate_input->generate_config->max_new_tokens > 0) {
+        const size_t request_max_token_num = static_cast<size_t>(seq_length_)
+                                             + generate_input->generate_config->max_new_tokens
+                                             + extra_reserve_token_num;
+        max_token_num = std::min(max_token_num, request_max_token_num);
+    }
 
     complete_token_ids_ = torch::zeros({(int64_t)max_batch_size_, (int64_t)max_token_num}, torch::kInt32);
-    for (int i = 0; i < batch_size_; ++i) {
+    for (int i = 0; i < max_batch_size_; ++i) {
         memcpy(complete_token_ids_.data_ptr<int32_t>() + i * max_token_num,
                generate_input->input_ids.data_ptr<int32_t>(),
                generate_input->input_ids.nbytes());
