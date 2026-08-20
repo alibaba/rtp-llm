@@ -409,8 +409,40 @@ RTP 侧（`5a393bedda` CSA、`da03d2b19c` HCA）：bazel
 各完成 3 条 greedy 请求。两侧输出均语言连贯且关键答案一致（"Paris"、"2+2=4"）；
 200-token 长生成前约 160 字符逐字相同后在近平局 token 处分岔，之后各自连贯。
 0/3 文本逐字一致——与框架 smoke 对 cp2/cp4/tp1 各用 golden 的既有现象同类，
-文本级验收应采用 per-配置 golden；logits 级定量对照在排队等空卡
-（`docs/dsv4_mega_e2e/watch_and_run_logits.sh`）。
+文本级验收应采用 per-配置 golden；logits 级定量对照见下节。
+
+### 2026-08-20：现成 smoke golden 用例 × Mega 三方对照与 logits 定量
+
+用框架自带 smoke（`q_r_v4_flash_sm100_arm.json`：5 条 query 带 golden——2 条
+greedy、1 条 4261-token 长上下文、2 条 507 错误路径）在本机对同一 checkpoint 分别
+跑 baseline 与 Mega（args 完全一致，见 §8.4 复现要点）。golden 生成环境为
+ARM + 7 月 Flash 快照，本机为 x86 + `-0731` 快照：
+
+| query | golden | baseline（本机） | Mega（本机） |
+| --- | --- | --- | --- |
+| Paris | `...is Paris.` | `...is **Paris**.` | 与 baseline 逐字一致 |
+| 2+2= | `That's a simple...` | `2 + 2 = **4**.` | `2 + 2 = 4.`（尾 token 近平局） |
+| 4261-token 长上下文 | `DSV4_TP1_LONG_CONTEXT_OK` | 同 | **三方逐字全等** |
+| 507 错误路径 x2 | — | 通过 | 通过 |
+
+最重的长上下文 case（长 prefill -> Mega CSA+HCA decode -> 对抗式指令跟随）三方
+全等；短 case 的 golden 漂移连 baseline 也复现不了（环境/快照差异），符合框架
+per-环境 golden 的既有认知。
+
+logits 级定量（`run_e2e_logits.py`，服务器返回**最后一步** logits，只统计两侧
+生成前缀一致的有效样本）：
+
+- prefill / 底噪：`max_new_tokens=1` 时（返回值即 prefill 输出）4 条 prompt
+  baseline vs mega 与 baseline vs baseline 复跑全部 `calc_diff=0.0`（bitwise）——
+  prefill 运行间确定，且 Mega 开关对 prefill 零扰动。
+- decode 第 8 步（经 7 步 Mega decode 累积，有效样本 3/4）：`calc_diff`
+  `6.7e-04`~`2.5e-03`，top1 全部一致（margin 0.13~10.7），低于框架 smoke 数值档
+  `isclose(1e-2)` 一个量级。
+
+端到端延时（同卡背靠背，B=1 串行、**eager**（`--enable_cuda_graph 0`）、共享卡）：
+全量 Flash decode 每 token `135 -> 91 ms`（约 **-31%**）；prefill 不变
+（137.9 vs 137.8 ms）。裁层 Pro 4 层约 `-19%`。注意 eager 口径放大了 kernel
+launch 节省，生产 CUDA Graph + batch 口径需按 §6 缺口 6 另测。
 
 ## 6. 端到端剩余缺口
 
@@ -573,6 +605,23 @@ bazelisk test --config=cuda13 --jobs=64 --test_output=summary \
 ```
 
 CPU/静态回归与端到端见第 5 节与 8.3。
+
+复用现成 smoke golden 用例做 baseline/Mega 对照（§5 2026-08-20 的做法）：
+`internal_source/rtp_llm/test/smoke/BUILD` 中的 `v4_flash_native_fp4_fp8_tp1_*`
+处于注释状态且 args 已过时，本地启用时需要三处适配（均不提交）：
+
+1. task json 的 `model_path`（`/mnt/nas1/hf/DeepSeek-V4-Flash` 在部分机器是指向
+   他机 `/data1` 的断链）指到本机可用的 checkpoint；
+2. `--seq_size_per_block 64 -> 256`（当前分支 C++ 断言要求 >=128 且 128 的倍数）、
+   `--max_seq_len 512 -> 8192`（长上下文 query 有 4261 token）、补 `--fp8_kv_cache 1`；
+3. bazel 命令加 §8.3 的 8 个 JIT cache `--test_env`（smoke 子进程同样受
+   `/tmp/rtp-llm` 权限问题影响）。
+
+Mega 轮在 target 的 `envs` 里加 `DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`。golden 是
+旧环境产物（见 §5），判据看两轮 actual 的互相对照（bazel testlogs 的
+`test.outputs/outputs.zip` 里有每条 query 的 actual dump）；正式收编需按框架惯例
+生成本环境 per-配置 golden。smoke 宏会自动注入 `DETERMINISTIC_GEMM=1` 与
+`DSV4_INDEXER_TOPK_CANONICALIZE=1`。
 
 ### 8.5 Benchmark
 

@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Logits-level normal-vs-mega compare (three steps: baseline|mega|compare).
+"""Logits-level normal-vs-mega compare (steps: baseline|baseline2|mega|compare).
 
 Shares configuration (E2E_CKPT/E2E_GPU/...) with run_e2e_compare.py.
+
+The server returns the LAST decode step's logits, so a comparison is only
+valid when both runs generated identical token prefixes before that step
+(compare prints prefix_match per query; ignore rows where it is False).
+baseline2 reruns the mega-off config to measure the run-to-run noise floor:
+compare logits_baseline logits_baseline2.
 """
 
 import json
@@ -11,7 +17,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_e2e_compare as e2e  # noqa: E402
 
-PROMPTS = ["What is the capital of France?", "2+2="]
+PROMPTS = [
+    "What is the capital of France?",
+    "2+2=",
+    "Write a detailed step-by-step explanation of how paged attention "
+    "works in LLM inference engines.",
+    "The quick brown fox jumps over the lazy dog. Translate to French:",
+]
 
 
 def query_logits(tag: str) -> list:
@@ -23,7 +35,7 @@ def query_logits(tag: str) -> list:
             {
                 "prompt": prompt,
                 "generate_config": {
-                    "max_new_tokens": 4,
+                    "max_new_tokens": 8,
                     "top_k": 1,
                     "top_p": 0,
                     "return_logits": True,
@@ -63,11 +75,11 @@ def find_logits(payload):
     return None
 
 
-def compare() -> None:
+def compare(a: str = "logits_baseline", b: str = "logits_mega") -> None:
     import numpy as np
 
-    base = json.loads((e2e.OUT_DIR / "logits_baseline.logits.json").read_text())
-    mega = json.loads((e2e.OUT_DIR / "logits_mega.logits.json").read_text())
+    base = json.loads((e2e.OUT_DIR / f"{a}.logits.json").read_text())
+    mega = json.loads((e2e.OUT_DIR / f"{b}.logits.json").read_text())
     for index, (x, y) in enumerate(zip(base, mega)):
         lx, ly = find_logits(x), find_logits(y)
         if lx is None or ly is None:
@@ -82,7 +94,13 @@ def compare() -> None:
         ax = ax.reshape(-1, vocab)
         ay = ay.reshape(-1, vocab)
         steps = min(len(ax), len(ay))
-        print(f"query {index} ({PROMPTS[index]!r}): {steps} steps")
+        rx = str(x.get("response"))
+        ry = str(y.get("response"))
+        print(
+            f"query {index} ({PROMPTS[index]!r}): {steps} steps; "
+            f"prefix_match={rx[:-8] == ry[:-8]} "
+            f"resp_a={rx[:48]!r} resp_b={ry[:48]!r}"
+        )
         for t in range(steps):
             xa, ya = ax[t], ay[t]
             denom = float((xa * xa + ya * ya).sum())
@@ -101,7 +119,9 @@ if __name__ == "__main__":
     mode = sys.argv[1]
     if mode == "baseline":
         run("logits_baseline", {"DSV4_MEGA_CSA": "0", "DSV4_MEGA_HCA": "0"})
+    elif mode == "baseline2":  # run-to-run noise floor probe
+        run("logits_baseline2", {"DSV4_MEGA_CSA": "0", "DSV4_MEGA_HCA": "0"})
     elif mode == "mega":
         run("logits_mega", {"DSV4_MEGA_CSA": "1", "DSV4_MEGA_HCA": "1"})
     elif mode == "compare":
-        compare()
+        compare(*sys.argv[2:4])
