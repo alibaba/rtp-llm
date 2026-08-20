@@ -221,6 +221,13 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 
 }  // namespace
 
+torch::Tensor MtpExecutor::snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
+    if (!tensor.defined() || tensor.is_cuda()) {
+        return tensor;
+    }
+    return toCudaWithHostHold(tensor.clone().pin_memory(), holder);
+}
+
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
@@ -863,17 +870,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         global_model_input = model_input;
     }
     if (cp_enabled && isTpRank0()) {
-        // Materialize both copies now: an async H2D of a live host buffer could
-        // land after handleInputs rewrote it to the rank-local chunk, which
-        // would capture the split lengths and make the restore below a no-op.
-        auto snapshot = [](const torch::Tensor& tensor) {
-            if (!tensor.defined()) {
-                return tensor;
-            }
-            return tensor.is_cuda() ? tensor.clone() : tensor.to(torch::kCUDA, /*non_blocking=*/false);
-        };
-        global_model_input.combo_tokens  = snapshot(model_input.combo_tokens);
-        global_model_input.input_lengths = snapshot(model_input.input_lengths);
+        global_model_input.combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        global_model_input.input_lengths = snapshotMutableHostInputToCuda(model_input.input_lengths, buffer_holder_);
     }
 
     // target model prefill
