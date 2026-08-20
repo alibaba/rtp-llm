@@ -74,11 +74,13 @@ public:
 
     bool hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const;
 
-    void referenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const;
-    void unreferenceBlocks(const MultiNodeResource& resource, BlockRefType ref_type) const;
+    void referenceBlocks(const MultiNodeResource& resource) const;
+    void unreferenceBlocks(const MultiNodeResource& resource) const;
+    void referenceBlocks(const MultiNodeResource& resource, BlockTreeRefType ref_type) const;
+    void unreferenceBlocks(const MultiNodeResource& resource, BlockTreeRefType ref_type) const;
 
-    BlockIdxType allocateSingleBlock(Tier tier, BlockRefType ref_type);
-    void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const;
+    BlockIdxType allocateSingleBlock(Tier tier, BlockTreeRefType ref_type);
+    void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const;
 
 private:
     std::vector<DeviceBlockPoolPtr>         device_pools_;

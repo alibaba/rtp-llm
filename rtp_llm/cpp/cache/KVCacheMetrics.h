@@ -19,8 +19,8 @@ struct CachePoolMetricsSnapshot {
     size_t      available_blocks       = 0;
     size_t      reserve_blocks         = 0;
     size_t      request_ref_blocks     = 0;
-    size_t      connector_ref_blocks   = 0;
     size_t      block_cache_ref_blocks = 0;
+    size_t      load_ref_blocks        = 0;
     size_t      eviction_ref_blocks    = 0;
     size_t      store_ref_blocks       = 0;
     float       used_ratio             = 0.0f;

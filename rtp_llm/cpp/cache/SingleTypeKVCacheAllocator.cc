@@ -88,15 +88,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             load_context->abortPending();
         }
         load_context.reset();
-        BlockIndicesType valid_blocks;
-        for (const auto block : block_ids_0.blocks()) {
-            if (!isNullBlockIdx(block)) {
-                valid_blocks.push_back(block);
-            }
-        }
-        if (!valid_blocks.empty()) {
-            full_kv_cache_group_->release(valid_blocks, BlockRefType::REQUEST);
-        }
+        full_kv_cache_group_->unreference(block_ids_0.blocks());
         block_ids_0.resize(0);
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(0);
         MallocResult result{false, 0};
@@ -348,22 +340,18 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
             block_ids.resize(original_num);
         }
     }
-    if (!blocks_to_free.empty()) {
-        full_kv_cache_group_->release(blocks_to_free, BlockRefType::REQUEST);
-    }
+    full_kv_cache_group_->unreference(blocks_to_free);
     return {false, 0};
 }
 
 void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     auto& kv_cache_resource = free_info.batch_kv_cache_resource;
-
     if (kv_cache_resource->curBlocksNum() == 0) {
         return;
     }
-
     auto all_blocks = kv_cache_resource->getAllBatchBlocks(0);
     for (const auto& blocks : all_blocks) {
-        full_kv_cache_group_->release(blocks, BlockRefType::REQUEST);
+        full_kv_cache_group_->unreference(blocks);
     }
     kv_cache_resource->clearBlocks();
 }
@@ -472,8 +460,8 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     }
 
     auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
-    auto deleter               = [self = shared_from_this(), is_connector](KVCacheResource* resource) {
-        self->decrKVCacheRef(*resource, is_connector);
+    auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
+        self->decrKVCacheRef(*resource);
         delete resource;
     };
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
@@ -508,28 +496,17 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    const BlockRefType ref_type = is_connector ? BlockRefType::STORAGE_BACKEND : BlockRefType::REQUEST;
-    full_kv_cache_group_->KVCacheGroup::reference(real_blocks, ref_type);
+    full_kv_cache_group_->reference(real_blocks);
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
     selected_resource->cacheKeys() = std::move(selected_cache_keys);
 
     return selected_resource;
 }
 
-void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {
+void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource) {
     RTP_LLM_CHECK_WITH_INFO(
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
-
-    BlockIndicesType blocks_to_free;
-    for (const auto block : kvcache_resource.blocks(0)) {
-        if (block > 0 && !isNullBlockIdx(block)) {
-            blocks_to_free.push_back(block);
-        }
-    }
-    if (!blocks_to_free.empty()) {
-        const BlockRefType ref_type = is_connector ? BlockRefType::STORAGE_BACKEND : BlockRefType::REQUEST;
-        full_kv_cache_group_->release(blocks_to_free, ref_type);
-    }
+    full_kv_cache_group_->unreference(kvcache_resource.blocks(0));
 }
 
 // Update kv blocks for beam search or multi-return sequences.
@@ -561,7 +538,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count == 0) {
-            full_kv_cache_group_->release(kv_cache_resource->blocks(old_batch_idx, 0), BlockRefType::REQUEST);
+            full_kv_cache_group_->unreference(kv_cache_resource->blocks(old_batch_idx, 0));
         } else if (fork_count > 1 && copy_last_block) {
             new_blocks_num += static_cast<uint32_t>(fork_count - 1);
         }
@@ -598,7 +575,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
 
             if (copy_last_block && !block_ids.blocks().empty()) {
                 const int old_block = block_ids.popBack();
-                full_kv_cache_group_->release({old_block}, BlockRefType::REQUEST);
+                full_kv_cache_group_->unreference({old_block});
 
                 // allocate exactly one new block via kvCacheGroup
                 int seq_len_target =

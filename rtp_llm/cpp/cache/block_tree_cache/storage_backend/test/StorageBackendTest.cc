@@ -32,9 +32,9 @@ private:
     bool old_;
 };
 
-class TestBlockPool: public IBlockPool {
+class TestBlockPool: public DeviceBlockPool {
 public:
-    TestBlockPool(): IBlockPool(makeConfig()) {
+    TestBlockPool(): DeviceBlockPool(makeConfig()) {
         markInitialized();
     }
 
@@ -43,11 +43,17 @@ public:
     }
 
 private:
-    static std::shared_ptr<const BlockPoolConfigBase> makeConfig() {
-        auto config                  = std::make_shared<BlockPoolConfigBase>();
+    static std::shared_ptr<const DeviceBlockPoolConfig> makeConfig() {
+        auto config                  = std::make_shared<DeviceBlockPoolConfig>();
         config->pool_type            = BlockPoolType::DEVICE;
         config->pool_name            = "storage_backend_test";
         config->physical_block_count = 8;
+        MemoryLayoutConfig layout;
+        layout.block_num                = 8;
+        layout.layer_num                = 1;
+        layout.kv_block_stride_bytes    = 16;
+        layout.kv_block_pool_size_bytes = 128;
+        config->memory_layouts.push_back(layout);
         return config;
     }
 };
@@ -269,7 +275,7 @@ std::shared_ptr<const CacheTopology> makeSharedPoolTopology() {
     return CacheTopology::create(std::move(groups), {{0, {"group_0", "group_1"}}});
 }
 
-bool initBackend(TestBackend& backend, const std::shared_ptr<IBlockPool>& pool) {
+bool initBackend(TestBackend& backend, const DeviceBlockPoolPtr& pool) {
     return backend.init(
         makeTopology(),
         {pool},
@@ -339,7 +345,7 @@ TEST(StorageBackendTest, ExecutorStartFailurePropagatesFromInit) {
 TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
@@ -351,7 +357,7 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
         EXPECT_FALSE(success);
     });
     EXPECT_EQ(read_completions, 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
 
     size_t match_completions = 0;
     backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) {
@@ -361,7 +367,7 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
     EXPECT_EQ(match_completions, 1u);
 
     backend.write(backend.prepareWrite(makeRequest(block)));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
 
     executor->setReject(false);
     executor->setThrowOnSubmit(true);
@@ -370,14 +376,14 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
         EXPECT_FALSE(success);
     });
     EXPECT_EQ(match_completions, 2u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    pool->decRef(block);
     backend.shutdown();
 }
 
 TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
@@ -387,26 +393,26 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     backend.read(makeRequest(block), nullptr, [&](bool success) { read_success = success; });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_FALSE(read_success);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
 
     backend.failNextWrite();
     backend.write(backend.prepareWrite(makeRequest(block)));
     EXPECT_EQ(executor->runAll(), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
 
     backend.failNextMatch();
     bool match_success = true;
     backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) { match_success = success; });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_FALSE(match_success);
-    pool->decRef(block, BlockRefType::REQUEST);
+    pool->decRef(block);
     backend.shutdown();
 }
 
 TEST(StorageBackendTest, DuplicateExecutorInvocationCompletesExactlyOnce) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     auto executor = std::make_shared<HoldingExecutor>();
     executor->setDuplicate(true);
     TestBackend backend(/*init_result=*/true, executor);
@@ -420,8 +426,8 @@ TEST(StorageBackendTest, DuplicateExecutorInvocationCompletesExactlyOnce) {
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(completions, 1u);
     EXPECT_EQ(backend.readCalls(), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
     backend.shutdown();
 }
 
@@ -490,7 +496,7 @@ TEST(StorageBackendTest, ShutdownFromCompletionIsRejectedWithoutDeadlock) {
 TEST(StorageBackendTest, ReadAfterShutdownReleasesPin) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     TestBackend backend;
     ASSERT_TRUE(backend.init(
         makeTopology(),
@@ -501,14 +507,14 @@ TEST(StorageBackendTest, ReadAfterShutdownReleasesPin) {
     bool success = true;
     backend.read(makeRequest(block), nullptr, [&](bool current_success) { success = current_success; });
     EXPECT_FALSE(success);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, UnsubmittedWriteTasksReleasePinsAcrossShutdown) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     TestBackend backend;
     ASSERT_TRUE(backend.init(
         makeTopology(),
@@ -516,15 +522,16 @@ TEST(StorageBackendTest, UnsubmittedWriteTasksReleasePinsAcrossShutdown) {
         [](int, int, int) { return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}}; }));
 
     auto prepared_before_shutdown = backend.prepareWrite(makeRequest(block));
+    EXPECT_EQ(pool->refCount(block), 2u);
     backend.shutdown();
     prepared_before_shutdown = {};
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
 
     auto prepared_after_shutdown = backend.prepareWrite(makeRequest(block));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
     prepared_after_shutdown = {};
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, EmptyPerKeyRowsDoNotCreateWriteTask) {
@@ -558,26 +565,26 @@ TEST(StorageBackendTest, InitPropagatesDerivedFailure) {
 TEST(StorageBackendTest, WritePinsEachPhysicalBlockOnceUntilCompletion) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
 
     auto task = backend.prepareWrite(makeRequest(block, 2));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
     backend.write(std::move(task));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(backend.writeHandleCount(), 2u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
     backend.shutdown();
 }
 
 TEST(StorageBackendTest, SharedPoolPinsAndReleasesPhysicalBlockOnce) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(backend.init(
@@ -587,33 +594,33 @@ TEST(StorageBackendTest, SharedPoolPinsAndReleasesPhysicalBlockOnce) {
 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{0, block}, {1, block}}}};
     backend.write(backend.prepareWrite(std::move(request)));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_EQ(executor->runAll(), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
     backend.shutdown();
 }
 
 TEST(StorageBackendTest, UninitializedBackendRejectsTaskAndReleasesPinnedSource) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     TestBackend initialized_backend;
     ASSERT_TRUE(initBackend(initialized_backend, pool));
     auto task = initialized_backend.prepareWrite(makeRequest(block));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
 
     TestBackend uninitialized_backend;
     EXPECT_ANY_THROW(uninitialized_backend.write(std::move(task)));
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
     initialized_backend.shutdown();
 }
 
 TEST(StorageBackendTest, ReadPinsTargetsUntilCompletion) {
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
@@ -624,12 +631,12 @@ TEST(StorageBackendTest, ReadPinsTargetsUntilCompletion) {
         completed = true;
     });
     EXPECT_FALSE(completed);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_TRUE(completed);
     EXPECT_EQ(backend.readCalls(), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
     backend.shutdown();
 }
 

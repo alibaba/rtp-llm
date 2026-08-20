@@ -162,8 +162,6 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
         insert_result = tree_->insertNode(task.cache_keys, resources, true);
     }
 
-    // Publication owns the target through BLOCK_CACHE; temporary STORE holders
-    // are no longer needed once every target has been installed.
     store_task_runner_.releaseTaskResources(task);
 
     if (insert_result.accepted_resource_count > 0) {

@@ -486,15 +486,15 @@ void BlockTreeEvictor::completeEvict(const TransferDescriptor& desc) {
     if (desc.target_tier != Tier::NONE) {
         MultiNodeResource target_holder{desc.group_set_id, desc.target_tier, {{desc.node, desc.target_blocks}}};
         resource.setBlocks(desc.target_tier, desc.target_blocks);
-        group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
-        group_set->unreferenceBlocks(target_holder, BlockRefType::EVICTION);
+        group_set->referenceBlocks(target_holder, BlockTreeRefType::CACHE);
+        group_set->unreferenceBlocks(target_holder, BlockTreeRefType::EVICTION);
     }
 
     // DEMOTING is the operation's ownership token. Release its saved source
     // cache hold before clearing the corresponding resource tier. The target is
     // installed while the state is still non-IDLE, then IDLE is published last.
     const MultiNodeResource source_holder{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
-    group_set->unreferenceBlocks(source_holder, BlockRefType::BLOCK_CACHE);
+    group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
     resource.evictFromTier(desc.source_tier);
     resource.transfer_state = GroupSetTransferState::IDLE;
     RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),
@@ -547,7 +547,7 @@ bool BlockTreeEvictor::allocateTargets(EvictionTask& task) {
 
     const auto allocate_target = [this](TransferDescriptor& desc) {
         BlockIdxType target =
-            tree_->groupSets()[desc.group_set_id]->allocateSingleBlock(desc.target_tier, BlockRefType::EVICTION);
+            tree_->groupSets()[desc.group_set_id]->allocateSingleBlock(desc.target_tier, BlockTreeRefType::EVICTION);
         if (isNullBlockIdx(target)) {
             return false;
         }
@@ -641,7 +641,7 @@ void BlockTreeEvictor::discardDetachedTransfer(const TransferDescriptor& transfe
     const GroupSetPtr&      group_set = tree_->groupSets()[transfer_desc.group_set_id];
     const MultiNodeResource source_holder{
         transfer_desc.group_set_id, transfer_desc.source_tier, {{transfer_desc.node, transfer_desc.source_blocks}}};
-    group_set->unreferenceBlocks(source_holder, BlockRefType::BLOCK_CACHE);
+    group_set->unreferenceBlocks(source_holder, BlockTreeRefType::CACHE);
     resource.evictFromTier(transfer_desc.source_tier);
     resource.transfer_state    = GroupSetTransferState::IDLE;
     resource.transfer_detached = false;
@@ -653,7 +653,7 @@ void BlockTreeEvictor::releaseTargetBlocks(const TransferDescriptor& eviction_de
     }
     auto& group_set = tree_->groupSets()[eviction_desc.group_set_id];
     for (auto block : eviction_desc.target_blocks) {
-        group_set->releaseSingleBlock(eviction_desc.target_tier, block, BlockRefType::EVICTION);
+        group_set->releaseSingleBlock(eviction_desc.target_tier, block, BlockTreeRefType::EVICTION);
     }
 }
 

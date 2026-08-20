@@ -62,7 +62,7 @@ private:
                                                     int  reserve_step,
                                                     bool enable_reuse_cache,
                                                     int  target_batch_size) const override;
-    void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
+    void decrKVCacheRef(const KVCacheResource& kvcache_resource) override;
     bool materializeInitialBlocks(const MallocInfo& malloc_info,
                                   LoadAsyncContext* context,
                                   size_t            matched_blocks,

@@ -302,6 +302,11 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
     return block.has_value() ? *block : NULL_BLOCK_IDX;
 }
 
+void releasePoolBlock(IBlockPool& pool, BlockIdxType block) {
+    pool.incTreeRef(block, BlockTreeRefType::STORE);
+    pool.decTreeRef(block, BlockTreeRefType::STORE);
+}
+
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
                                   const std::vector<BlockIdxType>& device_blocks,

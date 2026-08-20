@@ -25,8 +25,6 @@ public:
                        int                        reserve_step         = 0,
                        std::vector<size_t>*       backfilled_positions = nullptr,
                        const RequiredPositions&  required_positions = {}) override;
-    void release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) override;
-    void free(const BlockIndicesType& block_indices) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
@@ -46,7 +44,6 @@ public:
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false,
                                  const RequiredPositions& required_positions = {}) const override;
-    void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
 private:
 };

@@ -515,8 +515,8 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(total_blocks_metric, "rtp_llm_kv_cache_pool_total_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(reserve_blocks_metric, "rtp_llm_kv_cache_pool_reserve_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(request_ref_blocks_metric, "rtp_llm_kv_cache_pool_request_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(connector_ref_blocks_metric, "rtp_llm_kv_cache_pool_connector_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(block_cache_ref_blocks_metric, "rtp_llm_kv_cache_pool_block_cache_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_pool_load_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_metric, "rtp_llm_kv_cache_pool_eviction_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_pool_store_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_pool_used_ratio");
@@ -532,8 +532,8 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
     REPORT_MUTABLE_METRIC(total_blocks_metric, collector->total_blocks);
     REPORT_MUTABLE_METRIC(reserve_blocks_metric, collector->reserve_blocks);
     REPORT_MUTABLE_METRIC(request_ref_blocks_metric, collector->request_ref_blocks);
-    REPORT_MUTABLE_METRIC(connector_ref_blocks_metric, collector->connector_ref_blocks);
     REPORT_MUTABLE_METRIC(block_cache_ref_blocks_metric, collector->block_cache_ref_blocks);
+    REPORT_MUTABLE_METRIC(load_ref_blocks_metric, collector->load_ref_blocks);
     REPORT_MUTABLE_METRIC(eviction_ref_blocks_metric, collector->eviction_ref_blocks);
     REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
     REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
