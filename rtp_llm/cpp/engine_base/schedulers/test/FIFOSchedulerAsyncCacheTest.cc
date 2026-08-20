@@ -166,6 +166,22 @@ protected:
         cache_manager_->allocator_ = mock_allocator_;
     }
 
+    void installRetryableAllocator() {
+        real_allocator_ = cache_manager_->allocator_;
+        mock_allocator_ = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        initial_malloc_calls_ = 0;
+
+        ON_CALL(*mock_allocator_, totalBlocksNum()).WillByDefault(testing::Return(64));
+        ON_CALL(*mock_allocator_, getNeedBlocks(testing::_)).WillByDefault(testing::Return(1));
+        ON_CALL(*mock_allocator_, initMallocForCommonLen(testing::_))
+            .WillByDefault(testing::Invoke([this](const MallocInfo&) {
+                ++initial_malloc_calls_;
+                return MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+            }));
+
+        cache_manager_->allocator_ = mock_allocator_;
+    }
+
 protected:
     autil::EnvGuard                                          perf_scope;
     CacheConfig                                              cache_config_;
@@ -378,6 +394,43 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_DoesNotSpinForLoadingCache
     ASSERT_TRUE(second.ok());
     ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_FALSE(scheduler->waitPredicate());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testRetryableKVShortageDoesNotSpinAndIsPolled) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3},
+                                  /*reuse_cache=*/true,
+                                  /*enable_host_cache=*/false,
+                                  /*max_new_tokens=*/1,
+                                  /*variable_num_beams=*/{},
+                                  RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installRetryableAllocator();
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    EXPECT_TRUE(first.value().empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(initial_malloc_calls_, 1u);
+    EXPECT_FALSE(scheduler->waitPredicate());
+
+    std::promise<absl::StatusOr<std::list<GenerateStreamPtr>>> promise;
+    auto                                                       future = promise.get_future();
+    std::thread schedule_thread([&] { promise.set_value(scheduler->schedule()); });
+
+    EXPECT_EQ(future.wait_for(std::chrono::milliseconds(2)), std::future_status::timeout);
+    const auto wait_status = future.wait_for(std::chrono::milliseconds(250));
+    if (wait_status != std::future_status::ready) {
+        scheduler->stop();
+    }
+    schedule_thread.join();
+
+    ASSERT_EQ(wait_status, std::future_status::ready);
+    auto second = future.get();
+    ASSERT_TRUE(second.ok());
+    EXPECT_TRUE(second.value().empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(initial_malloc_calls_, 2u);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvictDoneStreams_HandlesExternalError) {
