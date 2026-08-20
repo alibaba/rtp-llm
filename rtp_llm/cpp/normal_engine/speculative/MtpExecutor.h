@@ -209,6 +209,8 @@ protected:
 
     void releaseAllModelBuffers();
 private:
+    static torch::Tensor snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder);
+
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
     std::unique_ptr<ModelBase>               model_;
