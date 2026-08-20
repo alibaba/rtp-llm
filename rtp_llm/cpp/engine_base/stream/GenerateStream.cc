@@ -583,6 +583,19 @@ void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
+        // Forensic log: timeout latching used to leave no trace in engine logs.
+        // Expose stream progress (iterate count, token counts, state) so that slow
+        // generation, stalled streams and finished-but-not-exiting streams become
+        // distinguishable from each other when triaging decode-side anomalies.
+        RTP_LLM_LOG_WARNING("event=generate_timeout_forensic request_id=%ld timeout_ms=%ld running_time_ms=%ld "
+                            "iterate_count=%zu output_token_len=%zu input_token_len=%d state=%d",
+                            generate_input_ ? generate_input_->request_id : -1,
+                            timeout_ms,
+                            running_time_ms,
+                            iter_count_,
+                            outputTokenLen(),
+                            inputLength(),
+                            static_cast<int>(getStatus()));
         reportEvent(StreamEvents::Error,
                     ErrorCode::GENERATE_TIMEOUT,
                     "query has been running " + std::to_string(running_time_ms) + " ms, "
@@ -739,6 +752,24 @@ StreamState GenerateStream::moveToNext() {
     // notify one thread waiting for stream completion
     if (state == StreamState::FINISHED) {
         if (should_report_metric) {
+            // Forensic log for suspiciously long-lived decode streams: a stream that
+            // legitimately reached FINISHED after running over 5 minutes leaves a trace
+            // here, so a long survivor without this log points to a stalled stream or
+            // a finished-but-not-reported exit loss. Values are read after releasing
+            // mutex_ to avoid logging under the lock.
+            constexpr int64_t long_running_stream_threshold_ms = 300 * 1000;
+            // Reads happen after mutex_ has been released; the stream is terminal
+            // so token counters no longer change underneath.
+            auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+            if (running_time_ms > long_running_stream_threshold_ms) {
+                RTP_LLM_LOG_WARNING("event=long_stream_finished request_id=%ld running_time_ms=%ld "
+                                    "iterate_count=%zu output_token_len=%zu input_token_len=%d",
+                                    generate_input_ ? generate_input_->request_id : -1,
+                                    running_time_ms,
+                                    iter_count_,
+                                    outputTokenLen(),
+                                    inputLength());
+            }
             reportMetricOnce();
         }
         if (finish_callback) {
