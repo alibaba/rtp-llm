@@ -684,6 +684,28 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
             ):
                 repack_compressed_int4_to_cutlass(packed, scale, 128)
 
+    def test_w4a8_repack_allows_positive_scale_to_underflow_to_fp8_zero(self):
+        from rtp_llm.models_py.quant_methods.w4a8_utils import (
+            repack_compressed_int4_to_cutlass,
+        )
+
+        packed = torch.zeros(1, 64, dtype=torch.int8)
+        scale = torch.tensor([[1.0e-6]])
+        fake_kernel = types.SimpleNamespace(
+            pack_scale_fp8=lambda value: value,
+            reorder_tensor=lambda value: value,
+            unified_encode_int4b=lambda value: value,
+        )
+        with mock.patch.dict(
+            "sys.modules", {"rtp_kernel.w4a8_group_gemm": fake_kernel}
+        ):
+            _, repacked_scale = repack_compressed_int4_to_cutlass(
+                packed, scale, 128
+            )
+
+        self.assertEqual(repacked_scale.dtype, torch.float8_e4m3fn)
+        self.assertEqual(repacked_scale.item(), 0.0)
+
     def test_invalid_fp8_block_size_types_fail_fast(self):
         for block_size in (128, [True, 128], [64.5, 128], [128]):
             with self.subTest(block_size=block_size), self.assertRaises(

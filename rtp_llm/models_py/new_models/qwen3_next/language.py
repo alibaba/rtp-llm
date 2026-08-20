@@ -75,6 +75,20 @@ def _build_qwen3_next_metadata(
     )
 
 
+def _write_linear_cache_store(
+    attn_inputs: PyAttentionInputs, kv_cache: Optional[LayerKVCache]
+) -> None:
+    """Register a linear-attention cache only when CacheStore is active."""
+    cache_store_inputs = attn_inputs.cache_store_inputs
+    cache_store_writer = attn_inputs.cache_store_writer
+    if (
+        kv_cache is not None
+        and cache_store_inputs is not None
+        and cache_store_writer is not None
+    ):
+        cache_store_writer.write(cache_store_inputs, kv_cache)
+
+
 # ================================================================== #
 #  Weight transformation functions (ported from qwen3_next_weight.py)
 # ================================================================== #
@@ -1058,7 +1072,6 @@ class Qwen3NextGatedDeltaNet(RtpModule):
             load_initial_state_from_block_map,
             store_ssm_state_to_block_map,
         )
-        from rtp_llm.ops.compute_ops import rtp_llm_ops as compute_ops
 
         cu_seqlens = attn_inputs.cu_seqlens_device
         conv_states = (
@@ -1193,14 +1206,11 @@ class Qwen3NextGatedDeltaNet(RtpModule):
                     chunk_size=64,
                 )
 
-        if kv_cache is not None:
-            compute_ops.write_cache_store(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
-                attn_inputs.cache_store_inputs,
-                kv_cache,
-            )
+        # CacheStore registration is owned by the C++ writer attached to the
+        # attention inputs.  The old compute-op entry point is not available in
+        # every CUDA build and, more importantly, was called even for ordinary
+        # requests that had no CacheStore plan.
+        _write_linear_cache_store(attn_inputs, kv_cache)
         return attn_out.squeeze_(0)
 
     def _forward_decode(
