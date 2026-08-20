@@ -536,5 +536,9 @@ if [[ "${skip_build}" == "0" ]]; then
 fi
 [[ -x "${server_binary}" ]] || die "missing Bazel launcher ${server_binary}"
 
+# Keep runtime-only compiler headers out of Bazel action environments.
+if [[ -n "${RTP_LLM_RUNTIME_CPATH:-}" ]]; then
+    export CPATH="${RTP_LLM_RUNTIME_CPATH}"
+fi
 cd "${run_root}/work/${role,,}"
 exec "${server_binary}" "${server_args[@]}"
