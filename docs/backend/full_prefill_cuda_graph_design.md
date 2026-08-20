@@ -6,9 +6,9 @@
 | 实现状态 | 核心逻辑、算子门槛、真实 checkpoint 端到端验证与 exact-bucket A/B 基线已完成；待长期稳定性、qps=10 和 timeline 验证 |
 | 设计基线 | `feature/beam-search-perf-bugfix-2026-08`（调研时 HEAD `de1b66746905`） |
 | 目标后端 | FlashInferTRTLLMFMHAv2PrefillImpl，非 paged、no-prefix 路径 |
-| 初始运行范围 | BF16、dense MHA/GQA、动态多请求纯 prefill batch，`1 <= B <= Bmax` |
+| 初始运行范围 | BF16、dense 或单卡 FP8 per-block masked MoE、MHA/GQA、动态多请求纯 prefill batch，`1 <= B <= Bmax` |
 | Graph 范围 | Python model forward 的完整 prefill 主干 |
-| 明确不支持 | Prefix cache、Piecewise/Breakable Graph、Paged FMHA、MoE、MLA、prefill/decode mixed batch |
+| 明确不支持 | Prefix cache、Piecewise/Breakable Graph、Paged FMHA、分布式/非 masked MoE、MLA、prefill/decode mixed batch |
 
 > 本文档是当前首版实现的设计基线。代码默认关闭，只有显式开启独立开关并满足 allowlist 时才创建 generative prefill runner。
 
@@ -105,9 +105,9 @@ SGLang 是 Full Prefill 固定 request-axis 的直接参考；vLLM 在这里是 
 - Paged TRT-LLM FMHA v2、FlashInfer paged prefill、TRTLLMGen、MLA、Sparse、HeadWise、Context Parallel。
 - prefill 与 decode request 混合在同一次 model forward 的 mixed batch。
 - `enable_layer_micro_batch=1` 的 `forward_micro_batch` 路径；首版支持 scheduler 形成的动态 pure-prefill batch，但不再做 layer micro-batch 拆分。
-- MoE、multimodal/MRoPE、LoRA、PD disaggregation、cache-store 等尚未完成 graph-safety 审计的模型路径。
+- 除单卡 `fp8_per_block_no_dp_masked` 外的 MoE、multimodal/MRoPE、LoRA、PD disaggregation、cache-store 等尚未完成 graph-safety 审计的模型路径。
 - TP 大于 1 或 capture NCCL collective；首版限定 TP=1。
-- FP8 model/KV cache；首版使用 BF16 model 和 BF16 KV cache。
+- FP8 activation/KV cache；首版 activation 与 KV cache 均为 BF16，仅 allowlisted MoE expert weights 使用 FP8 per-block。
 - 将 post layers、采样、scheduler、tokenizer 或 RPC 纳入 CUDA Graph。
 
 ## 4. “Full Prefill Graph”的边界
@@ -185,12 +185,17 @@ FULL_PREFILL_NO_PREFIX_GRAPH
 | Dtype | BF16 input/output，BF16 KV cache |
 | CUDA | 不低于 backend 现有最低要求 |
 | GPU | SM90、SM120 |
-| Model | dense causal decoder-only |
-| Parallelism | TP=1、无 CP |
+| Model | dense causal decoder-only；或 BF16 activation 的 FP8 per-block MoE，显式选择 `fp8_per_block_no_dp_masked` |
+| MoE runtime | `PureTpRouterFp8PerBlock + DeepGemmMaskedExecutorV2`、`use_all_gather=true`、无 EPLB/额外专家/DeepEP/MoriEP |
+| Parallelism | TP=EP=DP=PP=world size=1、无 CP |
 | Layer micro batch | 关闭；当前 `forwardMicroBatched` 路径不经过 CUDA Graph runner |
 | Real prefill batch | 动态 `1..FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS`，只允许 pure prefill batch |
 
 allowlist 按“完成测试的平台配置”逐项扩展，不能仅依据 TRT-LLM FMHA v2 的理论 support 范围自动开放。
+
+MoE 的这一项是窄 allowlist：`recompute_topk_ids_sum_expert_count` 将 expert counts 保持在 GPU，masked
+executor 为每个 token bucket 使用固定的 expert capacity，且 DeepGEMM masked launch 只读取 device-side
+counts。`auto`、contiguous、PureDP/PureCP、DeepEP、MoriEP 和 EPLB 路径不由此推导为 graph-safe。
 
 Head dim 不作为 Full Prefill Graph 的额外 allowlist 维度。FMHA、RoPE 和 KV writer 对 head dim 的约束统一由目标 backend 的常规 `support()` 检查负责；CUDA Graph 不增加额外限制。
 
@@ -801,6 +806,7 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 | stale metadata | 所有 metadata 原地刷新，交替长度/block id 重放测试 |
 | sentinel scratch 并发写冲突 | 首版 replay 串行；并发前引入 scratch pool |
 | operator UT 与真实模型存在差距 | 补齐 RoPE、真实 KV writer、prefill-to-decode 端到端测试 |
+| MoE routing 导致动态 shape 或 host sync | 只允许 device-side counts + 固定容量的 FP8 masked V2 路径；其它策略启动时拒绝 |
 
 ## 20. 后续扩展
 
@@ -810,7 +816,7 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 2. Prefix backend：需要 paged attention、动态 block table、prefix length 和 KV reuse 的独立 graph-safety 设计。
 3. 其它 GPU 架构：按硬件配置补齐同等测试后扩展 allowlist。
 4. TP/NCCL capture：需要 collective graph capture 和多 rank 一致性验证。
-5. MoE：需要 routing、capacity、通信和动态 shape 审计。
+5. 其它 MoE：分布式 EP/DP/TP、EPLB、DeepEP/MoriEP、contiguous executor 需要分别完成 routing、capacity、通信和动态 shape 审计。
 6. graph pool 共享：只有证明 decode/prefill 不并发且地址安全后才实施。
 
 ## 21. Review 清单
@@ -826,7 +832,9 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 - [x] PREFILL_CAPTURE_CONFIG 继续表达一维 token buckets。
 - [x] 首版所有 buckets 共用 `FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS`，graph 数量不乘以 batch size。
 - [x] padding ratio 阈值默认值为 0.25。
-- [x] enable matrix 限定 BF16、TP=1、dense、SM90/SM120；head dim 沿用 backend 的常规 support matrix。
+- [x] enable matrix 限定 BF16、单卡 dense 或显式 FP8 per-block masked MoE、SM90/SM120；head dim 沿用 backend 的常规 support matrix。
 - [x] Prefix、prefill/decode mixed batch、Paged backend 和 Breakable Graph 均不进入首版。
 
-真实 checkpoint 的 capture、动态多请求 replay、decode-after-prefill 与 exact-bucket A/B 基线已完成；长期稳定性、qps=10、padding/fallback 分布和 timeline 门槛仍按第 16、17 节执行，未通过前保持实验开关默认关闭。
+dense 真实 checkpoint 的 capture、动态多请求 replay、decode-after-prefill 与 exact-bucket A/B 基线已完成；
+新增 MoE allowlist 仍需使用匹配 checkpoint 完成相同的模型级 correctness/perf gate。长期稳定性、qps=10、
+padding/fallback 分布和 timeline 门槛仍按第 16、17 节执行，未通过前保持实验开关默认关闭。

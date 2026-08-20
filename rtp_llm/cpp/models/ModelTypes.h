@@ -54,6 +54,10 @@ struct GptModelInitParams {
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
     int64_t            hc_mult = 1;
+    // Keep the resolved MoE runtime policy alongside the model description.
+    // The description contains model topology, but not the selected Python
+    // FusedMoE strategy needed by CUDA graph eligibility checks.
+    MoeConfig moe_config;
 };
 
 enum GptModelInputIndex : size_t {

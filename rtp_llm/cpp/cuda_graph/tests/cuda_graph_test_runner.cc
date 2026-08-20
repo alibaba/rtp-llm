@@ -49,6 +49,44 @@ public:
                                                         input_embedding_scalar));
     }
 
+    void init_generative_prefill(py::object               py_instance,
+                                 int64_t                  max_requests,
+                                 int64_t                  max_seq_len,
+                                 int64_t                  tokens_per_block,
+                                 int64_t                  kernel_tokens_per_block,
+                                 std::vector<int>         prefill_capture_seq_lens,
+                                 int64_t                  hidden_size,
+                                 std::vector<std::string> group_tags) {
+        reset_runner();
+        GraphParams params;
+        params.enable_cuda_graph_debug_mode   = true;
+        params.role                           = CudaGraphRole::GENERATIVE_PREFILL_NO_PREFIX;
+        params.max_seq_len                    = static_cast<int>(max_seq_len);
+        params.tokens_per_block               = static_cast<int>(tokens_per_block);
+        params.kernel_tokens_per_block        = static_cast<int>(kernel_tokens_per_block);
+        params.num_tokens_per_bs              = 1;
+        params.max_context_batch_size         = static_cast<size_t>(max_requests + 1);
+        params.hidden_size                    = static_cast<size_t>(hidden_size);
+        params.model_data_type                = c10::ScalarType::BFloat16;
+        params.prefill_capture_seq_lens       = std::move(prefill_capture_seq_lens);
+        params.kv_cache_group_tags            = std::move(group_tags);
+        params.full_prefill_max_requests      = static_cast<int>(max_requests);
+        params.full_prefill_max_padding_ratio = 1.0;
+        params.full_prefill_pad_token_id      = 0;
+        const size_t scratch_group_count =
+            params.kv_cache_group_tags.size() > 1 ? params.kv_cache_group_tags.size() : 1;
+        const int scratch_block_count = (static_cast<int>(max_seq_len) + static_cast<int>(kernel_tokens_per_block) - 1)
+                                        / static_cast<int>(kernel_tokens_per_block);
+        params.prefill_scratch_kernel_block_ids.resize(scratch_group_count);
+        for (auto& block_ids : params.prefill_scratch_kernel_block_ids) {
+            block_ids.resize(scratch_block_count);
+            for (int i = 0; i < scratch_block_count; ++i) {
+                block_ids[i] = i;
+            }
+        }
+        runner_.reset(CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params)));
+    }
+
     void init_decode(py::object               py_instance,
                      int64_t                  hidden_size,
                      int64_t                  max_seq_len,
@@ -146,6 +184,16 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")        = std::vector<std::string>{},
              py::arg("is_target_verify")  = false,
              py::arg("num_tokens_per_bs") = 1)
+        .def("init_generative_prefill",
+             &CudaGraphTestRunner::init_generative_prefill,
+             py::arg("py_instance"),
+             py::arg("max_requests"),
+             py::arg("max_seq_len"),
+             py::arg("tokens_per_block"),
+             py::arg("kernel_tokens_per_block"),
+             py::arg("prefill_capture_seq_lens"),
+             py::arg("hidden_size"),
+             py::arg("group_tags") = std::vector<std::string>{})
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("forward", &CudaGraphTestRunner::forward)

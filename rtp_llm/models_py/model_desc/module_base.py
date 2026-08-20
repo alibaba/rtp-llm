@@ -126,6 +126,22 @@ class GptModelBase(nn.Module):
     def apply_input_embeddings(
         self, inputs_embeds: Tensor, inputs: PyModelInputs
     ) -> Tensor:
+        # Unit-level callers and external model adapters may provide the
+        # PyModelInputs protocol through a lightweight namespace. Keep those
+        # adapters source-compatible with the graph-only optional fields.
+        graph_overrides = getattr(inputs, "cuda_graph_input_embedding_overrides", None)
+        graph_mask = getattr(inputs, "cuda_graph_input_embedding_mask", None)
+        if graph_overrides is not None and graph_overrides.numel() > 0:
+            if graph_mask is None or graph_mask.numel() != inputs_embeds.size(0):
+                raise ValueError(
+                    "cuda_graph_input_embedding_mask must contain one entry per token"
+                )
+            if graph_overrides.shape != inputs_embeds.shape:
+                raise ValueError(
+                    "cuda_graph_input_embedding_overrides must match inputs_embeds"
+                )
+            return torch.where(graph_mask.unsqueeze(1), graph_overrides, inputs_embeds)
+
         if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
             locs = inputs.input_embeddings_locs
             if locs is None:

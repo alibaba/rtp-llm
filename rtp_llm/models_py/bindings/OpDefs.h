@@ -360,6 +360,11 @@ struct PyModelInputs {
     BertEmbeddingInputs                       bert_embedding_inputs;
     std::optional<std::vector<torch::Tensor>> input_embeddings;
     torch::Tensor                             input_embeddings_locs;
+    // Full-prefill CUDA graph uses fixed-address dense buffers so dynamic
+    // request embeddings can be injected without capturing request-owned
+    // tensor addresses or Python control flow.
+    torch::Tensor cuda_graph_input_embedding_overrides;
+    torch::Tensor cuda_graph_input_embedding_mask;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
