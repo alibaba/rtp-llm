@@ -97,9 +97,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         host_sources[group_set_id] = resource.host_block;
-        EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
     }
 
@@ -147,9 +147,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         disk_sources[group_set_id] = resource.disk_slot;
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
-        EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 1u);
-        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
     }
 
     descriptors = pausable_engine->descriptors();
@@ -202,7 +202,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         ASSERT_TRUE(resource.hasTier(Tier::DISK));
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         EXPECT_EQ(resource.disk_slot, disk_sources[group_set_id]);
-        EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 2u);
+        EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 2u);
         ASSERT_EQ(group_set->groupIds().size(), 1u);
         const int  group_id = static_cast<int>(group_set->groupIds().front());
         const auto position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, group_id, 0);
@@ -599,7 +599,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                 << "path=" << path << " group_set=" << group_set_id;
             if (!reused) {
                 EXPECT_EQ(state.getTopTier(), Tier::HOST);
-                EXPECT_EQ(group_set->hostPool()->refCount(state.host_block), 1u);
+                EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 1u);
                 continue;
             }
             ASSERT_FALSE(isNullBlockIdx(blocks[path]));
@@ -755,7 +755,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
             EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
             EXPECT_EQ(state.getTopTier(), Tier::DISK);
             disk_sources[path_index][group_set_id] = state.disk_slot;
-            EXPECT_EQ(group_set->diskPool()->refCount(state.disk_slot), 1u);
+            EXPECT_EQ(group_set->diskPool()->treeRefCount(state.disk_slot), 1u);
         }
     }
 

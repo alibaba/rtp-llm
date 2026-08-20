@@ -41,6 +41,18 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     EXPECT_EQ(load_context->matchedBlocks(Tier::HOST), 2u);
     EXPECT_EQ(load_context->matchedBlocks(Tier::DISK), 0u);
 
+    for (const TransferDescriptor& desc : load_context->loadDescs()) {
+        const auto source_pool = environment->groups.at(desc.group_set_id)->hostPool();
+        ASSERT_NE(source_pool, nullptr);
+        for (BlockIdxType block : desc.source_blocks) {
+            EXPECT_EQ(source_pool->treeRefCount(block), 2u);
+        }
+    }
+    for (const auto& source_pool : environment->host_pools) {
+        EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::CACHE), options.path_length);
+        EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::LOAD), options.path_length);
+    }
+
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
     for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
         std::vector<BlockIdxType> targets;
@@ -48,7 +60,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
         for (const DeviceBlockPoolPtr& pool : environment->groups.at(group_set_id)->devicePools()) {
             const BlockIdList blocks = pool->malloc(1).value();
             ASSERT_EQ(blocks.size(), 1u);
-            pool->incRef(blocks, BlockRefType::REQUEST);
+            pool->incRef(blocks);
             targets.push_back(blocks.front());
             request_targets.emplace_back(pool, blocks.front());
         }
@@ -69,7 +81,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     load_context.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : request_targets) {
-        releaseDeviceBlocks(*environment->cache, pool, {block}, BlockRefType::REQUEST);
+        releaseDeviceBlocks(*environment->cache, pool, {block});
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
@@ -105,7 +117,7 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
         std::vector<BlockIdxType> targets;
         for (const DeviceBlockPoolPtr& pool : environment->groups[group_set_id]->devicePools()) {
             const BlockIdList blocks = pool->malloc(1).value();
-            pool->incRef(blocks, BlockRefType::REQUEST);
+            pool->incRef(blocks);
             targets.push_back(blocks.front());
             request_targets.emplace_back(pool, blocks.front());
         }
@@ -126,7 +138,7 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     }
     for (const auto& [pool, block] : request_targets) {
         EXPECT_EQ(pool->refCount(block), 1u);
-        pool->decRef(block, BlockRefType::REQUEST);
+        pool->decRef(block);
         EXPECT_EQ(pool->freeBlocksNum(), options.usable_device_blocks);
     }
 

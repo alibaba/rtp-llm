@@ -135,7 +135,7 @@ public:
                 releasePrepared(out);
                 return false;
             }
-            pools[0]->incRef(blocks.value(), BlockRefType::REQUEST);
+            pools[0]->incRef(blocks.value());
             out.load_target_blocks[gs] = std::move(blocks.value());
         }
         out.load_targets_allocated = true;
@@ -157,7 +157,7 @@ public:
                 releasePrepared(out);
                 return false;
             }
-            pools[0]->incRef(blocks.value(), BlockRefType::REQUEST);
+            pools[0]->incRef(blocks.value());
             out.suffix_blocks[gs] = std::move(blocks.value());
         }
         out.suffix_allocated = true;
@@ -222,7 +222,7 @@ public:
                 if (group_id >= blocks.size() || blocks[group_id].empty()) {
                     continue;
                 }
-                pools[member_index]->decRef(blocks[group_id], BlockRefType::REQUEST);
+                pools[member_index]->decRef(blocks[group_id]);
             }
         }
         blocks.clear();
@@ -279,7 +279,7 @@ private:
             if (held.empty()) {
                 continue;
             }
-            group_sets[gs]->devicePools()[0]->decRef(held, BlockRefType::REQUEST);
+            group_sets[gs]->devicePools()[0]->decRef(held);
         }
         out = PreparedRequestResources{};
     }
@@ -307,7 +307,7 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
                 allocated = false;
                 break;
             }
-            pools[0]->incRef(block.value(), BlockRefType::REQUEST);
+            pools[0]->incRef(block.value());
             resources[i][gs].device_blocks = {block.value()};
         }
         if (!allocated) {
@@ -321,7 +321,7 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
                     continue;
                 }
                 for (const BlockIdxType block : resources[i][gs].device_blocks) {
-                    group_sets[gs]->devicePools()[0]->decRef(block, BlockRefType::REQUEST);
+                    group_sets[gs]->devicePools()[0]->decRef(block);
                 }
             }
         }
@@ -338,7 +338,7 @@ bool insertPathFromPrefix(BlockTreeCache& cache, const PathKeys& path, size_t ex
             inserted_blocks.insert(
                 inserted_blocks.end(), resources[i][gs].device_blocks.begin(), resources[i][gs].device_blocks.end());
         }
-        group_sets[gs]->devicePools()[0]->decRef(inserted_blocks, BlockRefType::REQUEST);
+        group_sets[gs]->devicePools()[0]->decRef(inserted_blocks);
     }
     return true;
 }

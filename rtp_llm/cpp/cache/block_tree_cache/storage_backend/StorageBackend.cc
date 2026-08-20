@@ -20,7 +20,7 @@ void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
 
 struct StorageTaskState {
     struct Pin {
-        std::shared_ptr<IBlockPool> pool;
+        DeviceBlockPoolPtr          pool;
         BlockIdxType                block;
     };
 
@@ -31,7 +31,7 @@ struct StorageTaskState {
     void finish() {
         std::call_once(finish_once, [this] {
             for (const Pin& pin : pins) {
-                pin.pool->decRef(pin.block, BlockRefType::STORAGE_BACKEND);
+                pin.pool->decRef(pin.block);
             }
             pins.clear();
         });
@@ -48,7 +48,7 @@ namespace rtp_llm {
 namespace {
 
 struct BlockKey {
-    IBlockPool*  pool;
+    DeviceBlockPool* pool;
     BlockIdxType block;
     bool         operator==(const BlockKey& other) const {
         return pool == other.pool && block == other.block;
@@ -57,7 +57,7 @@ struct BlockKey {
 
 struct BlockKeyHash {
     size_t operator()(const BlockKey& key) const {
-        return std::hash<IBlockPool*>{}(key.pool) ^ (std::hash<BlockIdxType>{}(key.block) << 1U);
+        return std::hash<DeviceBlockPool*>{}(key.pool) ^ (std::hash<BlockIdxType>{}(key.block) << 1U);
     }
 };
 
@@ -75,9 +75,9 @@ StorageBackend::~StorageBackend() {
                             "StorageBackend must be shutdown before derived destruction");
 }
 
-bool StorageBackend::init(std::shared_ptr<const CacheTopology>     topology,
-                          std::vector<std::shared_ptr<IBlockPool>> device_pools,
-                          BufferResolver                           buffer_resolver) {
+bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
+                          std::vector<DeviceBlockPoolPtr>      device_pools,
+                          BufferResolver                       buffer_resolver) {
     RTP_LLM_CHECK_WITH_INFO(!topology_, "StorageBackend is already initialized");
     RTP_LLM_CHECK(topology && device_pools.size() == topology->groups().size() && buffer_resolver);
     for (const auto& pool : device_pools) {
@@ -194,7 +194,7 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
             const auto&    pool = device_pools_[handle.group_id];
             const BlockKey key{pool.get(), handle.block};
             if (pinned.insert(key).second) {
-                pool->incRef(handle.block, BlockRefType::STORAGE_BACKEND);
+                pool->incRef(handle.block);
                 state->pins.push_back({pool, handle.block});
             }
         }

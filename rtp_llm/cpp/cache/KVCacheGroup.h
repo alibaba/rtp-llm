@@ -64,9 +64,7 @@ public:
     virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
     virtual void
-         insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
-    virtual void release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) = 0;
-    virtual void free(const BlockIndicesType& block_indices) = 0;
+    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
     virtual void
     removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
@@ -86,11 +84,9 @@ public:
                                                               int  target_batch_size) const = 0;
     virtual NeedBlocksInfo getNeedBlocks(
         int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled = false) const = 0;
-    virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
-
-    void                                   reference(const BlockIndicesType& new_block_indices);
-    void                                   reference(const BlockIndicesType& new_block_indices,
-                                                     BlockRefType            ref_type);
+    void                                   reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices);
+    void                                   reference(const BlockIndicesType& block_indices);
+    void                                   unreference(const BlockIndicesType& block_indices);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
@@ -134,9 +130,6 @@ protected:
         group.kv_scale_stride_bytes     = group.spec == nullptr ? 0 : group.spec->scale_block_size_bytes();
         return group;
     }
-
-    void                            addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
-    void releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
 
     GroupBase                    cache_group_;
     DeviceBlockPoolPtr           block_pool_;

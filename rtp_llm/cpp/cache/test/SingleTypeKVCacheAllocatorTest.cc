@@ -108,7 +108,7 @@ KVCacheConfig makeSingleTypeTieredConfig(Tier source_tier, const std::string& di
 
 BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, CacheKeyType key) {
     const auto& group        = cache.groupSets().front();
-    const auto  source_block = group->allocateSingleBlock(source_tier, BlockRefType::BLOCK_CACHE);
+    const auto  source_block = group->allocateSingleBlock(source_tier, BlockTreeRefType::CACHE);
     EXPECT_NE(source_block, NULL_BLOCK_IDX);
     if (isNullBlockIdx(source_block)) {
         return source_block;
@@ -122,7 +122,7 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
     const BlockTreeInsertResult insert_result =
         cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false);
     EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
-    group->releaseSingleBlock(source_tier, source_block, BlockRefType::BLOCK_CACHE);
+    group->releaseSingleBlock(source_tier, source_block, BlockTreeRefType::CACHE);
     return source_block;
 }
 
@@ -626,7 +626,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     ASSERT_NE(block_pool, nullptr);
     const auto blocks = block_pool->malloc(2).value();
     ASSERT_EQ(blocks.size(), 2u);
-    block_pool->incRef(blocks, BlockRefType::REQUEST);
+    block_pool->incRef(blocks);
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
     resource->setBatchBlocks(0, 0, BlockIndicesType{blocks[0]});
@@ -647,7 +647,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
         allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_one_match.matched_device_resources).empty());
     block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), batch_one_match.matched_device_resources);
 
-    block_pool->decRef(blocks, BlockRefType::REQUEST);
+    block_pool->decRef(blocks);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheStopsAtFirstNullBlock) {
@@ -659,7 +659,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheStopsAtFirstNullBlock) {
     ASSERT_NE(block_pool, nullptr);
     const auto blocks = block_pool->malloc(2).value();
     ASSERT_EQ(blocks.size(), 2u);
-    block_pool->incRef(blocks, BlockRefType::REQUEST);
+    block_pool->incRef(blocks);
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
     resource->setBatchBlocks(0, 0, BlockIndicesType{blocks[0], NULL_BLOCK_IDX, blocks[1]});
@@ -671,7 +671,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheStopsAtFirstNullBlock) {
     EXPECT_EQ(path.front()->cache_key, 100);
     EXPECT_EQ(path.front()->group_set_resources.front().device_blocks, (BlockIndicesType{blocks[0]}));
 
-    block_pool->decRef(blocks, BlockRefType::REQUEST);
+    block_pool->decRef(blocks);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCanonicalKeys) {
@@ -684,7 +684,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     ASSERT_NE(block_pool, nullptr);
     const auto seed_blocks = block_pool->malloc(2).value();
     ASSERT_EQ(seed_blocks.size(), 2u);
-    block_pool->incRef(seed_blocks, BlockRefType::REQUEST);
+    block_pool->incRef(seed_blocks);
 
     auto seed = createBatchKVCacheResource(/*batch_size=*/1, config);
     seed->setBatchBlocks(0, 0, seed_blocks);
@@ -726,7 +726,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     EXPECT_EQ(unaligned->blocks(0, 0)[0], seed_blocks[0]);
 
     allocator_->free(FreeInfo{unaligned, unaligned_tokens});
-    block_pool->decRef(seed_blocks, BlockRefType::REQUEST);
+    block_pool->decRef(seed_blocks);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, MergedCommonMallocFailureAbortsContextWithoutAllocatingRequestTargets) {
@@ -743,8 +743,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MergedCommonMallocFailureAbortsContextWit
         const BlockIdxType source_block = seedSingleTypeLowerTier(*cache, source_tier, /*key=*/100);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         const auto&  group             = cache->groupSets().front();
-        const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->refCount(source_block) :
-                                                                     group->diskPool()->refCount(source_block);
+        const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->treeRefCount(source_block) :
+                                                                     group->diskPool()->treeRefCount(source_block);
         const size_t free_before       = allocator_->freeBlocksNum();
         const auto   snapshot_before   = cache->getKeySnapshot(/*limit=*/16);
 
@@ -763,8 +763,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MergedCommonMallocFailureAbortsContextWit
             free_blocks_during_abort = allocator_->freeBlocksNum();
             EXPECT_EQ(free_blocks_during_abort, free_before);
             const size_t source_ref_after_abort = source_tier == Tier::HOST ?
-                                                      group->hostPool()->refCount(source_block) :
-                                                      group->diskPool()->refCount(source_block);
+                                                      group->hostPool()->treeRefCount(source_block) :
+                                                      group->diskPool()->treeRefCount(source_block);
             EXPECT_EQ(source_ref_after_abort, source_ref_before);
             events.push_back("source_protection_released");
         };
@@ -807,8 +807,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         const BlockIdxType source_block = seedSingleTypeLowerTier(*cache, source_tier, /*key=*/100);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         const auto&  group             = cache->groupSets().front();
-        const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->refCount(source_block) :
-                                                                     group->diskPool()->refCount(source_block);
+        const size_t source_ref_before = source_tier == Tier::HOST ? group->hostPool()->treeRefCount(source_block) :
+                                                                     group->diskPool()->treeRefCount(source_block);
         const size_t free_before       = allocator_->freeBlocksNum();
         const auto   snapshot_before   = cache->getKeySnapshot(/*limit=*/16);
 
@@ -850,10 +850,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         EXPECT_EQ(group_set_resource.transfer_state, GroupSetTransferState::IDLE);
         if (source_tier == Tier::HOST) {
             EXPECT_EQ(group_set_resource.host_block, source_block);
-            EXPECT_EQ(group->hostPool()->refCount(source_block), source_ref_before);
+            EXPECT_EQ(group->hostPool()->treeRefCount(source_block), source_ref_before);
         } else {
             EXPECT_EQ(group_set_resource.disk_slot, source_block);
-            EXPECT_EQ(group->diskPool()->refCount(source_block), source_ref_before);
+            EXPECT_EQ(group->diskPool()->treeRefCount(source_block), source_ref_before);
         }
         coordinator->commit_callback_ = std::move(original_commit);
         coordinator->abort_callback_  = std::move(original_abort);
@@ -1206,7 +1206,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
     const auto allocated = pool->malloc(2);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 2u);
-    pool->incRef(*allocated, BlockRefType::REQUEST);
+    pool->incRef(*allocated);
     const int src_block = (*allocated)[0];
     const int dst_block = (*allocated)[1];
 
@@ -1241,7 +1241,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockCopySingle) {
         EXPECT_EQ(readDeviceBytes(dst_addr.kv_addr, block_size), readDeviceBytes(src_addr.kv_addr, block_size))
             << "cache mismatch at layer " << layer_id;
     }
-    pool->decRef(*allocated, BlockRefType::REQUEST);
+    pool->decRef(*allocated);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
@@ -1254,7 +1254,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
     const auto allocated = pool->malloc(6);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 6u);
-    pool->incRef(*allocated, BlockRefType::REQUEST);
+    pool->incRef(*allocated);
 
     std::vector<BlockIdPair> copy_mapping = {
         {(*allocated)[0], (*allocated)[1]}, {(*allocated)[2], (*allocated)[3]}, {(*allocated)[4], (*allocated)[5]}};
@@ -1292,7 +1292,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyVector) {
                 << "cache mismatch at block pair (" << pair.src << "->" << pair.dst << "), layer " << layer_id;
         }
     }
-    pool->decRef(*allocated, BlockRefType::REQUEST);
+    pool->decRef(*allocated);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
@@ -1327,7 +1327,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
     const auto allocated = pool->malloc(4);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 4u);
-    pool->incRef(*allocated, BlockRefType::REQUEST);
+    pool->incRef(*allocated);
 
     const auto stride   = config.kv_scale_stride_bytes;
     auto       snapshot = [&]() {
@@ -1372,7 +1372,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
     auto after_last   = after_single;
     after_last.back() = after_single[1];
     verify(after_last);
-    pool->decRef(*allocated, BlockRefType::REQUEST);
+    pool->decRef(*allocated);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
@@ -1385,7 +1385,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
     const auto allocated = pool->malloc(4);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 4u);
-    pool->incRef(*allocated, BlockRefType::REQUEST);
+    pool->incRef(*allocated);
 
     BlockIdPair pairs[] = {{(*allocated)[0], (*allocated)[1]}, {(*allocated)[2], (*allocated)[3]}};
 
@@ -1419,7 +1419,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyPointers) {
                 << "cache mismatch for block pair (" << pair.src << "->" << pair.dst << "), layer " << layer_id;
         }
     }
-    pool->decRef(*allocated, BlockRefType::REQUEST);
+    pool->decRef(*allocated);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
@@ -1432,7 +1432,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
     const auto allocated = pool->malloc(6);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 6u);
-    pool->incRef(*allocated, BlockRefType::REQUEST);
+    pool->incRef(*allocated);
 
     std::vector<int32_t> data(allocated->begin(), allocated->end());
     auto                 tensor = torch::from_blob(data.data(), {3, 2}, torch::kInt32).clone();
@@ -1470,7 +1470,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyBuffer) {
                 << "cache mismatch for block pair (" << src_block << "->" << dst_block << "), layer " << layer_id;
         }
     }
-    pool->decRef(*allocated, BlockRefType::REQUEST);
+    pool->decRef(*allocated);
 }
 
 // Test getter methods
@@ -1493,23 +1493,23 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     const size_t total_free_before = allocator_->freeBlocksNum();
     auto         blocks            = block_pool->malloc(4).value();
     ASSERT_EQ(blocks.size(), 4);
-    block_pool->incRef(blocks, BlockRefType::REQUEST);
+    block_pool->incRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 4);
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
 
     resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
-    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
+    resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX, blocks[2]});
     resource.setDeviceReuseBlockNum(3);
 
-    // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
+    // Reference keys: 101(pos1)->blocks[1], 102(pos2)->NULL(ignored), 103(pos3)->blocks[2]
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
     ASSERT_NE(ref_resource, nullptr);
     // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
     EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
 
-    block_pool->decRef(blocks, BlockRefType::REQUEST);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
     // incrKVCacheRef returns a resource with a custom deleter that calls decrKVCacheRef().
     // Release it to drop ref-counts and unblock the pending frees.
@@ -1528,7 +1528,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     const size_t total_free_before = allocator_->freeBlocksNum();
     auto         blocks            = block_pool->malloc(2).value();
     ASSERT_EQ(blocks.size(), 2);
-    block_pool->incRef(blocks, BlockRefType::REQUEST);
+    block_pool->incRef(blocks);
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
@@ -1543,7 +1543,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
     EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
     EXPECT_EQ(ref_resource->blocks(0), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
 
-    block_pool->decRef(blocks, BlockRefType::REQUEST);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     ref_resource.reset();
@@ -1561,7 +1561,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     const size_t total_free_before = allocator_->freeBlocksNum();
     auto         blocks            = block_pool->malloc(2).value();
     ASSERT_EQ(blocks.size(), 2);
-    block_pool->incRef(blocks, BlockRefType::REQUEST);
+    block_pool->incRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
 
     KVCacheResource resource;
@@ -1572,7 +1572,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
     ASSERT_EQ(ref_resource, nullptr);
 
-    block_pool->decRef(blocks, BlockRefType::REQUEST);
+    block_pool->decRef(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before);
 }
 
@@ -1645,7 +1645,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     ASSERT_NE(block_pool, nullptr);
     auto resident_request_holds = block_pool->malloc(4).value();
     ASSERT_EQ(resident_request_holds.size(), 4u);
-    block_pool->incRef(resident_request_holds, BlockRefType::REQUEST);
+    block_pool->incRef(resident_request_holds);
     ASSERT_EQ(allocator_->freeBlocksNum(), 1u);
 
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/2, config);
@@ -1669,7 +1669,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
 
     EXPECT_EQ(allocator_->freeBlocksNum(), free_before_fail);
 
-    block_pool->decRef(resident_request_holds, BlockRefType::REQUEST);
+    block_pool->decRef(resident_request_holds);
     EXPECT_EQ(allocator_->freeBlocksNum(), 5u);
 }
 
@@ -1922,7 +1922,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, UpdateKVBlockReleasesSharedBlocksFromEach
     const auto shared_blocks = block_pool->malloc(2);
     ASSERT_TRUE(shared_blocks.has_value());
     for (int batch_id = 0; batch_id < 3; ++batch_id) {
-        block_pool->incRef(*shared_blocks, BlockRefType::REQUEST);
+        block_pool->incRef(*shared_blocks);
     }
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/3, config);
@@ -1941,7 +1941,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, UpdateKVBlockReleasesSharedBlocksFromEach
         EXPECT_EQ(block_pool->refCount(block), 1u);
     }
 
-    block_pool->decRef(*shared_blocks, BlockRefType::REQUEST);
+    block_pool->decRef(*shared_blocks);
 }
 
 }  // namespace test

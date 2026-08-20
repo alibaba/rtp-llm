@@ -127,7 +127,7 @@ void LoadTaskRunner::releaseTaskResources(const Task& task) {
         }
         group_set->unreferenceBlocks(
             MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}},
-            BlockRefType::REQUEST);
+            BlockTreeRefType::LOAD);
     }
 }
 

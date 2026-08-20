@@ -34,8 +34,7 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
         }
         context->setTargetBlocks(desc_index, record_it->second.target_blocks);
         tree_->groupSets()[desc.group_set_id]->referenceBlocks(
-            MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}},
-            BlockRefType::REQUEST);
+            MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}});
     }
     return true;
 }

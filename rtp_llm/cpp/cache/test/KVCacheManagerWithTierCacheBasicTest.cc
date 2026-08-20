@@ -410,7 +410,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
         const auto& state = (*lower)[0][group_set_id];
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
         EXPECT_EQ(state.getTopTier(), Tier::HOST);
-        EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->refCount(state.host_block), 1u);
+        EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->treeRefCount(state.host_block), 1u);
     }
 
     const size_t batches_before_load     = transfer_engine_->submittedBatchCount();
@@ -482,7 +482,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
         EXPECT_EQ(state.getTopTier(), Tier::HOST);
         host_sources[group_set_id] = state.host_block;
-        EXPECT_EQ(group_set->hostPool()->refCount(state.host_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 1u);
     }
 
     const size_t descriptors_before_load = engine->submittedDescriptorCount();
@@ -520,8 +520,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         const auto& state     = (*loading_path)[0][group_set_id];
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::LOADING);
         EXPECT_EQ(state.host_block, host_sources[group_set_id]);
-        EXPECT_EQ(group_set->hostPool()->refCount(state.host_block), 2u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::REQUEST), 1u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 2u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
 
         ASSERT_EQ(group_set->groupIds().size(), 1u);
         const int   group_id = static_cast<int>(group_set->groupIds().front());
@@ -535,7 +535,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(batch0[0], batch1[0]);
         EXPECT_NE(batch0[1], batch1[1]);
         EXPECT_EQ(group_set->devicePools().front()->refCount(batch0[0]), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
+        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 3u);
         ASSERT_TRUE(
             fillGroupBlockPayload(manager_, cache_config_, group_id, batch0[0], /*path_index=*/0, /*poison=*/true));
     }
@@ -589,8 +589,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(batch1[0], tree.device_blocks[0]);
         EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, group_id, batch1[0], /*path_index=*/0));
         EXPECT_EQ(group_set->devicePools().front()->refCount(tree.device_blocks[0]), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 3u);
+        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
     }
 

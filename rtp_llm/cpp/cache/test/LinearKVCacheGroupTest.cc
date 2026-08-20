@@ -582,7 +582,7 @@ TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[0]));
 
     // Cleanup to avoid leaking refs in the test process.
-    group.free(blocks.blocks());
+    group.unreference(blocks.blocks());
     block_pool->requestFree(occupied);
 }
 
@@ -624,10 +624,10 @@ TEST_F(LinearKVCacheGroupTest, FreeIgnoresEmptyOrAllNullBlocks) {
     ASSERT_TRUE(group.init());
 
     const size_t free_before = block_pool->freeBlocksNum();
-    group.free(BlockIndicesType{});
+    group.unreference(BlockIndicesType{});
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before);
 
-    group.free(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    group.unreference(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before);
 }
 

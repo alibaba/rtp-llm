@@ -27,10 +27,10 @@ protected:
 
     void TearDown() override {
         for (const auto block : held_blocks_) {
-            pool_->decRef(block, BlockRefType::REQUEST);
+            pool_->decRef(block);
         }
         for (const auto block : held_host_blocks_) {
-            host_pool_->decRef(block, BlockRefType::REQUEST);
+            host_pool_->decTreeRef(block, BlockTreeRefType::CACHE);
         }
     }
 
@@ -47,7 +47,7 @@ protected:
         if (!block.has_value()) {
             return NULL_BLOCK_IDX;
         }
-        pool_->incRef(block.value(), BlockRefType::REQUEST);
+        pool_->incRef(block.value());
         held_blocks_.insert(block.value());
         node->group_set_resources[static_cast<size_t>(group_set_id)].device_blocks = {block.value()};
         return block.value();
@@ -63,7 +63,7 @@ protected:
         if (!block.has_value()) {
             return;
         }
-        host_pool_->incRef(block.value(), BlockRefType::REQUEST);
+        host_pool_->incTreeRef(block.value(), BlockTreeRefType::CACHE);
         held_host_blocks_.insert(block.value());
         node->group_set_resources[static_cast<size_t>(group_set_id)].host_block = block.value();
     }

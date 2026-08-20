@@ -724,8 +724,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolsUseOneBalancedReferenceCo
     auto         g1_blocks         = pool1->malloc(3).value();
     ASSERT_EQ(g0_blocks.size(), 2u);
     ASSERT_EQ(g1_blocks.size(), 3u);
-    pool0->incRef(g0_blocks, BlockRefType::REQUEST);
-    pool1->incRef(g1_blocks, BlockRefType::REQUEST);
+    pool0->incRef(g0_blocks);
+    pool1->incRef(g1_blocks);
 
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 5u);
     for (const auto block : g0_blocks) {
@@ -736,17 +736,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolsUseOneBalancedReferenceCo
     }
 
     // A second holder on the same numeric block id remains pool-local.
-    pool0->incRef(g0_blocks[0], BlockRefType::REQUEST);
-    pool1->incRef(g1_blocks[0], BlockRefType::REQUEST);
+    pool0->incRef(g0_blocks[0]);
+    pool1->incRef(g1_blocks[0]);
     EXPECT_EQ(pool0->refCount(g0_blocks[0]), 2u);
     EXPECT_EQ(pool1->refCount(g1_blocks[0]), 2u);
 
-    pool0->decRef(g0_blocks, BlockRefType::REQUEST);
-    pool1->decRef(g1_blocks, BlockRefType::REQUEST);
+    pool0->decRef(g0_blocks);
+    pool1->decRef(g1_blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before - 2u);
 
-    pool0->decRef(g0_blocks[0], BlockRefType::REQUEST);
-    pool1->decRef(g1_blocks[0], BlockRefType::REQUEST);
+    pool0->decRef(g0_blocks[0]);
+    pool1->decRef(g1_blocks[0]);
     EXPECT_EQ(allocator->freeBlocksNum(), free_total_before);
 }
 
@@ -937,8 +937,8 @@ static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
     EXPECT_EQ(actual.available_blocks, expected.available_blocks) << context;
     EXPECT_EQ(actual.active_tree_cached_blocks, expected.active_tree_cached_blocks) << context;
     EXPECT_EQ(actual.request_ref_blocks, expected.request_ref_blocks) << context;
-    EXPECT_EQ(actual.connector_ref_blocks, expected.connector_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
+    EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_ref_blocks, expected.eviction_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, expected.used_ratio) << context;
@@ -994,7 +994,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
         EXPECT_EQ(snapshot->available_blocks, snapshot->free_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->active_tree_cached_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->request_ref_blocks, 0u) << source.pool_name;
-        EXPECT_EQ(snapshot->connector_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
@@ -1038,7 +1037,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
         // No GroupSet means no candidate-aware override, so available falls back to free.
         EXPECT_EQ(snapshot->available_blocks, snapshot->free_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->active_tree_cached_blocks, 0u) << source.pool_name;
-        EXPECT_EQ(snapshot->connector_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
@@ -1076,10 +1074,10 @@ makeMergeAllocatorInput(const std::string& pool_name, size_t seed, size_t total_
     snapshot.active_tree_cached_blocks = 7 + seed;
     snapshot.reserve_blocks            = 5 + seed;
     snapshot.request_ref_blocks        = 11 + seed;
-    snapshot.connector_ref_blocks      = 12 + seed;
     snapshot.block_cache_ref_blocks    = 13 + seed;
-    snapshot.eviction_ref_blocks       = 14 + seed;
-    snapshot.store_ref_blocks          = 15 + seed;
+    snapshot.load_ref_blocks           = 14 + seed;
+    snapshot.eviction_ref_blocks       = 15 + seed;
+    snapshot.store_ref_blocks          = 16 + seed;
     snapshot.used_ratio = static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
     return snapshot;
 }
@@ -1100,10 +1098,10 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
     snapshot.available_blocks          = available_blocks;
     snapshot.active_tree_cached_blocks = 21 + seed;
     snapshot.request_ref_blocks        = 31 + seed;
-    snapshot.connector_ref_blocks      = 32 + seed;
     snapshot.block_cache_ref_blocks    = 33 + seed;
-    snapshot.eviction_ref_blocks       = 34 + seed;
-    snapshot.store_ref_blocks          = 35 + seed;
+    snapshot.load_ref_blocks           = 34 + seed;
+    snapshot.eviction_ref_blocks       = 35 + seed;
+    snapshot.store_ref_blocks          = 36 + seed;
     return snapshot;
 }
 
@@ -1120,8 +1118,8 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.reserve_blocks, source.reserve_blocks) << context;
     EXPECT_EQ(actual.active_tree_cached_blocks, source.active_tree_cached_blocks) << context;
     EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
-    EXPECT_EQ(actual.connector_ref_blocks, source.connector_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
+    EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_ref_blocks, source.eviction_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
@@ -1142,8 +1140,8 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.reserve_blocks, 0u) << context;
     EXPECT_EQ(actual.active_tree_cached_blocks, source.active_tree_cached_blocks) << context;
     EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
-    EXPECT_EQ(actual.connector_ref_blocks, source.connector_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
+    EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
     EXPECT_EQ(actual.eviction_ref_blocks, source.eviction_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio,
@@ -1357,7 +1355,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
     for (const GroupSetPtr& group_set : cache->groupSets()) {
         ASSERT_NE(group_set->hostPool(), nullptr);
         for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
-            const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+            const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
             ASSERT_FALSE(isNullBlockIdx(source_block));
             slots[path_index][group_set->groupSetId()].host_block = source_block;
             host_sources.emplace_back(group_set, source_block);
@@ -1367,7 +1365,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
 
     const auto counters_before = snapshotPoolCounters(allocator);
     for (const auto& [group_set, source_block] : host_sources) {
-        EXPECT_EQ(group_set->hostPool()->refCount(source_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(source_block), 1u);
     }
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
@@ -1386,7 +1384,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
     EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 0u);
     expectPoolCountersEq(allocator, counters_before);
     for (const auto& [group_set, source_block] : host_sources) {
-        EXPECT_EQ(group_set->hostPool()->refCount(source_block), 1u);
+        EXPECT_EQ(group_set->hostPool()->treeRefCount(source_block), 1u);
     }
 }
 
@@ -1486,7 +1484,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
     auto& linear_ids       = batch_res->mutableBlockIds(0, /*group_id=*/0);
     auto  removed_block_id = linear_ids.blocks()[1];
     ASSERT_FALSE(isNullBlockIdx(removed_block_id));
-    allocator->groupBlockPools()[0]->decRef(removed_block_id, BlockRefType::REQUEST);
+    allocator->groupBlockPools()[0]->decRef(removed_block_id);
     linear_ids.setAt(1, NULL_BLOCK_IDX);
     const auto counters_before = snapshotPoolCounters(allocator);
 

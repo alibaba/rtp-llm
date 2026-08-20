@@ -31,6 +31,7 @@ using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
 using block_transfer_engine_test::poolMalloc;
+using block_transfer_engine_test::releasePoolBlock;
 using block_transfer_engine_test::submitSucceeded;
 
 GroupSetPtr makeHostDiskGroup(size_t                                  group_set_id,
@@ -152,8 +153,8 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
     for (size_t i = 0; i < host_block_size_; ++i)
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF)) << "byte " << i;
 
-    host_pool_->free(host_block);
-    disk_pool_->free(disk_slot);
+    releasePoolBlock(*host_pool_, host_block);
+    releasePoolBlock(*disk_pool_, disk_slot);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch) {
@@ -268,9 +269,9 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
         EXPECT_EQ(dst_data[i], 0) << "padding byte " << i;
     }
 
-    host_pool_->free(host_block);
-    host_pool_->free(dst_block);
-    direct_disk->free(disk_slot);
+    releasePoolBlock(*host_pool_, host_block);
+    releasePoolBlock(*host_pool_, dst_block);
+    releasePoolBlock(*direct_disk, disk_slot);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskAcceptsValidUnallocatedDiskBlock) {
@@ -282,7 +283,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskAcceptsValidUnall
                  makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, unallocated_disk_block),
                  TransferStatus::OK);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRejectsOutOfRangeDiskBlock) {
@@ -294,7 +295,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRejectsOutOfRange
                  makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, out_of_range),
                  TransferStatus::INVALID_ARGS);
 
-    host_pool_->free(host_block);
+    releasePoolBlock(*host_pool_, host_block);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
@@ -331,7 +332,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
         auto engine     = makeEngine({group});
         expectStatus(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block), expected);
         expectStatus(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block), expected);
-        host_pool_->free(host_block);
+        releasePoolBlock(*host_pool_, host_block);
     }
 }
 

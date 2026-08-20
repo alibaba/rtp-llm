@@ -208,7 +208,7 @@ TEST(DeviceBlockPoolTest, InvalidLayerAndBlockDoNotCorruptPoolState) {
 
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
-    pool.incRef(*block, BlockRefType::REQUEST);
+    pool.incRef(*block);
     const size_t free_before = pool.freeBlocksNum();
     const auto   refs_before = pool.refCount(*block);
 
@@ -218,7 +218,7 @@ TEST(DeviceBlockPoolTest, InvalidLayerAndBlockDoNotCorruptPoolState) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), refs_before);
     EXPECT_EQ(pool.freeBlocksNum(), free_before);
-    pool.decRef(*block, BlockRefType::REQUEST);
+    pool.decRef(*block);
 }
 
 TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
@@ -231,8 +231,8 @@ TEST(DeviceBlockPoolTest, LifecycleStartsAllocatedBlockWithZeroRefCount) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 0u);
 
-    pool.incRef(*block, BlockRefType::REQUEST);
-    pool.decRef(*block, BlockRefType::REQUEST);
+    pool.incRef(*block);
+    pool.decRef(*block);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
@@ -246,10 +246,95 @@ TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 0u);
 
-    pool.incRef(*block, BlockRefType::REQUEST);
+    pool.incRef(*block);
     EXPECT_EQ(pool.refCount(*block), 1u);
-    pool.decRef(*block, BlockRefType::REQUEST);
+    pool.decRef(*block);
     EXPECT_FALSE(pool.isAllocated(*block));
+}
+
+TEST(DeviceBlockPoolTest, OuterAndTreeRefsReleaseIndependently) {
+    auto            config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+
+    pool.incRef(*block);
+    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool.refCount(*block), 2u);
+    EXPECT_EQ(pool.treeRefCount(*block), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(), 1u);
+    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 1u);
+
+    pool.decRef(*block);
+    EXPECT_TRUE(pool.isAllocated(*block));
+    EXPECT_EQ(pool.refCount(*block), 1u);
+    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 0u);
+
+    pool.decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool.isAllocated(*block));
+}
+
+TEST(DeviceBlockPoolTest, ExplicitReleaseCannotConsumeTreeUmbrella) {
+    auto            config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    pool.incTreeRef(*block, BlockTreeRefType::LOAD);
+
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool.decRef(*block));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_TRUE(pool.isAllocated(*block));
+    EXPECT_EQ(pool.refCount(*block), 1u);
+    EXPECT_EQ(pool.treeRefCount(*block), 1u);
+    pool.decTreeRef(*block, BlockTreeRefType::LOAD);
+}
+
+TEST(DeviceBlockPoolTest, BatchIncRefRejectsInvalidTailWithoutMutatingPrefix) {
+    auto            config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    const BlockIdxType unallocated_block = *block + 1;
+
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool.incRef(BlockIdList{*block, unallocated_block}));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_EQ(pool.refCount(*block), 0u);
+    EXPECT_EQ(pool.referencedBlocksNum(), 0u);
+    pool.incRef(*block);
+    pool.decRef(*block);
+}
+
+TEST(DeviceBlockPoolTest, BatchDecRefRejectsUnheldTailWithoutMutatingPrefix) {
+    auto            config = makeConfig();
+    DeviceBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+
+    auto blocks = pool.malloc(2);
+    ASSERT_TRUE(blocks.has_value());
+    pool.incRef(blocks->front());
+
+    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_ANY_THROW(pool.decRef(*blocks));
+    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
+
+    EXPECT_EQ(pool.refCount(blocks->front()), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(), 1u);
+    pool.decRef(blocks->front());
+    pool.incRef(blocks->back());
+    pool.decRef(blocks->back());
 }
 
 TEST(DeviceBlockPoolTest, ExposesAllocatorFacingLayerTensorsAndBuffers) {
