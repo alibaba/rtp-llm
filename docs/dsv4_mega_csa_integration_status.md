@@ -638,9 +638,11 @@ Mega 轮在 target 的 `envs` 里加 `DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`。gol
 
    已有基线：CSA B128/64K `-24.6%`（§5 表）；HCA 非边界 `-20%`、压缩边界 `-54%`、
    B128/4K `-43%`（§5 HCA 表）。
-2. **端到端粗口径**：`docs/dsv4_mega_e2e/run_e2e_compare.py` 输出每请求
-   `cost_time`/`iter_count`（aux_info），可对 baseline/mega 两轮做同 prompt 对比；
-   正式吞吐 A/B 见第 6 节缺口 6，需要专用整机窗口。
+2. **端到端口径**：`docs/dsv4_mega_e2e/run_e2e_prod_perf.py`
+   （`baseline|mega|compare`）为生产形态 A/B——CUDA Graph decode（capture 覆盖
+   被测并发档）、fp8 KV、并发 greedy 流，输出各并发档的聚合 tps 与
+   decode ms/token；`run_e2e_compare.py` 的 aux_info 则是 eager 粗口径。
+   整机 dp8/ep8 的正式吞吐 A/B 见第 6 节缺口 6。
 3. **extension 侧微基准**：`tests/benchmark_dsv4_mega_flash_segments.py`（Flash HCA
    decode 链冷-L2 分段基准：opA→opB→Q norm/RoPE→FlashMLA→O-proj），
    以及 Wuda 仓 `dsv4_megakernel/megakernel/test/` 下的原始 bench（`test_e2e_decode.py`
