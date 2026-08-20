@@ -11,6 +11,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -427,19 +432,66 @@ class FormulaPredictorTest {
         assertEquals(500, p.estimateMs(100, 0));
     }
 
-    // ---- cache behaviour ----
+    // ---- concurrency ----
 
     @Test
-    @DisplayName("predictBatchMs cache hit returns same result")
-    void predictBatchMsCacheHitReturnsSameResult() {
-        FormulaPredictor p = new FormulaPredictor("50 + sum(computeTokens)");
-        BatchItem item1 = batchItem(100, 0);
-        BatchItem item2 = batchItem(200, 50);
-        // 50 + (100 + 150) = 300
-        double first = p.predictBatchMs(List.of(item1, item2));
-        double second = p.predictBatchMs(List.of(item1, item2));
-        assertEquals(first, second, 0.001);
-        assertEquals(300, (long) first);
+    @DisplayName("thread-local formula cursors isolate concurrent single and batch evaluations")
+    void formulaCursorsAreConcurrentSafe() throws Exception {
+        FormulaPredictor single = new FormulaPredictor(
+                "2*computeTokens + 3*hitCacheTokens + batchSize");
+        FormulaPredictor batch = new FormulaPredictor(
+                "batchSize + sum(2*computeTokens + 3*hitCacheTokens)");
+        int threadCount = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+        try {
+            for (int thread = 0; thread < threadCount; thread++) {
+                long seqLen = 1_000L + thread * 37L;
+                long hitCache = 100L + thread * 11L;
+                List<BatchItem> items = List.of(
+                        batchItem(seqLen, hitCache),
+                        batchItem(seqLen / 2L, hitCache / 2L));
+                long expectedSingle = 2L * (seqLen - hitCache) + 3L * hitCache + 1L;
+                long batchExpected = items.size();
+                for (BatchItem item : items) {
+                    batchExpected += 2L * (item.seqLen() - item.hitCache())
+                            + 3L * item.hitCache();
+                }
+                long expectedBatch = batchExpected;
+                futures.add(executor.submit(() -> {
+                    start.await();
+                    for (int iteration = 0; iteration < 2_000; iteration++) {
+                        assertEquals(expectedSingle, single.estimateMs(seqLen, hitCache));
+                        assertEquals(expectedBatch, (long) batch.predictBatchMs(items));
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> future : futures) {
+                future.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    @DisplayName("failed evaluation does not poison the reusable cursor")
+    void failedEvaluationDoesNotPoisonReusableCursor() {
+        PrefillTimeFormula direct = PrefillTimeFormula.parse("computeTokens");
+
+        assertThrows(NullPointerException.class, () -> direct.evaluate(null, List.of()));
+
+        FormulaPredictor first = new FormulaPredictor(
+                "sum(computeTokens) + 2*sum(hitCacheTokens)");
+        FormulaPredictor second = new FormulaPredictor(
+                "sum(max(computeTokens - 10, 0))");
+        assertEquals(500, first.estimateMs(400, 100));
+        assertEquals(290, second.estimateMs(400, 100));
+        assertEquals(500, first.estimateMs(400, 100));
     }
 
     // ---- helpers ----

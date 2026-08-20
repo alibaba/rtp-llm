@@ -349,6 +349,26 @@
                             --add-opens java.instrument/sun.instrument=ALL-UNNAMED
                         </argLine>
                     </configuration>
+                    <executions>
+                        <execution>
+                            <!-- Throughput floors are wall-clock assertions, so they run in a
+                                 dedicated JVM instead of sharing a fork with the rest of the suite. -->
+                            <id>performance-regression</id>
+                            <goals>
+                                <goal>test</goal>
+                            </goals>
+                            <configuration>
+                                <groups>performance-regression</groups>
+                                <reuseForks>false</reuseForks>
+                            </configuration>
+                        </execution>
+                        <execution>
+                            <id>default-test</id>
+                            <configuration>
+                                <excludedGroups>performance-regression</excludedGroups>
+                            </configuration>
+                        </execution>
+                    </executions>
                 </plugin>
             </plugins>
         </pluginManagement>

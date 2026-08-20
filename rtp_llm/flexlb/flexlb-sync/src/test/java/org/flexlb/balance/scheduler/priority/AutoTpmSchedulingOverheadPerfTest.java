@@ -1,13 +1,13 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
+import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -21,6 +21,9 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.metric.NoOpFlexMonitor;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.Tag;
@@ -29,15 +32,19 @@ import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -46,362 +53,462 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * A/B performance comparison: Auto-TPM enabled vs disabled scheduling path.
+ * Rate-limited performance matrix for every legal scheduler/dispatcher pair.
  *
- * <p>Measures the per-request overhead of the PriorityAdmissionScheduler
- * plan/commit path vs the legacy direct-enqueue path. Both paths share the
- * same underlying PriorityScheduler batch/dispatch pipeline — only the
- * admission layer differs.
+ * <p>The test deliberately enters through {@link RouteService}, including DIRECT,
+ * so it measures the public configuration switch rather than calling a scheduler
+ * implementation directly. Topology and load are controlled with:
  *
- * <p>Topology: 1 prefill + 2 decode (mirroring MasterBatchEndToEndPerformanceTest
- * baseline). Requests use log-like varying priority (uniform 1-100) and seqLen.
+ * <ul>
+ *   <li>{@code flexlb.perf.prefill-workers} (default 1)</li>
+ *   <li>{@code flexlb.perf.decode-workers} (default 1)</li>
+ *   <li>{@code flexlb.perf.target-qps} (default 3000)</li>
+ *   <li>{@code flexlb.perf.autotpm.requests} (default max(1024, target QPS))</li>
+ * </ul>
+ *
+ * <p>DIRECT + BATCH is rejected by the public config validator and is therefore
+ * intentionally absent. Every submitted future is retained and must complete
+ * successfully; dispatch and completion counts are exact hard gates.
  */
 @Tag("performance-regression")
 class AutoTpmSchedulingOverheadPerfTest {
 
     private static final int WARMUP_REQUESTS = 256;
-    private static final int REQUEST_COUNT =
-            Integer.getInteger("flexlb.perf.autotpm.requests", 8_192);
-    private static final int ROUNDS = 2;
+    private static final int PREFILL_WORKERS = integerProperty(
+            "flexlb.perf.prefill-workers", "flexlb.perf.autotpm.prefills", 1);
+    private static final int DECODE_WORKERS = integerProperty(
+            "flexlb.perf.decode-workers", "flexlb.perf.autotpm.decodes", 1);
+    private static final int TARGET_QPS =
+            Integer.getInteger("flexlb.perf.target-qps", 3_000);
+    private static final int REQUEST_COUNT = Integer.getInteger(
+            "flexlb.perf.autotpm.requests", Math.max(1_024, TARGET_QPS));
+    private static final long PHASE_TIMEOUT_SECONDS =
+            Long.getLong("flexlb.perf.phase-timeout-seconds", 20L);
 
     @Test
-    @Timeout(value = 60, unit = TimeUnit.SECONDS)
-    void autoTpmOverheadVsBaselineBurst() throws Exception {
-        // ================ Run baseline (autoTpmEnabled=false) ================
-        List<RoundResult> baselineRounds = new ArrayList<>();
-        for (int round = 0; round < ROUNDS; round++) {
-            try (PerfHarness h = new PerfHarness(cfg -> { /* baseline: all defaults */ })) {
-                baselineRounds.add(runBurst(h, "baseline-" + round));
-            }
-        }
-
-        // ================ Run Auto-TPM enabled ================
-        List<RoundResult> autoTpmRounds = new ArrayList<>();
-        for (int round = 0; round < ROUNDS; round++) {
-            try (PerfHarness h = new PerfHarness(cfg -> {
-                SchedulingTestConfig.usePriorityQueue(cfg);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
-            })) {
-                autoTpmRounds.add(runBurst(h, "autotpm-" + round));
-            }
-        }
-
-        // ================ Report ================
-        RoundResult baseline = best(baselineRounds);
-        RoundResult autoTpm = best(autoTpmRounds);
-        double overheadPct = (baseline.qps - autoTpm.qps) / baseline.qps * 100.0;
-        double p50DeltaUs = (autoTpm.p50Ns - baseline.p50Ns) / 1_000.0;
-        double p99DeltaUs = (autoTpm.p99Ns - baseline.p99Ns) / 1_000.0;
+    @Timeout(value = 120, unit = TimeUnit.SECONDS)
+    void legalSchedulingConfigMatrixRateLimited() throws Exception {
+        assertTrue(PREFILL_WORKERS > 0, "prefill worker count must be positive");
+        assertTrue(DECODE_WORKERS > 0, "decode worker count must be positive");
+        assertTrue(TARGET_QPS > 0, "target QPS must be positive");
+        assertTrue(REQUEST_COUNT > 0, "request count must be positive");
 
         System.out.printf(
-                "AutoTpm scheduling overhead A/B comparison (burst, %d requests):%n"
-                        + "  BASELINE (off): qps=%.1f p50=%.3fms p90=%.3fms p99=%.3fms avg=%.3fms%n"
-                        + "  AUTO-TPM (on):  qps=%.1f p50=%.3fms p90=%.3fms p99=%.3fms avg=%.3fms%n"
-                        + "  DELTA: throughput=%.1f%% p50_overhead=%.1fus p99_overhead=%.1fus%n",
-                REQUEST_COUNT,
-                baseline.qps, baseline.p50Ns / 1e6, baseline.p90Ns / 1e6,
-                baseline.p99Ns / 1e6, baseline.avgNs / 1e6,
-                autoTpm.qps, autoTpm.p50Ns / 1e6, autoTpm.p90Ns / 1e6,
-                autoTpm.p99Ns / 1e6, autoTpm.avgNs / 1e6,
-                overheadPct, p50DeltaUs, p99DeltaUs);
+                "Scheduling config matrix: target_qps=%d requests=%d topology=%dP/%dD%n",
+                TARGET_QPS, REQUEST_COUNT, PREFILL_WORKERS, DECODE_WORKERS);
+        System.out.printf("%-28s %-12s %-12s %-12s %-12s %-12s%n",
+                "mode", "actual_qps", "e2e_p50_ms", "e2e_p90_ms",
+                "e2e_p99_ms", "e2e_avg_ms");
 
-        // SLO: Auto-TPM path must deliver at least 5000 QPS (same floor)
-        long minimumQps = Long.getLong("flexlb.perf.min-autotpm-qps", 5_000L);
-        assertTrue(autoTpm.qps >= minimumQps,
-                () -> String.format("Auto-TPM throughput %.1f QPS below floor %d",
-                        autoTpm.qps, minimumQps));
-    }
-
-    @Test
-    @Timeout(value = 60, unit = TimeUnit.SECONDS)
-    void autoTpmOverheadVsBaselineRateLimited() throws Exception {
-        int[] targetQpsValues = {2_000, 5_000, 10_000};
-
-        System.out.println("AutoTpm rate-limited A/B comparison:");
-        System.out.printf("%-10s %-12s %-12s %-10s %-10s %-10s %-10s %-12s %-12s%n",
-                "target", "mode", "actual_qps", "p50_ms", "p90_ms", "p99_ms", "avg_ms",
-                "p50_delta_us", "p99_delta_us");
-
-        for (int targetQps : targetQpsValues) {
-            int requestCount = Math.max(1_024, targetQps / 2);
-
-            RoundResult baseline;
-            try (PerfHarness h = new PerfHarness(cfg -> { })) {
-                runWarmup(h);
-                baseline = runRateLimited(h, requestCount, targetQps);
+        for (Mode mode : Mode.values()) {
+            RoundResult result;
+            try (PerfHarness harness = new PerfHarness(mode)) {
+                runWarmup(harness);
+                result = runRateLimited(harness);
             }
-
-            RoundResult autoTpm;
-            try (PerfHarness h = new PerfHarness(cfg -> {
-                SchedulingTestConfig.usePriorityQueue(cfg);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
-            })) {
-                runWarmup(h);
-                autoTpm = runRateLimited(h, requestCount, targetQps);
-            }
-
-            double p50DeltaUs = (autoTpm.p50Ns - baseline.p50Ns) / 1_000.0;
-            double p99DeltaUs = (autoTpm.p99Ns - baseline.p99Ns) / 1_000.0;
-
-            System.out.printf("%-10d %-12s %-12.1f %-10.3f %-10.3f %-10.3f %-10.3f %-12s %-12s%n",
-                    targetQps, "baseline", baseline.qps,
-                    baseline.p50Ns / 1e6, baseline.p90Ns / 1e6,
-                    baseline.p99Ns / 1e6, baseline.avgNs / 1e6, "-", "-");
-            System.out.printf("%-10d %-12s %-12.1f %-10.3f %-10.3f %-10.3f %-10.3f %-12.1f %-12.1f%n",
-                    targetQps, "autotpm", autoTpm.qps,
-                    autoTpm.p50Ns / 1e6, autoTpm.p90Ns / 1e6,
-                    autoTpm.p99Ns / 1e6, autoTpm.avgNs / 1e6,
-                    p50DeltaUs, p99DeltaUs);
+            System.out.printf("%-28s %-12.1f %-12.3f %-12.3f %-12.3f %-12.3f%n",
+                    mode.label, result.qps,
+                    result.p50Ns / 1e6, result.p90Ns / 1e6,
+                    result.p99Ns / 1e6, result.avgNs / 1e6);
         }
     }
 
-    // ==================== Measurement logic ====================
-
-    private RoundResult runBurst(PerfHarness h, String label) throws Exception {
-        // Warmup
+    private void runWarmup(PerfHarness harness) throws Exception {
+        List<CompletableFuture<Response>> futures = new ArrayList<>(WARMUP_REQUESTS);
         for (int i = 0; i < WARMUP_REQUESTS; i++) {
-            h.submit(i, syntheticPriority(i), syntheticSeqLen(i));
+            futures.add(harness.submit(i, syntheticPriority(i), syntheticSeqLen(i)));
         }
-        awaitAllDispatched(h, WARMUP_REQUESTS);
+        harness.awaitSuccessful(futures, WARMUP_REQUESTS);
+    }
 
-        // Measurement
-        long[] latencies = new long[REQUEST_COUNT];
+    private RoundResult runRateLimited(PerfHarness harness) throws Exception {
+        List<CompletableFuture<Response>> futures = new ArrayList<>(REQUEST_COUNT);
+        List<CompletableFuture<Response>> latencyObservers =
+                new ArrayList<>(REQUEST_COUNT);
+        long[] completionLatencies = new long[REQUEST_COUNT];
         long startNanos = System.nanoTime();
         for (int i = 0; i < REQUEST_COUNT; i++) {
-            long t0 = System.nanoTime();
-            h.submit(1_000_000L + i, syntheticPriority(i), syntheticSeqLen(i));
-            latencies[i] = System.nanoTime() - t0;
-        }
-        awaitAllDispatched(h, WARMUP_REQUESTS + REQUEST_COUNT);
-        long elapsedNanos = System.nanoTime() - startNanos;
-
-        Arrays.sort(latencies);
-        double qps = REQUEST_COUNT * 1_000_000_000.0 / elapsedNanos;
-        return new RoundResult(qps, latencies, label);
-    }
-
-    private void runWarmup(PerfHarness h) throws Exception {
-        for (int i = 0; i < WARMUP_REQUESTS; i++) {
-            h.submit(i, syntheticPriority(i), syntheticSeqLen(i));
-        }
-        awaitAllDispatched(h, WARMUP_REQUESTS);
-    }
-
-    private RoundResult runRateLimited(PerfHarness h, int requestCount, int targetQps)
-            throws Exception {
-        long[] latencies = new long[requestCount];
-        long startNanos = System.nanoTime();
-        for (int i = 0; i < requestCount; i++) {
-            long targetNano = startNanos + (long) i * 1_000_000_000L / targetQps;
-            while (System.nanoTime() < targetNano) {
+            long targetNanos = startNanos + (long) i * 1_000_000_000L / TARGET_QPS;
+            while (System.nanoTime() < targetNanos) {
                 Thread.onSpinWait();
             }
-            long t0 = System.nanoTime();
-            h.submit(2_000_000L + i, syntheticPriority(i), syntheticSeqLen(i));
-            latencies[i] = System.nanoTime() - t0;
+            int latencyIndex = i;
+            long requestStarted = System.nanoTime();
+            CompletableFuture<Response> future = harness.submit(
+                    1_000_000L + i, syntheticPriority(i), syntheticSeqLen(i));
+            futures.add(future);
+            latencyObservers.add(future.whenComplete((ignored, error) ->
+                    completionLatencies[latencyIndex] =
+                            System.nanoTime() - requestStarted));
         }
-        awaitAllDispatched(h, WARMUP_REQUESTS + requestCount);
+        harness.awaitSuccessful(futures, WARMUP_REQUESTS + REQUEST_COUNT);
+        CompletableFuture.allOf(latencyObservers.toArray(CompletableFuture[]::new))
+                .get(PHASE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         long elapsedNanos = System.nanoTime() - startNanos;
 
-        Arrays.sort(latencies);
-        double qps = requestCount * 1_000_000_000.0 / elapsedNanos;
-        return new RoundResult(qps, latencies, "rate-" + targetQps);
+        Arrays.sort(completionLatencies);
+        double qps = REQUEST_COUNT * 1_000_000_000.0 / elapsedNanos;
+        return new RoundResult(qps, completionLatencies);
     }
 
-    private static void awaitAllDispatched(PerfHarness h, int expectedTotal) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (h.dispatchCount.get() < expectedTotal && System.nanoTime() < deadline) {
-            Thread.sleep(5);
-        }
+    private static int integerProperty(String preferred, String compatibility,
+                                       int defaultValue) {
+        String preferredValue = System.getProperty(preferred);
+        return preferredValue != null
+                ? Integer.parseInt(preferredValue)
+                : Integer.getInteger(compatibility, defaultValue);
     }
 
     private static int syntheticPriority(int index) {
-        // Spread priorities across 1-100 range
         return 1 + (index * 7 + 13) % 100;
     }
 
     private static long syntheticSeqLen(int index) {
-        // Vary input length: 64 to 8192 tokens
         return 64L + (index * 127) % 8128;
     }
 
-    private static RoundResult best(List<RoundResult> rounds) {
-        return rounds.stream().max((a, b) -> Double.compare(a.qps, b.qps)).orElseThrow();
+    private enum Mode {
+        QUEUE_PRIORITY_BATCH("QUEUE+PRIORITY+BATCH", true, true, true),
+        QUEUE_FIFO_BATCH("QUEUE+FIFO+BATCH", true, true, false),
+        QUEUE_PRIORITY_NON_BATCH("QUEUE+PRIORITY+NON_BATCH", true, false, true),
+        QUEUE_FIFO_NON_BATCH("QUEUE+FIFO+NON_BATCH", true, false, false),
+        DIRECT_NON_BATCH("DIRECT+NON_BATCH", false, false, false);
+
+        private final String label;
+        private final boolean queue;
+        private final boolean batch;
+        private final boolean priority;
+
+        Mode(String label, boolean queue, boolean batch, boolean priority) {
+            this.label = label;
+            this.queue = queue;
+            this.batch = batch;
+            this.priority = priority;
+        }
+
+        void configure(FlexlbConfig config) {
+            if (!queue) {
+                config.setScheduler(new DirectSchedulerConfig());
+                SchedulingTestConfig.useNonBatchDispatcher(config);
+                return;
+            }
+            if (priority) {
+                SchedulingTestConfig.usePriorityQueue(config);
+            } else {
+                SchedulingTestConfig.useFifoQueue(config);
+            }
+            if (batch) {
+                SchedulingTestConfig.useBatchDispatcher(config);
+            } else {
+                SchedulingTestConfig.useNonBatchDispatcher(config);
+            }
+        }
     }
 
-    // ==================== Records ====================
-
-    private record RoundResult(double qps, long p50Ns, long p90Ns, long p99Ns, long avgNs, String label) {
-        RoundResult(double qps, long[] sortedLatencies, String label) {
+    private record RoundResult(double qps, long p50Ns, long p90Ns, long p99Ns, long avgNs) {
+        RoundResult(double qps, long[] sortedLatencies) {
             this(qps,
                     percentile(sortedLatencies, 0.50),
                     percentile(sortedLatencies, 0.90),
                     percentile(sortedLatencies, 0.99),
-                    average(sortedLatencies),
-                    label);
+                    average(sortedLatencies));
         }
 
-        private static long percentile(long[] sorted, double pct) {
-            int idx = Math.max(0, (int) Math.ceil(sorted.length * pct) - 1);
-            return sorted[idx];
+        private static long percentile(long[] sorted, double percentile) {
+            int index = Math.max(0, (int) Math.ceil(sorted.length * percentile) - 1);
+            return sorted[index];
         }
 
         private static long average(long[] values) {
             long sum = 0;
-            for (long v : values) sum += v;
+            for (long value : values) {
+                sum += value;
+            }
             return sum / values.length;
         }
     }
 
-    // ==================== Per-test harness ====================
+    private record WorkerTarget(String ip, int httpPort, int grpcPort,
+                                String ipPort, WorkerStatus status) {
+    }
 
     private static final class PerfHarness implements AutoCloseable {
-        final FlexlbConfig config = new FlexlbConfig();
-        final PriorityScheduler scheduler;
-        final PriorityAdmissionScheduler priorityScheduler;
-        final EndpointRegistry endpointRegistry;
-        final AtomicLong dispatchCount = new AtomicLong();
-        final WorkerStatus decodeStatus = decodeWs();
-        final DefaultBatchDispatcher dispatcher;
+        private static final int PREFILL_HTTP_BASE = 9_000;
+        private static final int PREFILL_GRPC_BASE = 19_000;
+        private static final int DECODE_HTTP_BASE = 29_000;
+        private static final int DECODE_GRPC_BASE = 39_000;
 
-        private static final String PREFILL_IP = "127.0.0.1";
-        private static final int PREFILL_HTTP = 9000;
-        private static final int PREFILL_GRPC = 9001;
-        private static final String PREFILL_IP_PORT = PREFILL_IP + ":" + PREFILL_HTTP;
-        private static final String DECODE_IP = "127.0.0.2";
-        private static final int DECODE_HTTP = 9100;
-        private static final int DECODE_GRPC = 9101;
-        private static final String DECODE_IP_PORT = DECODE_IP + ":" + DECODE_HTTP;
+        private final Mode mode;
+        private final FlexlbConfig config = new FlexlbConfig();
+        private final PriorityScheduler scheduler;
+        private final PriorityAdmissionScheduler priorityScheduler;
+        private final EndpointRegistry endpointRegistry;
+        private final DefaultBatchDispatcher dispatcher;
+        private final RouteService routeService;
+        private final List<WorkerTarget> prefills = new ArrayList<>();
+        private final List<WorkerTarget> decodes = new ArrayList<>();
+        private final Map<Long, Integer> decodeAssignment = new ConcurrentHashMap<>();
+        private final List<Map<Long, TaskInfo>> activeDecodeTasks = new ArrayList<>();
+        private final List<Object> decodeStatusLocks = new ArrayList<>();
+        private final AtomicLong dispatchCount = new AtomicLong();
+        private final AtomicLong completionCount = new AtomicLong();
+        private final AtomicReference<String> firstFailure = new AtomicReference<>();
 
-        PerfHarness(Consumer<FlexlbConfig> customize) {
+        PerfHarness(Mode mode) {
+            this.mode = mode;
+            mode.configure(config);
+            configureCapacity(config, mode);
+
             ConfigService configService = mock(ConfigService.class);
             EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
-            BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
-            PrioritySchedulerReporter priorityReporter = mock(PrioritySchedulerReporter.class);
-
-            // Perf config matching MasterBatchEndToEndPerformanceTest
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10L);
-            SchedulingTestConfig.useBatchDispatcher(config).setEarlyDispatchPredictedExecutionMs((long) (0L));
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(16);
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(4_096);
-            config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(20_000);
-            config.getRouter().getRoles().getPrefill().getAvailability()
-                    .setMaxPendingRequests(1_000_000L);
-            config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100_000));
-            customize.accept(config);
+            BatchSchedulerReporter reporter =
+                    new BatchSchedulerReporter(NoOpFlexMonitor.getInstance());
+            PrioritySchedulerReporter priorityReporter =
+                    new PrioritySchedulerReporter(NoOpFlexMonitor.getInstance());
+            RecentCacheKeyTraceReporter traceReporter = mock(RecentCacheKeyTraceReporter.class);
+            DefaultRouter router = mock(DefaultRouter.class);
             when(configService.loadBalanceConfig()).thenReturn(config);
 
             AtomicReference<PriorityScheduler> schedulerRef = new AtomicReference<>();
-            AtomicReference<EndpointRegistry> endpointRegistryRef = new AtomicReference<>();
+            endpointRegistry = new EndpointRegistry(configService, schedulerRef::get, reporter);
 
-            // Mock gRPC: immediate success followed by the same Decode
-            // KV_ALLOCATED WorkerStatus signal that closes production leases.
+            when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+                BalanceContext context = invocation.getArgument(0);
+                long requestId = context.getRequestId();
+                int prefillIndex = Math.floorMod(requestId, prefills.size());
+                int decodeIndex = Math.floorMod(requestId, decodes.size());
+                WorkerTarget prefill = prefills.get(prefillIndex);
+                WorkerTarget decode = decodes.get(decodeIndex);
+                if (mode.queue) {
+                    DecodeEndpoint decodeEndpoint = endpointRegistry.getDecode(decode.ipPort);
+                    decodeEndpoint.reserve(requestId,
+                            (int) context.getRequest().getSeqLen(),
+                            (int) context.getRequest().getSeqLen() + 8,
+                            context.getPriority());
+                    decodeAssignment.put(requestId, decodeIndex);
+                }
+                return successRoute(requestId, prefill, decode);
+            });
+
             when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
                     any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                    .thenAnswer(inv -> {
-                        EngineRpcService.EnqueueBatchRequestPB req = inv.getArgument(2);
-                        int count = 0;
-                        for (EngineRpcService.EnqueueBatchDpSlotPB slot : req.getDpSlotsList()) {
-                            count += slot.getRequestsCount();
-                        }
-                        dispatchCount.addAndGet(count);
+                    .thenAnswer(invocation -> {
+                        EngineRpcService.EnqueueBatchRequestPB request = invocation.getArgument(2);
                         EngineRpcService.EnqueueBatchResponsePB.Builder response =
                                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
-                                        .setBatchId(req.getBatchId());
-                        List<Long> acceptedRequestIds = new ArrayList<>();
-                        for (EngineRpcService.EnqueueBatchDpSlotPB slot : req.getDpSlotsList()) {
+                                        .setBatchId(request.getBatchId());
+                        List<Long> accepted = new ArrayList<>();
+                        for (EngineRpcService.EnqueueBatchDpSlotPB slot
+                                : request.getDpSlotsList()) {
                             for (EngineRpcService.EnqueueBatchExternalInputPB input
                                     : slot.getRequestsList()) {
                                 long requestId = input.getInput().getRequestId();
-                                acceptedRequestIds.add(requestId);
+                                accepted.add(requestId);
                                 response.addSuccesses(
                                         EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                                                 .setRequestId(requestId));
                             }
                         }
-                        reportDecodeAccepted(schedulerRef.get(), endpointRegistryRef.get(),
-                                decodeStatus, acceptedRequestIds);
-                        return CompletableFuture.completedFuture(response.build());
+                        try {
+                            // Acceptance is part of this synthetic RPC's success
+                            // contract. Publish dispatch only after every endpoint
+                            // status reducer completed, matching the phase gate used
+                            // by NON_BATCH delivery.
+                            reportDecodeAccepted(accepted);
+                            dispatchCount.addAndGet(accepted.size());
+                            return CompletableFuture.completedFuture(response.build());
+                        } catch (Throwable acceptanceFailure) {
+                            firstFailure.compareAndSet(null,
+                                    "batch_id=" + request.getBatchId()
+                                            + " decode_acceptance=" + acceptanceFailure);
+                            // Preserve the real dispatcher's asynchronous RPC
+                            // failure path instead of throwing only from Mockito.
+                            return CompletableFuture.failedFuture(acceptanceFailure);
+                        }
                     });
 
-            // Router: always succeeds, reserves on decode
-            Router router = mock(Router.class);
-            endpointRegistry = new EndpointRegistry(configService, schedulerRef::get, reporter);
-            endpointRegistryRef.set(endpointRegistry);
-
-            when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
-                BalanceContext ctx = inv.getArgument(0);
-                DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-                decodeEp.reserve(ctx.getRequestId(), (int) ctx.getRequest().getSeqLen(),
-                        (int) ctx.getRequest().getSeqLen() + 8,
-                        ctx.getPriority());
-                return successRoute(ctx.getRequestId());
-            });
-
             dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-
-            // Build priority scheduler (always created; only active when autoTpmEnabled=true)
             priorityScheduler = new PriorityAdmissionScheduler(
                     configService, router, endpointRegistry, new PlanCommitter(),
                     priorityReporter, reporter, new UnsupportedEngineCancelChannel());
-
-            scheduler = new PriorityScheduler(configService, router,
-                    endpointRegistry, dispatcher, reporter, priorityScheduler, null,
-                    new UnsupportedEngineCancelChannel());
+            scheduler = new PriorityScheduler(
+                    configService, router, endpointRegistry, dispatcher, reporter,
+                    priorityScheduler, null, new UnsupportedEngineCancelChannel());
             schedulerRef.set(scheduler);
+            routeService = new RouteService(
+                    configService, router, scheduler, traceReporter);
 
-            // Register endpoints
-            WorkerStatus prefillWs = new WorkerStatus();
-            prefillWs.setIp(PREFILL_IP);
-            prefillWs.setPort(PREFILL_HTTP);
-            prefillWs.setGrpcPort(PREFILL_GRPC);
-            endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
-
-            endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeStatus);
-            endpointRegistry.getDecode(DECODE_IP_PORT)
-                    .onWorkerStatusUpdate(decodeStatus, new WorkerStatusResponse());
+            registerTopology();
         }
 
-        private static void reportDecodeAccepted(PriorityScheduler scheduler,
-                                                 EndpointRegistry registry,
-                                                 WorkerStatus decodeStatus,
-                                                 List<Long> requestIds) {
-            Map<String, TaskInfo> running = new java.util.HashMap<>();
-            for (long requestId : requestIds) {
-                TaskInfo task = new TaskInfo();
-                task.setRequestId(requestId);
-                task.setPhase(TaskPhase.KV_ALLOCATED);
-                running.put(String.valueOf(requestId), task);
+        private static void configureCapacity(FlexlbConfig config, Mode mode) {
+            int requestedCapacity = Math.max(20_000,
+                    WARMUP_REQUESTS + REQUEST_COUNT + 1_024);
+            config.getRouter().getRoles().getPrefill().getAvailability()
+                    .setMaxPendingRequests(1_000_000L);
+            config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxEngineRequests(100_000L);
+            if (!mode.queue) {
+                return;
             }
-            WorkerStatusResponse response = new WorkerStatusResponse();
-            response.setRole(RoleType.DECODE);
-            response.setRunningTaskInfo(running);
-            registry.getDecode(DECODE_IP_PORT).onWorkerStatusUpdate(decodeStatus, response);
-            scheduler.onWorkerStatusUpdate(response);
+            config.queueScheduler().getCapacity()
+                    .setMaxOutstandingRequestsGlobal(requestedCapacity);
+            config.queueScheduler().getLifecycle()
+                    .setMaxDeliveredNotAcceptedRequestsGlobal(requestedCapacity);
+            if (mode.batch) {
+                SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10L);
+                SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(16);
+                SchedulingTestConfig.useBatchDispatcher(config)
+                        .setMaxWaitingRequestsPerPrefillWorker(requestedCapacity);
+            }
         }
 
-        private static WorkerStatus decodeWs() {
-            WorkerStatus status = new WorkerStatus();
-            status.setIp(DECODE_IP);
-            status.setPort(DECODE_HTTP);
-            status.setGrpcPort(DECODE_GRPC);
-            status.setAvailableKvCacheTokens(new AtomicLong(1_000_000_000L));
-            status.setTotalKvCacheTokens(new AtomicLong(2_000_000_000L));
-            return status;
+        private void registerTopology() {
+            for (int i = 0; i < PREFILL_WORKERS; i++) {
+                WorkerStatus status = workerStatus(
+                        "127.1." + (i / 250) + "." + (1 + i % 250),
+                        PREFILL_HTTP_BASE + i, PREFILL_GRPC_BASE + i, false);
+                WorkerTarget target = new WorkerTarget(
+                        status.getIp(), status.getPort(), status.getGrpcPort(),
+                        status.getIpPort(), status);
+                prefills.add(target);
+                endpointRegistry.ensureEndpoint(RoleType.PREFILL, target.ipPort, status);
+            }
+            for (int i = 0; i < DECODE_WORKERS; i++) {
+                WorkerStatus status = workerStatus(
+                        "127.2." + (i / 250) + "." + (1 + i % 250),
+                        DECODE_HTTP_BASE + i, DECODE_GRPC_BASE + i, true);
+                WorkerTarget target = new WorkerTarget(
+                        status.getIp(), status.getPort(), status.getGrpcPort(),
+                        status.getIpPort(), status);
+                decodes.add(target);
+                activeDecodeTasks.add(new HashMap<>());
+                decodeStatusLocks.add(new Object());
+                endpointRegistry.ensureEndpoint(RoleType.DECODE, target.ipPort, status);
+                endpointRegistry.getDecode(target.ipPort)
+                        .onWorkerStatusUpdate(status, new WorkerStatusResponse());
+            }
         }
 
         CompletableFuture<Response> submit(long requestId, int priority, long seqLen) {
-            BalanceContext ctx = context(requestId, priority, seqLen);
-            return scheduler.submit(ctx);
+            CompletableFuture<Response> future = routeService.route(
+                    context(requestId, priority, seqLen));
+            future.whenComplete((response, error) -> {
+                try {
+                    if (error != null) {
+                        firstFailure.compareAndSet(null,
+                                "request_id=" + requestId + " exceptional=" + error);
+                        return;
+                    }
+                    if (response == null || !response.isSuccess()) {
+                        firstFailure.compareAndSet(null,
+                                "request_id=" + requestId + " response=" + response);
+                        return;
+                    }
+                    if (!mode.batch) {
+                        if (mode.queue) {
+                            reportDecodeAccepted(List.of(requestId));
+                        } else {
+                            decodeAssignment.remove(requestId);
+                        }
+                        dispatchCount.incrementAndGet();
+                    }
+                } catch (Throwable callbackFailure) {
+                    // whenComplete returns a dependent stage. Do not leave a
+                    // callback failure observable only on that otherwise-unused
+                    // stage: publish it into the phase gate so the test fails
+                    // immediately while the source future is still retained and
+                    // validated independently below.
+                    firstFailure.compareAndSet(null,
+                            "request_id=" + requestId
+                                    + " completion_callback=" + callbackFailure);
+                } finally {
+                    // Publish completion only after the synthetic Decode status has
+                    // finished reducing, so the phase gate cannot race harness close.
+                    completionCount.incrementAndGet();
+                }
+            });
+            return future;
         }
 
-        @Override
-        public void close() {
-            priorityScheduler.shutdown();
-            scheduler.shutdown();
-            dispatcher.shutdown();
+        void awaitSuccessful(List<CompletableFuture<Response>> futures,
+                             long expectedTotal) throws Exception {
+            long deadline = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(PHASE_TIMEOUT_SECONDS);
+            while ((dispatchCount.get() < expectedTotal
+                    || completionCount.get() < expectedTotal)
+                    && System.nanoTime() < deadline) {
+                String failure = firstFailure.get();
+                if (failure != null) {
+                    fail(mode.label + " failed before delivery: " + failure);
+                }
+                Thread.sleep(2L);
+            }
+
+            assertEquals(expectedTotal, dispatchCount.get(),
+                    () -> timeoutMessage("dispatch", expectedTotal));
+            assertEquals(expectedTotal, completionCount.get(),
+                    () -> timeoutMessage("completion", expectedTotal));
+            String failure = firstFailure.get();
+            assertTrue(failure == null,
+                    () -> mode.label + " returned a failed response: " + failure);
+            for (CompletableFuture<Response> future : futures) {
+                assertTrue(future.isDone(),
+                        () -> mode.label + " retained a non-terminal future");
+                Response response = future.getNow(null);
+                assertNotNull(response, mode.label + " completed without a response");
+                assertTrue(response.isSuccess(),
+                        () -> mode.label + " response failed: code=" + response.getCode()
+                                + " message=" + response.getErrorMessage());
+                assertEquals(mode.batch, response.isEnqueuedByMaster(),
+                        () -> mode.label + " returned the wrong delivery protocol");
+            }
+        }
+
+        private String timeoutMessage(String counter, long expected) {
+            return mode.label + " " + counter + " count mismatch: expected=" + expected
+                    + " dispatched=" + dispatchCount.get()
+                    + " completed=" + completionCount.get()
+                    + " queued=" + (mode.queue ? scheduler.getQueuedRequestCount() : 0)
+                    + " first_failure=" + firstFailure.get();
+        }
+
+        private void reportDecodeAccepted(List<Long> requestIds) {
+            Map<Integer, List<Long>> byDecode = new HashMap<>();
+            for (long requestId : requestIds) {
+                Integer decodeIndex = decodeAssignment.remove(requestId);
+                if (decodeIndex == null) {
+                    firstFailure.compareAndSet(null,
+                            "missing decode assignment for request_id=" + requestId);
+                    continue;
+                }
+                byDecode.computeIfAbsent(decodeIndex, ignored -> new ArrayList<>())
+                        .add(requestId);
+            }
+
+            for (Map.Entry<Integer, List<Long>> entry : byDecode.entrySet()) {
+                int decodeIndex = entry.getKey();
+                WorkerTarget decode = decodes.get(decodeIndex);
+                synchronized (decodeStatusLocks.get(decodeIndex)) {
+                    Map<Long, TaskInfo> active = activeDecodeTasks.get(decodeIndex);
+                    for (long requestId : entry.getValue()) {
+                        TaskInfo task = new TaskInfo();
+                        task.setRequestId(requestId);
+                        task.setPhase(TaskPhase.KV_ALLOCATED);
+                        active.put(requestId, task);
+                    }
+                    Map<String, TaskInfo> snapshot = new HashMap<>(active.size());
+                    for (Map.Entry<Long, TaskInfo> task : active.entrySet()) {
+                        snapshot.put(String.valueOf(task.getKey()), task.getValue());
+                    }
+                    WorkerStatusResponse response = new WorkerStatusResponse();
+                    response.setRole(RoleType.DECODE);
+                    response.setRunningTaskInfo(snapshot);
+                    endpointRegistry.getDecode(decode.ipPort)
+                            .onWorkerStatusUpdate(decode.status, response);
+                    scheduler.onWorkerStatusUpdate(response);
+                }
+            }
         }
 
         private BalanceContext context(long requestId, int priority, long seqLen) {
@@ -413,13 +520,40 @@ class AutoTpmSchedulingOverheadPerfTest {
             request.setModel("perf-model");
             request.setPriority(priority);
 
-            BalanceContext ctx = new BalanceContext();
-            ctx.setRequest(request);
-            ctx.setConfig(config);
-            ctx.setGenerateInputPbBytes(generateInputBytes(requestId, (int) seqLen));
-            ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
-                    priority, ctx.getStartTime() + 30_000));
-            return ctx;
+            BalanceContext context = new BalanceContext();
+            context.setRequest(request);
+            context.setGenerateInputPbBytes(generateInputBytes(requestId, (int) seqLen));
+            context.setSchedulingMetadata(SchedulingMetadata.explicit(
+                    priority, context.getStartTime() + 30_000));
+            return context;
+        }
+
+        @Override
+        public void close() {
+            try {
+                priorityScheduler.shutdown();
+                scheduler.shutdown();
+            } finally {
+                // PriorityScheduler owns the registry in production; the explicit
+                // close also protects the harness if scheduler shutdown aborts.
+                endpointRegistry.close();
+                dispatcher.shutdown();
+            }
+        }
+
+        private static WorkerStatus workerStatus(String ip, int httpPort,
+                                                 int grpcPort, boolean decode) {
+            WorkerStatus status = new WorkerStatus();
+            status.setIp(ip);
+            status.setPort(httpPort);
+            status.setGrpcPort(grpcPort);
+            status.setGroup("perf-group");
+            status.setAlive(true);
+            if (decode) {
+                status.setAvailableKvCacheTokens(new AtomicLong(1_000_000_000L));
+                status.setTotalKvCacheTokens(new AtomicLong(2_000_000_000L));
+            }
+            return status;
         }
 
         private static byte[] generateInputBytes(long requestId, int tokenCount) {
@@ -435,23 +569,25 @@ class AutoTpmSchedulingOverheadPerfTest {
             return input.build().toByteArray();
         }
 
-        private static Response successRoute(long requestId) {
+        private static Response successRoute(long requestId,
+                                             WorkerTarget prefill,
+                                             WorkerTarget decode) {
             Response response = new Response();
             response.setSuccess(true);
             response.setServerStatus(List.of(
-                    server(RoleType.PREFILL, PREFILL_IP, PREFILL_HTTP, PREFILL_GRPC, requestId),
-                    server(RoleType.DECODE, DECODE_IP, DECODE_HTTP, DECODE_GRPC, requestId)));
+                    server(RoleType.PREFILL, prefill, requestId),
+                    server(RoleType.DECODE, decode, requestId)));
             return response;
         }
 
-        private static ServerStatus server(RoleType role, String ip, int httpPort,
-                                           int grpcPort, long requestId) {
+        private static ServerStatus server(RoleType role, WorkerTarget worker,
+                                           long requestId) {
             ServerStatus status = new ServerStatus();
             status.setSuccess(true);
             status.setRole(role);
-            status.setServerIp(ip);
-            status.setHttpPort(httpPort);
-            status.setGrpcPort(grpcPort);
+            status.setServerIp(worker.ip);
+            status.setHttpPort(worker.httpPort);
+            status.setGrpcPort(worker.grpcPort);
             status.setDpRank(0);
             status.setGroup("perf-group");
             status.setRequestId(requestId);

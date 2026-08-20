@@ -12,6 +12,7 @@ import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -86,6 +87,9 @@ public abstract class FlexLBMockTestBase {
     private NioEventLoopGroup eventLoopGroup;
     private ThreadPoolExecutor grpcExecutor;
 
+    /** Addressable logical decode endpoints: one subnet per 254 endpoints. */
+    private static final int LOGICAL_DECODE_INDEX_LIMIT = 254 * 254;
+
     // Additional prefill workers started by tests (for multi-worker scenarios)
     private final List<MockPrefillWorker> additionalPrefillWorkers = new ArrayList<>();
     private final List<String> additionalPrefillIpPorts = new ArrayList<>();
@@ -132,13 +136,20 @@ public abstract class FlexLBMockTestBase {
 
         // 2. Create config
         config = createConfig();
-        configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(config);
+        configService = new ConfigService() {
+            @Override
+            public FlexlbConfig loadBalanceConfig() {
+                return config;
+            }
+        };
 
         // 3. Create gRPC infrastructure
-        eventLoopGroup = new NioEventLoopGroup(2);
+        InternalRuntimeSettings runtime = config.getInternalRuntime();
+        eventLoopGroup = new NioEventLoopGroup(runtime.getGrpcClientEventLoopThreads());
         grpcExecutor = new ThreadPoolExecutor(
-                2, 4, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(128));
+                runtime.getGrpcClientExecutorThreads(), runtime.getGrpcClientExecutorThreads(),
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
 
         CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
@@ -417,10 +428,13 @@ public abstract class FlexLBMockTestBase {
      * selects decode metadata; it does not contact decode before returning the ACK.
      */
     protected DecodeEndpoint addLogicalDecodeEndpoint(int workerIndex) {
-        if (workerIndex <= 0 || workerIndex > 254) {
-            throw new IllegalArgumentException("logical decode worker index must be in [1, 254]");
+        if (workerIndex <= 0 || workerIndex > LOGICAL_DECODE_INDEX_LIMIT) {
+            throw new IllegalArgumentException("logical decode worker index must be in [1, "
+                    + LOGICAL_DECODE_INDEX_LIMIT + "]");
         }
-        String ip = "192.0.2." + workerIndex;
+        // RFC 2544 benchmarking block, spread over subnets so a production-sized
+        // decode fleet still gets one distinct address per endpoint.
+        String ip = "198.18." + (workerIndex - 1) / 254 + "." + ((workerIndex - 1) % 254 + 1);
         int httpPort = 61_000;
         int grpcPort = httpPort + 1;
         String ipPort = ip + ":" + httpPort;

@@ -345,8 +345,10 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 continue;
             }
             long ttft = saturatingAdd(prefillMs, queueMs);
-            Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
-                    ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
+            if (Logger.isDebugEnabled()) {
+                Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
+                        ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
+            }
             result.add(new ScoredEndpoint(
                     ep, ttft, cacheHit, prefillMs, ep.getLastSelectedTime().get()));
         }

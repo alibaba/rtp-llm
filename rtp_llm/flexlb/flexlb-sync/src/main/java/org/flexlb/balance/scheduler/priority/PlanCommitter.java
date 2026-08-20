@@ -28,13 +28,16 @@ public class PlanCommitter {
         // cancellation/expiration linearize either before the whole commit or after
         // the item is externally visible to the batcher.
         synchronized (plan.item().future()) {
-            if (!registrar.isAdmissionOpen(
-                    plan.item().requestId(), plan.item().future())) {
-                return CommitResult.OFFER_FAILED;
-            }
+            // Registration refuses both a closed admission generation
+            // (cancellation/expiration already won) and a duplicate request
+            // id; the gate state is frozen for the whole critical section, so
+            // the distinction is only needed to classify the failure.
             if (!registrar.registerInflight(plan.item())) {
-                Logger.warn("[priority-scheduler] commit failed: duplicate request_id={}",
-                        plan.envelope().requestId());
+                if (registrar.isAdmissionOpen(
+                        plan.item().requestId(), plan.item().future())) {
+                    Logger.warn("[priority-scheduler] commit failed: duplicate request_id={}",
+                            plan.envelope().requestId());
+                }
                 return CommitResult.OFFER_FAILED;
             }
             if (!plan.prefillEp().getBatcher().tryOffer(plan.item())) {

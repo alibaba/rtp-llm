@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -30,6 +31,7 @@ public class LearningPredictor implements PrefillTimePredictor {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final AtomicReference<double[]> weightsRef;
+    private final AtomicLong generation = new AtomicLong();
     private final int linear_param_count;
     private final int total_param_count;
     private final double[] adamMoment1;
@@ -57,6 +59,11 @@ public class LearningPredictor implements PrefillTimePredictor {
         logger.debug(
                 "learn predictor created, t: {}, total param {}, init param: {}, beta1: {}, beta2: {}, alpha: {}, batchSize: {}",
                 this.t, this.total_param_count, formulaStringParam(this.weightsRef.get()), this.beta1, this.beta2, this.alpha, this.batchSize);
+    }
+
+    @Override
+    public long generation() {
+        return generation.get();
     }
 
     @Override
@@ -94,12 +101,6 @@ public class LearningPredictor implements PrefillTimePredictor {
         double[] values = new double[5];
         calcNonLinear(weights, linear, values);
         return values[0];
-    }
-
-    @Override
-    public double predictBatchMsUncached(List<BatchItem> items) {
-        // LearningPredictor has no cache — delegate directly.
-        return predictBatchMs(items);
     }
 
     private double calcLinear(double[] inputs, double[] weights) {
@@ -206,6 +207,11 @@ public class LearningPredictor implements PrefillTimePredictor {
 
             return newWeights;
         });
+        // Publish the generation only after the new immutable weight array is
+        // visible. A scheduler which overlaps this update may use either model
+        // for its current decision, but it will never publish a decision made
+        // against the replaced model after observing this increment.
+        this.generation.incrementAndGet();
         this.t = this.t + 1;
         this.itemBatch.clear();
         if (logger.isDebugEnabled()) {

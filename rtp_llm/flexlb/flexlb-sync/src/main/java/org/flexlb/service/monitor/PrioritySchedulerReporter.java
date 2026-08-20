@@ -43,11 +43,34 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
 @Component
 public class PrioritySchedulerReporter {
 
+    /** Highest normalized priority level; see {@code PriorityNormalizer}. */
+    private static final int MAX_PRIORITY = 100;
+
+    /**
+     * Priority is a normalized level, so its single-tag set is shared per
+     * level instead of being rebuilt on every report.
+     */
+    private static final FlexMetricTags[] PRIORITY_TAGS = buildPriorityTags();
+
     private final FlexMonitor monitor;
 
     @Autowired
     public PrioritySchedulerReporter(FlexMonitor monitor) {
         this.monitor = monitor;
+    }
+
+    private static FlexMetricTags[] buildPriorityTags() {
+        FlexMetricTags[] tags = new FlexMetricTags[MAX_PRIORITY + 1];
+        for (int priority = 0; priority < tags.length; priority++) {
+            tags[priority] = FlexMetricTags.of("priority", String.valueOf(priority));
+        }
+        return tags;
+    }
+
+    private static FlexMetricTags priorityTags(int priority) {
+        return priority >= 0 && priority <= MAX_PRIORITY
+                ? PRIORITY_TAGS[priority]
+                : FlexMetricTags.of("priority", String.valueOf(priority));
     }
 
     @PostConstruct
@@ -81,8 +104,7 @@ public class PrioritySchedulerReporter {
      * Report request arrival by normalized priority.
      */
     public void reportRequest(int priority) {
-        monitor.report(AUTO_TPM_REQUEST_COUNT,
-                FlexMetricTags.of("priority", String.valueOf(priority)), 1.0);
+        monitor.report(AUTO_TPM_REQUEST_COUNT, priorityTags(priority), 1.0);
     }
 
     /**
@@ -103,7 +125,7 @@ public class PrioritySchedulerReporter {
      */
     public void reportNormalPlacement(int priority) {
         monitor.report(AUTO_TPM_NORMAL_PLACEMENT_COUNT,
-                FlexMetricTags.of("priority", String.valueOf(priority)), 1.0);
+                priorityTags(priority), 1.0);
     }
 
     /**
@@ -218,7 +240,7 @@ public class PrioritySchedulerReporter {
      */
     public void reportTtft(int priority, long latencyMs) {
         monitor.report(AUTO_TPM_TTFT_MS,
-                FlexMetricTags.of("priority", String.valueOf(priority)), latencyMs);
+                priorityTags(priority), latencyMs);
     }
 
     /**
@@ -317,7 +339,7 @@ public class PrioritySchedulerReporter {
      */
     public void reportPlanAge(int priority, long ageMs) {
         monitor.report(AUTO_TPM_PLAN_AGE_MS,
-                FlexMetricTags.of("priority", String.valueOf(priority)), ageMs);
+                priorityTags(priority), ageMs);
     }
 
     /**
