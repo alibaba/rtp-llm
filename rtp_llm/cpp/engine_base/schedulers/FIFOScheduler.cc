@@ -489,6 +489,13 @@ void FIFOScheduler::cachePrepareLoop() {
             if (result == CachePrepareResult::LACK_MEM) {
                 std::lock_guard<std::mutex> lock(lock_);
                 cache_prepare_blocked_stream_ = stream;
+                // In async mode the scheduler wait predicate deliberately ignores
+                // waiting queues. Wake it even when this is a repeated LACK_MEM:
+                // prepared members before the blocked stream may be holding the
+                // blocks that the retry needs, and must be dispatched to make
+                // forward progress.
+                schedule_trigger_ = true;
+                cond_.notify_all();
                 break;
             }
             has_pending = has_pending || result == CachePrepareResult::WAIT;
