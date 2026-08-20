@@ -112,9 +112,7 @@ def repack_compressed_int4_to_cutlass(
     )
     scale_fp8 = weight_scale.to(torch.float8_e4m3fn)
     scale_roundtrip = scale_fp8.float()
-    if not bool(torch.isfinite(scale_roundtrip).all()) or bool(
-        (scale_roundtrip <= 0).any()
-    ):
+    if not bool(torch.isfinite(scale_roundtrip).all()):
         raise ValueError(
             "compressed INT4 scales must be representable as float8_e4m3fn"
         )
