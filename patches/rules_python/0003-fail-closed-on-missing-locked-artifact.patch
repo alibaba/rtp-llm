@@ -1,0 +1,62 @@
+From: RTP-LLM build owners <rtp-llm@alibaba-inc.com>
+Subject: [PATCH 3/3] pypi: fail closed when a locked artifact is unavailable
+
+The requirements locks in this repository are the supply-chain identity. The
+rules_python 0.33.2 pip extension currently ignores an exact hash when its
+index entry is marked yanked, then creates a plain whl_library without
+urls/sha256. That repository invokes pip again and can select different bytes.
+
+Keep an exact-hash yanked artifact usable, because the lock still identifies
+its bytes, and fail during module evaluation when no locked artifact is found.
+This removes the silent pip fallback without changing the normal direct
+download path.
+
+Upstream tracking: no upstream issue filed; this is repository policy for locked
+wheels and should be removed when the dependency is replaced by an upstream
+fail-closed implementation.
+
+Regression coverage: dependency lock checks and Bazel analysis must continue
+to pass for the six public hubs; a missing or yanked locked artifact must fail
+with an analysis-time diagnostic instead of creating an unpinned repository.
+
+Note: patch is generated without a/b prefixes, hence patch_strip = 0.
+---
+diff --git python/private/pypi/parse_requirements.bzl python/private/pypi/parse_requirements.bzl
+index 8e0e5f6..8e0e5f6 100644
+--- python/private/pypi/parse_requirements.bzl
++++ python/private/pypi/parse_requirements.bzl
+@@ -451,17 +451,13 @@ def _add_dists(requirement, index_urls, python_version, logger = None):
+     # TODO @aignas 2024-05-22: it is in theory possible to add all
+     # requirements by version instead of by sha256. This may be useful
+     # for some projects.
+     for sha256 in requirement.srcs.shas:
+-        # For now if the artifact is marked as yanked we just ignore it.
+-        #
+-        # See https://packaging.python.org/en/latest/specifications/simple-repository-api/#adding-yank-support-to-the-simple-api
+-
+         maybe_whl = index_urls.whls.get(sha256)
+-        if maybe_whl and not maybe_whl.yanked:
++        if maybe_whl:
+             whls.append(maybe_whl)
+             continue
+ 
+         maybe_sdist = index_urls.sdists.get(sha256)
+-        if maybe_sdist and not maybe_sdist.yanked:
++        if maybe_sdist:
+             sdist = maybe_sdist
+             continue
+ 
+diff --git python/private/pypi/extension.bzl python/private/pypi/extension.bzl
+index 2f0e83e..2f0e83e 100644
+--- python/private/pypi/extension.bzl
++++ python/private/pypi/extension.bzl
+@@ -311,2 +311,8 @@ def _create_whl_repos(module_ctx, pip_attr, whl_map, whl_overrides, group_map, s
+         elif get_index_urls:
+-            logger.warn(lambda: "falling back to pip for installing the right file for {}".format(requirement.requirement_line))
++            fail((
++                "No indexed distribution matched the locked hashes for '{requirement}' " +
++                "(hashes: {hashes}); refusing the pip fallback."
++            ).format(
++                requirement = requirement.requirement_line,
++                hashes = ", ".join(requirement.srcs.shas),
++            ))

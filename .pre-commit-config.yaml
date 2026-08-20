@@ -6,7 +6,10 @@ repos:
       - id: check-merge-conflict
       - id: check-symlinks
       - id: mixed-line-ending
+        # patch context lines carry significant whitespace; mutating them breaks `git apply`.
+        exclude: ^patches/
       - id: trailing-whitespace
+        exclude: ^patches/
 
     # Formatters
   - repo: https://github.com/psf/black-pre-commit-mirror
@@ -14,18 +17,40 @@ repos:
     hooks:
       - id: black
         types_or: [python]
+        exclude: ^rtp_llm/ops|^3rdparty
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
       - id: isort
         args: ["--profile=black"]
+        exclude: ^rtp_llm/ops|^3rdparty
 
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v19.1.1
     hooks:
       - id: clang-format
         types_or: [c++, c, cuda]
-        exclude: ^rtp_llm/cpp/cutlass/
+        exclude: ^rtp_llm/ops|^3rdparty|^rtp_llm/cpp/cutlass/
 
-exclude: ^rtp_llm/ops|^3rdparty
+      # Dependency gate: the public checkout's single CLI entry point; the
+      # offline gate remains an implementation detail of the CLI.
+  - repo: local
+    hooks:
+      # The gate reads generated artifacts and the full dependency declaration surface. Run it
+      # on every commit so a new BUILD/.bzl/input file cannot bypass the gate by missing a regex.
+      - id: deps-gate
+        name: deps gate (locks / wheel_requires / sm.bazelrc / flavor / public hosts)
+        entry: scripts/rtpcli deps gate
+        language: system
+        pass_filenames: false
+        always_run: true
+      # This one has no files filter and runs on every commit: credentials can appear in any
+      # file, and it scans the tracked contents of both repos (git grep, millisecond-level),
+      # not just the files staged this time.
+      - id: no-plaintext-ak
+        name: no plaintext AccessKey in tracked files
+        entry: bash deps/check_no_secrets.sh
+        language: system
+        pass_filenames: false
+        always_run: true

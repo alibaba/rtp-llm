@@ -1,0 +1,5 @@
+# bzlmod repo boundary marker
+# The original WORKSPACE (workspace name + WORKSPACE-era dependency loading) is dead code under
+# --noenable_workspace; this file carries only the Bzlmod form of the same responsibility:
+# marking the repo root of @com_google_protobuf (MODULE.bazel local_repository).
+# Dependencies are all provided by the root module's MODULE.bazel/extension; nothing is declared here.

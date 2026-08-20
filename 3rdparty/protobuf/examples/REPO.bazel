@@ -1,0 +1,4 @@
+# bzlmod repo boundary marker
+# The upstream examples subtree ships its own WORKSPACE so it can be built standalone; this
+# repo never builds it standalone. The boundary file is kept only to fence examples/ out of
+# @com_google_protobuf's package space (same responsibility as the original WORKSPACE).

@@ -6,7 +6,6 @@ licenses(["notice"])  # MIT/X derivative license
 exports_files(["COPYING"])
 
 CURL_WIN_COPTS = [
-    "/Iexternal/curl/lib",
     "/DBUILDING_LIBCURL",
     "/DHAVE_CONFIG_H",
     "/DCURL_DISABLE_FTP",
@@ -248,7 +247,6 @@ cc_library(
         "include/curl/typecheck-gcc.h",
     ],
     copts = [
-            "-Iexternal/curl/lib",
             "-D_GNU_SOURCE",
             "-DBUILDING_LIBCURL",
             "-DHAVE_CONFIG_H",
@@ -262,19 +260,20 @@ cc_library(
             "-DCURL_MAX_WRITE_SIZE=65536",
     ],
     defines = ["CURL_STATICLIB"],
-    includes = ["include"],
+    includes = ["include", "lib"],
     linkopts = [
         "-lrt",
     ],
     visibility = ["//visibility:public"],
     deps = [
         "@zlib_archive//:zlib",
-        "//external:libssl",
+        # Missed item of the bind retirement: originally //external:libssl = bind →
+        # @boringssl//:ssl; now points directly at the real label (the //external: package is retired in this repo).
+        "@boringssl//:ssl",
     ],
 )
 
 CURL_BIN_WIN_COPTS = [
-    "/Iexternal/curl/lib",
     "/DHAVE_CONFIG_H",
     "/DCURL_DISABLE_LIBCURL_OPTION",
 ]
@@ -368,7 +367,6 @@ cc_binary(
         "src/tool_xattr.h",
     ],
     copts = [
-            "-Iexternal/curl/lib",
             "-D_GNU_SOURCE",
             "-DHAVE_CONFIG_H",
             "-DCURL_DISABLE_LIBCURL_OPTION",

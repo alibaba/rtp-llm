@@ -48,7 +48,12 @@ py_library(
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
-    deps = [":test_util"],
+    deps = [
+        "//rtp_llm:port_config",
+        "//rtp_llm:psutil",
+        "//rtp_llm:requests",
+        ":test_util",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -67,4 +72,10 @@ py_test(
         ":test_util",
         ":torch",
     ],
+)
+
+py_test(
+    name = "maga_server_manager_test",
+    srcs = ["maga_server_manager_test.py"],
+    deps = [":maga_server_manager"],
 )

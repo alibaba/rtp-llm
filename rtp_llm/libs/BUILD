@@ -27,7 +27,7 @@ copy_files(
 copy_files(
     name = "copy_acclep_libs",
     srcs = select({
-        "//rtp_llm/models_py/bindings/cuda/ops:use_accl_ep": ["//3rdparty/accl_ep:accl_ep_shared"],
+        "//rtp_llm/models_py/bindings/cuda/ops:use_accl_ep": ["@rtp_extension//3rdparty/accl_ep:accl_ep_shared"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

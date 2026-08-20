@@ -1,2 +1,10 @@
-USE_BAZEL_VERSION=6.4.0
-BAZELISK_BASE_URL=https://mirrors.huaweicloud.com/bazel/
+# Owns the bazel version and binary origin (bazelisk only reads this file at the workspace
+# root). .bazelversion carries the same version for IDEs and is pinned equal to it by
+# deps/gate.sh; nothing else may declare it. BASE_URL points to our own public bucket, byte-identical to
+# the upstream official releases (sha256 checked); a new version must first be uploaded via
+#   rtpcli oss put --repo opensource --key bazel/<version>/bazel-<version>-linux-<arch> <file> --yes
+# before this file may change. Do NOT set ENV BAZELISK_BASE_URL anywhere, or that becomes a
+# second source of truth overriding this file. Images bake this exact binary via their
+# BAZELISK_URL build arg — bump those bootstrap URLs together with this file.
+USE_BAZEL_VERSION=7.7.1
+BAZELISK_BASE_URL=https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/bazel

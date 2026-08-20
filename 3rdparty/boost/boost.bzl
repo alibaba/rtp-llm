@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
 DEFAULT_COPTS = [
     "-Wno-tautological-constant-out-of-range-compare",
     "-Wno-return-std-move",
@@ -27,7 +28,7 @@ def boost_library(name, exclude_srcs=None, defines=None, deps=None, extra_srcs=N
     if linkopts == None:
         linkopts = []
 
-    return native.cc_library(
+    return cc_library(
         name = name,
         visibility = ["//visibility:public"],
         defines = defines,
@@ -55,7 +56,7 @@ def boost_headers(name, deps = None):
     if deps == None:
         deps = []
 
-    return native.cc_library(
+    return cc_library(
         name = name + "-headers",
         hdrs = native.glob([
             "boost/%s/*.h" % name,

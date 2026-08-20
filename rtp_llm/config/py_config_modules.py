@@ -6,6 +6,7 @@ from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
+from rtp_llm.config.port_config import MIN_WORKER_INFO_PORT_NUM
 
 st = time.time()
 from rtp_llm.ops import (
@@ -38,7 +39,6 @@ print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 9
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
 DASH_SC_GRPC_SERVER_PORT_OFFSET = 8
 

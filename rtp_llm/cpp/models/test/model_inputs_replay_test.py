@@ -7,7 +7,7 @@ import torch
 from rtp_llm.models_py.standalone.auto_model import AutoModel
 from rtp_llm.ops.compute_ops import PyModelInputs
 
-# MODEL_INPUTS_DUMP_PATH=/tmp/model-inputs/model_inputs MODEL_INPUTS_REPLAY_MODEL_PATH=/path/to/Qwen2-0.5B bazelisk test --config=cuda12_9 //rtp_llm/cpp/models/test:model_inputs_replay_test --test_env=MODEL_INPUTS_DUMP_PATH --test_env=MODEL_INPUTS_REPLAY_MODEL_PATH --test_output=all
+# MODEL_INPUTS_DUMP_PATH=/tmp/model-inputs/model_inputs MODEL_INPUTS_REPLAY_MODEL_PATH=/path/to/Qwen2-0.5B scripts/rtpcli bazel test --profile cuda12_9 //rtp_llm/cpp/models/test:model_inputs_replay_test --test_env=MODEL_INPUTS_DUMP_PATH --test_env=MODEL_INPUTS_REPLAY_MODEL_PATH --test_output=all
 DUMP_PATH = os.environ.get("MODEL_INPUTS_DUMP_PATH")
 MODEL_PATH = os.environ.get("MODEL_INPUTS_REPLAY_MODEL_PATH")
 

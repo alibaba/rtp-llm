@@ -33,6 +33,12 @@ class Tau2BenchComparer(BaseComparer):
 
     def run(self):
         out_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+        self._pip_target = os.path.join(
+            os.environ.get("TEST_TMPDIR", tempfile.gettempdir()), "tau2_pip_target"
+        )
+        os.makedirs(self._pip_target, exist_ok=True)
+        if self._pip_target not in sys.path:
+            sys.path.insert(0, self._pip_target)
 
         threshold = float(self.qr_info.get("tau2_threshold", DEFAULT_THRESHOLD))
         model_arg = self.qr_info.get("tau2_model", DEFAULT_MODEL_ARG)
@@ -75,7 +81,15 @@ class Tau2BenchComparer(BaseComparer):
         logging.info(f"[TAU2] PASS: OVERALL score={score} >= threshold={threshold}")
 
     def _pip_install(self, args: List[str]) -> None:
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + args
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--target",
+            self._pip_target,
+        ] + args
         logging.info(f"[TAU2] pip install: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
 
@@ -92,10 +106,8 @@ class Tau2BenchComparer(BaseComparer):
                 return
             logging.info(
                 f"[TAU2] evalscope=={current} != pinned {EVALSCOPE_PINNED_VERSION}, "
-                f"force reinstall"
+                f"installing pinned into per-test prefix"
             )
-            self._pip_install(["--force-reinstall", "--no-deps", pinned_spec])
-            return
         except ImportError:
             pass
         self._pip_install([pinned_spec])
@@ -240,11 +252,17 @@ class Tau2BenchComparer(BaseComparer):
         ]
         logging.info(f"[TAU2] running: {' '.join(cmd)} (cwd={extract_root})")
 
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [self._pip_target] + [p for p in [env.get("PYTHONPATH", "")] if p]
+        )
+
         captured: list = []
         with open(log_path, "w", encoding="utf-8") as log_fp:
             proc = subprocess.Popen(
                 cmd,
                 cwd=extract_root,
+                env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=1,
@@ -294,7 +312,9 @@ class Tau2BenchComparer(BaseComparer):
         return None
 
     @staticmethod
-    def _normalize_report_schema(data: dict) -> tuple[Optional[float], list[dict[str, Any]]]:
+    def _normalize_report_schema(
+        data: dict,
+    ) -> tuple[Optional[float], list[dict[str, Any]]]:
         score = Tau2BenchComparer._to_float(data.get("score"))
         metrics = []
         for raw_metric in data.get("metrics", []) or []:

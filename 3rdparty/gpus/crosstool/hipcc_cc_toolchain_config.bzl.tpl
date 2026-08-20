@@ -13,60 +13,10 @@ load(
     "tool_path",
     "variable_with_value",
 )
-load(
-    "@bazel_tools//tools/build_defs/cc:action_names.bzl",
-    "ASSEMBLE_ACTION_NAME",
-    "CC_FLAGS_MAKE_VARIABLE_ACTION_NAME",
-    "CLIF_MATCH_ACTION_NAME",
-    "CPP_COMPILE_ACTION_NAME",
-    "CPP_HEADER_PARSING_ACTION_NAME",
-    "CPP_LINK_DYNAMIC_LIBRARY_ACTION_NAME",
-    "CPP_LINK_EXECUTABLE_ACTION_NAME",
-    "CPP_LINK_NODEPS_DYNAMIC_LIBRARY_ACTION_NAME",
-    "CPP_LINK_STATIC_LIBRARY_ACTION_NAME",
-    "CPP_MODULE_CODEGEN_ACTION_NAME",
-    "CPP_MODULE_COMPILE_ACTION_NAME",
-    "C_COMPILE_ACTION_NAME",
-    "LINKSTAMP_COMPILE_ACTION_NAME",
-    "LTO_BACKEND_ACTION_NAME",
-    "LTO_INDEXING_ACTION_NAME",
-    "OBJCPP_COMPILE_ACTION_NAME",
-    "OBJCPP_EXECUTABLE_ACTION_NAME",
-    "OBJC_ARCHIVE_ACTION_NAME",
-    "OBJC_COMPILE_ACTION_NAME",
-    "OBJC_EXECUTABLE_ACTION_NAME",
-    "OBJC_FULLY_LINK_ACTION_NAME",
-    "PREPROCESS_ASSEMBLE_ACTION_NAME",
-    "STRIP_ACTION_NAME",
-)
-
-ACTION_NAMES = struct(
-    c_compile = C_COMPILE_ACTION_NAME,
-    cpp_compile = CPP_COMPILE_ACTION_NAME,
-    linkstamp_compile = LINKSTAMP_COMPILE_ACTION_NAME,
-    cc_flags_make_variable = CC_FLAGS_MAKE_VARIABLE_ACTION_NAME,
-    cpp_module_codegen = CPP_MODULE_CODEGEN_ACTION_NAME,
-    cpp_header_parsing = CPP_HEADER_PARSING_ACTION_NAME,
-    cpp_module_compile = CPP_MODULE_COMPILE_ACTION_NAME,
-    assemble = ASSEMBLE_ACTION_NAME,
-    preprocess_assemble = PREPROCESS_ASSEMBLE_ACTION_NAME,
-    lto_indexing = LTO_INDEXING_ACTION_NAME,
-    lto_backend = LTO_BACKEND_ACTION_NAME,
-    cpp_link_executable = CPP_LINK_EXECUTABLE_ACTION_NAME,
-    cpp_link_dynamic_library = CPP_LINK_DYNAMIC_LIBRARY_ACTION_NAME,
-    cpp_link_nodeps_dynamic_library = CPP_LINK_NODEPS_DYNAMIC_LIBRARY_ACTION_NAME,
-    cpp_link_static_library = CPP_LINK_STATIC_LIBRARY_ACTION_NAME,
-    strip = STRIP_ACTION_NAME,
-    objc_archive = OBJC_ARCHIVE_ACTION_NAME,
-    objc_compile = OBJC_COMPILE_ACTION_NAME,
-    objc_executable = OBJC_EXECUTABLE_ACTION_NAME,
-    objc_fully_link = OBJC_FULLY_LINK_ACTION_NAME,
-    objcpp_compile = OBJCPP_COMPILE_ACTION_NAME,
-    objcpp_executable = OBJCPP_EXECUTABLE_ACTION_NAME,
-    clif_match = CLIF_MATCH_ACTION_NAME,
-    objcopy_embed_data = "objcopy_embed_data",
-    ld_embed_data = "ld_embed_data",
-)
+# Bazel 7: use the ACTION_NAMES struct exported by bazel_tools directly. Loading each symbol
+# individually hard-binds to the upstream symbol surface (objc symbols were removed in 7.x;
+# this template never used them, yet the load failure took down the entire toolchain load).
+load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 
 def _impl(ctx):
     if (ctx.attr.cpu == "darwin"):

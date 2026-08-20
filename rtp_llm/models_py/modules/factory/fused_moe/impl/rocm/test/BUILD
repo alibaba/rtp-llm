@@ -67,7 +67,7 @@ py_test (
 # Not part of bulk MI308 ROCm CI: tag "rocm" is omitted; "manual" skips default
 # bazel test //...; "rocm_gfx950" only matches jobs that opt into that filter.
 # On MI308 this target hung when tagged "rocm" only — see PR #1005.
-# Run on MI355: bazelisk test ...:rocm_mxfp4_fused_moe_test --test_tag_filters=rocm_gfx950
+# Run on MI355: scripts/rtpcli bazel test --profile rocm ...:rocm_mxfp4_fused_moe_test --test_tag_filters=rocm_gfx950
 py_test (
     name = "rocm_mxfp4_fused_moe_test",
     srcs = ["rocm_mxfp4_fused_moe_test.py"],

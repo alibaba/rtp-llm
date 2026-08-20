@@ -1,4 +1,6 @@
 load("@bazel_skylib//lib:versions.bzl", "versions")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 def _GetPath(ctx, path):
     if ctx.label.workspace_root:
@@ -276,7 +278,7 @@ def cc_proto_library(
         )
 
         # An empty cc_library to make rule dependency consistent.
-        native.cc_library(
+        cc_library(
             name = name,
             **kargs
         )
@@ -284,7 +286,7 @@ def cc_proto_library(
 
     grpc_cpp_plugin = None
     if use_grpc_plugin:
-        grpc_cpp_plugin = "//external:grpc_cpp_plugin"
+        grpc_cpp_plugin = "@grpc//:grpc_cpp_plugin"
 
     gen_srcs = _CcSrcs(srcs, use_grpc_plugin)
     gen_hdrs = _CcHdrs(srcs, use_grpc_plugin)
@@ -306,9 +308,9 @@ def cc_proto_library(
     if default_runtime and not default_runtime in cc_libs:
         cc_libs = cc_libs + [default_runtime]
     if use_grpc_plugin:
-        cc_libs = cc_libs + ["//external:grpc_lib"]
+        cc_libs = cc_libs + ["@grpc//:grpc++"]
 
-    native.cc_library(
+    cc_library(
         name = name,
         srcs = gen_srcs,
         hdrs = gen_hdrs,
@@ -323,7 +325,11 @@ def internal_gen_well_known_protos_java(srcs):
     Args:
       srcs: the well known protos
     """
-    root = Label("%s//protobuf_java" % (native.repository_name())).workspace_root
+    # Bzlmod: native.repository_name() returns the canonical name (@@_main~_repo_rules~...);
+    # splicing it into Label() treats it as an apparent name looked up in the repo mapping and
+    # fails ("unknown repo"). Within the same repo a relative label suffices; workspace_root
+    # yields the same result (also holds under WORKSPACE).
+    root = Label("//protobuf_java").workspace_root
     pkg = native.package_name() + "/" if native.package_name() else ""
     if root == "":
         include = " -I%ssrc " % pkg
@@ -414,7 +420,7 @@ def py_proto_library(
 
     grpc_python_plugin = None
     if use_grpc_plugin:
-        grpc_python_plugin = "//external:grpc_python_plugin"
+        grpc_python_plugin = "@grpc//:grpc_python_plugin"
         # Note: Generated grpc code depends on Python grpc module. This dependency
         # is not explicitly listed in py_libs. Instead, host system is assumed to
         # have grpc installed.
@@ -435,7 +441,7 @@ def py_proto_library(
     if default_runtime and not default_runtime in py_libs + deps:
         py_libs = py_libs + [default_runtime]
 
-    native.py_library(
+    py_library(
         name = name,
         srcs = outs + py_extra_srcs,
         deps = py_libs + deps,
@@ -458,7 +464,7 @@ def internal_protobuf_py_tests(
     """
     for m in modules:
         s = "python/google/protobuf/internal/%s.py" % m
-        native.py_test(
+        py_test(
             name = "py_%s" % m,
             srcs = [s],
             main = s,

@@ -7,15 +7,20 @@ licenses(["restricted"])
 
 package(default_visibility = ["//visibility:public"])
 
+# target_compatible_with appends @rtp_llm//platforms:rocm_compiler so this hipcc wrapper
+# toolchain wins resolution only when the target platform explicitly carries the rocm_compiler
+# constraint (--config=rocm selects @rtp_llm//platforms:rocm_linux_x86_64 via --platforms);
+# otherwise it falls back to the default gcc and does not hijack CPU/host builds.
 toolchain(
     name = "toolchain-linux-x86_64",
     exec_compatible_with = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:x86_64",
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
     ],
     target_compatible_with = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:x86_64",
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+        "@rtp_llm//platforms:rocm_compiler",
     ],
     toolchain = ":cc-compiler-local",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",

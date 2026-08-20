@@ -21,7 +21,13 @@ py_library(
     deps = [
         "//rtp_llm:torch",
     ] + select({
-        "@//:using_cuda12":["deep_ep_py"],
+        # CUDA13 inherits using_cuda12, so both cuda13 branches must be specialized
+        # explicitly or Bazel would select the broader cuda12 alias and hand them the
+        # cu12 wheel. x86 has its own deep-ep build; arm still defers it because the
+        # available wheels link libcudart.so.12.
+        "@//:using_cuda13_x86": ["deep_ep_py"],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12": ["deep_ep_py"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

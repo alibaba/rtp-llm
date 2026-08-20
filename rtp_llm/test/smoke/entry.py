@@ -60,6 +60,16 @@ def _parse_kv_list(raw: str) -> Dict[str, str]:
 
 
 if __name__ == "__main__":
+    # The TEST_UNDECLARED_OUTPUTS_DIR given by nativelink may be a relative path,
+    # while server subprocesses use that directory as cwd; any relative join nests
+    # the whole path one more level inside test.outputs, causing REAPI artifact
+    # upload NOT_FOUND and, after retries 4>3, the entire bazel test aborting with
+    # Exit 34. Pin it to an absolute path at the entry point to cover every
+    # downstream consumer.
+    _outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+    if _outputs_dir:
+        os.environ["TEST_UNDECLARED_OUTPUTS_DIR"] = os.path.abspath(_outputs_dir)
+
     parser = argparse.ArgumentParser(description="smoke runner")
     parser.add_argument("--suite_name", type=str, required=True, help="suite_name")
     parser.add_argument("--task_info", type=str, required=True, help="task_info")
@@ -126,8 +136,6 @@ if __name__ == "__main__":
         "kill_remote": str_to_bool(args.kill_remote),
         "concurrency_test": str_to_bool(args.concurrency_test),
     }
-    # prompt_batch queries are now routed to /batch_infer per-query in case_runner
-    # (see CaseRunner._resolve_endpoint), no env-level switch needed.
 
     runner = runner_class(**runner_params)
 

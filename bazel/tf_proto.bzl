@@ -1,5 +1,7 @@
 # copy from tensorflow
 load("@com_google_protobuf//:protobuf.bzl", "proto_gen")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_python//python:defs.bzl", "py_library")
 
 def if_static(static, extra_deps, otherwise = []):
     if static:
@@ -105,7 +107,7 @@ def cc_proto_library(
         )
 
         # An empty cc_library to make rule dependency consistent.
-        native.cc_library(
+        cc_library(
             name = name,
             **kargs
         )
@@ -145,7 +147,7 @@ def cc_proto_library(
     else:
         header_only_name = name + "_headers_only"
         impl_name = name
-    native.cc_library(
+    cc_library(
         name = impl_name,
         srcs = gen_srcs,
         hdrs = gen_hdrs,
@@ -153,7 +155,7 @@ def cc_proto_library(
         includes = includes,
         **kargs
     )
-    native.cc_library(
+    cc_library(
         name = header_only_name,
         deps = ["@com_google_protobuf//:protobuf_headers"] + if_static(static, [impl_name]),
         hdrs = gen_hdrs,
@@ -227,7 +229,7 @@ def py_proto_library(
     if default_runtime and not default_runtime in py_libs + deps:
         py_libs = py_libs + [default_runtime]
 
-    native.py_library(
+    py_library(
         name = name,
         srcs = outs + py_extra_srcs,
         deps = py_libs + deps,
@@ -279,14 +281,14 @@ def tf_proto_library_cc(
             protoc = "@com_google_protobuf//:protoc",
             visibility = ["//visibility:public"],
         )
-        native.cc_library(
+        cc_library(
             name = cc_name,
             deps = cc_deps + ["@com_google_protobuf//:protobuf_headers"] +
                    if_static(static, [name + "_cc_impl"]),
             testonly = testonly,
             visibility = visibility,
         )
-        native.cc_library(
+        cc_library(
             name = cc_name + "_impl",
             deps = [s + "_impl" for s in cc_deps] + ["@com_google_protobuf//:cc_wkt_protos"],
         )
@@ -334,7 +336,7 @@ def tf_proto_library_py(
             protoc = "@com_google_protobuf//:protoc",
             visibility = ["//visibility:public"],
         )
-        native.py_library(
+        py_library(
             name = py_name,
             deps = py_deps + ["@com_google_protobuf//:protobuf_python"],
             testonly = testonly,
@@ -422,7 +424,7 @@ def cc_proto(
         default_header = default_header,
         static=static,
     )
-    native.cc_library(
+    cc_library(
         name = name + "_cc_proto",
         hdrs = [s[:-len(".proto")] + ".pb.h" for s in srcs],
         deps = [name + "_cc_impl"],
@@ -437,7 +439,7 @@ def cc_proto(
         else:
             # tensorflow proto library
             header_deps.append(dep + "_cc_headers_only")
-    native.cc_library(
+    cc_library(
         name = name + "_cc_proto_headers",
         hdrs = [s[:-len(".proto")] + ".pb.h" for s in srcs],
         deps = header_deps,

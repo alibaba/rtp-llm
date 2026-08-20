@@ -1,0 +1,1238 @@
+{
+  "schema_version": 1,
+  "python": {
+    "version": "3.10",
+    "uv": "0.11.27"
+  },
+  "indexes": {
+    "oss_base": "rtp-opensource"
+  },
+  "profiles": [
+    {
+      "name": "cpu",
+      "platform": "x86_64-unknown-linux-gnu",
+      "bazel_config": "cpu",
+      "index_view": "simple-cpu",
+      "hub": "pip_cpu_torch",
+      "lock": "requirements_lock_torch_cpu.txt"
+    },
+    {
+      "name": "arm",
+      "platform": "aarch64-unknown-linux-gnu",
+      "bazel_config": "arm",
+      "index_view": "simple-arm",
+      "hub": "pip_arm_torch",
+      "lock": "requirements_lock_torch_arm.txt"
+    },
+    {
+      "name": "cuda12_6",
+      "platform": "x86_64-unknown-linux-gnu",
+      "bazel_config": "cuda12_6",
+      "index_view": "simple-cuda12",
+      "hub": "pip_gpu_cuda12_torch",
+      "lock": "requirements_lock_torch_gpu_cuda12.txt"
+    },
+    {
+      "name": "cuda12_9",
+      "platform": "x86_64-unknown-linux-gnu",
+      "bazel_config": "cuda12_9",
+      "index_view": "simple-cuda12_9",
+      "hub": "pip_gpu_cuda12_9_torch",
+      "lock": "requirements_lock_torch_gpu_cuda12_9.txt"
+    },
+    {
+      "name": "cuda12_9_arm",
+      "platform": "aarch64-unknown-linux-gnu",
+      "bazel_config": "cuda12_9_arm",
+      "index_view": "simple-cuda12_arm",
+      "hub": "pip_cuda12_arm_torch",
+      "lock": "requirements_lock_cuda12_arm.txt"
+    },
+    {
+      "name": "rocm",
+      "platform": "x86_64-unknown-linux-gnu",
+      "bazel_config": "rocm",
+      "index_view": "simple-rocm",
+      "hub": "pip_gpu_rocm_torch",
+      "lock": "requirements_lock_rocm.txt"
+    }
+  ],
+  "packages": [
+    {
+      "name": "aiohttp",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "aiter",
+      "per_profile": {
+        "rocm": {
+          "spec": "==0.1.17.dev79+g2570b35f9.d20260623",
+          "cc_view": {
+            "name": "aiter",
+            "sha256": "23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25",
+            "urls": [
+              "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/archives/sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl"
+            ],
+            "build_file": "@rtp_llm//:BUILD.aiter"
+          }
+        }
+      }
+    },
+    {
+      "name": "amdsmi",
+      "per_profile": {
+        "rocm": {
+          "spec": "==24.7.1+e834839"
+        }
+      }
+    },
+    {
+      "name": "apache-tvm-ffi",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==0.1.1"
+        },
+        "cuda12_9": {
+          "spec": "==0.1.9"
+        }
+      }
+    },
+    {
+      "name": "auto_gptq",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": ""
+        },
+        "cuda12_9": {
+          "spec": ""
+        }
+      }
+    },
+    {
+      "name": "autoawq",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": ">=0.2.9"
+        },
+        "cuda12_9": {
+          "spec": ""
+        }
+      }
+    },
+    {
+      "name": "av",
+      "common": {
+        "spec": "==16.1.0",
+        "marker": "platform_machine == \"x86_64\""
+      }
+    },
+    {
+      "name": "bitsandbytes",
+      "common": {
+        "spec": ">=0.41.0"
+      }
+    },
+    {
+      "name": "blobfile",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "concurrent_log_handler",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "cpm_kernels",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "dacite",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "dashscope",
+      "common": {
+        "spec": ">=1.11.0"
+      }
+    },
+    {
+      "name": "datasets",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": ""
+        },
+        "cuda12_9": {
+          "spec": ""
+        }
+      }
+    },
+    {
+      "name": "decord",
+      "common": {
+        "spec": "==0.6.0",
+        "marker": "platform_machine == \"x86_64\""
+      }
+    },
+    {
+      "name": "deep-ep",
+      "_comment": "ARM/GB200 needs a self-supplied manylinux wheel; for the same version across arches only the target sha256 is kept. Remove once public ARM supply is stable.",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==1.2.1+29d31c0"
+        },
+        "cuda12_9": {
+          "spec": "==1.2.1.10+d7d7b48"
+        },
+        "cuda12_9_arm": {
+          "spec": "==1.2.1.11+unknown.pai",
+          "source": "oss_flavor",
+          "sha256": "8e590c67b3900b5d4a8388243726e209f03d32ea3d647f328b5d2195fc4720a0"
+        }
+      }
+    },
+    {
+      "name": "deep-gemm",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==2.2.0+9b680f4"
+        },
+        "cuda12_9": {
+          "spec": "==2.1.1+local"
+        },
+        "cuda12_9_arm": {
+          "spec": "==2.1.1+local"
+        }
+      }
+    },
+    {
+      "name": "einops",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "fast-hadamard-transform",
+      "_comment": "aliyun lacks this build; our own index is the only supplier. Remove the explicit source once public mirrors catch up.",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==1.0.4.post1",
+          "source": "oss_flavor"
+        },
+        "cuda12_9_arm": {
+          "spec": "==1.0.4.post1",
+          "source": "oss_flavor"
+        }
+      }
+    },
+    {
+      "name": "fast-safetensors",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==0.7.3+torch2.1.2.cu121"
+        }
+      }
+    },
+    {
+      "name": "fastapi",
+      "common": {
+        "spec": "==0.115.6"
+      }
+    },
+    {
+      "name": "fastsafetensors",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==0.1.19rc5+ali"
+        }
+      }
+    },
+    {
+      "name": "filelock",
+      "common": {
+        "spec": ">=3.20.0"
+      }
+    },
+    {
+      "name": "flash-attn",
+      "_comment": "ARM needs a self-supplied wheel; a bare version spec would match local tags, so sha256 pins the manylinux build. Remove once public ARM supply is stable.",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==2.7.4.post1+cu12torch2.6cxx11abitrue"
+        },
+        "cuda12_9": {
+          "spec": "==2.8.3+cu12torch2.8cxx11abitrue"
+        },
+        "cuda12_9_arm": {
+          "spec": "===2.8.3",
+          "source": "oss_flavor",
+          "sha256": "9587c44a8adb6af4f83553f3147bdd7daa3c28a00a9be0ef97a945659f2885b5"
+        }
+      }
+    },
+    {
+      "name": "flash-attn-3",
+      "_comment": "The ARM runtime needs the in-package flash_attn_interface; hashes differ across arches for the same version. Remove once ARM supply is stable.",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==3.0.0b1"
+        },
+        "cuda12_9_arm": {
+          "spec": "===3.0.0b1",
+          "source": "oss_flavor"
+        }
+      }
+    },
+    {
+      "name": "flash-mla",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==1.0.0+ca58fed"
+        },
+        "cuda12_9_arm": {
+          "spec": "==1.0.0+47c35a7"
+        }
+      }
+    },
+    {
+      "name": "flashinfer-cubin",
+      "_comment": "The ARM/sm100 runtime needs the in-package flashInferMetaInfo.h to keep JIT from falling back to external downloads; remove once public ARM supply is stable.",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==0.6.9",
+          "source": "oss_flavor",
+          "sha256": "bbc02f9e0e547e90e8bc1b2f6a6c140bca7d0be8a85d3bc58100b92288f14f50"
+        },
+        "cuda12_9_arm": {
+          "spec": "==0.6.9",
+          "source": "oss_flavor",
+          "sha256": "bbc02f9e0e547e90e8bc1b2f6a6c140bca7d0be8a85d3bc58100b92288f14f50"
+        }
+      }
+    },
+    {
+      "name": "flashinfer-jit-cache",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==0.6.9",
+          "source": "oss_flavor",
+          "sha256": "4466c7991931e8b030ab36fad052ee2cd0ceeb41c741f30076a025f81d4ff8a8"
+        }
+      }
+    },
+    {
+      "name": "flashinfer-python",
+      "_comment": "The same version has multiple builds; sha256 pins the build containing the required JIT API; update sha256 in sync when switching builds.",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==0.2.5"
+        },
+        "cuda12_9": {
+          "spec": "==0.6.9",
+          "source": "oss_flavor",
+          "sha256": "991bb0906eba8a37e8ae306fdee5deb2e648569210d62e292f6c8156ddb2774b"
+        },
+        "cuda12_9_arm": {
+          "spec": "==0.6.9",
+          "source": "oss_flavor",
+          "sha256": "991bb0906eba8a37e8ae306fdee5deb2e648569210d62e292f6c8156ddb2774b"
+        }
+      }
+    },
+    {
+      "name": "grpcio",
+      "common": {
+        "spec": "==1.62.0"
+      }
+    },
+    {
+      "name": "grpcio-tools",
+      "common": {
+        "spec": "==1.57.0"
+      }
+    },
+    {
+      "name": "importlib_metadata",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "jieba",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "jinja2",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "json5",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "librosa",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "lru-dict",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "matplotlib",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "mysql-connector-python",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": ""
+        },
+        "cuda12_9_arm": {
+          "spec": ""
+        }
+      }
+    },
+    {
+      "name": "nest_asyncio",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "numpy",
+      "common": {
+        "spec": "<2.0a0,>=1.25"
+      }
+    },
+    {
+      "name": "nvidia-nvshmem-cu12",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==3.4.5"
+        }
+      }
+    },
+    {
+      "name": "onnx",
+      "common": {
+        "spec": "==1.16.0"
+      }
+    },
+    {
+      "name": "openai",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "orjson",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "oss2",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "partial_json_parser",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "Pillow",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "pillow-avif-plugin",
+      "common": {
+        "spec": "==1.5.2"
+      }
+    },
+    {
+      "name": "pillow-heif",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "portalocker",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "prettytable",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "protobuf",
+      "common": {
+        "spec": "==4.25"
+      }
+    },
+    {
+      "name": "psutil",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "py-spy",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "pybind11_stubgen",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "pydantic",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "pynvml",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "pyodps",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "pyOpenSSL",
+      "common": {
+        "spec": "==24.1.0"
+      }
+    },
+    {
+      "name": "pyrsmi",
+      "per_profile": {
+        "rocm": {
+          "spec": "==0.2.0"
+        }
+      }
+    },
+    {
+      "name": "pyyaml",
+      "per_profile": {
+        "rocm": {
+          "spec": "==6.0.2"
+        }
+      }
+    },
+    {
+      "name": "rtp-kernel",
+      "_comment": "Different builds differ in SM/position_ids capabilities and the version number cannot tell them apart; sha256 pins the target build; update spec/sha256 in sync when switching builds.",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==0.1.0+125c29e5",
+          "sha256": "a74c8d99e7c9026fad5f96397a54f9cf4eedb7086a2fa4448b3e5b64a4cc371f"
+        },
+        "cuda12_9_arm": {
+          "spec": "===0.1.0",
+          "source": "oss_flavor",
+          "sha256": "a31eef22a53a57ebbd6269f25ded9c148bf1deb6cbe9dae7ea2bae92ebfe3f87"
+        }
+      }
+    },
+    {
+      "name": "safetensors",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "sentence-transformers",
+      "common": {
+        "spec": "==5.2.0"
+      }
+    },
+    {
+      "name": "sentencepiece",
+      "common": {
+        "spec": "==0.2.0"
+      }
+    },
+    {
+      "name": "setproctitle",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "setuptools",
+      "common": {
+        "spec": "==60.5.0"
+      }
+    },
+    {
+      "name": "sqlglot",
+      "_comment": "Neither the public internet nor aliyun has this build; our own index is the only supplier. Remove the explicit source once public mirrors catch up.",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==19.8.4.dev4",
+          "source": "oss_flavor"
+        }
+      }
+    },
+    {
+      "name": "sympy",
+      "common": {
+        "spec": ""
+      },
+      "per_profile": {
+        "cpu": {
+          "spec": "==1.13.1"
+        }
+      }
+    },
+    {
+      "name": "tabulate",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==0.9.0"
+        }
+      }
+    },
+    {
+      "name": "tensorrt",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==10.3.0"
+        },
+        "cuda12_9": {
+          "spec": "==10.3.0"
+        }
+      }
+    },
+    {
+      "name": "tensorrt-cu12-bindings",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==10.3.0"
+        },
+        "cuda12_9": {
+          "spec": "==10.3.0"
+        }
+      }
+    },
+    {
+      "name": "tensorrt-cu12-libs",
+      "_comment": "aliyun lacks this NVIDIA build; our own index is the only supplier. Remove the explicit source once public mirrors catch up.",
+      "per_profile": {
+        "cuda12_6": {
+          "spec": "==10.3.0",
+          "source": "oss_flavor"
+        },
+        "cuda12_9": {
+          "spec": "==10.3.0",
+          "source": "oss_flavor"
+        }
+      }
+    },
+    {
+      "name": "thrift",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "tiktoken",
+      "common": {
+        "spec": "==0.7.0"
+      }
+    },
+    {
+      "name": "tilelang",
+      "per_profile": {
+        "cuda12_9": {
+          "spec": "==0.1.6"
+        }
+      }
+    },
+    {
+      "name": "timm",
+      "common": {
+        "spec": "==0.9.12"
+      }
+    },
+    {
+      "name": "torch",
+      "per_profile": {
+        "cpu": {
+          "spec": "==2.6.0+cpu",
+          "cc_view": {
+            "name": "torch_py310_cpu",
+            "sha256": "35a9e78b7e4096968b54c1a198687b981569c50ae93e661aa430f9fd208da102",
+            "urls": [
+              "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/archives/mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl"
+            ],
+            "build_file": "@rtp_llm//:BUILD.pytorch"
+          }
+        },
+        "arm": {
+          "spec": "==2.1.2",
+          "cc_view": {
+            "name": "torch_py310_cpu_aarch64",
+            "sha256": "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
+            "urls": [
+              "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/archives/mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
+            ],
+            "build_file": "@rtp_llm//:BUILD.pytorch"
+          }
+        },
+        "cuda12_6": {
+          "spec": "==2.6.0+cu126",
+          "cc_view": {
+            "name": "torch_2.6_py310_cuda",
+            "sha256": "c55280b4da58e565d8a25e0e844dc27d0c96aaada7b90b4de70a45397faf604e",
+            "urls": [
+              "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/archives/mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.6.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl"
+            ],
+            "build_file": "@rtp_llm//:BUILD.pytorch"
+          }
+        },
+        "cuda12_9": {
+          "spec": "==2.8.0+cu129",
+          "cc_view": {
+            "name": "torch_2.8_py310_cuda",
+            "sha256": "54d240b5d3b1f9075d4ee6179675a22c1974f7bef1885d134c582678d5180cd3",
+            "urls": [
+              "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/archives/download.pytorch.org/whl/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl"
+            ],
+            "build_file": "@rtp_llm//:BUILD.pytorch"
+          }
+        },
+        "cuda12_9_arm": {
+          "spec": "==2.9.0+cu129"
+        },
+        "rocm": {
+          "spec": "==2.9.1+git7e1940d",
+          "cc_view": {
+            "name": "torch_rocm",
+            "sha256": "521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a",
+            "urls": [
+              "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/archives/sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/torch/torch-2.9.1%2Bgit7e1940d-cp310-cp310-linux_x86_64.whl"
+            ],
+            "build_file": "@rtp_llm//:BUILD.pytorch"
+          }
+        }
+      }
+    },
+    {
+      "name": "torchvision",
+      "per_profile": {
+        "cpu": {
+          "spec": "==0.21.0+cpu"
+        },
+        "cuda12_6": {
+          "spec": "==0.21.0+cu126"
+        },
+        "cuda12_9": {
+          "spec": "==0.23.0+cu129"
+        },
+        "cuda12_9_arm": {
+          "spec": "==0.24.0+cu129"
+        },
+        "rocm": {
+          "spec": "==0.24.0+rocm7.2.0.gitb919bd0c"
+        }
+      }
+    },
+    {
+      "name": "transformers",
+      "common": {
+        "spec": "==5.2.0"
+      }
+    },
+    {
+      "name": "triton",
+      "per_profile": {
+        "cuda12_9_arm": {
+          "spec": "==3.5.0"
+        },
+        "rocm": {
+          "spec": "==3.7.0+amd.rocm7.2.0.gitd0d77a509"
+        }
+      }
+    },
+    {
+      "name": "triton-kernels",
+      "per_profile": {
+        "rocm": {
+          "spec": "==1.0.0+amd.rocm7.2.0.gitd0d77a509"
+        }
+      }
+    },
+    {
+      "name": "typing-extensions",
+      "common": {
+        "spec": ""
+      }
+    },
+    {
+      "name": "uvicorn",
+      "common": {
+        "spec": "==0.30.0"
+      }
+    },
+    {
+      "name": "xfastertransformer_devel",
+      "common": {
+        "spec": "==1.8.1.1",
+        "marker": "platform_machine == \"x86_64\""
+      }
+    },
+    {
+      "name": "xfastertransformer_devel_icx",
+      "common": {
+        "spec": "==1.8.1.1",
+        "marker": "platform_machine == \"x86_64\""
+      }
+    },
+    {
+      "name": "watchdog",
+      "common": {
+        "spec": "==6.0.0"
+      }
+    },
+    {
+      "name": "zstandard",
+      "common": {
+        "spec": "==0.25.0"
+      }
+    },
+    {
+      "name": "jsonschema",
+      "common": {
+        "spec": "==4.26.0"
+      }
+    }
+  ],
+  "exceptions": [
+    {
+      "name": "aiter",
+      "exists_in": [
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "ROCm-only kernel library"
+    },
+    {
+      "name": "amdsmi",
+      "exists_in": [
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "ROCm management interface"
+    },
+    {
+      "name": "pyrsmi",
+      "exists_in": [
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "ROCm monitoring"
+    },
+    {
+      "name": "triton-kernels",
+      "exists_in": [
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "ROCm triton companion"
+    },
+    {
+      "name": "av",
+      "exists_in": [
+        "cpu",
+        "cuda12_6",
+        "cuda12_9",
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "x86-only (base carries a platform marker)"
+    },
+    {
+      "name": "decord",
+      "exists_in": [
+        "cpu",
+        "cuda12_6",
+        "cuda12_9",
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "x86-only (same as above)"
+    },
+    {
+      "name": "xfastertransformer-devel",
+      "exists_in": [
+        "cpu",
+        "cuda12_6",
+        "cuda12_9",
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "x86 test-only"
+    },
+    {
+      "name": "xfastertransformer-devel-icx",
+      "exists_in": [
+        "cpu",
+        "cuda12_6",
+        "cuda12_9",
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD"
+      ],
+      "reason": "x86 test-only"
+    },
+    {
+      "name": "deep-ep",
+      "exists_in": [
+        "cuda12_6",
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "CUDA source-built big artifact (two x86 lines + gb200 arm)"
+    },
+    {
+      "name": "deep-gemm",
+      "exists_in": [
+        "cuda12_6",
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "CUDA-only (absent on cpu/arm/rocm)"
+    },
+    {
+      "name": "flash-attn",
+      "exists_in": [
+        "cuda12_6",
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "CUDA-only (absent on cpu/arm/rocm)"
+    },
+    {
+      "name": "flash-attn-3",
+      "exists_in": [
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "cu129-only"
+    },
+    {
+      "name": "rtp-kernel",
+      "exists_in": [
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "cu129-only"
+    },
+    {
+      "name": "tilelang",
+      "exists_in": [
+        "cuda12_9"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "cu129-only (upstream yanked; the only pip-fallback exemption)"
+    },
+    {
+      "name": "fast-safetensors",
+      "exists_in": [
+        "cuda12_9"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD",
+        "rtp_llm/models_py/standalone/BUILD"
+      ],
+      "reason": "cu129 stack (incl. the §10-11 exempted pin)"
+    },
+    {
+      "name": "fastsafetensors",
+      "exists_in": [
+        "cuda12_9"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD",
+        "rtp_llm/models_py/standalone/BUILD"
+      ],
+      "reason": "same as above"
+    },
+    {
+      "name": "fast-hadamard-transform",
+      "exists_in": [
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "cu129 family"
+    },
+    {
+      "name": "flash-mla",
+      "exists_in": [
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "cu129 family"
+    },
+    {
+      "name": "flashinfer-python",
+      "exists_in": [
+        "cuda12_6",
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/models_py/BUILD",
+        "rtp_llm/BUILD"
+      ],
+      "reason": "CUDA-only (absent on cpu/arm/rocm); cuda12_9_arm gets the 0.6.9 py3-none-any transitive deps via Bazel. Remove this special case once public ARM supply is stable."
+    },
+    {
+      "name": "triton",
+      "exists_in": [
+        "cuda12_6",
+        "cuda12_9",
+        "cuda12_9_arm",
+        "rocm"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD",
+        "rtp_llm/models_py/triton_kernels/causal_conv1d/test/BUILD",
+        "rtp_llm/models_py/triton_kernels/fla/test/BUILD",
+        "rtp_llm/models_py/triton_kernels/kimi_kda/test/BUILD",
+        "rtp_llm/models_py/triton_kernels/moe/test/BUILD"
+      ],
+      "reason": "GPU-only (absent on cpu/arm)"
+    },
+    {
+      "name": "nvidia-cutlass-dsl",
+      "exists_in": [
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [],
+      "reason": "no build published;cuda12_9_arm pulls it in as a transitive dep of flashinfer since 0.6.9 (py3-none-any)"
+    },
+    {
+      "name": "apache-tvm-ffi",
+      "exists_in": [
+        "cuda12_6",
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [],
+      "reason": "transitive dep of flashinfer-python 0.6.x; the arm line did not need it in the 0.2.5 era; cpu/rocm have no flashinfer"
+    },
+    {
+      "name": "flashinfer-cubin",
+      "exists_in": [
+        "cuda12_9",
+        "cuda12_9_arm"
+      ],
+      "allowed_refs": [],
+      "reason": "only the two cuda12_9 lines (x86 + gb200 arm) use trtllm-gen precompiled cubins; the package is py3-none-any so arm can install it too"
+    },
+    {
+      "name": "flashinfer-jit-cache",
+      "exists_in": [
+        "cuda12_9"
+      ],
+      "allowed_refs": [],
+      "reason": "only the cuda12_9 line provides the JIT cache wheel"
+    },
+    {
+      "name": "ninja",
+      "exists_in": [
+        "cuda12_6",
+        "cuda12_9",
+        "cuda12_9_arm",
+        "rocm"
+      ],
+      "allowed_refs": [],
+      "reason": "transitive dep of flashinfer/tilelang (an executable invoked by the JIT backend); cpu/arm have no flashinfer so their locks have no ninja either"
+    },
+    {
+      "name": "xgrammar",
+      "exists_in": [
+        "cuda12_9"
+      ],
+      "allowed_refs": [
+        "rtp_llm/BUILD",
+        "rtp_llm/dash_sc/BUILD"
+      ],
+      "reason": "DSV4 structured output; platform-only (cuda12_9); bypasses deps.json relock because xgrammar METADATA requires transformers<5, conflicts with transformers==5.2.0"
+    }
+  ],
+  "wheel": {
+    "groups": {
+      "wheel": [
+        "apache-tvm-ffi",
+        "pyarrow"
+      ],
+      "kserve": [
+        "kserve"
+      ]
+    },
+    "exclude": {
+      "pybind11_stubgen": {
+        "shipped": false,
+        "reason": "stub generation tool, dev-time only"
+      },
+      "pyodps": {
+        "shipped": false,
+        "reason": "internal data platform client, test only"
+      },
+      "pyOpenSSL": {
+        "shipped": false,
+        "reason": "test-only dependency; runtime uses system ssl"
+      },
+      "xfastertransformer_devel": {
+        "shipped": false,
+        "reason": "xft is currently not shipped with the wheel (x86 test-only)"
+      },
+      "xfastertransformer_devel_icx": {
+        "shipped": false,
+        "reason": "same as above"
+      },
+      "decord": {
+        "provided_by": [
+          "platform_pins.default",
+          "platform_pins.rocm"
+        ]
+      }
+    },
+    "arch_names": {
+      "cpu": [
+        "torch",
+        "torchvision"
+      ],
+      "arm": [
+        "torch"
+      ],
+      "cuda12_6": [
+        "deep-ep",
+        "deep-gemm",
+        "flash-attn",
+        "torch",
+        "torchvision"
+      ],
+      "cuda12_9": [
+        "deep-ep",
+        "deep-gemm",
+        "flash-attn",
+        "flash-attn-3",
+        "flash-mla",
+        "rtp-kernel",
+        "torch",
+        "torchvision"
+      ],
+      "cuda12_9_arm": [
+        "flash-mla",
+        "torch",
+        "torchvision"
+      ],
+      "rocm": [
+        "aiter",
+        "torch",
+        "torchvision",
+        "triton",
+        "triton-kernels"
+      ]
+    },
+    "platform_pins": {
+      "default": [
+        "decord==0.6.0"
+      ],
+      "rocm": [
+        "pyyaml==6.0.2",
+        "decord==0.6.0",
+        "pyrsmi==0.2.0",
+        "amdsmi==24.7.1+e834839"
+      ]
+    }
+  }
+}

@@ -6,8 +6,8 @@ short batches before allgather:
 - output adjusted_topk_ids must keep -1 unchanged in those slots
 - out-of-range expert ids collapse to -1 the same way
 
-Run with bazel:
-    bazel test //rtp_llm/models_py/triton_kernels/moe/test:test_ep_kernels --config=cuda12
+Run with the repository runner:
+    scripts/rtpcli bazel test --profile cuda12_9 //rtp_llm/models_py/triton_kernels/moe/test:test_ep_kernels
 """
 
 import unittest
@@ -65,7 +65,9 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         self.assertTrue(torch.equal(adjusted, expected_adj))
 
         # count: each of experts [0,1,2,3] gets exactly 1, padded rows ignored
-        expected_count = torch.tensor([1, 1, 1, 1], dtype=torch.int32, device=self.device)
+        expected_count = torch.tensor(
+            [1, 1, 1, 1], dtype=torch.int32, device=self.device
+        )
         self.assertTrue(torch.equal(count, expected_count))
 
     def test_mixed_sentinel_and_out_of_range(self) -> None:
@@ -74,10 +76,10 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         start, num_local = 4, 4
         topk_ids = torch.tensor(
             [
-                [4, 5],   # both local → adjusted (0, 1)
-                [0, 6],   # 0 is remote (out of range) → -1; 6 → adjusted 2
+                [4, 5],  # both local → adjusted (0, 1)
+                [0, 6],  # 0 is remote (out of range) → -1; 6 → adjusted 2
                 [-1, 7],  # sentinel + adjusted 3
-                [-1, -1], # padded row
+                [-1, -1],  # padded row
             ],
             dtype=torch.int32,
             device=self.device,
@@ -104,7 +106,9 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         )
 
         # count: experts 0,1,2,3 each get exactly 1; out-of-range and -1 contribute 0
-        expected_count = torch.tensor([1, 1, 1, 1], dtype=torch.int32, device=self.device)
+        expected_count = torch.tensor(
+            [1, 1, 1, 1], dtype=torch.int32, device=self.device
+        )
         self.assertTrue(
             torch.equal(count, expected_count),
             f"count mismatch:\n  got={count}\n  want={expected_count}",
@@ -113,9 +117,7 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
     def test_all_sentinel_input(self) -> None:
         """All-sentinel input → adjusted preserves -1, count is all zero."""
         start, num_local = 0, 8
-        topk_ids = torch.full(
-            (5, 4), -1, dtype=torch.int32, device=self.device
-        )
+        topk_ids = torch.full((5, 4), -1, dtype=torch.int32, device=self.device)
 
         adjusted, count = recompute_topk_ids_sum_expert_count(
             topk_ids, start, num_local
@@ -137,7 +139,11 @@ class TestRecomputeTopkIdsSentinel(unittest.TestCase):
         start = 16  # rank 2 owns [16, 24)
 
         topk_ids = torch.randint(
-            0, num_total_experts, (num_tokens, topk), dtype=torch.int32, device=self.device
+            0,
+            num_total_experts,
+            (num_tokens, topk),
+            dtype=torch.int32,
+            device=self.device,
         )
         # Inject -1 sentinels into random positions
         sentinel_mask = torch.rand(num_tokens, topk, device=self.device) < 0.2

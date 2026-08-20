@@ -1,8 +1,31 @@
+# All of Bazel 7.x defaults enable_workspace to true; without turning it off the
+# WORKSPACE evaluation path remains and this is not truly pure Bzlmod (8.x flips the default).
+common --noenable_workspace
+
+# The stable name --downloader_config is Bazel 8+; 7.7.1 rejects it, the experimental
+# prefix is the only spelling on 7.x.
 common --experimental_downloader_config=bazel/bazel_downloader.cfg
-fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel.server:9092 --remote_cache=grpc://com.taobao.search.bazel.server:9092
 
+# Registry fallback must use --registry: downloader rewrites do not apply to bzlmod registry
+# reads (Bazel uses only the first rewritten URL). Our bucket first, bcr as byte-identical
+# fallback (module bytes are pinned by MODULE.bazel.lock integrity). Once --registry appears,
+# BCR is no longer used by default, so it must be listed explicitly.
+common --registry=https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/bazel-registry/
+common --registry=https://bcr.bazel.build
 
-build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
+# Local disk cache only on the open-source side. Remote cache endpoints are intranet-only
+# (external users cannot resolve them; anonymous-writable would be a poisoning surface).
+build --disk_cache=~/.cache/rtp-bazel-disk
+# Image digest enters the action key, so changing images invalidates the cache automatically.
+build --action_env=RTP_IMAGE_DIGEST
+build --jobs=HOST_CPUS*.8
+
+# The interpreter comes from the registered toolchain (root BUILD :python310_toolchain);
+# PYTHON_BIN_PATH only feeds autoconfig repo rules.
+build --repo_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
+# rules_python's python_version flag drives the is_cp3.10 wheel selection in the pip hubs;
+# it is the only declaration surface for the python version.
+build --@rules_python//python/config_settings:python_version=3.10
 
 build --spawn_strategy=local # avoid nvcc conflicts
 build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
@@ -30,23 +53,32 @@ build --define=xft_use_icx=true
 build --define=frontend=false
 build --linkopt -ldl # exception backtrace
 build --define=NVSHMEM_DIR=/
-build --action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
-build --host_action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
+build --action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+build --host_action_env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
 build:cuda --copt="-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE"
 build:cuda --copt="-DUSING_CUDA=1"
 build:cuda --define=using_cuda=true --define=using_cuda_nvcc=true
-build:cuda --crosstool_top=@local_config_cuda//crosstool:toolchain
-build:cuda --action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
-build:cuda --host_action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
+# --platforms selects the target platform (cuda_compiler constraint) → nvcc wrapper toolchain.
+# --extra_toolchains registers lazily, only under --config=cuda: in a CPU-only build
+# TF_NEED_CUDA is unset, cuda_configure generates the dummy crosstool whose BUILD fails on
+# load, and unconditional registration would make even CPU builds eager-load it and go red.
+build:cuda --platforms=//platforms:cuda_linux_x86_64
+build:cuda --extra_toolchains=@local_config_cuda//crosstool:toolchain-linux-x86_64
+# CUDA_TOOLKIT_PATH is only read by the cuda_configure repository rule (repo_env); the
+# crosstool wrapper bakes in NVCC_PATH and never reads it at compile time.
+build:cuda --repo_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
 build:cuda --action_env TF_CUDA_PATHS="/usr/local/cuda/"
 build:cuda --host_action_env TF_CUDA_PATHS="/usr/local/cuda/"
+build:cuda --repo_env TF_CUDA_PATHS="/usr/local/cuda/"
 build:cuda --action_env TF_CUDA_CLANG="0"
 build:cuda --host_action_env TF_CUDA_CLANG="0"
+build:cuda --repo_env TF_CUDA_CLANG="0"
 build:cuda --action_env TF_NEED_CUDA="1"
 build:cuda --host_action_env TF_NEED_CUDA="1"
+build:cuda --repo_env TF_NEED_CUDA="1"
 build:cuda --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/"
 build:cuda --host_action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/"
 build:cuda --linkopt="-L/usr/local/cuda/lib64/stubs/"
@@ -54,47 +86,39 @@ build:cuda --action_env NCCL_INSTALL_PATH="/usr/local/cuda/"
 build:cuda --action_env NCCL_HDR_PATH="/usr/local/cuda/include"
 build:cuda --action_env TF_NCCL_VERSION="2"
 build:cuda --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
+build:cuda --repo_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
 
-# 6.0 = P100, 7.0 = V100, 7.5 = T4, 8.6 = A10, 8.0 = A100 8.9 = L, 9.0 = H800
+# SM list lives in bazel/sm.bazelrc (derived from arch_config/sm_matrix.bzl)
 build:cuda12 --config=cuda
-build:cuda12 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
-build:cuda12 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
-build:sm7x --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5"
-build:sm7x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5"
-build:sm8x --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
-build:sm8x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9"
-build:sm9x --action_env TF_CUDA_COMPUTE_CAPABILITIES="9.0"
-build:sm9x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="9.0"
-build:sm10x --action_env  TF_CUDA_COMPUTE_CAPABILITIES="10.0"
-build:sm12x --action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
-build:sm12x --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
+build:cuda12 --repo_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=using_cuda12=true
 build:cuda12 --define=using_cuda12_9_x86=false
-build:cuda12 --define=using_cuda12_x86=true
 build:cuda12 --define=using_cuda12_arm=false
 # cuda_pre_12_9 (BUILD) matches only when all three defines are explicitly
 # false; cuda13 configs inherit cuda12 and override this to true.
 build:cuda12 --define=using_cuda13_x86=false
 build:cuda12 --copt="-DUSING_CUDA12=1"
-build:cuda12 --copt="-DFMHA_SUPPORT_SPLIT=1"
 build:cuda12 --copt="-DENABLE_FP8=1"
 build:cuda12 --config=remote_kv_cache
 
 build:cuda12_2 --config=cuda12
 build:cuda12_2 --action_env TF_CUDA_VERSION="12.2"
 build:cuda12_2 --host_action_env TF_CUDA_VERSION="12.2"
+build:cuda12_2 --repo_env TF_CUDA_VERSION="12.2"
 
 build:cuda12_6 --config=cuda12
 build:cuda12_6 --action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --host_action_env TF_CUDA_VERSION="12.6"
+build:cuda12_6 --repo_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 
 build:cuda12_9_base --config=cuda12
 build:cuda12_9_base --copt="-DUSING_CUDA12_9=1"
 build:cuda12_9_base --action_env TF_CUDA_VERSION="12.9"
 build:cuda12_9_base --host_action_env TF_CUDA_VERSION="12.9"
+build:cuda12_9_base --repo_env TF_CUDA_VERSION="12.9"
 build:cuda12_9_base --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 build:cuda12_9_base --copt="-DENABLE_FP4=1"
 
@@ -105,7 +129,11 @@ build:cuda12_9 --define=using_cuda12_9_x86=true
 # still builds with this config (the DSv4 ARM path moved to cuda13_arm below,
 # but this merge keeps main's pipeline yaml and therefore main's config).
 build:cuda12_9_arm --config=cuda12_9_base
-build:cuda12_9_arm --config=sm10x
+# Overrides the x86 platform inherited from the base cuda config (--platforms is
+# single-valued; last write wins). toolchain-linux-aarch64 requires an aarch64 exec side:
+# cross-compiling nvcc from an x86 host is unsupported.
+build:cuda12_9_arm --platforms=//platforms:cuda_linux_aarch64
+build:cuda12_9_arm --extra_toolchains=@local_config_cuda//crosstool:toolchain-linux-aarch64
 build:cuda12_9_arm --copt=-Wno-tautological-compare
 build:cuda12_9_arm --copt=-Wno-array-bounds
 build:cuda12_9_arm --copt=-Wno-unused-result
@@ -113,8 +141,6 @@ build:cuda12_9_arm --copt=-Wno-array-parameter
 build:cuda12_9_arm --copt=-Wno-narrowing
 build:cuda12_9_arm --define=using_cuda12_arm=true
 build:cuda12_9_arm --define=using_cuda12_9_x86=false
-build:cuda12_9_arm --action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
-build:cuda12_9_arm --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda12_9_arm --copt -DUSE_CUDA_ARM=0
 build:cuda12_9_arm --define=use_remote_kv_cache=false
 build:cuda12_9_arm --copt="-DENABLE_FP4=1"
@@ -248,7 +274,9 @@ build:cuda13_base --copt="-DENABLE_FP4=1"
 # cuda13_arm: replaces the former cuda12_9_arm config — same SM100 target and
 # defines, just built against the CUDA 13 toolchain.
 build:cuda13_arm --config=cuda13_base
-build:cuda13_arm --config=sm10x
+# CUDA 13 ARM must override the x86 platform/toolchain inherited from cuda13_base.
+build:cuda13_arm --platforms=//platforms:cuda_linux_aarch64
+build:cuda13_arm --extra_toolchains=@local_config_cuda//crosstool:toolchain-linux-aarch64
 build:cuda13_arm --copt=-Wno-tautological-compare
 build:cuda13_arm --copt=-Wno-array-bounds
 build:cuda13_arm --copt=-Wno-unused-result
@@ -257,8 +285,6 @@ build:cuda13_arm --copt=-Wno-narrowing
 build:cuda13_arm --define=using_cuda12_arm=true
 build:cuda13_arm --define=using_cuda13_arm=true
 build:cuda13_arm --define=using_cuda12_9_x86=false
-build:cuda13_arm --action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
-build:cuda13_arm --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="10.0"
 build:cuda13_arm --copt -DUSE_CUDA_ARM=0
 build:cuda13_arm --define=use_remote_kv_cache=false
 build:cuda13_arm --copt="-DENABLE_FP4=1"
@@ -283,34 +309,31 @@ build:cuda13 --copt=-Wno-array-bounds
 build:cuda13 --copt=-Wno-unused-result
 build:cuda13 --copt=-Wno-array-parameter
 build:cuda13 --copt=-Wno-narrowing
-# cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
-# pip_gpu_cuda13_torch / torch_2.11_py310_cuda repos and a dedicated whl_deps
-# branch in arch_select.bzl.  Selects that need to treat cu13 the same as
-# cu12_9 use the using_cu12_9_or_13_x86 config_setting_group (BUILD).
+# cuda13 needs its own dep chain (torch 2.11+cu130, triton 3.6.0), and that chain is
+# published only to the internal index: this tree declares no cuda13 pip hub, lock or
+# torch view, so every cuda13 dep branch in arch_select.bzl routes to the @arch_config
+# absence stubs and fails explicitly at analysis time. The internal overlay supplies
+# cuda13. Selects that need to treat cu13 the same as cu12_9 use the
+# using_cu12_9_or_13_x86 config_setting_group (BUILD).
 build:cuda13 --define=using_cuda13_x86=true
 build:cuda13 --define=using_cuda12_9_x86=false
 # remote_kv_cache 3rdparty prebuilt (kv_cache_manager_client.so) is linked
 # against libcudart.so.12 — pulls a missing dep into libth_transformer.so on
 # cu13 toolchain. cuda13_arm already disables it; mirror here.
 build:cuda13 --define=use_remote_kv_cache=false
-# nvcc 13 dropped Volta (sm_70) and Turing (sm_75); supported set on
-# CUDA 13.x is sm_80..sm_120.  With sm_70/sm_75 left in the list nvcc
-# fatals out at:  Unsupported gpu architecture 'compute_70'.
-build:cuda13 --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9,9.0,10.0"
-build:cuda13 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9,9.0,10.0"
 build:cuda13 --copt="-DENABLE_FP4=1"
 build:cuda13 --copt=-Wno-missing-field-initializers
 build:cuda13 --copt=-Wno-error=missing-field-initializers
 build:cuda13 --host_copt=-Wno-missing-field-initializers
 build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
-# Triton 3.6.0 (shipped with cuda13 lock) supports CUDA 13.x ptxas natively;
+# Triton 3.6.0 (shipped with the internal cuda13 lock) supports CUDA 13.x ptxas natively;
 # the ptxas wrapper that triton 3.4 needed is no longer required.  The wrapper
 # is still baked into the prod image — keep it there harmlessly, just don't
 # point TRITON_PTXAS_PATH at it.
-# CUDA 13 ARM base image ships glibc 2.32, but the CUDA-12 PyTorch wheels we
-# depend on (via pip_cuda12_arm_torch_*) include libcufile.so.0 which assumes
-# glibc >= 2.34 (shm_open moved to libc there).  Preload librt.so.1 so the
-# symbol resolves without having to rebuild the wheels.
+# CUDA 13 ARM base image ships glibc 2.32, but the PyTorch wheels the cuda13_arm image
+# is built from (supplied by the internal overlay -- this tree has no cuda13_arm pip
+# supply) include libcufile.so.0 which assumes glibc >= 2.34 (shm_open moved to libc
+# there).  Preload librt.so.1 so the symbol resolves without having to rebuild the wheels.
 test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 
 # deep_gemm JIT spawns nvcc at runtime to build SM100/SM103a kernels. nvcc
@@ -331,8 +354,10 @@ build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true
 build:cpu --action_env TF_NEED_CUDA="0"
 build:cpu --host_action_env TF_NEED_CUDA="0"
-build:cpu --crosstool_top=@bazel_tools//tools/cpp:toolchain
-build:cpu --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:cpu --repo_env TF_NEED_CUDA="0"
+# The CPU platform carries no gpu_compiler constraint → default local_config_cc gcc.
+# Pinned explicitly to the x86_64-unknown-linux-gnu declared in deps.json, not taken from the machine CPU.
+build:cpu --platforms=//platforms:linux_x86_64
 build:cpu --copt="-DUSING_CUDA=0"
 build:cpu --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 
@@ -343,11 +368,14 @@ build:cpu_latest --define=xft_use_icx=false
 build:rocm --copt="-DENABLE_BF16=1"
 build:rocm --action_env TF_NEED_CUDA="0"
 build:rocm --host_action_env TF_NEED_CUDA="0"
-build:rocm --crosstool_top=@local_config_rocm//crosstool:toolchain
-build:rocm --host_crosstool_top=@local_config_rocm//crosstool:toolchain
+build:rocm --repo_env TF_NEED_CUDA="0"
+build:rocm --repo_env HCC_AMDGPU_TARGET=gfx942
+build:rocm --platforms=//platforms:rocm_linux_x86_64
+build:rocm --extra_toolchains=@local_config_rocm//crosstool:toolchain-linux-x86_64
 build:rocm --define=using_cuda=false --define=using_cuda_nvcc=false
 build:rocm --define=using_rocm=true --define=using_rocm_hipcc=true
 build:rocm --action_env TF_NEED_ROCM=1
+build:rocm --repo_env TF_NEED_ROCM=1
 build:rocm --action_env GPU_ARCHS=gfx942
 build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
@@ -367,8 +395,6 @@ build:rocm --copt="-DTORCH_CUDA_CU_API=" # PyTorch 2.9 ROCm compatibility
 ## Known mapping: ROCm 5.x → clang 17, ROCm 6.x → clang 18, ROCm 7.x → clang 22.
 build:rocm --linkopt="/opt/rocm/lib/llvm/lib/clang/22/lib/linux/libclang_rt.builtins-x86_64.a"
 build:rocm --copt="-DLEGACY_HIPBLAS_DIRECT"
-build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
-build:rocm --repo_env CK_LYNM_GEN_ARGS="--receipt 2"
 build:rocm --copt -Wno-tautological-compare # grpc
 build:rocm --copt="-Wno-array-parameter"
 build:rocm --copt="-Wno-error=array-bounds"
@@ -383,8 +409,8 @@ build:rocm --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
 #build:rocm --copt="-DENABLE_PROF=1"
 build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
 build:rocm --host_action_env LD_LIBRARY_PATH="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
-build:rocm --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
-build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/tmp/cache_bust_20260321"
+build:rocm --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+build:rocm --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 build:rocm --copt="-DUSE_ROCM=1"
 build:rocm --copt="-DFORCE_NVSHMEM_API=1"
 build:rocm --copt="-DFLASHINFER_CUB_SUBTRACTLEFT_DEFINED"  # ROCm 7.2 hipcub uses SubtractLeft instead of FlagHeads
@@ -396,8 +422,11 @@ build:arm --define=using_arm=true
 build:arm --copt="-DBUILDING_ARM_ONLY=1"
 build:arm --action_env TF_NEED_CUDA="0"
 build:arm --host_action_env TF_NEED_CUDA="0"
-build:arm --crosstool_top=@bazel_tools//tools/cpp:toolchain
-build:arm --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:arm --repo_env TF_NEED_CUDA="0"
+# arm is CPU-only (no gpu_compiler constraint → default gcc toolchain). The platform must be
+# declared explicitly: without --platforms the target CPU = machine CPU, and the arm lock only
+# has aarch64 wheels, so torch's alias cannot select a wheel on an x86 host.
+build:arm --platforms=//platforms:linux_aarch64
 build:arm --copt="-DUSING_CUDA=0"
 build:arm --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 build:arm --define=xft_use_icx=false
@@ -412,9 +441,11 @@ build:remote_kv_cache --define=use_remote_kv_cache=true
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE --copt -DEXCLUDE_SM_100=1 --copt -DEXCLUDE_SM_120=1
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 
-build:cicd --remote_upload_local_results
 build:cicd --worker_verbose
 build:cicd --show_result=0 --auto_output_filter=all
+# CI forces MODULE.bazel.lock not to drift: local dev defaults to update (bazel 7 default);
+# CI uses error, so changing MODULE.bazel without a lock update turns the pipeline red.
+build:cicd --lockfile_mode=error
 test:cicd --test_output=errors --max_test_output_bytes=10240000 --experimental_ui_max_stdouterr_bytes=31457280
 
 # asan
@@ -433,12 +464,19 @@ test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env LOG_LEVEL="INFO"
 test --test_env NCCL_DEBUG="INFO"
+# Without this the interpreter also reads ~/.local/lib/pythonX/site-packages, and packages
+# there on dev machines silently inject/shadow hub-supplied ones, flipping test results.
+test --test_env PYTHONNOUSERSITE=1
 # for dp scatter add stable result
 test --test_env TZ=Asia/Shanghai
 # for flashinfer find cuda; scope to CUDA-specific test runs
 test:cuda --test_env CUDA_HOME=/usr/local/cuda
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/rocm/lib:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/opt/amdgpu/lib64:/usr/local/cuda/extras/CUPTI/lib64:/usr/local/cuda/lib64/stubs"
+
+# The SM matrix is derived from arch_config/sm_matrix.bzl (deps/gen_sm_bazelrc.py); hand-writing SM lists in this file is forbidden.
+# The import must come after all config definitions so SM lines are not overridden by each config's base chain.
+import %workspace%/bazel/sm.bazelrc
 
 # internal source overrides (only loaded when internal_source symlink exists)
 try-import %workspace%/internal_source/.internal_bazelrc

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 import psutil
 import requests
 
-from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
+from rtp_llm.config.port_config import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
@@ -30,18 +30,18 @@ long_live_port_locks = []
 class MagaServerManager(object):
     def __init__(
         self,
-        env_args: Optional[Dict[str, Any]] = {},
+        env_args: Optional[Dict[str, Any]] = None,
         port: Optional[str] = None,
-        device_ids: List[int] = [],
+        device_ids: Optional[List[int]] = None,
         role_name: str = "main",
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
         health_check_path: str = "/health",
     ):
         self._username = os.getenv("USER")
-        self._env_args = env_args
+        self._env_args = dict(env_args or {})
         self._log_file = None
-        self._device_ids = device_ids
+        self._device_ids = list(device_ids or [])
         self._server_process = None
         self._role_name = role_name
         self._file_stream = None
@@ -179,23 +179,14 @@ class MagaServerManager(object):
                 [str(_) for _ in self._device_ids]
             )
 
-        # Set DeepGEMM JIT cache directory to use a persistent global cache
-        # instead of the temporary test.outputs directory. This allows kernel
-        # cache reuse across test runs, avoiding expensive JIT compilation overhead.
-        # Skip when the JIT cache manager is active (REMOTE_JIT_DIR set): a preset
-        # DG_JIT_CACHE_DIR makes jit_cache_manager.resolve_scope drop the deep_gemm
-        # component inside the server process, forking the scope_id away from the
-        # one out-of-server callers compute (breaks jit_cache_deepseek_v2_lite,
-        # which asserts the publisher uploads under the test-computed scope).
-        if (
-            "DG_JIT_CACHE_DIR" not in current_env
-            and not current_env.get("REMOTE_JIT_DIR", "").strip()
-        ):
-            home_dir = os.environ.get("HOME", os.path.expanduser("~"))
-            current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
-
-        bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
-        cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
+        bazel_outputs_dir = os.path.abspath(
+            current_env.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
+        )
+        cwd_path = os.path.abspath(
+            current_env.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
+        )
+        current_env["TEST_UNDECLARED_OUTPUTS_DIR"] = bazel_outputs_dir
+        current_env["MAGA_SERVER_WORK_DIR"] = cwd_path
         # 创建一个文件来存储子进程的日志
         self._log_file = (
             f"{bazel_outputs_dir}/{role_log_name}/{self._process_file_name}"

@@ -1,0 +1,54 @@
+From: RTP-LLM build owners <rtp-llm@alibaba-inc.com>
+Subject: [PATCH 1/2] wheelmaker: store instead of deflate, and force zip64
+
+Two independent needs, both driven by how large RTP-LLM wheels are (multi-GB,
+dominated by prebuilt .so payloads):
+
+1. compression=ZIP_STORED instead of ZIP_DEFLATED.
+   The payload is already-compiled binary; deflating it costs minutes of wheel
+   build time per profile for a few percent size gain, and costs again on every
+   install. Storing is the right trade for an internally distributed wheel.
+
+2. force_zip64=True when writing each member.
+   wheelmaker streams members through ZipFile.open(..., "w") without declaring
+   the size upfront, so zipfile cannot decide on its own whether zip64 is
+   needed and defaults to no. Individual members here exceed the 2 GiB zip64
+   threshold (libtorch and friends), which fails the write without this flag.
+
+Upstream tracking: not filed — (1) is a local distribution-policy choice
+upstream should not take by default, and (2) is arguably an upstream bug worth
+reporting once we are on a rules_python release whose wheelmaker still shows it.
+Re-verify both hunks on any rules_python upgrade; if a newer wheelmaker gained
+a compression knob and zip64 handling, drop this patch (and with it the
+archive_override, since the other patch is already obsolete on 2.x).
+
+Regression cover: the repository wheel packaging check validates filename, METADATA,
+WHEEL tag and RECORD sampling, so a wheel that fails to write or writes a corrupt
+member fails there.
+
+Note: patch is generated without a/b prefixes, hence patch_strip = 0.
+---
+diff --git tools/wheelmaker.py tools/wheelmaker.py
+index 8fa3e02d..59ac3d4d 100644
+--- tools/wheelmaker.py
++++ tools/wheelmaker.py
+@@ -104,7 +104,7 @@ class _WhlFile(zipfile.ZipFile):
+         mode,
+         distribution_prefix: str,
+         strip_path_prefixes=None,
+-        compression=zipfile.ZIP_DEFLATED,
++        compression=zipfile.ZIP_STORED,
+         **kwargs,
+     ):
+         self._distribution_prefix = distribution_prefix
+@@ -152,7 +152,7 @@ class _WhlFile(zipfile.ZipFile):
+         hash = hashlib.sha256()
+         size = 0
+         with open(real_filename, "rb") as fsrc:
+-            with self.open(zinfo, "w") as fdst:
++            with self.open(zinfo, "w", force_zip64=True) as fdst:
+                 while True:
+                     block = fsrc.read(2**20)
+                     if not block:
+--
+2.19.1.6.gb485710b

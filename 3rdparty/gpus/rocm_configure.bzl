@@ -26,7 +26,7 @@ _GCC_HOST_COMPILER_PREFIX = "GCC_HOST_COMPILER_PREFIX"
 _ROCM_TOOLKIT_PATH = "ROCM_TOOLKIT_PATH"
 _TF_ROCM_VERSION = "TF_ROCM_VERSION"
 _TF_MIOPEN_VERSION = "TF_MIOPEN_VERSION"
-_TF_ROCM_AMDGPU_TARGETS = "TF_ROCM_AMDGPU_TARGETS"
+_GPU_ARCHS = "GPU_ARCHS"
 _TF_ROCM_CONFIG_REPO = "TF_ROCM_CONFIG_REPO"
 
 _DEFAULT_ROCM_VERSION = ""
@@ -280,9 +280,9 @@ def _rocm_toolkit_path(repository_ctx):
 
 def _amdgpu_targets(repository_ctx):
     """Returns a list of strings representing AMDGPU targets."""
-    if _TF_ROCM_AMDGPU_TARGETS not in repository_ctx.os.environ:
+    if _GPU_ARCHS not in repository_ctx.os.environ:
         return _DEFAULT_ROCM_AMDGPU_TARGETS
-    amdgpu_targets_str = repository_ctx.os.environ[_TF_ROCM_AMDGPU_TARGETS]
+    amdgpu_targets_str = repository_ctx.os.environ[_GPU_ARCHS]
     amdgpu_targets = amdgpu_targets_str.split(",")
     for amdgpu_target in amdgpu_targets:
         if amdgpu_target[:3] != "gfx" or not amdgpu_target[3:].isdigit():
@@ -714,13 +714,8 @@ def _read_dir(repository_ctx, src_dir):
     return result
 
 def _compute_rocm_extra_copts(repository_ctx, amdgpu_targets):
-    if False:
-        amdgpu_target_flags = ["--amdgpu-target=" +
-                               amdgpu_target for amdgpu_target in amdgpu_targets]
-    else:
-        # AMDGPU targets are handled in the "crosstool_wrapper_driver_is_not_gcc"
-        amdgpu_target_flags = []
-    return str(amdgpu_target_flags)
+    # AMDGPU targets are handled in the crosstool wrapper.
+    return "[]"
 
 def _create_local_rocm_repository(repository_ctx):
     """Creates the repository containing files set up to build with ROCm."""
@@ -999,7 +994,7 @@ rocm_configure = repository_rule(
         _ROCM_TOOLKIT_PATH,
         _TF_ROCM_VERSION,
         _TF_MIOPEN_VERSION,
-        _TF_ROCM_AMDGPU_TARGETS,
+        _GPU_ARCHS,
         _TF_ROCM_CONFIG_REPO,
     ],
 )

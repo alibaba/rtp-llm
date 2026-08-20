@@ -20,7 +20,7 @@ config_setting(
 ################################################################################
 
 #ZLIB_DEPS = ["@zlib//:zlib"]
-ZLIB_DEPS = ["//external:zlib"]
+ZLIB_DEPS = ["@zlib_archive//:zlib"]
 
 ################################################################################
 # Protobuf Runtime Library
@@ -62,32 +62,8 @@ load(":compiler_config_setting.bzl", "create_compiler_config_setting")
 
 create_compiler_config_setting(name = "msvc", value = "msvc-cl")
 
-config_setting(
-    name = "android",
-    values = {
-        "crosstool_top": "//external:android/crosstool",
-    },
-)
-
-config_setting(
-    name = "android-libcpp",
-    values = {
-        "crosstool_top": "@androidndk//:toolchain-libcpp",
-    },
-)
-
-config_setting(
-    name = "android-gnu-libstdcpp",
-    values = {
-        "crosstool_top": "@androidndk//:toolchain-gnu-libstdcpp",
-    },
-)
-
-# Android and MSVC builds do not need to link in a separate pthread library.
+# MSVC builds do not need to link in a separate pthread library.
 LINK_OPTS = select({
-    ":android": [],
-    ":android-libcpp": [],
-    ":android-gnu-libstdcpp": [],
     ":msvc": [
         # Suppress linker warnings about files with no symbols defined.
         "-ignore:4221",
@@ -512,7 +488,7 @@ cc_binary(
     deps = [
         ":protobuf",
         ":protoc_lib",
-        "//external:gtest",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -521,7 +497,7 @@ cc_test(
     srcs = ["src/google/protobuf/io/io_win32_unittest.cc"],
     deps = [
         ":protobuf_lite",
-        "//external:gtest_main",
+        "@com_google_googletest//:gtest_main",
     ],
     tags = ["manual", "windows"],
 )
@@ -626,7 +602,7 @@ cc_test(
         ":cc_test_protos",
         ":protobuf",
         ":protoc_lib",
-        "//external:gtest_main",
+        "@com_google_googletest//:gtest_main",
     ] + PROTOBUF_DEPS,
 )
 
@@ -649,21 +625,6 @@ java_library(
        "//conditions:default": ["-source 7", "-target 7"],
     }),
     visibility = ["//visibility:public"],
-)
-
-java_library(
-    name = "protobuf_java_util",
-    srcs = glob([
-        "java/util/src/main/java/com/google/protobuf/util/*.java",
-    ]),
-    javacopts = ["-source 7", "-target 7"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "protobuf_java",
-        "//external:error_prone_annotations",
-        "//external:gson",
-        "//external:guava",
-    ],
 )
 
 ################################################################################
@@ -699,7 +660,7 @@ cc_binary(
     linkstatic = 1,
     deps = select({
         "//conditions:default": [],
-        ":use_fast_cpp_protos": ["//external:python_headers"],
+        ":use_fast_cpp_protos": ["//util/python:python_headers"],
     }),
 )
 
@@ -726,7 +687,7 @@ cc_binary(
         ":proto_api",
     ] + select({
         "//conditions:default": [],
-        ":use_fast_cpp_protos": ["//external:python_headers"],
+        ":use_fast_cpp_protos": ["//util/python:python_headers"],
     }),
 )
 
@@ -775,7 +736,7 @@ py_proto_library(
     protoc = ":protoc",
     py_libs = [
         ":python_srcs",
-        "//external:six",
+        "@six_archive//:six",
     ],
     py_extra_srcs = glob(["python/**/__init__.py"]),
     srcs_version = "PY2AND3",
@@ -870,7 +831,7 @@ cc_library(
     name = "proto_api",
     hdrs = ["python/google/protobuf/proto_api.h"],
     deps = [
-        "//external:python_headers",
+        "//util/python:python_headers",
     ],
     visibility = ["//visibility:public"],
 )

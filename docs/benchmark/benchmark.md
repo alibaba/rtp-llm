@@ -36,30 +36,30 @@ Example (SM90; adjust configs for your stack e.g. `cuda12_9` + `sm9x`):
 
 ```shell
 # Grid: override sizes and run decode + prefill (partial=0) or decode-only
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+scripts/rtpcli bazel test --profile cuda12_9 --batch --stream \
+    //rtp_llm/test/perf_test:grid_perf_test --config=sm9x \
     --test_arg=--batch_size=1,2,4,8 \
     --test_arg=--input_len=128,1024,2048 \
     --test_arg=--partial=0
 
 # Grid: custom local checkpoint and model type
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+scripts/rtpcli bazel test --profile cuda12_9 --batch --stream \
+    //rtp_llm/test/perf_test:grid_perf_test --config=sm9x \
     --test_arg=--checkpoint_path=/path/to/local/ckpt \
     --test_arg=--tokenizer_path=/path/to/local/tokenizer \
     --test_arg=--model_type=qwen35_moe
 
 # Distribution mode (use distribution_perf_test or pass dataset flags via test_arg)
-bazelisk test //rtp_llm/test/perf_test:distribution_perf_test \
-    --config=cuda12_9 --config=sm9x \
+scripts/rtpcli bazel test --profile cuda12_9 --batch --stream \
+    //rtp_llm/test/perf_test:distribution_perf_test --config=sm9x \
     --test_arg=--model_type=qwen35_moe
 ```
 
 Optional environment for the engine, e.g. `INT8_MODE=1`:
 
 ```shell
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+scripts/rtpcli bazel test --profile cuda12_9 --batch --stream \
+    //rtp_llm/test/perf_test:grid_perf_test --config=sm9x \
     --test_env=INT8_MODE=1
 ```
 
@@ -68,8 +68,8 @@ bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
 When prefill and decode need different engine configs, restrict phases with **`--partial`**: `0` = both (default), `1` = decode grid only, `2` = prefill only. Example decode-only:
 
 ```shell
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda12_9 --config=sm9x \
+scripts/rtpcli bazel test --profile cuda12_9 --batch --stream \
+    //rtp_llm/test/perf_test:grid_perf_test --config=sm9x \
     --test_arg=--partial=1
 ```
 

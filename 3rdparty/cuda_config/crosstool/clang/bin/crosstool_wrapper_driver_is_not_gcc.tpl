@@ -80,6 +80,38 @@ def GetOptionValue(argv, option):
     return sum(vars(args)[option], [])
 
 
+def ScanIncludeFlags(argv):
+  """Collect -I/-isystem/-iquote paths from argv, both attached and separated.
+
+  argparse cannot do this reliably: with nargs='*' a value that itself starts
+  with '-' (Bazel emits virtual-include paths as attached -Ipath right after an
+  -iquote pair) is either swallowed as the previous flag's value or dropped
+  entirely, which silently deletes every _virtual_includes path - the compiler
+  then cannot find headers such as alog/Appender.h.
+
+  Returns (isystem, iquote, include) lists, order preserved, duplicates kept
+  (they are harmless and preserving order keeps search semantics intact).
+  """
+  flags = {'-isystem': [], '-iquote': [], '-I': []}
+  i = 0
+  while i < len(argv):
+    tok = argv[i]
+    for opt in ('-isystem', '-iquote', '-I'):
+      if tok == opt:
+        nxt = argv[i + 1] if i + 1 < len(argv) else ''
+        # (see the ROCm wrapper for the annotated rationale; kept ASCII here
+        #  because this file runs under python2 without an encoding declaration)
+        if nxt and not nxt.startswith('-'):
+          flags[opt].append(nxt)
+          i += 1
+        break
+      if tok.startswith(opt) and len(tok) > len(opt):
+        flags[opt].append(tok[len(opt):])
+        break
+    i += 1
+  return flags['-isystem'], flags['-iquote'], flags['-I']
+
+
 def GetHostCompilerOptions(argv):
   """Collect the -isystem, -iquote, and --sysroot option values from argv.
 
@@ -91,8 +123,6 @@ def GetHostCompilerOptions(argv):
   """
 
   parser = ArgumentParser()
-  parser.add_argument('-isystem', nargs='*', action='append')
-  parser.add_argument('-iquote', nargs='*', action='append')
   parser.add_argument('--sysroot', nargs=1)
   parser.add_argument('-g', nargs='*', action='append')
   parser.add_argument('-fno-canonical-system-headers', action='store_true')
@@ -100,12 +130,17 @@ def GetHostCompilerOptions(argv):
 
   args, _ = parser.parse_known_args(argv)
 
+  isystem, iquote, _ = ScanIncludeFlags(argv)
+
+  def _co(path):
+    return path.replace('"', '\\"')
+
   opts = ''
 
-  if args.isystem:
-    opts += ' -isystem ' + ' -isystem '.join(sum(args.isystem, []))
-  if args.iquote:
-    opts += ' -iquote ' + ' -iquote '.join(sum(args.iquote, []))
+  for path in isystem:
+    opts += ' -isystem ' + _co(path)
+  for path in iquote:
+    opts += ' -iquote ' + _co(path)
   if args.g:
     opts += ' -g' + ''.join(args.g[-1])
   if args.fno_canonical_system_headers:
@@ -181,28 +216,30 @@ def InvokeNvcc(argv, log=False):
   nvcc_compiler_options = GetNvccOptions(argv)
   opt_option = GetOptionValue(argv, '-O')
   llvm_options_value = GetOptionValue(argv, '-mllvm')
-  llvm_options = ''.join([' -mllvm ' + llvm_option for llvm_option in llvm_options_value])
+  llvm_options = ''.join([' -mllvm ' + pipes.quote(llvm_option)
+                           for llvm_option in llvm_options_value])
   m_options = GetOptionValue(argv, '-m')
   m_options = ''.join([' -m' + m for m in m_options if m in ['32', '64']])
-  include_options = GetOptionValue(argv, '-I')
+  _, _, include_options = ScanIncludeFlags(argv)
   out_file = GetOptionValue(argv, '-o')
   depfiles = GetOptionValue(argv, '-MF')
   defines_value = GetOptionValue(argv, '-D')
-  defines = ''.join([' -D' + define for define in defines_value])
+  defines = ''.join([' -D' + pipes.quote(define) for define in defines_value])
   undefines = GetOptionValue(argv, '-U')
-  undefines = ''.join([' -U' + define for define in undefines])
+  undefines = ''.join([' -U' + pipes.quote(define) for define in undefines])
   std_options = GetOptionValue(argv, '-std')
   # Supported -std flags as of CUDA 9.0. Only keep last to mimic gcc/clang.
   nvcc_allowed_std_options = ["c++03", "c++11", "c++14", "c++17"]
   std_options = ''.join([' -std=' + define
       for define in std_options if define in nvcc_allowed_std_options][-1:])
-  fatbin_options = ''.join([' --fatbin-options=' + option
+  fatbin_options = ''.join([' --fatbin-options=' + pipes.quote(option)
       for option in GetOptionValue(argv, '-Xcuda-fatbinary')])
 
   # The list of source files get passed after the -c option. I don't know of
   # any other reliable way to just get the list of source files to be compiled.
   src_files = GetOptionValue(argv, '-c')
-  mcmodel_options = ''.join([' -mcmodel=' + x for x in GetOptionValue(argv, '-mcmodel')])
+  mcmodel_options = ''.join([' -mcmodel=' + pipes.quote(x)
+                              for x in GetOptionValue(argv, '-mcmodel')])
   if mcmodel_options:
     mcmodel_options = ' -Xcompiler ' + mcmodel_options
   # Pass -w through from host to nvcc, but don't do anything fancier with
@@ -217,7 +254,7 @@ def InvokeNvcc(argv, log=False):
 
   opt = ' -O' + opt_option[-1] + ' '
 
-  includes = (' -I ' + ' -I '.join(include_options)
+  includes = (' -I ' + ' -I '.join(pipes.quote(p) for p in include_options)
               if len(include_options) > 0
               else '')
 
@@ -225,8 +262,8 @@ def InvokeNvcc(argv, log=False):
   # So allowing only those look like C/C++ files.
   src_files = [f for f in src_files if
                re.search('\.cpp$|\.cc$|\.c$|\.cxx$|\.C$|\.cu$', f)]
-  srcs = ' '.join(src_files)
-  out = ' -o ' + out_file[0]
+  srcs = ' '.join(pipes.quote(f) for f in src_files)
+  out = ' -o ' + pipes.quote(out_file[0])
 
   nvccopts = '-D_FORCE_INLINES '
   for capability in GetOptionValue(argv, "--cuda-gpu-arch"):
@@ -249,10 +286,10 @@ def InvokeNvcc(argv, log=False):
 
   if depfiles:
     # Generate the dependency file
-    depfile = depfiles[0]
+    depfile = pipes.quote(depfiles[0])
     cmd = (NVCC_PATH + ' ' + nvccopts +
            ' --compiler-options "' + host_compiler_options + '"' +
-           ' --compiler-bindir=' + GCC_HOST_COMPILER_PATH +
+           ' --compiler-bindir=' + pipes.quote(GCC_HOST_COMPILER_PATH) +
            ' -I .' +
            ' -x cu ' + opt + includes + ' ' + srcs + ' -M -o ' + depfile)
     if log: Log(cmd)
@@ -262,7 +299,7 @@ def InvokeNvcc(argv, log=False):
 
   cmd = (NVCC_PATH + ' ' + nvccopts +
          ' --compiler-options "' + host_compiler_options + ' -fPIC"' +
-         ' --compiler-bindir=' + GCC_HOST_COMPILER_PATH +
+         ' --compiler-bindir=' + pipes.quote(GCC_HOST_COMPILER_PATH) +
          ' -I .' +
          ' -x cu ' + opt + includes + ' -c ' + srcs + out)
 
@@ -281,7 +318,6 @@ def main():
 
   if args.x and args.x[0] == 'cuda':
     if args.cuda_log: Log('-x cuda')
-    leftover = [pipes.quote(s) for s in leftover]
     if args.cuda_log: Log('using nvcc')
     return InvokeNvcc(leftover, log=args.cuda_log)
 

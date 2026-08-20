@@ -79,6 +79,38 @@ def GetOptionValue(argv, option):
     return sum(vars(args)[option], [])
 
 
+def ScanIncludeFlags(argv):
+  """Collect -I/-isystem/-iquote paths from argv, both attached and separated.
+
+  argparse cannot do this reliably: with nargs='*' a value that itself starts
+  with '-' (Bazel emits virtual-include paths as attached -Ipath right after an
+  -iquote pair) is either swallowed as the previous flag's value or dropped
+  entirely, which silently deletes every _virtual_includes path — the compiler
+  then cannot find headers such as alog/Appender.h.
+
+  Returns (isystem, iquote, include) lists, order preserved, duplicates kept
+  (they are harmless and preserving order keeps search semantics intact).
+  """
+  flags = {'-isystem': [], '-iquote': [], '-I': []}
+  i = 0
+  while i < len(argv):
+    tok = argv[i]
+    for opt in ('-isystem', '-iquote', '-I'):
+      if tok == opt:
+        nxt = argv[i + 1] if i + 1 < len(argv) else ''
+        # The value itself starts with '-' => upstream squeezed two flags together; do not
+        # swallow it: leave it for the next iteration as an independent flag.
+        if nxt and not nxt.startswith('-'):
+          flags[opt].append(nxt)
+          i += 1
+        break
+      if tok.startswith(opt) and len(tok) > len(opt):
+        flags[opt].append(tok[len(opt):])
+        break
+    i += 1
+  return flags['-isystem'], flags['-iquote'], flags['-I']
+
+
 def GetHostCompilerOptions(argv):
   """Collect the -isystem, -iquote, and --sysroot option values from argv.
 
@@ -90,8 +122,6 @@ def GetHostCompilerOptions(argv):
   """
 
   parser = ArgumentParser()
-  parser.add_argument('-isystem', nargs='*', action='append')
-  parser.add_argument('-iquote', nargs='*', action='append')
   parser.add_argument('--sysroot', nargs=1)
   parser.add_argument('-g', nargs='*', action='append')
   parser.add_argument('-fno-canonical-system-headers', action='store_true')
@@ -99,12 +129,22 @@ def GetHostCompilerOptions(argv):
 
   args, _ = parser.parse_known_args(argv)
 
+  isystem, iquote, _ = ScanIncludeFlags(argv)
+
+  # These opts get stuffed into nvcc's --compiler-options "..." (wrapped in double quotes), so
+  # pipes.quote must [not] be used here: the single quotes it adds get swallowed as literals
+  # by the outer double quotes, invalidating the include paths (alog/Appender.h in run
+  # 56485515). Bzlmod canonical paths contain '~', which needs no escaping inside double
+  # quotes; only actual spaces need escaping, and bazel-out paths contain none.
+  def _co(path):
+    return path.replace('"', '\\"')
+
   opts = ''
 
-  if args.isystem:
-    opts += ' -isystem ' + ' -isystem '.join(sum(args.isystem, []))
-  if args.iquote:
-    opts += ' -iquote ' + ' -iquote '.join(sum(args.iquote, []))
+  for path in isystem:
+    opts += ' -isystem ' + _co(path)
+  for path in iquote:
+    opts += ' -iquote ' + _co(path)
   if args.g:
     opts += ' -g' + ' -g'.join(sum(args.g, []))
   if args.fno_canonical_system_headers:
@@ -161,7 +201,7 @@ def InvokeNvcc(argv, log=False):
   opt_option = GetOptionValue(argv, 'O')
   m_options = GetOptionValue(argv, 'm')
   m_options = ''.join([' -m' + m for m in m_options if m in ['32', '64']])
-  include_options = GetOptionValue(argv, 'I')
+  _, _, include_options = ScanIncludeFlags(argv)
   out_file = GetOptionValue(argv, 'o')
   depfiles = GetOptionValue(argv, 'MF')
   defines = GetOptionValue(argv, 'D')
@@ -191,7 +231,7 @@ def InvokeNvcc(argv, log=False):
   opt = (' -O2' if (len(opt_option) > 0 and int(opt_option[0]) > 0)
          else ' -g -G')
 
-  includes = (' -I ' + ' -I '.join(include_options)
+  includes = (' -I ' + ' -I '.join(pipes.quote(p) for p in include_options)
               if len(include_options) > 0
               else '')
 
@@ -199,8 +239,8 @@ def InvokeNvcc(argv, log=False):
   # So allowing only those look like C/C++ files.
   src_files = [f for f in src_files if
                re.search('\.cpp$|\.cc$|\.c$|\.cxx$|\.C$', f)]
-  srcs = ' '.join(src_files)
-  out = ' -o ' + out_file[0]
+  srcs = ' '.join(pipes.quote(f) for f in src_files)
+  out = ' -o ' + pipes.quote(out_file[0])
 
   supported_cuda_compute_capabilities = [ %{cuda_compute_capabilities} ]
   nvccopts = '-D_FORCE_INLINES '
@@ -217,7 +257,7 @@ def InvokeNvcc(argv, log=False):
 
   if depfiles:
     # Generate the dependency file
-    depfile = depfiles[0]
+    depfile = pipes.quote(depfiles[0])
     cmd = (NVCC_PATH + ' ' + nvccopts +
            ' --compiler-options "' + host_compiler_options + '"' +
            ' --compiler-bindir=' + GCC_HOST_COMPILER_PATH +
@@ -249,7 +289,10 @@ def main():
 
   if args.x and args.x[0] == 'cuda':
     if args.cuda_log: Log('-x cuda')
-    leftover = [pipes.quote(s) for s in leftover]
+    # Same as the ROCm wrapper: no wholesale quoting before parsing. Bzlmod canonical repo
+    # names contain '~'; pipes.quote would wrap the whole "-Ipath" in quotes, so it neither
+    # looks like a flag nor survives being swallowed by the preceding -iquote, losing external
+    # repo headers. Quoting is done per value when assembling the command line instead.
     if args.cuda_log: Log('using nvcc')
     return InvokeNvcc(leftover, log=args.cuda_log)
 
