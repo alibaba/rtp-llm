@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+from rtp_llm.models.kimi_k3.mla_cache_tp import (
+    kimi_k3_mla_cache_layout,
+    mla_cache_tp_enabled,
+)
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     has_bf16_gemm_nt_skip_head_mid,
 )
@@ -309,6 +314,7 @@ class MlaFlashMLAPrefillOp:
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
         kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
+        parallelism_config: Optional[Any] = None,
     ) -> None:
         if weights is None:
             raise ValueError("FlashMLA Prefill requires MLA projection weights")
@@ -352,6 +358,8 @@ class MlaFlashMLAPrefillOp:
         self.kv_lens: List[int] = []
         self._direct_attn_inputs: Optional[Any] = None
         self._direct_block_table_width = 0
+        self.prefix_lens: List[int] = []
+        self.parallelism_config = parallelism_config
 
     def plan(self, mla_params: Any) -> None:
         if isinstance(mla_params, FlashMLADeviceParams):
@@ -403,6 +411,7 @@ class MlaFlashMLAPrefillOp:
         self.max_kv_len = max(self.kv_lens)
         self.total_kv_lens = sum(self.kv_lens)
         self.batch_size = len(self.q_lens)
+        self.prefix_lens = prefix_lens
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         expected_kv_lens = [
@@ -435,6 +444,11 @@ class MlaFlashMLAPrefillOp:
             raise RuntimeError(
                 "FlashMLA total KV length is smaller than the current suffix: "
                 f"kv={self.total_kv_lens}, suffix={compressed_kv.shape[0]}"
+            )
+
+        if mla_cache_tp_enabled(self.parallelism_config):
+            return self._gather_reused_kv_cache_tp(
+                compressed_kv, flat_k_pe, kv_cache
             )
 
         reuse_cache_page_indice = self.reuse_cache_page_indice
@@ -483,6 +497,81 @@ class MlaFlashMLAPrefillOp:
             self.page_size,
         )
         return final_compressed_kv, final_k_pe
+
+    def _gather_reused_kv_cache_tp(
+        self,
+        compressed_kv: torch.Tensor,
+        flat_k_pe: torch.Tensor,
+        kv_cache: LayerKVCache,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Rebuild reused full-576 history from dimension-sharded cache pages.
+
+        This is the explicit first-version repack path. It gathers only prefix
+        tokens referenced by the current batch, not the whole resident pool.
+        NCCL and repack remain separate PyTorch operations so phase-two tests
+        can time them independently.
+        """
+
+        if self._direct_attn_inputs is None:
+            raise RuntimeError(
+                "K3 MLA cache TP prefix reuse requires direct K3 block metadata"
+            )
+        block_table = getattr(
+            self._direct_attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
+        if (
+            block_table is None
+            or not block_table.is_cuda
+            or block_table.dtype != torch.int32
+            or block_table.ndim != 2
+            or block_table.shape[0] != self.batch_size
+        ):
+            raise RuntimeError("K3 MLA cache TP has invalid prefix block table")
+
+        layout = kimi_k3_mla_cache_layout(self.parallelism_config)
+        cache = kv_cache.kv_cache_base
+        if cache.ndim != 3 or cache.shape[-1] != layout.local_width:
+            raise RuntimeError(
+                "K3 MLA cache TP expects [blocks,page,local_width], got "
+                f"{tuple(cache.shape)}"
+            )
+
+        local_prefix_parts = []
+        for request, prefix_len in enumerate(self.prefix_lens):
+            if prefix_len <= 0:
+                continue
+            page_count = (prefix_len + self.page_size - 1) // self.page_size
+            page_ids = block_table[request, :page_count].to(torch.long)
+            request_cache = cache.index_select(0, page_ids).reshape(
+                -1, layout.local_width
+            )
+            local_prefix_parts.append(request_cache[:prefix_len])
+        local_prefix = torch.cat(local_prefix_parts, dim=0).contiguous()
+        total_prefix = int(local_prefix.shape[0])
+        gathered = all_gather(local_prefix, group=Group.TP).reshape(
+            layout.tp_size, total_prefix, layout.local_width
+        )
+        full_prefix_ckv, full_prefix_pe = layout.reconstruct_rank_major(gathered)
+
+        ckv_parts = []
+        pe_parts = []
+        prefix_offset = 0
+        suffix_offset = 0
+        for q_len, prefix_len in zip(
+            self.q_lens, self.prefix_lens, strict=True
+        ):
+            if prefix_len:
+                ckv_parts.append(
+                    full_prefix_ckv[prefix_offset : prefix_offset + prefix_len]
+                )
+                pe_parts.append(
+                    full_prefix_pe[prefix_offset : prefix_offset + prefix_len]
+                )
+                prefix_offset += prefix_len
+            ckv_parts.append(compressed_kv[suffix_offset : suffix_offset + q_len])
+            pe_parts.append(flat_k_pe[suffix_offset : suffix_offset + q_len])
+            suffix_offset += q_len
+        return torch.cat(ckv_parts, dim=0), torch.cat(pe_parts, dim=0)
 
     def _project_kv(
         self,

@@ -411,6 +411,35 @@ TEST(HybridPoolConfigCreatorTest, KimiKdaPoolUsesExplicitBlockCount) {
     EXPECT_EQ(config.group_block_nums[1], 17u);
 }
 
+TEST(MLAKVCacheSpecTest, KimiCacheTpShardsPrefillComponentsOnly) {
+    const char* previous = std::getenv("KIMI_K3_MLA_CACHE_TP");
+    const std::optional<std::string> saved =
+        previous == nullptr ? std::nullopt : std::make_optional(std::string(previous));
+    ASSERT_EQ(setenv("KIMI_K3_MLA_CACHE_TP", "1", 1), 0);
+
+    AttentionConfigs attn;
+    attn.kv_lora_rank     = 512;
+    attn.rope_head_dim    = 64;
+    attn.tokens_per_block = 64;
+    ParallelismConfig pc;
+    pc.tp_size   = 8;
+    pc.role_type = RoleType::PREFILL;
+    MLAKVCacheSpec prefill(attn, pc);
+    EXPECT_EQ(prefill.kv_lora_rank, 64u);
+    EXPECT_EQ(prefill.rope_head_dim, 8u);
+
+    pc.role_type = RoleType::DECODE;
+    MLAKVCacheSpec decode(attn, pc);
+    EXPECT_EQ(decode.kv_lora_rank, 512u);
+    EXPECT_EQ(decode.rope_head_dim, 64u);
+
+    if (saved.has_value()) {
+        ASSERT_EQ(setenv("KIMI_K3_MLA_CACHE_TP", saved->c_str(), 1), 0);
+    } else {
+        ASSERT_EQ(unsetenv("KIMI_K3_MLA_CACHE_TP"), 0);
+    }
+}
+
 TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
     ParallelismConfig pc;
     auto              config =

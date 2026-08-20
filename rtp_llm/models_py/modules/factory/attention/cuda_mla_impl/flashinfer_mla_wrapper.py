@@ -311,6 +311,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             ),
             MlaKVCacheWriteOp(
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
+                parallelism_config=parallelism_config,
             ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
@@ -480,12 +481,16 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 weights,
                 quant_config,
                 attn_configs.kv_cache_dtype,
+                parallelism_config,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
                 is_neox_style=attn_configs.rope_config.is_neox_style,
             ),
-            MlaKVCacheWriteOp(kv_cache_dtype=attn_configs.kv_cache_dtype),
+            MlaKVCacheWriteOp(
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
+                parallelism_config=parallelism_config,
+            ),
             attn_inputs,
             attn_configs.kernel_tokens_per_block,
             attn_configs,
