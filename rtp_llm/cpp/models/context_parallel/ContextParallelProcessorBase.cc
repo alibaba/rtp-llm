@@ -323,17 +323,20 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         cp_valid_mask.reserve(cp_split_input_tokens.numel());
     }
 
-    const bool has_hidden_states          = total_hidden_states.defined() && total_hidden_states.numel() > 0;
-    const bool should_split_hidden_states = has_hidden_states && split_hidden_states_;
+    const bool has_hidden_states = total_hidden_states.defined() && total_hidden_states.numel() > 0;
+    bool       should_split_hidden_states = false;
     if (has_hidden_states) {
         RTP_LLM_CHECK_WITH_INFO(
             total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
-        const int64_t expected_token_num = split_hidden_states_ ? global_token_num : local_token_num;
-        RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == expected_token_num,
-                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s",
-                                total_hidden_states.size(0),
-                                expected_token_num,
-                                split_hidden_states_ ? "global" : "local");
+        const int64_t hidden_token_num = total_hidden_states.size(0);
+        const bool    matches_global   = hidden_token_num == global_token_num;
+        const bool    matches_local    = hidden_token_num == local_token_num;
+        RTP_LLM_CHECK_WITH_INFO(matches_global || matches_local,
+                                "CP MTP hidden states row count mismatch: rows=%ld, global=%ld, local=%ld",
+                                hidden_token_num,
+                                global_token_num,
+                                local_token_num);
+        should_split_hidden_states = matches_global && (!matches_local || !prefer_local_hidden_states_);
     }
     std::vector<int64_t> hidden_select_indices;
     std::vector<uint8_t> hidden_valid_mask;
