@@ -300,6 +300,14 @@ struct PyCacheStoreInputs {
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
     int cp_size = 1;
     int cp_rank = 0;
+
+    // Chunked Prefill publishes only the blocks introduced by the current
+    // chunk. Non-chunked hybrid FULL groups preserve the legacy behavior of
+    // publishing from block zero.
+    bool cache_store_full_from_begin = true;
+    // Executor-driven chunk Prefill needs backpressure until the store task
+    // has staged and registered this chunk's blocks.
+    bool wait_cache_store_done = false;
 };
 
 struct PyPrefillCudaGaphCopyParams {
@@ -325,6 +333,8 @@ struct PyAttentionInputs {
     // Model-scoped fixed-address backing storage used while constructing
     // TokenSpeed MLA implementations for CUDA graph capture/replay.
     torch::Tensor cuda_graph_fmha_workspace;
+    bool is_mtp_draft_update{false};
+    bool is_prefill_chunk{false};
     // True for the synthetic stream used to keep DP/EP collectives aligned.
     // Python models must not read or write request KV state for this stream.
     bool          is_fake_stream{false};

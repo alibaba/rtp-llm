@@ -1,9 +1,14 @@
-"""Whole-model chunk Prefill planning and round-input construction for Kimi K3."""
+"""Whole-model chunk Prefill planning and round-input construction for Kimi K3.
+
+Round planning and packed-input construction live in the Python model; the
+C++ executor observes each planned round through a
+``mtp_chunk_prefill_round_hook`` callback and only assembles the mirrored
+draft-model input.
+"""
 
 from __future__ import annotations
 
 import copy
-import os
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -178,8 +183,6 @@ def validate_whole_chunk_prefill(
         raise RuntimeError(
             "whole-model K3 Prefill does not support framework Prefill CP"
         )
-    if os.environ.get("SP_TYPE", "").lower() == "eagle3":
-        raise RuntimeError("whole-model K3 Prefill does not support EAGLE3/MTP")
     multimodal = inputs.multimodal_inputs
     if multimodal.multimodal_features or (
         multimodal.mm_features_locs_host is not None

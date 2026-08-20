@@ -3,6 +3,7 @@
 #include <cstring>
 #include <memory>
 #include <chrono>
+#include "autil/EnvUtil.h"
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -147,6 +148,10 @@ public:
         checkTensorField("prepared lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
     }
 
+    void abortPrefillChunkSession() noexcept override {
+        ++abort_prefill_chunk_session_count;
+    }
+
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
         RTP_LLM_LOG_INFO("check %s", name);
         checkTensorEqual(actual, expected);
@@ -158,8 +163,48 @@ public:
         checkTensorField("input_lengths", inputs.input_lengths, expected_inputs.input_lengths);
         checkTensorField("sequence_lengths", inputs.sequence_lengths, expected_inputs.sequence_lengths);
         checkTensorField("prefix_lengths", inputs.prefix_lengths, expected_inputs.prefix_lengths);
+        if (expected_inputs.input_lengths_host_for_log.defined()) {
+            checkTensorField("input_lengths_host_for_log",
+                             inputs.input_lengths_host_for_log,
+                             expected_inputs.input_lengths_host_for_log);
+        }
+        if (expected_inputs.prefix_lengths_host_for_log.defined()) {
+            checkTensorField("prefix_lengths_host_for_log",
+                             inputs.prefix_lengths_host_for_log,
+                             expected_inputs.prefix_lengths_host_for_log);
+        }
+        if (expected_inputs.cache_store_input_lengths_host.defined()) {
+            checkTensorField("cache_store_input_lengths_host",
+                             inputs.cache_store_input_lengths_host,
+                             expected_inputs.cache_store_input_lengths_host);
+        }
+        if (expected_inputs.cache_store_prefix_lengths_host.defined()) {
+            checkTensorField("cache_store_prefix_lengths_host",
+                             inputs.cache_store_prefix_lengths_host,
+                             expected_inputs.cache_store_prefix_lengths_host);
+        }
         checkTensorField("lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
         checkTensorField("last_hidden_states", inputs.last_hidden_states, expected_inputs.last_hidden_states);
+        if (expected_inputs.kv_cache_group_types.defined()) {
+            checkTensorField(
+                "kv_cache_group_types", inputs.kv_cache_group_types, expected_inputs.kv_cache_group_types);
+        }
+        if (expected_inputs.kv_cache_group_types_host.defined()) {
+            checkTensorField("kv_cache_group_types_host",
+                             inputs.kv_cache_group_types_host,
+                             expected_inputs.kv_cache_group_types_host);
+        }
+        if (expected_inputs.kv_cache_layer_to_group.defined()) {
+            checkTensorField("kv_cache_layer_to_group",
+                             inputs.kv_cache_layer_to_group,
+                             expected_inputs.kv_cache_layer_to_group);
+        }
+        if (expected_inputs.kv_cache_layer_to_group_host.defined()) {
+            checkTensorField("kv_cache_layer_to_group_host",
+                             inputs.kv_cache_layer_to_group_host,
+                             expected_inputs.kv_cache_layer_to_group_host);
+        }
+        EXPECT_EQ(inputs.is_prefill_chunk, expected_inputs.is_prefill_chunk);
     }
 
     void setOutputs(const vector<GptModelOutputs>& outputs) {
@@ -177,6 +222,8 @@ public:
     bool hasPendingPrepareInputs() const {
         return !prepare_input_holder.test_data.empty();
     }
+
+    int abort_prefill_chunk_session_count = 0;
 
 private:
     TestDataHolder<GptModelInputs>  input_holder;
@@ -426,6 +473,15 @@ public:
                                                          rtp_llm::TYPE_INT8,
                                                          /*local_head_num_kv=*/128,
                                                          /*size_per_head=*/256);
+        // The combined cache layout appends the single MTP layer after the
+        // target layer. Keep the test fixture consistent with the mapping
+        // produced by CacheConfigCreator::createSpConfig.
+        const int global_mtp_layer_id              = static_cast<int>(cache_config.layer_num);
+        cache_config.layer_all_num                 = cache_config.layer_num + mtp_config.layer_num;
+        cache_config.global_layer_ids[0].push_back(global_mtp_layer_id);
+        cache_config.layer_ids[0].push_back(global_mtp_layer_id);
+        mtp_config.global_layer_ids[0]             = {global_mtp_layer_id};
+        mtp_config.local_to_global_layer_ids       = {global_mtp_layer_id};
         cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
@@ -508,6 +564,387 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, testMakePrefillRoundInputPacksMultiRequestRounds) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelInputs inputs;
+    inputs.combo_tokens              = torch::arange(0, 8, torch::kInt32).cuda();
+    inputs.combo_tokens_host_for_log = inputs.combo_tokens.cpu().clone();
+    inputs.combo_tokens_type_ids     = torch::arange(100, 108, torch::kInt32).cuda();
+    inputs.combo_position_ids        = torch::arange(200, 208, torch::kInt32).cuda();
+    inputs.text_tokens_mask          = torch::ones({8}, torch::kBool).cuda();
+    inputs.input_lengths             = torch::tensor({4, 4}, torch::kInt32).cuda();
+    inputs.prefix_lengths            = torch::tensor({0, 0}, torch::kInt32).cuda();
+    inputs.sequence_lengths          = torch::empty({0}, torch::kInt32).cuda();
+    inputs.last_hidden_states        = torch::ones({8, 3}, torch::kFloat32).cuda();
+
+    // Python-planned rounds (plan_kimi_k3_chunk_rounds, chunk_budget=4,
+    // page_size=2): two aligned non-terminal slices, then a terminal round.
+    KimiK3ChunkRound first_round;
+    first_round.slices = {
+        {0, 0, 2, 2, 0, 2, false},
+        {1, 4, 6, 2, 0, 2, false},
+    };
+    KimiK3ChunkRound last_round;
+    last_round.slices = {
+        {0, 2, 4, 2, 2, 4, true},
+        {1, 6, 8, 2, 2, 4, true},
+    };
+
+    auto first = components.executor->makePrefillRoundInput(inputs, first_round, /*total_tokens=*/8);
+    EXPECT_EQ(toVec<int32_t>(first.combo_tokens), (std::vector<int32_t>{0, 1, 4, 5}));
+    EXPECT_EQ(toVec<int32_t>(first.combo_tokens_host_for_log), (std::vector<int32_t>{0, 1, 4, 5}));
+    EXPECT_EQ(toVec<int32_t>(first.combo_tokens_type_ids), (std::vector<int32_t>{100, 101, 104, 105}));
+    EXPECT_EQ(toVec<int32_t>(first.combo_position_ids), (std::vector<int32_t>{200, 201, 204, 205}));
+    EXPECT_EQ(toVec<bool>(first.text_tokens_mask), (std::vector<bool>{true, true, true, true}));
+    EXPECT_EQ(toVec<int32_t>(first.input_lengths), (std::vector<int32_t>{2, 2}));
+    EXPECT_EQ(toVec<int32_t>(first.prefix_lengths), (std::vector<int32_t>{0, 0}));
+    EXPECT_EQ(first.lm_output_indexes.numel(), 0);
+    EXPECT_FALSE(first.last_hidden_states.defined());
+    EXPECT_TRUE(first.is_prefill_chunk);
+    EXPECT_EQ(first.prefill_chunk_kv_length, 4);
+
+    auto last = components.executor->makePrefillRoundInput(inputs, last_round, /*total_tokens=*/8);
+    EXPECT_EQ(toVec<int32_t>(last.combo_tokens), (std::vector<int32_t>{2, 3, 6, 7}));
+    EXPECT_EQ(toVec<int32_t>(last.input_lengths), (std::vector<int32_t>{2, 2}));
+    EXPECT_EQ(toVec<int32_t>(last.prefix_lengths), (std::vector<int32_t>{2, 2}));
+    EXPECT_EQ(toVec<int32_t>(last.lm_output_indexes), (std::vector<int32_t>{1, 3}));
+    EXPECT_EQ(last.prefill_chunk_kv_length, 8);
+}
+
+TEST_F(MtpExecutorTest, testMakePrefillRoundInputSelectsPerRequestMetadataRows) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelInputs inputs;
+    inputs.combo_tokens                  = torch::arange(0, 12, torch::kInt32).cuda();
+    inputs.input_lengths                 = torch::tensor({4, 4, 4}, torch::kInt32).cuda();
+    inputs.prefix_lengths                = torch::tensor({0, 0, 0}, torch::kInt32).cuda();
+    inputs.sequence_lengths              = torch::empty({0}, torch::kInt32).cuda();
+    inputs.kv_cache_block_id             = torch::arange(0, 9, torch::kInt32).reshape({3, 3}).cuda();
+    inputs.kv_cache_block_id_host        = inputs.kv_cache_block_id.cpu().clone();
+    inputs.kv_cache_kernel_block_id      = torch::arange(0, 36, torch::kInt32).reshape({4, 3, 3}).cuda();
+    inputs.kv_cache_kernel_block_id_host = inputs.kv_cache_kernel_block_id.cpu().clone();
+    inputs.request_id                    = torch::tensor({100, 200, 300}, torch::kInt64).cuda();
+
+    // Python-planned rounds (chunk_budget=4, page_size=2): requests 0+1
+    // advance in round 0, request 2 alone in round 1.
+    KimiK3ChunkRound first_round;
+    first_round.slices = {
+        {0, 0, 2, 2, 0, 2, false},
+        {1, 4, 6, 2, 0, 2, false},
+    };
+    KimiK3ChunkRound middle_round;
+    middle_round.slices = {
+        {2, 8, 10, 2, 0, 2, false},
+    };
+
+    // Round 0 keeps requests 0 and 1; round 1 advances only request 2.
+    auto first = components.executor->makePrefillRoundInput(inputs, first_round, /*total_tokens=*/12);
+    EXPECT_EQ(toVec<int64_t>(first.request_id), (std::vector<int64_t>{100, 200}));
+    EXPECT_EQ(toVec<int32_t>(first.kv_cache_block_id), (std::vector<int32_t>{0, 1, 2, 3, 4, 5}));
+    EXPECT_EQ(toVec<int32_t>(first.kv_cache_block_id_host), (std::vector<int32_t>{0, 1, 2, 3, 4, 5}));
+    EXPECT_EQ(toVec<int32_t>(first.kv_cache_kernel_block_id),
+              (std::vector<int32_t>{0, 1, 2, 3, 4, 5, 9, 10, 11, 12, 13, 14, 18, 19, 20, 21, 22, 23,
+                                    27, 28, 29, 30, 31, 32}));
+
+    auto middle = components.executor->makePrefillRoundInput(inputs, middle_round, /*total_tokens=*/12);
+    EXPECT_EQ(toVec<int32_t>(middle.combo_tokens), (std::vector<int32_t>{8, 9}));
+    EXPECT_EQ(toVec<int64_t>(middle.request_id), (std::vector<int64_t>{300}));
+    EXPECT_EQ(toVec<int32_t>(middle.kv_cache_block_id), (std::vector<int32_t>{6, 7, 8}));
+}
+
+TEST_F(MtpExecutorTest, testShiftRoundComboTokensAppliesPerSliceLookahead) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelInputs inputs;
+    inputs.combo_tokens              = torch::arange(0, 8, torch::kInt32).cuda();
+    inputs.combo_tokens_host_for_log = inputs.combo_tokens.cpu().clone();
+    inputs.input_lengths             = torch::tensor({4, 4}, torch::kInt32).cuda();
+    inputs.prefix_lengths            = torch::tensor({0, 0}, torch::kInt32).cuda();
+
+    KimiK3ChunkRound first_round;
+    first_round.slices = {
+        {0, 0, 2, 2, 0, 2, false},
+        {1, 4, 6, 2, 0, 2, false},
+    };
+    KimiK3ChunkRound last_round;
+    last_round.slices = {
+        {0, 2, 4, 2, 2, 4, true},
+        {1, 6, 8, 2, 2, 4, true},
+    };
+
+    auto first = components.executor->makePrefillRoundInput(inputs, first_round, /*total_tokens=*/8);
+    components.executor->shiftRoundComboTokens(first, inputs, first_round);
+    EXPECT_EQ(toVec<int32_t>(first.combo_tokens), (std::vector<int32_t>{1, 2, 5, 6}));
+    EXPECT_EQ(toVec<int32_t>(first.combo_tokens_host_for_log), (std::vector<int32_t>{1, 2, 5, 6}));
+
+    // The terminal round reaches the end of the packed batch, so its lookahead
+    // shift would overrun and must be rejected (final rounds never shift).
+    EXPECT_THROW(
+        components.executor->shiftRoundComboTokens(first, inputs, last_round), std::runtime_error);
+}
+
+TEST_F(MtpExecutorTest, testBuildDraftCacheGroupTypesPreservesGlobalGroupNamespace) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    CacheConfig global_cache_config;
+    global_cache_config.group_types = {
+        CacheGroupType::FULL,
+        CacheGroupType::LINEAR,
+        CacheGroupType::SWA,
+    };
+    CacheLayerLayout draft_layout;
+    draft_layout.layer_to_groups   = {2};
+    draft_layout.layer_group_types = {CacheGroupType::FULL};
+
+    auto group_types = components.executor->buildDraftCacheGroupTypes(global_cache_config, draft_layout);
+    EXPECT_TRUE(group_types.is_pinned());
+    EXPECT_EQ(toVec<int32_t>(group_types),
+              (std::vector<int32_t>{static_cast<int32_t>(CacheGroupType::FULL),
+                                    static_cast<int32_t>(CacheGroupType::LINEAR),
+                                    static_cast<int32_t>(CacheGroupType::FULL)}));
+
+    draft_layout.layer_to_groups = {3};
+    EXPECT_THROW(components.executor->buildDraftCacheGroupTypes(global_cache_config, draft_layout), std::runtime_error);
+}
+
+TEST_F(MtpExecutorTest, testRunK3ChunkPrefillRoundInterleavesTargetShiftAndDraft) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+
+    // Make the draft semantics intentionally differ from the target metadata
+    // gathered by the stream processor.  This reproduces K3 (target group 0
+    // LINEAR, Eagle3 group 0 FULL) without constructing an invalid synthetic
+    // hybrid cache layout in this CPU unit test.
+    auto draft_group_types = torch::tensor({static_cast<int32_t>(CacheGroupType::FULL),
+                                            static_cast<int32_t>(CacheGroupType::LINEAR),
+                                            static_cast<int32_t>(CacheGroupType::FULL)},
+                                           torch::kInt32)
+                                 .pin_memory();
+    auto draft_layer_to_group = torch::tensor({2}, torch::kInt32).pin_memory();
+    components.executor->draft_kv_cache_group_types = draft_group_types;
+    components.executor->draft_kv_cache_layer_to_group = draft_layer_to_group;
+
+    GptModelInputs full_inputs;
+    full_inputs.combo_tokens     = torch::arange(0, 8, torch::kInt32);
+    full_inputs.input_lengths    = torch::tensor({8}, torch::kInt32);
+    full_inputs.prefix_lengths   = torch::tensor({0}, torch::kInt32);
+    full_inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+
+    // The Python planner (page_size=2) schedules three rounds:
+    // [4] -> [2] -> terminal [2].
+    KimiK3ChunkRound first_round;
+    first_round.slices = {{0, 0, 4, 4, 0, 4, false}};
+    KimiK3ChunkRound middle_round;
+    middle_round.slices = {{0, 4, 6, 2, 4, 6, false}};
+    KimiK3ChunkRound final_round;
+    final_round.slices = {{0, 6, 8, 2, 6, 8, true}};
+
+    // Draft position p consumes target token p + 1, so each non-final draft
+    // input is the round slice shifted by one token and re-pointed at the
+    // draft cache groups.
+    auto first_draft                      = GptModelInputs{};
+    first_draft.combo_tokens              = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    first_draft.input_lengths             = torch::tensor({4}, torch::kInt32);
+    first_draft.prefix_lengths            = torch::tensor({0}, torch::kInt32);
+    first_draft.is_prefill_chunk          = true;
+    first_draft.kv_cache_group_types       = draft_group_types;
+    first_draft.kv_cache_group_types_host = draft_group_types;
+    first_draft.kv_cache_layer_to_group      = draft_layer_to_group;
+    first_draft.kv_cache_layer_to_group_host = draft_layer_to_group;
+
+    auto middle_draft                      = GptModelInputs{};
+    middle_draft.combo_tokens              = torch::tensor({5, 6}, torch::kInt32);
+    middle_draft.input_lengths             = torch::tensor({2}, torch::kInt32);
+    middle_draft.prefix_lengths            = torch::tensor({4}, torch::kInt32);
+    middle_draft.is_prefill_chunk          = true;
+    middle_draft.kv_cache_group_types       = draft_group_types;
+    middle_draft.kv_cache_group_types_host = draft_group_types;
+    middle_draft.kv_cache_layer_to_group      = draft_layer_to_group;
+    middle_draft.kv_cache_layer_to_group_host = draft_layer_to_group;
+
+    auto terminal_prefix_draft                         = GptModelInputs{};
+    terminal_prefix_draft.combo_tokens                 = torch::tensor({7}, torch::kInt32);
+    terminal_prefix_draft.input_lengths                = torch::tensor({1}, torch::kInt32);
+    terminal_prefix_draft.prefix_lengths               = torch::tensor({6}, torch::kInt32);
+    terminal_prefix_draft.is_prefill_chunk             = true;
+    terminal_prefix_draft.kv_cache_group_types         = draft_group_types;
+    terminal_prefix_draft.kv_cache_group_types_host    = draft_group_types;
+    terminal_prefix_draft.kv_cache_layer_to_group      = draft_layer_to_group;
+    terminal_prefix_draft.kv_cache_layer_to_group_host = draft_layer_to_group;
+
+    components.fake_draft_model->setInputs({first_draft, middle_draft, terminal_prefix_draft});
+    components.fake_draft_model->setOutputs({GptModelOutputs{}, GptModelOutputs{}, GptModelOutputs{}});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    MtpExecutor::K3ChunkPrefillHook hook;
+    hook.full_inputs      = full_inputs;
+    hook.total_tokens     = 8;
+    hook.terminal_seen.assign(1, false);
+    int64_t model_forward_us = 0;
+    hook.model_forward_us = &model_forward_us;
+
+    components.executor->runK3ChunkPrefillRound(hook, first_round, /*is_last=*/false);
+    components.executor->runK3ChunkPrefillRound(hook, middle_round, /*is_last=*/false);
+    components.executor->runK3ChunkPrefillRound(hook, final_round, /*is_last=*/true);
+
+    ASSERT_EQ(hook.terminal_round.slices.size(), 1);
+    const auto& terminal = hook.terminal_round.slices[0];
+    EXPECT_TRUE(terminal.terminal);
+    EXPECT_EQ(terminal.source_start, 7);
+    EXPECT_EQ(terminal.source_end, 8);
+    EXPECT_EQ(terminal.new_length, 1);
+    EXPECT_EQ(terminal.absolute_start, 7);
+    EXPECT_EQ(terminal.absolute_end, 8);
+
+    // force_disable_sp_run skips every draft pass but still records the final
+    // round and advances the cursor identically.
+    MtpExecutor::K3ChunkPrefillHook no_sp_hook;
+    auto no_sp_full_inputs = full_inputs;
+    no_sp_full_inputs.force_disable_sp_run = true;
+    no_sp_hook.full_inputs      = no_sp_full_inputs;
+    no_sp_hook.total_tokens     = 8;
+    no_sp_hook.terminal_seen.assign(1, false);
+    no_sp_hook.model_forward_us = &model_forward_us;
+    components.executor->runK3ChunkPrefillRound(no_sp_hook, first_round, /*is_last=*/false);
+    components.executor->runK3ChunkPrefillRound(no_sp_hook, middle_round, /*is_last=*/false);
+    components.executor->runK3ChunkPrefillRound(no_sp_hook, final_round, /*is_last=*/true);
+    ASSERT_EQ(no_sp_hook.terminal_round.slices.size(), 1);
+    EXPECT_EQ(no_sp_hook.terminal_round.slices[0].source_start, 7);
+}
+
+TEST_F(MtpExecutorTest, testRunK3ChunkPrefillRoundPropagatesDraftFailure) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    GptModelInputs full_inputs;
+    full_inputs.combo_tokens     = torch::arange(0, 4, torch::kInt32);
+    full_inputs.input_lengths    = torch::tensor({4}, torch::kInt32);
+    full_inputs.prefix_lengths   = torch::tensor({0}, torch::kInt32);
+    full_inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+
+    MtpExecutor::K3ChunkPrefillHook hook;
+    hook.full_inputs      = full_inputs;
+    hook.total_tokens     = 4;
+    hook.terminal_seen.assign(1, false);
+    int64_t model_forward_us = 0;
+    hook.model_forward_us = &model_forward_us;
+
+    KimiK3ChunkRound first_round;
+    first_round.slices = {{0, 0, 4, 4, 0, 4, false}};
+
+    // No draft inputs/outputs queued: the draft forward throws, and the hook
+    // must propagate it so prefillStep's session guard aborts the Python
+    // chunk session.
+    EXPECT_THROW(components.executor->runK3ChunkPrefillRound(hook, first_round, /*is_last=*/false),
+                 std::runtime_error);
+}
+
+TEST_F(MtpExecutorTest, testRunK3ChunkPrefillRoundCollectsHeterogeneousTerminalTokens) {
+    auto           components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelInputs full_inputs;
+    full_inputs.combo_tokens         = torch::arange(0, 5, torch::kInt32);
+    full_inputs.input_lengths        = torch::tensor({1, 4}, torch::kInt32);
+    full_inputs.prefix_lengths       = torch::tensor({0, 0}, torch::kInt32);
+    full_inputs.sequence_lengths     = torch::empty({0}, torch::kInt32);
+    full_inputs.force_disable_sp_run = true;
+
+    KimiK3ChunkRound first_round;
+    first_round.slices = {
+        {0, 0, 1, 1, 0, 1, true},
+        {1, 1, 3, 2, 0, 2, false},
+    };
+    KimiK3ChunkRound last_round;
+    last_round.slices = {{1, 3, 5, 2, 2, 4, true}};
+
+    MtpExecutor::K3ChunkPrefillHook hook;
+    hook.full_inputs  = full_inputs;
+    hook.total_tokens = 5;
+    hook.terminal_seen.assign(2, false);
+    int64_t model_forward_us = 0;
+    hook.model_forward_us    = &model_forward_us;
+
+    components.executor->runK3ChunkPrefillRound(hook, first_round, /*is_last=*/false);
+    components.executor->runK3ChunkPrefillRound(hook, last_round, /*is_last=*/true);
+    ASSERT_EQ(hook.terminal_round.slices.size(), 2);
+    std::sort(hook.terminal_round.slices.begin(),
+              hook.terminal_round.slices.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.original_batch_idx < rhs.original_batch_idx; });
+
+    auto terminal_input =
+        components.executor->makePrefillRoundInput(full_inputs, hook.terminal_round, /*total_tokens=*/5);
+    EXPECT_EQ(toVec<int32_t>(terminal_input.combo_tokens), (std::vector<int32_t>{0, 4}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.input_lengths), (std::vector<int32_t>{1, 1}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.prefix_lengths), (std::vector<int32_t>{0, 3}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.lm_output_indexes), (std::vector<int32_t>{0, 1}));
+}
+
+TEST_F(MtpExecutorTest, testPrefillChunkCacheStoreRangeDefersAndRewritesTerminalPartialBlock) {
+    auto           components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelInputs full_inputs;
+    full_inputs.combo_tokens     = torch::arange(0, 5, torch::kInt32);
+    full_inputs.input_lengths    = torch::tensor({1, 4}, torch::kInt32);
+    full_inputs.prefix_lengths   = torch::tensor({0, 0}, torch::kInt32);
+    full_inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+
+    // Before the sampled token is available, request 1 has produced positions
+    // [0, 3). Only its complete [0, 2) block may be published.
+    KimiK3ChunkRound terminal_prefix_round;
+    terminal_prefix_round.slices = {{1, 1, 4, 3, 0, 3, false}};
+    auto terminal_prefix_input =
+        components.executor->makePrefillRoundInput(full_inputs, terminal_prefix_round, /*total_tokens=*/5);
+    components.executor->setPrefillChunkCacheStoreRange(
+        terminal_prefix_input, terminal_prefix_round, /*seq_size_per_block=*/2, /*complete_blocks_only=*/true);
+    EXPECT_EQ(toVec<int32_t>(terminal_prefix_input.prefix_lengths), (std::vector<int32_t>{0}));
+    EXPECT_EQ(toVec<int32_t>(terminal_prefix_input.input_lengths), (std::vector<int32_t>{3}));
+    EXPECT_EQ(toVec<int32_t>(terminal_prefix_input.cache_store_prefix_lengths_host), (std::vector<int32_t>{0}));
+    EXPECT_EQ(toVec<int32_t>(terminal_prefix_input.cache_store_input_lengths_host), (std::vector<int32_t>{2}));
+
+    // The final draft pass still attends at the real singleton prefixes 0 and
+    // 3, but cache store republishes the physical ranges [0, 1) and [2, 4).
+    KimiK3ChunkRound terminal_round;
+    terminal_round.slices = {
+        {0, 0, 1, 1, 0, 1, true},
+        {1, 4, 5, 1, 3, 4, true},
+    };
+    auto terminal_input =
+        components.executor->makePrefillRoundInput(full_inputs, terminal_round, /*total_tokens=*/5);
+    components.executor->setPrefillChunkCacheStoreRange(
+        terminal_input, terminal_round, /*seq_size_per_block=*/2, /*complete_blocks_only=*/false);
+    EXPECT_EQ(toVec<int32_t>(terminal_input.prefix_lengths), (std::vector<int32_t>{0, 3}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.input_lengths), (std::vector<int32_t>{1, 1}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_prefix_lengths_host), (std::vector<int32_t>{0, 2}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_input_lengths_host), (std::vector<int32_t>{1, 2}));
+
+    // Regression for full-model PD smoke's first chunked stage. The attention
+    // prefixes are input_length - 1 and therefore intentionally unaligned;
+    // only the cache-store transfer view is rounded back to 4096-token blocks.
+    KimiK3ChunkRound smoke_terminal_round;
+    smoke_terminal_round.slices = {
+        {0, 0, 1, 1, 9651, 9652, true},
+        {1, 1, 2, 1, 16051, 16052, true},
+        {2, 2, 3, 1, 22451, 22452, true},
+        {3, 3, 4, 1, 28851, 28852, true},
+    };
+    GptModelInputs smoke_terminal_input;
+    smoke_terminal_input.input_lengths   = torch::tensor({1, 1, 1, 1}, torch::kInt32);
+    smoke_terminal_input.prefix_lengths  = torch::tensor({9651, 16051, 22451, 28851}, torch::kInt32);
+    components.executor->setPrefillChunkCacheStoreRange(smoke_terminal_input,
+                                                         smoke_terminal_round,
+                                                         /*seq_size_per_block=*/4096,
+                                                         /*complete_blocks_only=*/false);
+    EXPECT_EQ(toVec<int32_t>(smoke_terminal_input.cache_store_prefix_lengths_host),
+              (std::vector<int32_t>{8192, 12288, 20480, 28672}));
+    EXPECT_EQ(toVec<int32_t>(smoke_terminal_input.cache_store_input_lengths_host),
+              (std::vector<int32_t>{1460, 3764, 1972, 180}));
+}
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
@@ -720,6 +1157,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     next_draft_input.combo_tokens      = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
     next_draft_input.input_lengths     = torch::tensor({5}, torch::kInt32);
     next_draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    next_draft_input.input_lengths_host_for_log  = torch::tensor({5}, torch::kInt32);
+    next_draft_input.prefix_lengths_host_for_log = torch::tensor({2}, torch::kInt32);
     next_draft_input.lm_output_indexes = torch::tensor({2}, torch::kInt32);
 
     // set fake model outputs
@@ -728,6 +1167,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     target_input.combo_tokens      = torch::tensor({2, 3, 2, 1, 3}, torch::kInt32);
     target_input.input_lengths     = torch::tensor({5}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    target_input.input_lengths_host_for_log  = torch::tensor({5}, torch::kInt32);
+    target_input.prefix_lengths_host_for_log = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1, 2, 3, 4}, torch::kInt32);
 
     auto target_prepare_input                    = GptModelInputs{};

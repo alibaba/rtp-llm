@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <string>
 #include <atomic>
@@ -65,9 +66,16 @@ public:
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
+    void            abortPrefillChunkSession() noexcept override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+
+    // Whole-chunk prefill hook: invoked by the Python model after each planned
+    // round's target forward with (round_plan, is_last_round). The callback is
+    // stored GIL-free and wrapped in a py::cpp_function at the forward call
+    // site (which already holds the GIL).
+    void setMtpChunkPrefillRoundHook(std::function<void(py::object, bool)> hook);
 
 private:
     // A Python attention implementation can own pinned planner workspaces used by
@@ -211,6 +219,8 @@ private:
     std::atomic<bool>            prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs attention_inputs_;
     CudaGraphState               graph_state_;
+
+    std::function<void(py::object, bool)> mtp_chunk_prefill_round_hook_fn_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -367,11 +377,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
-        if (!graph_params.decode_capture_batch_sizes.empty()) {
-            init_resources.max_decode_graph_batch_size =
-                *std::max_element(graph_params.decode_capture_batch_sizes.begin(),
-                                  graph_params.decode_capture_batch_sizes.end());
-        }
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
@@ -423,6 +428,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                              && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
+        graph_params.is_mtp_draft_update =
+            params.sp_config.type != SP_TYPE_NONE && params.model_id != 0 && is_prefill_cuda_graph_mode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }

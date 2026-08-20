@@ -744,9 +744,11 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
         # The runtime forward path derives q_len from the actual query tensor
         # and resizes the eager workspace if a future decode mode supplies more.
         max_q_len = decode_query_length(attn_inputs)
+        is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         max_bs = (
             attn_inputs.input_lengths.size(0)
-            if getattr(attn_inputs, "is_target_verify", False)
+            if is_target_verify or is_mtp_draft_update
             else attn_inputs.sequence_lengths.size(0)
         )
         super().__init__(
@@ -803,8 +805,9 @@ class TokenSpeedMlaDecodeImpl(MlaFlashInferImplBase):
     ) -> bool:
         selector = _get_mla_decode_kernel()
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         if selector == "flashinfer" or (
-            attn_inputs.is_prefill and not is_target_verify
+            attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
         ):
             return False
 

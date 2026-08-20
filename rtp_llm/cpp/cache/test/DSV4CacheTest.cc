@@ -349,6 +349,42 @@ TEST(KVCacheTransferPlannerTest, CpCompactSwaKeepsPartialTailRows) {
     }
 }
 
+TEST(KVCacheTransferPlannerTest, IncrementalHybridFullSkipsPublishedPrefix) {
+    auto plan = buildCacheStoreBlockPlan(/*total_logical_blocks=*/8,
+                                         /*reuse_block_size=*/4,
+                                         /*use_hybrid=*/true,
+                                         CacheGroupType::FULL,
+                                         /*cp_rank=*/0,
+                                         /*cp_size=*/1);
+    ASSERT_EQ(plan.size(), 4u);
+    for (size_t i = 0; i < plan.size(); ++i) {
+        EXPECT_EQ(plan[i].key_index, static_cast<int>(i + 4));
+        EXPECT_EQ(plan[i].offset_index, static_cast<int>(i + 4));
+    }
+}
+
+TEST(KVCacheTransferPlannerTest, IncrementalCpShardedFullSkipsPrefixAndKeepsCompactOffsets) {
+    auto rank_two = buildCacheStoreBlockPlan(/*total_logical_blocks=*/12,
+                                             /*reuse_block_size=*/8,
+                                             /*use_hybrid=*/true,
+                                             CacheGroupType::FULL,
+                                             /*cp_rank=*/2,
+                                             /*cp_size=*/4);
+    ASSERT_EQ(rank_two.size(), 1u);
+    EXPECT_EQ(rank_two[0].key_index, 10);
+    EXPECT_EQ(rank_two[0].offset_index, 2);
+
+    auto rank_zero = buildCacheStoreBlockPlan(/*total_logical_blocks=*/12,
+                                              /*reuse_block_size=*/8,
+                                              /*use_hybrid=*/true,
+                                              CacheGroupType::FULL,
+                                              /*cp_rank=*/0,
+                                              /*cp_size=*/4);
+    ASSERT_EQ(rank_zero.size(), 1u);
+    EXPECT_EQ(rank_zero[0].key_index, 8);
+    EXPECT_EQ(rank_zero[0].offset_index, 2);
+}
+
 // ============================================================
 // CacheConfig output
 // ============================================================
@@ -903,6 +939,8 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     EXPECT_EQ(config.global_layer_ids[6].size(), 45u);
     EXPECT_EQ(config.mtp_sub_configs[0]->global_layer_ids[6], std::vector<int>({43}));
     EXPECT_EQ(config.mtp_sub_configs[1]->global_layer_ids[6], std::vector<int>({44}));
+    EXPECT_EQ(config.mtp_sub_configs[0]->local_to_global_layer_ids, std::vector<int>({43}));
+    EXPECT_EQ(config.mtp_sub_configs[1]->local_to_global_layer_ids, std::vector<int>({44}));
     EXPECT_TRUE(config.mtp_sub_configs[0]->global_layer_ids[0].empty());
     EXPECT_TRUE(config.mtp_sub_configs[1]->global_layer_ids[0].empty());
     EXPECT_EQ(config.seq_size_per_block, 16384u);

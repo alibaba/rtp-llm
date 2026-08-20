@@ -122,8 +122,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("num_tokens_per_bs") = 1,
-             py::arg("is_target_verify") = false,
+             py::arg("num_tokens_per_bs")      = 1,
+             py::arg("is_target_verify")       = false,
              py::arg("max_context_batch_size") = 128)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)

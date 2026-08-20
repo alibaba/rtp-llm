@@ -501,6 +501,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
         const std::vector<std::vector<int>> propose_per_group = propose_config.global_layer_ids;
         sub_cfg->global_layer_ids.assign(propose_per_group.size(), {});
+        sub_cfg->local_to_global_layer_ids.assign(static_cast<size_t>(mtp_layer_num), -1);
         RTP_LLM_CHECK_WITH_INFO(sub_cfg->layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
                                 "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
                                 sub_cfg->layer_to_block_stride_bytes.size(),
@@ -512,6 +513,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 }
                 const int global_layer_id = main_layer_num + m * mtp_layer_num + local_lid;
                 sub_cfg->global_layer_ids[g].push_back(global_layer_id);
+                sub_cfg->local_to_global_layer_ids[static_cast<size_t>(local_lid)] = global_layer_id;
 
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
@@ -559,6 +561,12 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 }
             }
         }
+
+        RTP_LLM_CHECK_WITH_INFO(std::all_of(sub_cfg->local_to_global_layer_ids.begin(),
+                                            sub_cfg->local_to_global_layer_ids.end(),
+                                            [](int layer_id) { return layer_id >= 0; }),
+                                "MTP sub-config local-to-global layer mapping is incomplete (module=%d)",
+                                m);
 
         sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), -1);
         for (size_t g = 0; g < propose_per_group.size(); ++g) {

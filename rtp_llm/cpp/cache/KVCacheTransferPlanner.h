@@ -8,8 +8,8 @@
 
 namespace rtp_llm {
 
-std::vector<size_t> blockPositionsForCacheTransfer(
-    size_t block_num, size_t reuse_block_size, bool use_hybrid, CacheGroupType group_type, bool hybrid_full_from_begin);
+std::vector<size_t>
+blockPositionsForCacheTransfer(size_t block_num, size_t first_full_block, bool use_hybrid, CacheGroupType group_type);
 
 std::string layerRegionCacheTransferKey(size_t request_id, size_t layer_id, KVCacheRegionName region_name);
 
@@ -43,7 +43,7 @@ struct CacheStoreBlockPair {
 // ``cp_rank`` slots and produces coherent-but-wrong output (DSV4 PD reuse
 // regression seen 2026-05-12).
 std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_logical_blocks,
-                                                          size_t         reuse_block_size,
+                                                          size_t         first_full_block,
                                                           bool           use_hybrid,
                                                           CacheGroupType group_type,
                                                           int            cp_rank,

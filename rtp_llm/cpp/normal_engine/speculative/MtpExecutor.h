@@ -164,7 +164,7 @@ protected:
     bool useAsyncPrepare() const;
 
     // Target verify reinterprets the original decode sequence length as its
-    // prefix and packs one fixed-width query per request.  Publish matching
+    // prefix and packs one fixed-width query per request. Publish matching
     // CPU mirrors for host-side CUDA Graph planners without synchronizing the
     // device length tensors.
     static void populateTargetVerifyHostMetadata(GptModelInputs&     target,
@@ -201,6 +201,33 @@ protected:
     void releaseAllModelBuffers();
 
 private:
+    // Runtime-only helpers. Tests include this header with private visibility
+    // opened locally; these are not part of MtpExecutor's production API.
+    GptModelInputs
+         makePrefillRoundInput(const GptModelInputs& full_inputs, const KimiK3ChunkRound& round, size_t total_tokens);
+    void setPrefillChunkCacheStoreRange(GptModelInputs&          chunk_input,
+                                        const KimiK3ChunkRound& round,
+                                        size_t                  seq_size_per_block,
+                                        bool                    complete_blocks_only);
+    void shiftRoundComboTokens(GptModelInputs&         chunk_input,
+                               const GptModelInputs&   full_inputs,
+                               const KimiK3ChunkRound& round);
+    torch::Tensor buildDraftCacheGroupTypes(const CacheConfig&      global_cache_config,
+                                            const CacheLayerLayout& draft_cache_layer_layout);
+
+    // Per-round state threaded through the Python planner's
+    // mtp_chunk_prefill_round_hook callback. The planner (restored Python
+    // chunk prefill design) owns round scheduling;
+    // the executor only materializes each planned round's target/draft inputs.
+    struct K3ChunkPrefillHook {
+        GptModelInputs    full_inputs;
+        size_t            total_tokens = 0;
+        KimiK3ChunkRound  terminal_round;
+        std::vector<bool> terminal_seen;
+        int64_t*          model_forward_us = nullptr;
+    };
+    void runK3ChunkPrefillRound(K3ChunkPrefillHook& hook, const KimiK3ChunkRound& round, bool is_last);
+
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
@@ -240,6 +267,11 @@ private:
     // group id tensors
     torch::Tensor target_kv_cache_layer_to_group;
     torch::Tensor draft_kv_cache_layer_to_group;
+    // Cache-store planning must use the draft model's runtime group semantics,
+    // but the tensor remains indexed by the joint/global group id used by the
+    // block table.  For K3 Eagle3 this is [target FULL, target LINEAR,
+    // draft FULL], not the draft sub-config's local one-element vector.
+    torch::Tensor draft_kv_cache_group_types;
 
     torch::Tensor d2t_map_;
 

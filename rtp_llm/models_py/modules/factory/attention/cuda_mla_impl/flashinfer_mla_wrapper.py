@@ -24,7 +24,8 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 def decode_query_length(attn_inputs: PyAttentionInputs) -> int:
     """Return the rectangular per-request decode query width without a device sync."""
     is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
-    if not is_target_verify:
+    is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
+    if not is_target_verify and not is_mtp_draft_update:
         if getattr(attn_inputs, "is_prefill", False):
             raise RuntimeError(
                 "paged MLA decode query length was requested for a prefill batch"
@@ -556,8 +557,9 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     ) -> None:
         query_length = decode_query_length(attn_inputs)
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         sequence_lengths_host = getattr(attn_inputs, "sequence_lengths_host", None)
-        if is_target_verify:
+        if is_target_verify or is_mtp_draft_update:
             max_bs = int(attn_inputs.input_lengths.size(0))
             num_tokens = max_bs * query_length
         elif sequence_lengths_host is not None and sequence_lengths_host.numel() > 0:
@@ -607,20 +609,27 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         return (
             attn_configs.use_mla
             and (
                 not attn_inputs.is_prefill
-                or bool(getattr(attn_inputs, "is_target_verify", False))
+                or is_target_verify
+                or is_mtp_draft_update
             )
             and (
                 not attn_configs.is_sparse
-                or bool(getattr(attn_inputs, "is_target_verify", False))
+                or is_target_verify
+                or is_mtp_draft_update
             )
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+        is_mtp_draft_update = bool(
+            getattr(attn_inputs, "is_mtp_draft_update", False)
+        )
         sequence_lengths_d = getattr(
             attn_inputs, "sequence_lengths_plus_1_d", None
         )
@@ -636,6 +645,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         # arrays that FlashInfer's length-dependent scheduler still requires.
         if (
             not is_target_verify
+            and not is_mtp_draft_update
             and sequence_lengths_d is not None
             and sequence_lengths_d.numel() > 0
             and sequence_lengths_host is not None
@@ -659,5 +669,6 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             self.fmha_impl.plan(self.fmha_params)
             return
 
-        # Target verification has q>1 and still needs the generic planner.
+        # Target verification and the Prefill-shaped MTP draft update have
+        # q>1 and must use the generic planner.
         self.prepare(attn_inputs, forbid_realloc=True)

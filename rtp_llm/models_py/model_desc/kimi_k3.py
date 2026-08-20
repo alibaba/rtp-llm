@@ -554,6 +554,30 @@ class KimiK3Model(GptModelBase):
             )
         return self._mtp_hidden_buffer.narrow(0, 0, rows)
 
+    def _release_prefill_mtp_hidden_buffer(self) -> None:
+        """Drop the previous chunk after the draft model has consumed it.
+
+        Executor-driven Prefill runs target and draft serially for each chunk.
+        When the next target chunk starts, the previous auxiliary hidden tensor
+        is no longer needed.  Releasing it before target execution avoids
+        overlapping two full ``[chunk_tokens, 3 * hidden_size]`` buffers while
+        the new chunk is gathered.  Decode keeps its fixed graph-owned buffer.
+        """
+
+        if getattr(self, "_is_decode_role", False):
+            return
+        had_hidden_buffer = self._mtp_hidden_buffer is not None
+        self._mtp_hidden_buffer = None
+        self._mtp_hidden_valid_tokens = 0
+        if had_hidden_buffer and torch.cuda.is_available():
+            # Dense FlashMLA materializes cumulative projected K/V for each
+            # whole-model chunk. Those tensors are dead once the draft model
+            # has consumed this target chunk, but PyTorch may retain their
+            # increasingly large blocks in its allocator cache. Return the
+            # free blocks at this inter-round boundary so the next chunk can
+            # reuse the device memory instead of OOMing on a larger prefix.
+            torch.cuda.empty_cache()
+
     def _ensure_prefill_static_attn_res_bank(
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
@@ -614,7 +638,12 @@ class KimiK3Model(GptModelBase):
             hidden_states, multimodal_features, mm_features_locs
         )
 
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+    def forward(
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any = None,
+        mtp_chunk_prefill_round_hook: Any = None,
+    ) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
         input_ids = inputs.input_ids.reshape(-1)
         chunk_tokens = prefill_chunk_tokens()
@@ -624,7 +653,9 @@ class KimiK3Model(GptModelBase):
             and attention_inputs.is_prefill
             and input_ids.numel() > chunk_tokens
         ):
-            return self._forward_whole_chunk_prefill(inputs, fmha_impl, chunk_tokens)
+            return self._forward_whole_chunk_prefill(
+                inputs, fmha_impl, chunk_tokens, mtp_chunk_prefill_round_hook
+            )
         return self._forward_impl_one(inputs, fmha_impl)
 
     def _publish_whole_chunk_cache(self, attention_inputs: PyAttentionInputs) -> None:
@@ -642,6 +673,7 @@ class KimiK3Model(GptModelBase):
         inputs: PyModelInputs,
         fmha_impl: Any,
         chunk_tokens: int,
+        mtp_chunk_prefill_round_hook: Any = None,
     ) -> PyModelOutputs:
         validate_whole_chunk_prefill(
             inputs,
@@ -700,6 +732,7 @@ class KimiK3Model(GptModelBase):
             int(self.parallelism_config.ep_size),
         )
         terminal_hidden: Optional[torch.Tensor] = None
+        terminal_mtp_hidden: Optional[torch.Tensor] = None
         terminal_written = [False] * len(input_lengths)
         final_params: Any = None
         current_state_registry = KimiKDACurrentStateRegistry(len(input_lengths))
@@ -722,12 +755,45 @@ class KimiK3Model(GptModelBase):
             chunk_attention = chunk_inputs.attention_inputs
             assert chunk_attention is not None
             prepare_round_fmha(fmha_impl, chunk_attention)
+            # The preceding round's draft forward has consumed the previous
+            # target round. Drop that owner before this target forward builds
+            # and all-gathers the next 3-layer Eagle hidden tensor.
+            self._release_prefill_mtp_hidden_buffer()
             round_output = self._forward_impl_one(
                 chunk_inputs,
                 fmha_impl,
                 kda_current_state_registry=current_state_registry,
                 round_plan=round_plan,
             )
+            if mtp_chunk_prefill_round_hook is not None:
+                round_mtp_hidden = self.get_mtp_target_hidden_states(-1)
+                if round_mtp_hidden is None:
+                    raise RuntimeError(
+                        "whole-model K3 Prefill did not publish MTP target hidden rows"
+                    )
+                if terminal_mtp_hidden is None:
+                    terminal_mtp_hidden = torch.empty(
+                        (len(input_lengths), *round_mtp_hidden.shape[1:]),
+                        dtype=round_mtp_hidden.dtype,
+                        device=round_mtp_hidden.device,
+                    )
+                draft_row_indices: list[int] = []
+                packed_start = 0
+                for item in round_plan.slices:
+                    packed_end = packed_start + item.new_length
+                    draft_end = packed_end - (1 if item.terminal else 0)
+                    draft_row_indices.extend(range(packed_start, draft_end))
+                    if item.terminal:
+                        terminal_mtp_hidden[item.original_batch_idx].copy_(
+                            round_mtp_hidden[packed_end - 1]
+                        )
+                    packed_start = packed_end
+                index = torch.tensor(
+                    draft_row_indices, dtype=torch.long, device=round_mtp_hidden.device
+                )
+                self._mtp_hidden_buffer = round_mtp_hidden.index_select(0, index)
+                self._mtp_hidden_valid_tokens = len(draft_row_indices)
+                mtp_chunk_prefill_round_hook(round_plan, round_plan is rounds[-1])
             if terminal_hidden is None:
                 terminal_hidden = torch.empty(
                     (len(input_lengths), round_output.hidden_states.shape[-1]),
@@ -752,6 +818,11 @@ class KimiK3Model(GptModelBase):
                 idx for idx, written in enumerate(terminal_written) if not written
             ]
             raise RuntimeError(f"whole-model K3 missing terminal rows for {missing}")
+        if mtp_chunk_prefill_round_hook is not None:
+            if terminal_mtp_hidden is None:
+                raise RuntimeError("whole-model K3 missing terminal MTP hidden rows")
+            self._mtp_hidden_buffer = terminal_mtp_hidden
+            self._mtp_hidden_valid_tokens = len(input_lengths)
         hidden = terminal_hidden
         result = (
             PyModelOutputs(hidden, final_params)
@@ -760,6 +831,11 @@ class KimiK3Model(GptModelBase):
         )
         result.lm_output_already_selected = True
         return result
+
+    def abort_prefill_chunk_session(self) -> None:
+        """Drop state retained by an interrupted whole-chunk session."""
+
+        self._release_prefill_mtp_hidden_buffer()
 
     def _forward_impl_one(
         self,
@@ -1002,21 +1078,17 @@ class KimiK3Model(GptModelBase):
                 group=Group.TP,
             )
         fmha_params = getattr(fmha_impl, "fmha_params", None)
-        # The C++ caller only consumes hidden_states from PyModelOutputs.  In
-        # target-verify, retaining the Python FMHA parameter object across the
-        # pybind return boundary is unnecessary and is the only remaining
-        # object with non-tensor lifetime/destructor behavior at that boundary.
+        # Target verification only needs hidden_states on the C++ side. Avoid
+        # carrying the Python FMHA parameter holder across the pybind boundary
+        # on this path; it has non-tensor lifetime/destructor behavior that is
+        # not needed after the forward.
         if bool(getattr(attention_inputs, "is_target_verify", False)):
-            # Avoid transporting the custom PyModelOutputs holder through
-            # pybind for target verification.  C++ only needs hidden_states
-            # here, and accepts this one-element tuple as an isolated path.
             return (hidden_states,)
-        outputs = (
+        return (
             PyModelOutputs(hidden_states, fmha_params)
             if fmha_params is not None
             else PyModelOutputs(hidden_states)
         )
-        return outputs
 
 
 __all__ = [

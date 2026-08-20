@@ -152,6 +152,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("cuda_graph_fmha_workspace", &PyAttentionInputs::cuda_graph_fmha_workspace)
+        .def_readwrite("is_mtp_draft_update", &PyAttentionInputs::is_mtp_draft_update)
+        .def_readwrite("is_prefill_chunk", &PyAttentionInputs::is_prefill_chunk)
         .def_readwrite("is_fake_stream", &PyAttentionInputs::is_fake_stream)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)

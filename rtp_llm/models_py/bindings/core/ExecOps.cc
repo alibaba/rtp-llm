@@ -402,7 +402,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         // which under CP shard is the local-compact stride for FULL groups.
         const auto block_plan = buildCacheStoreBlockPlan(
             static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
-            /*reuse_block_size=*/0,
+            param.cache_store_full_from_begin ? 0 : static_cast<size_t>(canonical_reuse_block_num),
             use_group_cache_transfer_policy,
             group_type,
             param.cp_rank,
@@ -422,14 +422,30 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
         if (request_blocks->getBlocksCount() > 0) {
-            cache_store->store(request_blocks, storeCallback);
+            if (param.wait_cache_store_done) {
+                constexpr int64_t kChunkPrefillCacheStoreWaitTimeoutMs = 5000;
+                auto store_context = cache_store->storeBuffers({request_blocks}, kChunkPrefillCacheStoreWaitTimeoutMs);
+                RTP_LLM_CHECK_WITH_INFO(store_context != nullptr,
+                                        "chunk Prefill cache-store staging returned no context: request=%ld layer=%d",
+                                        request_id,
+                                        param.layer_id);
+                store_context->waitDone();
+                RTP_LLM_CHECK_WITH_INFO(
+                    store_context->success(),
+                    "chunk Prefill cache-store staging failed or timed out: request=%ld layer=%d timeout_ms=%ld error=%s",
+                    request_id,
+                    param.layer_id,
+                    kChunkPrefillCacheStoreWaitTimeoutMs,
+                    store_context->getErrorInfoString().c_str());
+            } else {
+                cache_store->store(request_blocks, storeCallback);
+            }
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
                               request_id,
                               param.layer_id);
         }
     }
-
 }
 
 // ============================================================
