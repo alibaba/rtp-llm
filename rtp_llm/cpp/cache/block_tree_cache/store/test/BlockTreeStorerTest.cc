@@ -32,13 +32,13 @@ struct StoreEnvironment {
     size_t storeRefCount() const {
         size_t store_refs = 0;
         for (const DeviceBlockPoolPtr& pool : device_pools) {
-            store_refs += pool->referencedBlocksNum(BlockRefType::STORE);
+            store_refs += pool->referencedBlocksNum(BlockTreeRefType::STORE);
         }
         for (const std::shared_ptr<HostBlockPool>& pool : host_pools) {
-            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockRefType::STORE);
+            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockTreeRefType::STORE);
         }
         for (const std::shared_ptr<BlockTreeDiskBlockPool>& pool : disk_pools) {
-            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockRefType::STORE);
+            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockTreeRefType::STORE);
         }
         return store_refs;
     }
@@ -227,7 +227,7 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
         IBlockPool&      target_pool = env.poolFor(target_tier);
         const size_t     free_before = target_pool.freeBlocksNum();
 
-        MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
+        MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
         ASSERT_EQ(request_holder.size(), 1u);
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
@@ -240,12 +240,12 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
 
         const BlockIdxType target_block = resource.getBlocks(target_tier).front();
-        EXPECT_EQ(target_pool.refCount(target_block), 1u) << "only the tree may hold the published block";
+        EXPECT_EQ(target_pool.treeRefCount(target_block), 1u) << "only the tree may hold the published block";
         EXPECT_EQ(target_pool.freeBlocksNum(), free_before - 1);
         EXPECT_EQ(candidateCountForTier(*env.cache, target_tier), 1u)
             << "the accepted target must reach its eviction heap";
         EXPECT_EQ(env.storeRefCount(), 0u);
-        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
     }
 }
 
@@ -262,22 +262,24 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
                                                 /*task_pool_size=*/4,
                                                 backend);
     backend->setCache(env.cache.get());
-    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env.groups[0], 2, BlockRefType::REQUEST);
+    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env.groups[0], 2);
     ASSERT_EQ(holder.size(), 2u);
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = holder[0];
     resources[1][0].device_blocks = holder[1];
 
     env.cache->insert({100, 101}, resources, Tier::DEVICE);
-    EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 2u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 3u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 3u);
     backend->finishWrite();
     EXPECT_TRUE(backend->submittedOutsideTreeLock());
     EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{1, 1}));
     EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[1][0]}));
-    EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
 
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0], BlockRefType::REQUEST);
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1], BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
 }
 
 TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
@@ -307,7 +309,7 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
     auto cache                 = makeBlockTreeCacheForTest({group_set}, std::move(config), backend);
     backend->setCache(cache.get());
 
-    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*group_set, 1, BlockRefType::REQUEST);
+    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*group_set, 1);
     ASSERT_EQ(holder.size(), 1u);
     cache->insert({100}, deviceSourceResources({holder.front()}), Tier::DEVICE);
     backend->finishWrite();
@@ -317,8 +319,8 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
     EXPECT_EQ(backend->addresses(),
               (std::vector<void*>{pool_z->convertIndexToBuffer(0, holder[0][0]).front().addr,
                                   pool_a->convertIndexToBuffer(0, holder[0][1]).front().addr}));
-    releaseDeviceBlocks(*cache, pool_z, {holder[0][0]}, BlockRefType::REQUEST);
-    releaseDeviceBlocks(*cache, pool_a, {holder[0][1]}, BlockRefType::REQUEST);
+    releaseDeviceBlocks(*cache, pool_z, {holder[0][0]});
+    releaseDeviceBlocks(*cache, pool_a, {holder[0][1]});
 }
 
 TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) {
@@ -331,7 +333,7 @@ TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) 
                                                 /*host_cache_on=*/false,
                                                 /*disk_cache_on=*/true);
 
-    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
+    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(request_holder.size(), 1u);
 
     env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::DISK);
@@ -355,7 +357,7 @@ TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) 
     EXPECT_EQ(load_context->loadDescs()[0].source_blocks, (BlockIndicesType{disk_block}));
 
     load_context.reset();
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
 }
 
 TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
@@ -376,7 +378,7 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
         const size_t device_free_before = env.device_pools[0]->freeBlocksNum();
         const size_t host_free_before   = env.host_pools[0]->freeBlocksNum();
 
-        MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
+        MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
         ASSERT_EQ(request_holder.size(), 1u);
         const BlockIdxType device_block = request_holder[0][0];
 
@@ -385,11 +387,12 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
         }
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
         barrier->waitUntilEntered();
-        EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORE), 1u);
+        EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
 
-        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+        releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
         EXPECT_TRUE(env.device_pools[0]->isAllocated(device_block)) << "the pending store still owns the source";
-        EXPECT_EQ(env.device_pools[0]->refCount(device_block), device_cache_on ? 2u : 1u);
+        EXPECT_EQ(env.device_pools[0]->refCount(device_block), 1u);
+        EXPECT_EQ(env.device_pools[0]->treeRefCount(device_block), device_cache_on ? 2u : 1u);
         EXPECT_EQ(candidateCountForTier(*env.cache, Tier::DEVICE), device_cache_on ? 1u : 0u)
             << "a store hold must not make a cached source ineligible for eviction";
         if (device_cache_on) {
@@ -438,7 +441,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             const size_t target_free_before = env.poolFor(target_tier).freeBlocksNum();
             const size_t device_free_before = env.device_pools[0]->freeBlocksNum();
 
-            MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
+            MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
             ASSERT_EQ(request_holder.size(), 1u);
 
             env.cache->insert({100}, deviceSourceResources({request_holder[0]}), target_tier);
@@ -449,8 +452,7 @@ TEST(BlockTreeStorerTest, StoreCopyFailureLeavesTreeAndPoolsUntouched) {
             EXPECT_EQ(env.poolFor(target_tier).freeBlocksNum(), target_free_before);
             EXPECT_EQ(env.storeRefCount(), 0u);
 
-            releaseDeviceBlocks(
-                *env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+            releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
             EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
         }
     }
@@ -485,15 +487,16 @@ TEST(BlockTreeStorerTest, StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce
 
         std::vector<BlockIdxType> squatters(env.groups.size(), NULL_BLOCK_IDX);
         const size_t              failing_group_set_id = env.groups.size() - 1;
-        squatters[failing_group_set_id] =
-            env.groups[failing_group_set_id]->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
-        ASSERT_NE(squatters[failing_group_set_id], NULL_BLOCK_IDX);
+        const auto                squatter             = env.host_pools[failing_group_set_id]->malloc();
+        ASSERT_TRUE(squatter.has_value());
+        env.host_pools[failing_group_set_id]->incTreeRef(*squatter, BlockTreeRefType::LOAD);
+        squatters[failing_group_set_id] = *squatter;
 
         std::vector<MultiNodeBlocks>           holders;
         std::vector<std::vector<BlockIdxType>> sources;
         std::vector<size_t>                    device_free_before;
         for (const GroupSetPtr& group : env.groups) {
-            holders.push_back(allocateDeviceBlocksForTest(*group, 1, BlockRefType::REQUEST));
+            holders.push_back(allocateDeviceBlocksForTest(*group, 1));
             ASSERT_EQ(holders.back().size(), 1u);
             sources.push_back(holders.back()[0]);
             device_free_before.push_back(kStoreDeviceBlocks);
@@ -509,11 +512,9 @@ TEST(BlockTreeStorerTest, StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce
             const size_t squatted = isNullBlockIdx(squatters[group_set_id]) ? 0u : 1u;
             EXPECT_EQ(env.host_pools[group_set_id]->freeBlocksNum(), lower_tier_blocks[group_set_id] - squatted);
             if (squatted > 0) {
-                env.groups[group_set_id]->releaseSingleBlock(
-                    Tier::HOST, squatters[group_set_id], BlockRefType::REQUEST);
+                env.host_pools[group_set_id]->decTreeRef(squatters[group_set_id], BlockTreeRefType::LOAD);
             }
-            releaseDeviceBlocks(
-                *env.cache, env.device_pools[group_set_id], holders[group_set_id].front(), BlockRefType::REQUEST);
+            releaseDeviceBlocks(*env.cache, env.device_pools[group_set_id], holders[group_set_id].front());
             EXPECT_EQ(env.device_pools[group_set_id]->freeBlocksNum(), device_free_before[group_set_id]);
         }
     }
@@ -530,8 +531,8 @@ TEST(BlockTreeStorerTest, DuplicateStoreForSameKeyReleasesLoserBlock) {
                                                 /*disk_cache_on=*/false);
     const size_t     host_free_before = env.host_pools[0]->freeBlocksNum();
 
-    MultiNodeBlocks first_holder  = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
-    MultiNodeBlocks second_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
+    MultiNodeBlocks first_holder  = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    MultiNodeBlocks second_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(first_holder.size(), 1u);
     ASSERT_EQ(second_holder.size(), 1u);
 
@@ -549,13 +550,13 @@ TEST(BlockTreeStorerTest, DuplicateStoreForSameKeyReleasesLoserBlock) {
     ASSERT_EQ(find.size(), 1u);
     const GroupSetResource& resource = find.back()->group_set_resources[0];
     ASSERT_TRUE(resource.hasTier(Tier::HOST));
-    EXPECT_EQ(env.host_pools[0]->refCount(resource.host_block), 1u);
+    EXPECT_EQ(env.host_pools[0]->treeRefCount(resource.host_block), 1u);
     EXPECT_EQ(candidateCountForTier(*env.cache, Tier::HOST), 1u);
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before - 1) << "the losing copy must be returned";
     EXPECT_EQ(env.storeRefCount(), 0u);
 
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], first_holder.front(), BlockRefType::REQUEST);
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], second_holder.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], first_holder.front());
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], second_holder.front());
 }
 
 TEST(BlockTreeStorerTest, StoreShutdownCutoffSettlesQueuedAndInFlightTasksWithoutPublishing) {
@@ -578,13 +579,13 @@ TEST(BlockTreeStorerTest, StoreShutdownCutoffSettlesQueuedAndInFlightTasksWithou
 
     std::vector<MultiNodeBlocks> holders;
     for (size_t index = 0; index < kStoreTasks; ++index) {
-        holders.push_back(allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST));
+        holders.push_back(allocateDeviceBlocksForTest(*env.groups[0], 1));
         ASSERT_EQ(holders.back().size(), 1u);
         env.cache->insert(
             {static_cast<CacheKeyType>(100 + index)}, deviceSourceResources({holders.back()[0]}), Tier::HOST);
     }
     barrier->waitUntilEntered(2);
-    EXPECT_EQ(env.host_pools[0]->referencedBlocksNum(BlockRefType::STORE), kStoreTasks);
+    EXPECT_EQ(env.host_pools[0]->referencedBlocksNum(BlockTreeRefType::STORE), kStoreTasks);
 
     BlockTreeCacheTestPeer::beginStoreShutdownForTest(*env.cache);
     barrier->release();
@@ -599,7 +600,7 @@ TEST(BlockTreeStorerTest, StoreShutdownCutoffSettlesQueuedAndInFlightTasksWithou
 
     env.cache.reset();
     for (const MultiNodeBlocks& holder : holders) {
-        env.device_pools[0]->decRef(holder.front(), BlockRefType::REQUEST);
+        env.device_pools[0]->decRef(holder.front());
     }
     EXPECT_EQ(env.device_pools[0]->freeBlocksNum(), device_free_before);
 }
@@ -615,7 +616,7 @@ TEST(BlockTreeStorerTest, StoreDerivedEvictionIsDrainedByWaitForPendingTasks) {
                                                 /*disk_cache_on=*/true);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*env.cache, Tier::HOST, 0.01);
 
-    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
+    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
     ASSERT_EQ(request_holder.size(), 1u);
 
     env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
@@ -629,7 +630,7 @@ TEST(BlockTreeStorerTest, StoreDerivedEvictionIsDrainedByWaitForPendingTasks) {
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), 2u);
     EXPECT_EQ(env.storeRefCount(), 0u);
 
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
 }
 
 }  // namespace

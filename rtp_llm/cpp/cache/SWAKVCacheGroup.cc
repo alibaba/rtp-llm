@@ -211,7 +211,7 @@ bool SWAKVCacheGroup::malloc(BlockIds&                 block_ids,
             return false;
         }
         allocated_blocks = std::move(*allocated);
-        addBlockRefs(allocated_blocks, BlockRefType::REQUEST);
+        block_pool_->incRef(allocated_blocks);
     }
 
     size_t allocated_idx = 0;
@@ -260,33 +260,11 @@ void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        releaseBlockRefs(blocks_to_free, BlockRefType::REQUEST);
+        block_pool_->decRef(blocks_to_free);
         block_ids.remove(pos_to_remove);
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
     }
     checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
-}
-
-void SWAKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
-    if (block_indices.empty()) {
-        return;
-    }
-    BlockIndicesType valid;
-    filterValidBlocks(block_indices, valid);
-    releaseBlockRefs(valid, ref_type);
-}
-
-void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
-    release(block_indices, BlockRefType::REQUEST);
-}
-
-void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
-    block_ids.add(new_block_indices);
-    BlockIndicesType valid;
-    filterValidBlocks(new_block_indices, valid);
-    if (!valid.empty()) {
-        addBlockRefs(valid, BlockRefType::REQUEST);
-    }
 }
 
 }  // namespace rtp_llm

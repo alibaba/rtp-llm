@@ -69,14 +69,19 @@ TEST_F(LoadJoinRegistryTest, FinishNotifiesJoinedContext) {
     const std::shared_ptr<LoadAsyncContext> joined_context = makeContext(1, &node, 0, true);
 
     ASSERT_TRUE(registry.start(&node, 0, target_blocks, first_context));
-    EXPECT_EQ(device_pool_->refCount(target_blocks[0]), 0u);
+    device_pool_->incTreeRef(target_blocks[0], BlockTreeRefType::LOAD);
+    EXPECT_EQ(device_pool_->refCount(target_blocks[0]), 1u);
+    EXPECT_EQ(device_pool_->treeRefCount(target_blocks[0]), 1u);
     ASSERT_TRUE(registry.join(joined_context));
     EXPECT_EQ(joined_context->loadDescs()[0].target_blocks, target_blocks);
-    EXPECT_EQ(device_pool_->refCount(target_blocks[0]), 1u);
+    EXPECT_EQ(device_pool_->refCount(target_blocks[0]), 2u);
+    EXPECT_EQ(device_pool_->treeRefCount(target_blocks[0]), 1u);
     EXPECT_TRUE(registry.finish(&node, 0, true));
     EXPECT_TRUE(first_context->success());
     EXPECT_TRUE(joined_context->success());
     EXPECT_FALSE(registry.finish(&node, 0, true));
+    device_pool_->decRef(target_blocks[0]);
+    device_pool_->decTreeRef(target_blocks[0], BlockTreeRefType::LOAD);
 }
 
 TEST_F(LoadJoinRegistryTest, FailureIsPerContext) {

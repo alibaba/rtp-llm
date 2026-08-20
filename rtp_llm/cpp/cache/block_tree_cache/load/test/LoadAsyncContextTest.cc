@@ -20,9 +20,9 @@ struct TestMatchMeta: StorageBackendMatchMeta {
     size_t remote_version{0};
 };
 
-class TestBlockPool: public IBlockPool {
+class TestBlockPool: public DeviceBlockPool {
 public:
-    TestBlockPool(): IBlockPool(makeConfig()) {
+    TestBlockPool(): DeviceBlockPool(makeConfig()) {
         markInitialized();
     }
     size_t blockSizeBytes() const override {
@@ -30,11 +30,17 @@ public:
     }
 
 private:
-    static std::shared_ptr<const BlockPoolConfigBase> makeConfig() {
-        auto config                  = std::make_shared<BlockPoolConfigBase>();
+    static std::shared_ptr<const DeviceBlockPoolConfig> makeConfig() {
+        auto config                  = std::make_shared<DeviceBlockPoolConfig>();
         config->pool_type            = BlockPoolType::DEVICE;
         config->pool_name            = "load_context_test";
         config->physical_block_count = 4;
+        MemoryLayoutConfig layout;
+        layout.block_num                = 4;
+        layout.layer_num                = 1;
+        layout.kv_block_stride_bytes    = 16;
+        layout.kv_block_pool_size_bytes = 64;
+        config->memory_layouts.push_back(layout);
         return config;
     }
 };
@@ -195,13 +201,13 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
     return CacheTopology::create(std::move(groups), {{0, std::move(tags)}});
 }
 
-void initBackend(ManualBackend& backend, const std::shared_ptr<IBlockPool>& pool) {
+void initBackend(ManualBackend& backend, const DeviceBlockPoolPtr& pool) {
     RTP_LLM_CHECK(backend.init(makeTopology(), {pool}, [](int, int, int) { return std::vector<BlockInfo>{}; }));
 }
 
-void initBackend(ManualBackend&                                  backend,
-                 std::shared_ptr<const CacheTopology>            topology,
-                 const std::vector<std::shared_ptr<IBlockPool>>& pools) {
+void initBackend(ManualBackend&                         backend,
+                 std::shared_ptr<const CacheTopology>   topology,
+                 const std::vector<DeviceBlockPoolPtr>& pools) {
     RTP_LLM_CHECK(
         backend.init(std::move(topology), pools, [](int, int, int) { return std::vector<BlockInfo>{}; }));
 }
@@ -355,7 +361,7 @@ TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndRelea
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     auto   block       = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     initBackend(*backend, pool);
     auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
@@ -367,7 +373,7 @@ TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndRelea
     context->startBackendMatch();
     backend->completeMatch(1);
     ASSERT_TRUE(backend->readPending());
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
     backend->failNextRead();
     backend->completeRead();
 
@@ -376,8 +382,8 @@ TEST(LoadAsyncContextTest, BackendReadFailureMarksCommittedContextFailedAndRelea
     EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
     coordinator->shutdown();
 }
 
@@ -388,7 +394,7 @@ TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     auto   block       = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     initBackend(*backend, pool);
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2}),
                            {{{0, NULL_BLOCK_IDX}, {0, NULL_BLOCK_IDX}}, {{0, NULL_BLOCK_IDX}}}};
@@ -412,7 +418,7 @@ TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
     EXPECT_TRUE(context->success());
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    pool->decRef(block);
     coordinator->shutdown();
 }
 
@@ -422,12 +428,12 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
     auto                                        coordinator = makeCoordinator(commits, aborts);
     auto                                        backend     = std::make_shared<ManualBackend>();
     std::vector<std::shared_ptr<TestBlockPool>> pools;
-    std::vector<std::shared_ptr<IBlockPool>>    bound_pools;
+    std::vector<DeviceBlockPoolPtr>             bound_pools;
     std::vector<BlockIdxType>                   blocks;
     for (size_t group_id = 0; group_id < 3; ++group_id) {
         auto pool  = std::make_shared<TestBlockPool>();
         auto block = pool->malloc().value();
-        pool->incRef(block, BlockRefType::REQUEST);
+        pool->incRef(block);
         pools.push_back(pool);
         bound_pools.push_back(pool);
         blocks.push_back(block);
@@ -473,7 +479,7 @@ TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) 
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
     for (size_t group_id = 0; group_id < pools.size(); ++group_id) {
-        pools[group_id]->decRef(blocks[group_id], BlockRefType::REQUEST);
+        pools[group_id]->decRef(blocks[group_id]);
     }
     coordinator->shutdown();
 }
@@ -486,8 +492,8 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     auto   pool        = std::make_shared<TestBlockPool>();
     auto   first       = pool->malloc().value();
     auto   second      = pool->malloc().value();
-    pool->incRef(first, BlockRefType::REQUEST);
-    pool->incRef(second, BlockRefType::REQUEST);
+    pool->incRef(first);
+    pool->incRef(second);
     initBackend(*backend, pool);
 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{10, 20, 30, 40}),
@@ -520,8 +526,8 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     EXPECT_EQ(context->matchedBlocks(), 4u);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
-    pool->decRef(first, BlockRefType::REQUEST);
-    pool->decRef(second, BlockRefType::REQUEST);
+    pool->decRef(first);
+    pool->decRef(second);
     coordinator->shutdown();
 }
 
@@ -532,7 +538,7 @@ TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     auto   block       = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     initBackend(*backend, pool);
 
     TransferDescriptor local;
@@ -548,15 +554,15 @@ TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
     context->startBackendMatch();
     backend->completeMatch(1);
     ASSERT_TRUE(backend->readPending());
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_TRUE(context->completeOne(true));
     EXPECT_FALSE(context->done());
     backend->completeRead();
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->matchedBlocks(), 1u);
-    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
     coordinator->shutdown();
 }
 
@@ -581,7 +587,7 @@ TEST(LoadAsyncContextTest, AbortWaitsForDeferredAllocatorCallbackAndLosesAfterCo
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     auto   block       = pool->malloc().value();
-    pool->incRef(block, BlockRefType::REQUEST);
+    pool->incRef(block);
     initBackend(*backend, pool);
     auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
@@ -619,7 +625,7 @@ TEST(LoadAsyncContextTest, AbortWaitsForDeferredAllocatorCallbackAndLosesAfterCo
     EXPECT_TRUE(context->success());
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
-    pool->decRef(block, BlockRefType::REQUEST);
+    pool->decRef(block);
     coordinator->shutdown();
 }
 

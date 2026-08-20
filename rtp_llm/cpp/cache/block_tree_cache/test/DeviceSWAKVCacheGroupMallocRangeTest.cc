@@ -85,7 +85,7 @@ TEST(DeviceSWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenU
             EXPECT_FALSE(isNullBlockIdx(blocks[blocks.size() - 1])) << "seq_len=" << seq_len;
         }
 
-        group.free(blocks);
+        group.unreference(blocks);
     };
 
     // SWA malloc depends on seq_slots=ceil(seq_len / block_size). The first

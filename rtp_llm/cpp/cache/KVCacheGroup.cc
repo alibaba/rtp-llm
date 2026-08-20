@@ -135,25 +135,35 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
 }
 
-void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
-    addBlockRefs(new_block_indices, BlockRefType::REQUEST);
+void KVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+    block_ids.add(new_block_indices);
+    BlockIndicesType valid_blocks;
+    valid_blocks.reserve(new_block_indices.size());
+    for (const BlockIdxType block : new_block_indices) {
+        if (!isNullBlockIdx(block)) {
+            valid_blocks.push_back(block);
+        }
+    }
+    reference(valid_blocks);
 }
 
-void KVCacheGroup::reference(const BlockIndicesType& new_block_indices, BlockRefType ref_type) {
-    addBlockRefs(new_block_indices, ref_type);
-}
-
-void KVCacheGroup::addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
-    if (!blocks.empty()) {
-        block_pool_->incRef(blocks, ref_type);
+void KVCacheGroup::reference(const BlockIndicesType& block_indices) {
+    if (!block_indices.empty()) {
+        block_pool_->incRef(block_indices);
     }
 }
 
-void KVCacheGroup::releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
-    if (blocks.empty()) {
-        return;
+void KVCacheGroup::unreference(const BlockIndicesType& block_indices) {
+    BlockIndicesType valid_blocks;
+    valid_blocks.reserve(block_indices.size());
+    for (const BlockIdxType block : block_indices) {
+        if (!isNullBlockIdx(block)) {
+            valid_blocks.push_back(block);
+        }
     }
-    block_pool_->decRef(blocks, ref_type);
+    if (!valid_blocks.empty()) {
+        block_pool_->decRef(valid_blocks);
+    }
 }
 
 bool KVCacheGroup::prefixReusable() const {

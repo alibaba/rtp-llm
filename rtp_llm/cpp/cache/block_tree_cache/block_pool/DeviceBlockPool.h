@@ -41,6 +41,16 @@ public:
     // the global-layer -> (layout, local layer) mapping. Invariants enforced via RTP_LLM_CHECK.
     bool init();
 
+    void incRef(BlockIdxType block);
+    void incRef(const BlockIdList& blocks);
+    void decRef(BlockIdxType block);
+    void decRef(const BlockIdList& blocks);
+
+    uint32_t refCount(BlockIdxType block) const;
+    using IBlockPool::referencedBlocksNum;
+    size_t referencedBlocksNum() const;
+    size_t activeTreeCachedBlocksNum() const;
+
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
 
@@ -66,7 +76,13 @@ public:
 
     std::string debugString() const override;
 
+protected:
+    void onFirstTreeRefNoLock(BlockIdxType block) override;
+    bool onLastTreeRefNoLock(BlockIdxType block) override;
+    void onCacheRefChangedNoLock(BlockIdxType block, bool cached) override;
+
 private:
+    bool                         hasRequestRefNoLock(BlockIdxType block) const;
     const DeviceBlockPoolConfig& config() const;
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
@@ -109,6 +125,10 @@ private:
                                    const std::string&          buffer_type);
 
 private:
+    std::vector<uint32_t> refcounts_;
+    size_t                request_referenced_blocks_num_{0};
+    size_t                active_tree_cached_blocks_num_{0};
+
     torch::Tensor cache_aligned_buffer_;
     void*         cache_base_ptr_{nullptr};
 

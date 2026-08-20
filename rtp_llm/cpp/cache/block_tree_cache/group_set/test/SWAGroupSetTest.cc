@@ -32,7 +32,7 @@ protected:
 
     void TearDown() override {
         for (const auto block : held_blocks_) {
-            pool_->decRef(block, BlockRefType::REQUEST);
+            pool_->decRef(block);
         }
     }
 
@@ -49,7 +49,7 @@ protected:
         if (!block.has_value()) {
             return NULL_BLOCK_IDX;
         }
-        pool_->incRef(block.value(), BlockRefType::REQUEST);
+        pool_->incRef(block.value());
         held_blocks_.insert(block.value());
         node->group_set_resources[static_cast<size_t>(group_set_id)].device_blocks = {block.value()};
         return block.value();

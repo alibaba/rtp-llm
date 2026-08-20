@@ -268,7 +268,7 @@ protected:
             auto& resource = stream_->streamCacheResource();
             initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
             const GroupSetPtr& group = cache->groupSets().front();
-            const BlockIdxType block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+            const BlockIdxType block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
             RTP_LLM_CHECK(!isNullBlockIdx(block));
             std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
             resources[0][0].host_block = block;
@@ -276,7 +276,7 @@ protected:
                               ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, resources, false)
                               .accepted_resource_count
                           == 1);
-            group->releaseSingleBlock(Tier::HOST, block, BlockRefType::BLOCK_CACHE);
+            group->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
         }
 
         auto& resource                                                 = stream_->streamCacheResource();

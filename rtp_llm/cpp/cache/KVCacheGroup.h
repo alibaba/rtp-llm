@@ -49,8 +49,6 @@ public:
                                int                        reserve_step         = 0,
                                std::vector<size_t>*       backfilled_positions = nullptr,
                                const RequiredPositions&  required_positions = {}) = 0;
-    virtual void release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) = 0;
-    virtual void free(const BlockIndicesType& block_indices) = 0;
     virtual void
     removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
@@ -75,11 +73,9 @@ public:
         int                      reuse_blocks_len,
         bool                     reuse_enabled     = false,
         const RequiredPositions& required_positions = {}) const = 0;
-    virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
-
-    void                                   reference(const BlockIndicesType& new_block_indices);
-    void                                   reference(const BlockIndicesType& new_block_indices,
-                                                     BlockRefType            ref_type);
+    void                                   reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices);
+    void                                   reference(const BlockIndicesType& block_indices);
+    void                                   unreference(const BlockIndicesType& block_indices);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
@@ -123,9 +119,6 @@ protected:
         group.kv_scale_stride_bytes     = group.spec == nullptr ? 0 : group.spec->scale_block_size_bytes();
         return group;
     }
-
-    void                            addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
-    void releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
 
     GroupBase          cache_group_;
     DeviceBlockPoolPtr block_pool_;
