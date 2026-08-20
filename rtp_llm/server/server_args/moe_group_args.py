@@ -1,4 +1,5 @@
 from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.utils.backend_registry import run_backend_registrations
 
 
 def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
@@ -194,3 +195,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         default="auto",
         help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
     )
+
+    # Out-of-tree backends ship MoE strategies the public parser must not
+    # advertise, so let them extend the accepted choices here instead.
+    run_backend_registrations("moe_strategy_choices", repeatable=True, parser=parser)
