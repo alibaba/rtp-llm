@@ -4,7 +4,6 @@
 #include <cuda_runtime.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/ModelProfile.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/DescriptorSizeProfile.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/CommonBenchmarkOptions.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeBenchmarkOptions.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkOptions.h"
@@ -123,7 +122,7 @@ int runTransfer(int argc, char** argv) {
         argv,
         TransferOptions::parse,
         validateTransferOptions,
-        [](const std::string& path) { return DescriptorSizeProfile::load(path).toSyntheticModelProfile(); },
+        ModelProfile::load,
         [](const ModelProfile& profile, const TransferOptions& options, const BenchmarkOptions& common) {
             return TransferBenchmarkRunner(profile, options, common.seed, common.output_json_path).run();
         });
