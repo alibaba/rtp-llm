@@ -12,12 +12,27 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
 class LoadContextCoordinator;
+
+struct LoadMatchResult {
+    // Keep bool-returning callbacks source-compatible. A callback failure that
+    // does not provide a capacity verdict is terminal rather than eligible for
+    // PREFILL's post-allocation transfer fallback.
+    LoadMatchResult(bool success, MallocStatus malloc_status = MallocStatus::NONE):
+        success(success),
+        malloc_status(success ? MallocStatus::NONE :
+                      malloc_status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR :
+                                                           malloc_status) {}
+
+    bool         success;
+    MallocStatus malloc_status;
+};
 
 class LoadAsyncContext: public AsyncContext, public std::enable_shared_from_this<LoadAsyncContext> {
 public:
@@ -28,7 +43,7 @@ public:
         FAILED,
         CANCELLED
     };
-    using MatchCallback = std::function<bool(LoadAsyncContext&, size_t matched_blocks)>;
+    using MatchCallback = std::function<LoadMatchResult(LoadAsyncContext&, size_t matched_blocks)>;
 
     LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                      std::vector<bool>                              joined_load,
@@ -65,6 +80,7 @@ public:
     void waitDone() override;
     bool done() const override;
     bool success() const override;
+    MallocStatus mallocStatus() const;
 
 private:
     void markAborted();
@@ -72,6 +88,7 @@ private:
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
     void onBackendRead(bool success);
     void failBeforeCommit();
+    void failCommit();
     void finishIfReadyLocked(bool& notify);
     void finishMatchCallback();
 
@@ -96,11 +113,14 @@ private:
     std::condition_variable match_callback_cv_;
     bool                    match_callback_running_{false};
 
-    std::atomic<State>      state_{State::PENDING};
-    mutable std::mutex      mutex_;
-    std::condition_variable cv_;
-    size_t                  remaining_transfer_count_{0};
-    bool                    has_failure_{false};
+    std::atomic<State>        state_{State::PENDING};
+    std::atomic<MallocStatus> malloc_status_{MallocStatus::NONE};
+    mutable std::mutex        mutex_;
+    std::condition_variable   cv_;
+    size_t                    remaining_transfer_count_{0};
+    bool                      has_failure_{false};
+
+    friend class LoadContextCoordinator;
 };
 
 class LoadContextCoordinator: public std::enable_shared_from_this<LoadContextCoordinator> {

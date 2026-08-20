@@ -133,11 +133,13 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         }
     }
     if (!callback_started) {
+        malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
         failBeforeCommit();
         return;
     }
     block_tree_cache_detail::ScopeRollback match_callback_guard([this] { finishMatchCallback(); });
     if (!success) {
+        malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
         failBeforeCommit();
         return;
     }
@@ -165,11 +167,12 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
                                      }),
                       handles.end());
     }
-    bool match_callback_success = false;
+    LoadMatchResult match_result{false};
     try {
-        match_callback_success = match_callback_(*this, matched_blocks_num);
+        match_result = match_callback_(*this, matched_blocks_num);
     } catch (...) {}
-    if (!match_callback_success) {
+    if (!match_result.success) {
+        malloc_status_.store(match_result.malloc_status, std::memory_order_release);
         failBeforeCommit();
         return;
     }
@@ -215,8 +218,17 @@ void LoadAsyncContext::failBeforeCommit() {
     onTaskFail();
 }
 
+void LoadAsyncContext::failCommit() {
+    malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
+    onTaskFail();
+}
+
 bool LoadAsyncContext::commit() {
     if (!coordinator_->commit(context_id_)) {
+        // The coordinator can reject before resolving the weak context. Make
+        // that path terminal as well; failCommit is idempotent if a rejected
+        // callback already invoked it.
+        failCommit();
         return false;
     }
     bool notify = false;
@@ -326,6 +338,10 @@ bool LoadAsyncContext::success() const {
     return state_.load() == State::SUCCEEDED;
 }
 
+MallocStatus LoadAsyncContext::mallocStatus() const {
+    return malloc_status_.load(std::memory_order_acquire);
+}
+
 LoadContextCoordinator::LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback):
     commit_callback_(std::move(commit_callback)), abort_callback_(std::move(abort_callback)) {}
 
@@ -379,7 +395,9 @@ bool LoadContextCoordinator::commit(uint64_t context_id) {
     }
     block_tree_cache_detail::ScopeRollback callback_guard([this] { retireActiveCallback(); });
     if (!commit_callback_(context)) {
-        context->onTaskFail();
+        // Publish the typed failure before FAILED. A scheduler may poll the
+        // context as soon as onTaskFail makes it terminal.
+        context->failCommit();
         return false;
     }
     return true;

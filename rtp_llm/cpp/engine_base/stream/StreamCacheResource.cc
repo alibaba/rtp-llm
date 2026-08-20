@@ -253,8 +253,16 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
         return;
     }
 
-    cache_reuse_metrics_.load_prepare_latency_us = result.load_prepare_latency_us;
-    load_wait_begin_time_us_                     = currentTimeUs();
+    // Metrics describe the current load attempt. A retry must not inherit the
+    // previous attempt's terminal result or latency.
+    cache_reuse_metrics_.load_success                  = false;
+    cache_reuse_metrics_.report_load_metrics           = false;
+    cache_reuse_metrics_.report_load_wait_latency      = false;
+    cache_reuse_metrics_.load_wait_latency_us          = 0;
+    cache_reuse_metrics_.report_match_to_ready_latency = false;
+    cache_reuse_metrics_.match_to_ready_latency_us     = 0;
+    cache_reuse_metrics_.load_prepare_latency_us       = result.load_prepare_latency_us;
+    load_wait_begin_time_us_                           = currentTimeUs();
     if (!result.success) {
         clearCacheReuseState();
         cache_reuse_metrics_.load_success        = false;
@@ -266,14 +274,16 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
 }
 
 absl::Status StreamCacheResource::finalizeAllocatorLoad() {
-    const bool load_success = allocator_load_context_->success();
-    const auto error        = allocator_load_context_->errorInfo();
+    const bool load_success  = allocator_load_context_->success();
+    const auto error         = allocator_load_context_->errorInfo();
+    const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+    const auto malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
     if (load_success) {
-        const auto context            = std::static_pointer_cast<LoadAsyncContext>(allocator_load_context_);
-        const size_t total   = context->matchedBlocks();
-        const size_t local   = context->localMatchedBlocks();
-        const size_t host    = context->matchedBlocks(Tier::HOST);
-        const size_t disk    = context->matchedBlocks(Tier::DISK);
+        RTP_LLM_CHECK(load_context != nullptr);
+        const size_t total   = load_context->matchedBlocks();
+        const size_t local   = load_context->localMatchedBlocks();
+        const size_t host    = load_context->matchedBlocks(Tier::HOST);
+        const size_t disk    = load_context->matchedBlocks(Tier::DISK);
         const size_t backend = total - local;
         auto&        resource = batch_kv_cache_resource_->cacheResource(0);
         resource.setDeviceReuseBlockNum(local - host - disk);
@@ -282,7 +292,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         resource.setStorageBackendReuseBlockNum(backend);
         const int tokens = reuseBlockTokens();
         publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
-    } else if (resource_context_.role_type == RoleType::PREFILL) {
+    } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
     } else {
@@ -301,7 +311,19 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     }
     allocator_load_context_.reset();
 
-    if (load_success || resource_context_.role_type == RoleType::PREFILL) {
+    if (load_success) {
+        return absl::OkStatus();
+    }
+    if (malloc_status == MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED) {
+        return absl::UnavailableError("allocator load materialization is temporarily out of KV blocks");
+    }
+    if (malloc_status == MallocStatus::PERMANENT_RESOURCE_EXHAUSTED) {
+        return absl::ResourceExhaustedError("allocator load materialization exceeds KV cache capacity");
+    }
+    if (malloc_status == MallocStatus::INTERNAL_ERROR) {
+        return absl::InternalError("allocator load materialization failed");
+    }
+    if (resource_context_.role_type == RoleType::PREFILL) {
         return absl::OkStatus();
     }
     const std::string error_text = error.ToString();
@@ -390,13 +412,16 @@ bool StreamCacheResource::loadCacheDone() {
         const ErrorInfo error   = allocator_load_context_->errorInfo();
         const bool      success = allocator_load_context_->success();
         const auto      status  = finalizeAllocatorLoad();
-        if (!success) {
+        if (!success && !absl::IsUnavailable(status)) {
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
         }
-        if (!status.ok()) {
+        if (absl::IsUnavailable(status)) {
+            ++malloc_failed_times_;
+            stream_->generate_status_->clearLoadInitiated();
+        } else if (!status.ok()) {
             stream_->reportEventWithoutLock(
-                StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "block tree cache load failed");
+                StreamEvents::Error, ErrorCode::MALLOC_FAILED, std::string(status.message()));
         }
     }
     return true;

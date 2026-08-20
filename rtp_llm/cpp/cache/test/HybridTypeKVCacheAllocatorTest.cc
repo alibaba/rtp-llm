@@ -1238,6 +1238,31 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
     EXPECT_EQ(countValidBlocks(linear_out), 1u);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, PreparedLoadReclaimsSharedPoolTreeCandidatesBeforeRetry) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+
+    const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{100, 101, 102, 103});
+    ASSERT_TRUE(seeded.success);
+    ASSERT_EQ(allocator->freeBlocksNum(), 1u);
+    ASSERT_GT(allocator->activeTreeCachedBlocksNum(), 0u);
+
+    auto resource  = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{200});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.reuse_cache = true;
+    malloc_info.verbose     = false;
+
+    // A one-token-block request needs one LINEAR and one FULL physical block.
+    // The shared pool has only one free block, but its tree candidates are
+    // reclaimable; prepared admission must reclaim instead of retrying forever.
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, /*reserve_blocks=*/0, {{}, {}}),
+              MallocStatus::NONE);
+    EXPECT_GE(allocator->freeBlocksNum(), 2u);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, UpdateKVBlockForksAliasedBlocksAcrossGroups) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::HOST);
