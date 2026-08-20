@@ -4,6 +4,7 @@
 #include <cstring>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/FullPrefillCudaGraphEligibility.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
@@ -295,9 +296,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_runner_->initCapture();
 
         if (enable_full_prefill_cuda_graph_ && !is_prefill_cuda_graph_mode_) {
+            const bool supported_moe_config =
+                supportsFullPrefillCudaGraphMoe(description_, params.parallelism_config, params.moe_config);
             const bool valid_static_config =
                 params.sp_config.type == SP_TYPE_NONE && description_.data_type == DataType::TYPE_BF16
-                && !description_.attention_conf.use_mla && !description_.ffn_conf.moe_configs.has_value()
+                && !description_.attention_conf.use_mla && supported_moe_config
                 && params.parallelism_config.tp_size == 1 && !params.parallelism_config.prefill_cp_config.is_enabled()
                 && !params.parallelism_config.prefill_cp_config.is_prefill_enabled()
                 && !params.parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate
@@ -310,8 +313,21 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             if (!valid_static_config) {
                 const char* reason = params.device_resource_config.enable_layer_micro_batch != 0 ?
                                          "layer_micro_batch_enabled" :
-                                         "unsupported_model";
-                RTP_LLM_LOG_WARNING("full prefill CUDA graph disabled reason=%s", reason);
+                                     !supported_moe_config ? "unsupported_moe_config" :
+                                                             "unsupported_model";
+                if (!supported_moe_config && description_.ffn_conf.moe_configs.has_value()) {
+                    RTP_LLM_LOG_WARNING("full prefill CUDA graph disabled reason=%s moe_strategy=%s use_all_gather=%d "
+                                        "tp_size=%ld ep_size=%ld dp_size=%ld pp_size=%ld",
+                                        reason,
+                                        params.moe_config.moe_strategy.c_str(),
+                                        static_cast<int>(params.moe_config.use_all_gather),
+                                        params.parallelism_config.tp_size,
+                                        params.parallelism_config.ep_size,
+                                        params.parallelism_config.dp_size,
+                                        params.parallelism_config.pp_size);
+                } else {
+                    RTP_LLM_LOG_WARNING("full prefill CUDA graph disabled reason=%s", reason);
+                }
                 enable_full_prefill_cuda_graph_ = false;
             } else {
                 std::vector<std::vector<int>> scratch_kernel_block_ids;
@@ -337,9 +353,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                 "prefill_graph_runner_ can't be null");
                         prefill_graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
                         prefill_graph_runner_->initCapture();
-                        RTP_LLM_LOG_INFO("full prefill CUDA graph enabled: max_requests=%d padding_ratio=%.4f",
+                        RTP_LLM_LOG_INFO("full prefill CUDA graph enabled: max_requests=%d padding_ratio=%.4f "
+                                         "moe_strategy=%s",
                                          params.hw_kernel_config.full_prefill_cuda_graph_max_requests,
-                                         params.hw_kernel_config.full_prefill_cuda_graph_max_padding_ratio);
+                                         params.hw_kernel_config.full_prefill_cuda_graph_max_padding_ratio,
+                                         description_.ffn_conf.moe_configs.has_value() ?
+                                             params.moe_config.moe_strategy.c_str() :
+                                             "dense");
                     } catch (const std::exception& e) {
                         const char* reason = std::strstr(e.what(), "unsupported_backend") != nullptr ?
                                                  "unsupported_backend" :

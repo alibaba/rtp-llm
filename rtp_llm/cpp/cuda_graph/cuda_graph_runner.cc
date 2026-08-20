@@ -253,6 +253,23 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                            py_model_inputs.input_hiddens,
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
     }
+    if (isGenerativePrefillCudaGraph()) {
+        auto& overrides = py_model_inputs.cuda_graph_input_embedding_overrides;
+        auto& mask      = py_model_inputs.cuda_graph_input_embedding_mask;
+        RTP_LLM_CHECK_WITH_INFO(overrides.defined() && mask.defined(),
+                                "full prefill CUDA graph input embedding buffers are not initialized");
+        mask.zero_();
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            const auto* locs = inputs.input_embeddings_locs.data_ptr<int32_t>();
+            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
+                const auto& embedding = inputs.input_embeddings->at(i);
+                const int   loc       = locs[i];
+                const int   length    = static_cast<int>(embedding.size(0));
+                overrides.narrow(0, loc, length).copy_(embedding, /*non_blocking=*/true);
+                mask.narrow(0, loc, length).fill_(true);
+            }
+        }
+    }
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -1034,6 +1051,28 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         if (inputs.attention_inputs.cache_store_inputs.has_value()) {
             return fallback("unsupported_model");
         }
+        if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+            if (!inputs.input_embeddings_locs.defined() || inputs.input_embeddings_locs.is_cuda()
+                || inputs.input_embeddings_locs.scalar_type() != torch::kInt32
+                || !inputs.input_embeddings_locs.is_contiguous() || inputs.input_embeddings_locs.dim() != 1
+                || inputs.input_embeddings_locs.numel() != static_cast<int64_t>(inputs.input_embeddings->size())) {
+                return fallback("input_embeddings_metadata");
+            }
+            const auto* locs         = inputs.input_embeddings_locs.data_ptr<int32_t>();
+            int64_t     previous_end = 0;
+            for (size_t i = 0; i < inputs.input_embeddings->size(); ++i) {
+                const auto& embedding = inputs.input_embeddings->at(i);
+                if (!embedding.defined() || !embedding.is_cuda() || !embedding.is_floating_point()
+                    || embedding.dim() != 2 || embedding.size(0) <= 0 || embedding.size(1) != hidden_size_) {
+                    return fallback("input_embeddings_metadata");
+                }
+                const int64_t loc = locs[i];
+                if (loc < previous_end || loc + embedding.size(0) > inferred_tokens) {
+                    return fallback("input_embeddings_metadata");
+                }
+                previous_end = loc + embedding.size(0);
+            }
+        }
         if (prefill_scratch_kernel_block_ids_device_.empty()) {
             return fallback("scratch_kv_unavailable");
         }
@@ -1085,7 +1124,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
-    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+    if (!isGenerativePrefillCudaGraph() && inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
         RTP_LLM_LOG_DEBUG("cuda graph disabled for request: input_embeddings present");
         return false;
     }
@@ -1366,6 +1405,12 @@ void CudaGraphRunner::initCapture() {
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
         inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
+        if (isGenerativePrefillCudaGraph()) {
+            inputs.cuda_graph_input_embedding_overrides =
+                torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+            inputs.cuda_graph_input_embedding_mask = torch::zeros(
+                {max_num_token_}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA).requires_grad(false));
+        }
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -1549,6 +1594,12 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const int  token_slice_len = fixed_capacity_draft_prefill ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    if (isGenerativePrefillCudaGraph()) {
+        inputs.cuda_graph_input_embedding_overrides =
+            capture_mem_hold_.py_model_inputs_.cuda_graph_input_embedding_overrides.slice(0, 0, token_slice_len);
+        inputs.cuda_graph_input_embedding_mask =
+            capture_mem_hold_.py_model_inputs_.cuda_graph_input_embedding_mask.slice(0, 0, token_slice_len);
+    }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.input_lengths_device =

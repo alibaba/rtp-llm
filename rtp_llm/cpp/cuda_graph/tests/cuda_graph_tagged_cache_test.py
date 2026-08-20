@@ -4,6 +4,7 @@ import unittest
 import torch
 
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyModelInputs,
@@ -20,7 +21,12 @@ TOKENS_PER_BLOCK = 8
 class TaggedBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: str | None = None,
+    ):
         return None
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
@@ -75,6 +81,28 @@ class BertEmbeddingModel:
             None,
         )
         return PyModelOutputs(output)
+
+
+class InputEmbeddingOverrideModel:
+    """Exercise the shared request input-embedding injector in a captured graph."""
+
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: str | None = None,
+    ):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        token_values = inputs.input_ids.to(torch.bfloat16).unsqueeze(1)
+        hidden_offsets = torch.arange(
+            HIDDEN_SIZE, dtype=torch.bfloat16, device=inputs.input_ids.device
+        ).unsqueeze(0)
+        inputs_embeds = token_values * 10 + hidden_offsets
+        return PyModelOutputs(
+            GptModelBase.apply_input_embeddings(self, inputs_embeds, inputs)
+        )
 
 
 def _tag_attention_inputs(
@@ -318,6 +346,69 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
             52,
         )
+
+    def test_generative_prefill_replays_dynamic_input_embeddings(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_generative_prefill(
+            InputEmbeddingOverrideModel(),
+            1,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+
+        def base_output(inputs: PyModelInputs) -> torch.Tensor:
+            return inputs.input_ids.to(torch.bfloat16).unsqueeze(1) * 10 + torch.arange(
+                HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+            ).unsqueeze(0)
+
+        inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        inputs.input_embeddings = [
+            torch.full((2, HIDDEN_SIZE), 7, dtype=torch.float32, device="cuda")
+        ]
+        inputs.input_embeddings_locs = torch.tensor([1], dtype=torch.int32)
+        self.assertTrue(runner.canRun(inputs))
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected = base_output(inputs)
+        expected[1:3] = 7
+        torch.testing.assert_close(output.hidden_states, expected)
+
+        # A following request without overrides must clear the capture-owned
+        # mask instead of reusing locations from the previous replay.
+        clean_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 3, "aux": 4})
+        self.assertTrue(runner.canRun(clean_inputs))
+        clean_output = runner.forward(clean_inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            clean_output.hidden_states, base_output(clean_inputs)
+        )
+
+        # Segment count, locations, lengths, values, and source dtype are all
+        # dynamic request data and may change between graph replays.
+        segmented_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 5, "aux": 6})
+        segmented_inputs.input_embeddings = [
+            torch.full((1, HIDDEN_SIZE), -2, dtype=torch.bfloat16, device="cuda"),
+            torch.full((1, HIDDEN_SIZE), 9, dtype=torch.float32, device="cuda"),
+        ]
+        segmented_inputs.input_embeddings_locs = torch.tensor([0, 3], dtype=torch.int32)
+        self.assertTrue(runner.canRun(segmented_inputs))
+        segmented_output = runner.forward(segmented_inputs)
+        torch.cuda.synchronize()
+        segmented_expected = base_output(segmented_inputs)
+        segmented_expected[0] = -2
+        segmented_expected[3] = 9
+        torch.testing.assert_close(segmented_output.hidden_states, segmented_expected)
+
+        invalid_inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        invalid_inputs.input_embeddings = [
+            torch.zeros((2, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        ]
+        invalid_inputs.input_embeddings_locs = torch.tensor([3], dtype=torch.int32)
+        self.assertFalse(runner.canRun(invalid_inputs))
 
     def test_multimodal_prefill_falls_back_from_cuda_graph(self) -> None:
         runner = CudaGraphRunner()

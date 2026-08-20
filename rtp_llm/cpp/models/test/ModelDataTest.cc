@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/FullPrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
@@ -80,6 +81,77 @@ TEST_F(ModelDataTest, testContextParallelAllowsEmptyInputEmbeddings) {
     inputs.input_embeddings = std::vector<torch::Tensor>();
 
     EXPECT_NO_THROW(PyWrappedModel::rejectContextParallelInputEmbeddings(device_props, inputs));
+}
+
+namespace {
+
+GptModelDescription makeFullPrefillMoeDescription() {
+    GptModelDescription description;
+    description.data_type   = DataType::TYPE_BF16;
+    description.act_qscheme = QScheme::Qfp8PerTokenBlock;
+    MoeConfigs model_moe_config;
+    model_moe_config.expert_num     = 96;
+    model_moe_config.top_k          = 8;
+    model_moe_config.use_all_gather = true;
+    description.ffn_conf.moe_configs.emplace(model_moe_config);
+    return description;
+}
+
+MoeConfig makeFullPrefillMoeRuntimeConfig() {
+    MoeConfig config;
+    config.moe_strategy           = "fp8_per_block_no_dp_masked";
+    config.use_all_gather         = true;
+    config.use_deepep_moe         = false;
+    config.use_deepep_internode   = false;
+    config.use_deepep_low_latency = false;
+    return config;
+}
+
+}  // namespace
+
+TEST_F(ModelDataTest, testFullPrefillCudaGraphSupportsDenseModel) {
+    GptModelDescription description;
+    EXPECT_TRUE(supportsFullPrefillCudaGraphMoe(description, ParallelismConfig{}, MoeConfig{}));
+}
+
+TEST_F(ModelDataTest, testFullPrefillCudaGraphSupportsSingleGpuFp8MaskedMoe) {
+    EXPECT_TRUE(supportsFullPrefillCudaGraphMoe(
+        makeFullPrefillMoeDescription(), ParallelismConfig{}, makeFullPrefillMoeRuntimeConfig()));
+}
+
+TEST_F(ModelDataTest, testFullPrefillCudaGraphRejectsAutoMoeStrategy) {
+    auto config         = makeFullPrefillMoeRuntimeConfig();
+    config.moe_strategy = "auto";
+    EXPECT_FALSE(supportsFullPrefillCudaGraphMoe(makeFullPrefillMoeDescription(), ParallelismConfig{}, config));
+}
+
+TEST_F(ModelDataTest, testFullPrefillCudaGraphRejectsNonFp8PerBlockMoe) {
+    auto description        = makeFullPrefillMoeDescription();
+    description.act_qscheme = QScheme::NoQuantize;
+    EXPECT_FALSE(supportsFullPrefillCudaGraphMoe(description, ParallelismConfig{}, makeFullPrefillMoeRuntimeConfig()));
+}
+
+TEST_F(ModelDataTest, testFullPrefillCudaGraphRejectsGraphUnsafeMoeTransport) {
+    auto config                   = makeFullPrefillMoeRuntimeConfig();
+    config.use_deepep_low_latency = true;
+    EXPECT_FALSE(supportsFullPrefillCudaGraphMoe(makeFullPrefillMoeDescription(), ParallelismConfig{}, config));
+
+    config                = makeFullPrefillMoeRuntimeConfig();
+    config.use_all_gather = false;
+    EXPECT_FALSE(supportsFullPrefillCudaGraphMoe(makeFullPrefillMoeDescription(), ParallelismConfig{}, config));
+}
+
+TEST_F(ModelDataTest, testFullPrefillCudaGraphRejectsDistributedOrEplbMoe) {
+    auto parallelism       = ParallelismConfig{};
+    parallelism.ep_size    = 2;
+    parallelism.dp_size    = 2;
+    parallelism.world_size = 2;
+    EXPECT_FALSE(supportsFullPrefillCudaGraphMoe(
+        makeFullPrefillMoeDescription(), parallelism, makeFullPrefillMoeRuntimeConfig()));
+
+    auto description                              = makeFullPrefillMoeDescription();
+    description.ffn_conf.moe_configs->enable_eplb = true;
+    EXPECT_FALSE(supportsFullPrefillCudaGraphMoe(description, ParallelismConfig{}, makeFullPrefillMoeRuntimeConfig()));
 }
 
 }  // namespace rtp_llm
