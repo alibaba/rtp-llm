@@ -26,6 +26,8 @@
 
 权威清单见 [docs/benchmark_cases.md](docs/benchmark_cases.md)。
 
+需要采集 CUDA API/GPU timeline、Copy Engine/PCIe/BAR1 等 GPU Metrics 或导出 `.nsys-rep`/SQLite 时，见 [Nsight Systems 采集指南](docs/nsys_collection_guide.md)。
+
 ## 构建
 
 ```bash
