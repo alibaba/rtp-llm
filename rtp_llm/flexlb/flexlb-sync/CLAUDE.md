@@ -54,8 +54,11 @@ mvn clean package -pl flexlb-sync -DskipTests
 
 ### Run tests
 ```bash
-# Run all tests in this module
+# Run all functional tests in this module
 mvn test
+
+# Run this module's performance regressions in a dedicated invocation
+mvn test -Psync-performance-regression
 
 # Run a specific test class
 mvn test -Dtest=DefaultRouterTest

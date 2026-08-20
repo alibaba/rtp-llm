@@ -18,12 +18,14 @@ public class ConfigurableGroupRoutingPolicy implements GroupRoutingPolicy {
 
     @Override
     public GroupRoutingDecision route(BalanceContext balanceContext) {
-        FlexlbConfig config = balanceContext.getConfig() != null ? balanceContext.getConfig() : configService.loadBalanceConfig();
-        if (config == null || config.getTrafficPolicy() == null) {
+        FlexlbConfig config = balanceContext.getConfig() != null
+                ? balanceContext.getConfig()
+                : configService.loadBalanceConfig();
+        if (config == null || config.getRouter().getGroupSelector() == null) {
             return GroupRoutingDecision.none();
         }
 
-        return config.getTrafficPolicy()
+        return config.getRouter().getGroupSelector()
                 .resolveTargetGroup(balanceContext.getRequest())
                 .map(group -> GroupRoutingDecision.of(group, POLICY_NAME))
                 .orElseGet(GroupRoutingDecision::none);

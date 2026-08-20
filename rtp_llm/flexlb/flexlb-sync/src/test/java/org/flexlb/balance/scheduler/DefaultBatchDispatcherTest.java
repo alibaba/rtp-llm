@@ -50,9 +50,7 @@ class DefaultBatchDispatcherTest {
         grpcClient = mock(EngineGrpcClient.class);
         reporter = mock(BatchSchedulerReporter.class);
         config = new FlexlbConfig();
-        config.setFlexlbBatchDispatchPoolSize(2);
-        config.setFlexlbBatchDispatchQueueSize(10);
-        config.setFlexlbBatchEnqueueDeadlineMs(5000);
+        SchedulingTestConfig.useBatchDispatcher(config).setEnqueueRpcTimeoutMs(5000);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
@@ -497,6 +495,7 @@ class DefaultBatchDispatcherTest {
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext();
+        ctx.setConfig(config);
         ctx.setRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)

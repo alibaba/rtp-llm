@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler.priority;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PrefillQueueManager;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -57,7 +58,8 @@ class AdmissionLeaseTest {
     void close_is_exactly_once() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         BatchItem item = batchItem(1001L, new CompletableFuture<>());
-        AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
+                0, null, null);
 
         lease.close();
         lease.close();
@@ -71,7 +73,8 @@ class AdmissionLeaseTest {
     void markDeliverySucceeded_is_exactly_once() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         BatchItem item = batchItem(1002L, new CompletableFuture<>());
-        AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
+                0, null, null);
 
         lease.markDeliverySucceeded();
         lease.markDeliverySucceeded();
@@ -85,7 +88,8 @@ class AdmissionLeaseTest {
     void close_then_delivery_is_noop() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         BatchItem item = batchItem(1003L, new CompletableFuture<>());
-        AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
+                0, null, null);
 
         lease.close();
         lease.markDeliverySucceeded();
@@ -97,7 +101,8 @@ class AdmissionLeaseTest {
     void prefill_only_delivery_closes_engine_owned_and_close_is_noop() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         BatchItem item = batchItem(1004L, new CompletableFuture<>());
-        AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
+                0, null, null);
 
         lease.markDeliverySucceeded();
         lease.close();
@@ -116,7 +121,8 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItem(1005L, future);
-        AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         future.complete(successResponse(1005L));
@@ -132,7 +138,8 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItem(1006L, future);
-        AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         future.complete(failedResponse());
@@ -145,7 +152,8 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItem(1007L, future);
-        AdmissionLease lease = new AdmissionLease(item, null, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         future.completeExceptionally(new RuntimeException("dispatch error"));
@@ -162,7 +170,8 @@ class AdmissionLeaseTest {
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(1008L, future, 1008L);
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, null, null);
 
         lease.close();
 
@@ -179,7 +188,8 @@ class AdmissionLeaseTest {
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(1009L, future, 1009L);
-        AdmissionLease lease = new AdmissionLease(item, null, prefillQueue, registrar);
+        AdmissionLease lease = new AdmissionLease(item, null, prefillQueue, registrar,
+                0, null, null);
 
         lease.close();
 
@@ -193,7 +203,8 @@ class AdmissionLeaseTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(1010L, future, 1010L);
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, null, registrar,
+                0, null, null);
 
         lease.close();
 
@@ -208,7 +219,8 @@ class AdmissionLeaseTest {
         CompletableFuture<Response> future = new CompletableFuture<>();
         // item with decode = null
         BatchItem item = batchItem(1011L, future);
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, null, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, null, registrar,
+                0, null, null);
 
         lease.close();
 
@@ -379,6 +391,7 @@ class AdmissionLeaseTest {
                                                   CompletableFuture<Response> future,
                                                   long decodeRequestId) {
         BalanceContext ctx = new BalanceContext();
+        ctx.setConfig(SchedulingTestConfig.batchConfig());
         Request request = new Request();
         request.setRequestId(requestId);
         ctx.setRequest(request);

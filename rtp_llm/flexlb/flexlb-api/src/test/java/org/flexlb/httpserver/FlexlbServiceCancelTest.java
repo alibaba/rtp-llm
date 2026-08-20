@@ -3,10 +3,10 @@ package org.flexlb.httpserver;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
@@ -55,9 +55,6 @@ class FlexlbServiceCancelTest {
                 mock(ConfigService.class),
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
-                new PrioritySloPolicy(
-                        PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 mock(PrioritySchedulerReporter.class));
     }
 
@@ -280,6 +277,8 @@ class FlexlbServiceCancelTest {
             RequestLifecycleState state,
             long batchId) {
         return new RequestLifecycleSnapshot(
-                requestId, state, batchId, 1L, 2L, state.name());
+                requestId, state,
+                batchId > 0 ? DeliveryClaimKind.BATCH_ENQUEUE : DeliveryClaimKind.NONE,
+                batchId, 1L, 2L, state.name());
     }
 }

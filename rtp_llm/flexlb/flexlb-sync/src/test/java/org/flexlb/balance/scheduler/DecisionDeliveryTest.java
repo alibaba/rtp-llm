@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -199,8 +199,13 @@ class DecisionDeliveryTest {
 
     private static BatchItem item(DeliveryMode mode, PrefillEndpoint endpoint) {
         BalanceContext context = new BalanceContext();
-        context.setScheduleMode(mode == DeliveryMode.ROUTE_DECISION
-                ? ScheduleModeEnum.QUEUE : ScheduleModeEnum.BATCH);
+        FlexlbConfig config = new FlexlbConfig();
+        if (mode == DeliveryMode.ROUTE_DECISION) {
+            SchedulingTestConfig.useNonBatchDispatcher(config);
+        } else {
+            SchedulingTestConfig.useBatchDispatcher(config);
+        }
+        context.setConfig(config);
         return new BatchItem(context, new CompletableFuture<>(), null,
                 null, null, endpoint, null, System.currentTimeMillis());
     }

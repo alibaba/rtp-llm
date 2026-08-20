@@ -59,14 +59,16 @@ public abstract class AbstractEngineStatusSynchronizer {
         this.flexlbConfig = configService.loadBalanceConfig();
 
         engineSyncExecutor = new ThreadPoolExecutor(
-                flexlbConfig.getEngineSyncExecutorCoreSize(),
-                flexlbConfig.getEngineSyncExecutorMaxSize(), 60L, TimeUnit.SECONDS,
+                flexlbConfig.getInternalRuntime().getEngineSyncExecutorThreads(),
+                flexlbConfig.getInternalRuntime().getEngineSyncExecutorThreads(),
+                60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
                 new ThreadPoolExecutor.CallerRunsPolicy());
 
         statusCheckExecutor = new ThreadPoolExecutor(
-                flexlbConfig.getStatusCheckExecutorCoreSize(),
-                flexlbConfig.getStatusCheckExecutorMaxSize(), 60L, TimeUnit.SECONDS,
+                flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads(),
+                flexlbConfig.getInternalRuntime().getStatusCheckExecutorThreads(),
+                60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
                 new ThreadPoolExecutor.CallerRunsPolicy());
     }

@@ -43,7 +43,7 @@ class DecodeEndpointAdmissionTest {
     @Test
     void realKvAvailable_subtractsHardNotExpectedReservations() {
         updateStatus(null, null, 10_000);
-        endpoint.reserve(1L, 500, 600, 70, 123L);
+        endpoint.reserve(1L, 500, 600, 70);
 
         // Hard (500), not expected (600), is subtracted from the report.
         assertEquals(9_500, endpoint.realKvAvailable());
@@ -52,7 +52,6 @@ class DecodeEndpointAdmissionTest {
 
         RequestInflight entry = endpoint.reservedView().get(1L);
         assertEquals(70, entry.priority());
-        assertEquals(123L, entry.deadlineMs());
         assertEquals(DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, entry.phase());
     }
 
@@ -62,7 +61,7 @@ class DecodeEndpointAdmissionTest {
     void reserveAndRelease_bumpVersion_andReverseShadowAccounting() {
         long v0 = endpoint.admissionVersion();
 
-        endpoint.reserve(1L, 500, 600, 30, 0);
+        endpoint.reserve(1L, 500, 600, 30);
         assertEquals(v0 + 1, endpoint.admissionVersion());
         assertEquals(1, endpoint.getTotalLoad());
 
@@ -76,10 +75,10 @@ class DecodeEndpointAdmissionTest {
     @Test
     void conditionalOrphanReleasePreservesReplacementReservation() {
         long requestId = 2L;
-        endpoint.reserve(requestId, 100, 110, 30, 1_000);
+        endpoint.reserve(requestId, 100, 110, 30);
         RequestInflight staleSnapshot = endpoint.reservedView().get(requestId);
 
-        endpoint.reserve(requestId, 200, 220, 70, 2_000);
+        endpoint.reserve(requestId, 200, 220, 70);
         RequestInflight replacement = endpoint.reservedView().get(requestId);
         assertNotSame(staleSnapshot, replacement);
 
@@ -100,14 +99,14 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void tryReleaseVictimsAndReserveIncoming_success_appliesAtomically() {
-        endpoint.reserve(1L, 100, 110, 30, 1_000);
-        endpoint.reserve(2L, 200, 220, 40, 2_000);
+        endpoint.reserve(1L, 100, 110, 30);
+        endpoint.reserve(2L, 200, 220, 40);
         endpoint.markQueuedPhase(1L);
         endpoint.markQueuedPhase(2L);
         long version = endpoint.admissionVersion();
 
         DecodeEndpoint.ReleaseReserveResult result = endpoint.tryReleaseVictimsAndReserveIncoming(
-                List.of(1L, 2L), 9L, 700, 708, 70, 3_000, version);
+                List.of(1L, 2L), 9L, 700, 708, 70, version);
 
         assertEquals(DecodeEndpoint.ReleaseReserveResult.SUCCESS, result);
         assertFalse(endpoint.reservedView().containsKey(1L));
@@ -122,11 +121,11 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void tryReleaseVictimsAndReserveIncoming_versionMismatch_appliesNothing() {
-        endpoint.reserve(1L, 100, 110, 30, 1_000);
+        endpoint.reserve(1L, 100, 110, 30);
         long staleVersion = endpoint.admissionVersion() - 1;
 
         DecodeEndpoint.ReleaseReserveResult result = endpoint.tryReleaseVictimsAndReserveIncoming(
-                List.of(1L), 9L, 700, 708, 70, 3_000, staleVersion);
+                List.of(1L), 9L, 700, 708, 70, staleVersion);
 
         assertEquals(DecodeEndpoint.ReleaseReserveResult.VERSION_MISMATCH, result);
         assertTrue(endpoint.reservedView().containsKey(1L));
@@ -137,12 +136,12 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void tryReleaseVictimsAndReserveIncoming_victimGone_appliesNothing() {
-        endpoint.reserve(1L, 100, 110, 30, 1_000);
+        endpoint.reserve(1L, 100, 110, 30);
         endpoint.markQueuedPhase(1L);
         long version = endpoint.admissionVersion();
 
         DecodeEndpoint.ReleaseReserveResult result = endpoint.tryReleaseVictimsAndReserveIncoming(
-                List.of(1L, 42L), 9L, 700, 708, 70, 3_000, version);
+                List.of(1L, 42L), 9L, 700, 708, 70, version);
 
         assertEquals(DecodeEndpoint.ReleaseReserveResult.VICTIM_GONE, result);
         assertTrue(endpoint.reservedView().containsKey(1L));
@@ -155,21 +154,21 @@ class DecodeEndpointAdmissionTest {
     void dispatchAndLocalEvictionHaveOneAdmissionLockWinner() {
         // Eviction wins: it removes the reservation, so the batch item must be
         // skipped before the engine-dispatch claim / gRPC publication.
-        endpoint.reserve(1L, 100, 110, 30, 1_000);
+        endpoint.reserve(1L, 100, 110, 30);
         endpoint.markQueuedPhase(1L);
         assertTrue(endpoint.releaseIfHeld(1L));
         assertFalse(endpoint.tryMarkEngineMayHaveSeen(1L));
 
         // Dispatch wins: the queued bit is atomically cleared while the
         // reservation stays held; a later local-eviction attempt cannot touch it.
-        endpoint.reserve(2L, 100, 110, 30, 1_000);
+        endpoint.reserve(2L, 100, 110, 30);
         endpoint.markQueuedPhase(2L);
         assertTrue(endpoint.tryMarkEngineMayHaveSeen(2L));
         assertFalse(endpoint.releaseIfHeld(2L));
         assertTrue(endpoint.reservedView().containsKey(2L));
 
         // Legacy paths never set the queued bit but still own a reservation.
-        endpoint.reserve(3L, 100, 110, 30, 1_000);
+        endpoint.reserve(3L, 100, 110, 30);
         assertTrue(endpoint.tryMarkEngineMayHaveSeen(3L));
     }
 
@@ -177,12 +176,12 @@ class DecodeEndpointAdmissionTest {
     void batchDispatchClaim_stopsAtConfiguredEngineFacingLimit() {
         // Four legacy/non-queued reservations already face the Engine.
         for (long requestId = 100; requestId < 104; requestId++) {
-            endpoint.reserve(requestId, 100, 110, 30, 1_000);
+            endpoint.reserve(requestId, 100, 110, 30);
         }
         // A single Prefill batch may contain many reservations which are all
         // deliberately invisible to getEngineLoad while still queued.
         for (long requestId = 1; requestId <= 20; requestId++) {
-            endpoint.reserve(requestId, 100, 110, 50, 2_000);
+            endpoint.reserve(requestId, 100, 110, 50);
             endpoint.markQueuedPhase(requestId);
         }
 
@@ -200,8 +199,8 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void batchDispatchClaim_preservesUnlimitedAndLegacySemantics() {
-        endpoint.reserve(1L, 100, 110, 30, 1_000);
-        endpoint.reserve(2L, 100, 110, 30, 1_000);
+        endpoint.reserve(1L, 100, 110, 30);
+        endpoint.reserve(2L, 100, 110, 30);
         endpoint.markQueuedPhase(1L);
         endpoint.markQueuedPhase(2L);
 
@@ -212,25 +211,25 @@ class DecodeEndpointAdmissionTest {
 
         // A legacy reservation was already charged to engine-facing load;
         // retrying the claim must be idempotent even when a finite limit is full.
-        endpoint.reserve(3L, 100, 110, 30, 1_000);
+        endpoint.reserve(3L, 100, 110, 30);
         assertEquals(DecodeEndpoint.DispatchClaimResult.CLAIMED,
                 endpoint.tryClaimEngineDispatch(3L, 1));
     }
 
     @Test
     void batchDispatchClaim_reportsNotOwnedAfterReleaseOrPreemptionClaim() {
-        endpoint.reserve(1L, 100, 110, 30, 1_000);
+        endpoint.reserve(1L, 100, 110, 30);
         endpoint.markQueuedPhase(1L);
         endpoint.release(1L);
         assertEquals(DecodeEndpoint.DispatchClaimResult.NOT_OWNED,
                 endpoint.tryClaimEngineDispatch(1L, 5));
 
-        endpoint.reserve(2L, 100, 110, 30, 1_000);
+        endpoint.reserve(2L, 100, 110, 30);
         long version = endpoint.admissionVersion();
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPriorityPreemption(
                         101L, List.of(2L), 9L, 100, 110,
-                        70, 2_000, version, true));
+                        70, version, true));
         assertEquals(DecodeEndpoint.DispatchClaimResult.NOT_OWNED,
                 endpoint.tryClaimEngineDispatch(2L, 5));
     }
@@ -239,7 +238,7 @@ class DecodeEndpointAdmissionTest {
 
     @Test
     void calibrate_movesConfirmedOutOfReservedView() {
-        endpoint.reserve(1L, 500, 508, 30, 1_000);
+        endpoint.reserve(1L, 500, 508, 30);
 
         TaskInfo running = new TaskInfo();
         running.setRequestId(1L);

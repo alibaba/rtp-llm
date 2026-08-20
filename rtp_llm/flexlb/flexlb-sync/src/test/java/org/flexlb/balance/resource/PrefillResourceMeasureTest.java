@@ -38,15 +38,15 @@ class PrefillResourceMeasureTest {
     @BeforeEach
     void setUp() {
         config = new FlexlbConfig();
-        config.setPrefillQueueSizeThreshold(2);
-        config.setMaxPrefillQueueSize(10);
+        config.getRouter().getRoles().getPrefill().getAvailability()
+                .setMaxPendingRequests(2);
         when(configService.loadBalanceConfig()).thenReturn(config);
     }
 
     @Test
     void pending_and_received_tasks_contribute_to_water_level() {
         // Non-RUNNING tasks (PENDING, RECEIVED, KV_ALLOCATED) are counted as waiting.
-        // With maxQueueSize=10, 3 waiting tasks → water level = 30%
+        // With the internal saturation point at 20, 3 waiting tasks → water level = 15%
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
@@ -55,7 +55,7 @@ class PrefillResourceMeasureTest {
         runningTaskList.put("3", taskInfo(3L, TaskPhase.KV_ALLOCATED));
         worker.setRunningTaskList(runningTaskList);
 
-        assertEquals(30.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
+        assertEquals(15.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 
     @Test
@@ -75,7 +75,7 @@ class PrefillResourceMeasureTest {
     void water_level_counts_all_non_running_tasks_from_engine_reported_list() {
         // Engine reports a unified runningTaskList;
         // tasks with phase != RUNNING are counted as waiting.
-        // PENDING + RECEIVED + KV_ALLOCATED = 3 waiting → 30% with maxQueueSize=10
+        // PENDING + RECEIVED + KV_ALLOCATED = 3 waiting → 15% at the internal saturation point of 20
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
@@ -85,8 +85,8 @@ class PrefillResourceMeasureTest {
         runningTaskList.put("4", taskInfo(4L, TaskPhase.RUNNING));
         worker.setRunningTaskList(runningTaskList);
 
-        // 3 waiting out of max 10 = 30%
-        assertEquals(30.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
+        // 3 waiting out of the saturation point of 20 = 15%
+        assertEquals(15.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 
     @Test
@@ -94,12 +94,12 @@ class PrefillResourceMeasureTest {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
-        for (int i = 1; i <= 12; i++) {
+        for (int i = 1; i <= 24; i++) {
             runningTaskList.put(String.valueOf(i), taskInfo(i, TaskPhase.PENDING));
         }
         worker.setRunningTaskList(runningTaskList);
 
-        // 12 waiting > maxQueueSize=10 → capped at 100%
+        // 24 waiting > the internal saturation point of 20 → capped at 100%
         assertEquals(100.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 

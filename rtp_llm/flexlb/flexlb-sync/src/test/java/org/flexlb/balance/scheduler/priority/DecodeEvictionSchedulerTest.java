@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
@@ -9,7 +11,6 @@ import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -85,17 +86,14 @@ class DecodeEvictionSchedulerTest {
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        config.setScheduleWorkerSize(1);
         // Large batch + window + SLO keep queued items parked (no dispatch).
-        config.setFlexlbBatchSizeMax(100);
-        config.setFlexlbBatchWindowMs(10_000);
-        config.setCostSloMs(50_000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setAutoTpmEnabled(true);
-        config.setAutoTpmDecodeReservedEvictEnabled(true);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
         // Single decode slot: the second admission always hits slot-full.
-        config.setDecodeConcurrencyLimit(1);
-        config.setFlexlbBatchQueueMaxSize(4);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(4);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // Capacity-aware route stand-in: mirrors the production decode hard
@@ -112,8 +110,6 @@ class DecodeEvictionSchedulerTest {
         // (the static strategy factory is not populated in unit tests).
         priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
-                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel()) {
             @Override
             protected ServerStatus selectPrefillForDecodeEviction(BalanceContext ctx,
@@ -126,7 +122,8 @@ class DecodeEvictionSchedulerTest {
             }
         };
         scheduler = new PriorityScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, priorityScheduler, null) {
+                endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                new UnsupportedEngineCancelChannel()) {
             @Override
             public void finishYieldedById(long requestId, String detail) {
                 if (failNextVictimSettlement.compareAndSet(true, false)) {
@@ -163,8 +160,8 @@ class DecodeEvictionSchedulerTest {
 
     private Response routeAnswer(BalanceContext ctx) {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        boolean slotFull = config.getDecodeConcurrencyLimit() > 0
-                && decodeEp.getEngineLoad() + 1 > config.getDecodeConcurrencyLimit();
+        boolean slotFull = config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests() > 0
+                && decodeEp.getEngineLoad() + 1 > config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests();
         boolean kvFull = decodeEp.realKvTotal() > 0
                 && decodeEp.realKvAvailable() < ctx.getRequest().getSeqLen();
         if (slotFull || kvFull) {
@@ -172,7 +169,7 @@ class DecodeEvictionSchedulerTest {
         }
         long seqLen = ctx.getRequest().getSeqLen();
         decodeEp.reserve(ctx.getRequestId(), seqLen, seqLen + 8,
-                ctx.getPriority(), ctx.getDeadlineMs());
+                ctx.getPriority());
         return successRoute(ctx.getRequestId());
     }
 
@@ -293,7 +290,7 @@ class DecodeEvictionSchedulerTest {
 
     @Test
     void evict_switch_off_keeps_legacy_failure_and_never_plans() throws Exception {
-        config.setAutoTpmDecodeReservedEvictEnabled(false);
+        SchedulingTestConfig.disallowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
         CompletableFuture<Response> victim = scheduler.submit(context(21, 30));
@@ -315,48 +312,6 @@ class DecodeEvictionSchedulerTest {
         assertFalse(victim.isDone());
         assertTrue(decodeEp.reservedView().containsKey(21L));
         assertEquals(1, decodeEp.getInflightCount());
-    }
-
-    // ==================== version conflict retries with a fresh plan ====================
-
-    @Test
-    void admission_version_mismatch_retries_and_commits_on_fresh_plan() throws Exception {
-        // Pin the legacy queue_version guard: under the default victim_presence
-        // mode unrelated admission-version churn no longer aborts a commit
-        // (redesign N3) — this case asserts the legacy OCC retry contract.
-        config.setAutoTpmVictimGuardMode("queue_version");
-        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        // One-shot interference: bump the admission version between the
-        // incoming's plan snapshot (pre-route) and its eviction commit.
-        AtomicBoolean bumpOnce = new AtomicBoolean(true);
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            if (decodeEp.getTotalLoad() + 1 > config.getDecodeConcurrencyLimit()
-                    && bumpOnce.compareAndSet(true, false)) {
-                decodeEp.reserve(555L, 0, 0);
-                decodeEp.release(555L);
-            }
-            return routeAnswer(ctx);
-        });
-
-        CompletableFuture<Response> victim = scheduler.submit(context(31, 30));
-        await(() -> decodeEp.reservedView().containsKey(31L));
-        // The victim remains Master-queued; its KV is locally releasable.
-
-        CompletableFuture<Response> incoming = scheduler.submit(context(32, 70));
-
-        // First attempt conflicts, the retry's fresh plan commits; the
-        // reserved victim yields with 8400 (contract 5.3)
-        Response victimResponse = victim.get(2, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), victimResponse.getCode());
-        assertTrue(victimResponse.getErrorMessage().contains("yielded to higher-priority request 32"));
-        await(() -> decodeEp.reservedView().containsKey(32L));
-        assertFalse(decodeEp.reservedView().containsKey(31L));
-        assertFalse(incoming.isDone());
-
-        verify(priorityReporter).reportPlanConflict(eq("decode_admission_version"));
-        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_kv_full"), eq("version_mismatch"));
-        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_kv_full"), eq("success"));
     }
 
     // ==================== victim termination by id is idempotent ====================

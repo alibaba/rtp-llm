@@ -269,14 +269,16 @@ public class RecentCacheKeyWindow {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_TIME_WINDOW_MS;
         }
-        return configService.loadBalanceConfig().getCacheHitTimeWindowMs();
+        return configService.loadBalanceConfig().getObservability().getCacheHit()
+                .getRecentKeyWindow().getDurationMs();
     }
 
     static long resolveMaxCacheKeys(ConfigService configService) {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_MAX_CACHE_KEYS;
         }
-        return configService.loadBalanceConfig().getCacheHitMaxCacheKeys();
+        return configService.loadBalanceConfig().getObservability().getCacheHit()
+                .getRecentKeyWindow().getMaxKeyOccurrences();
     }
 
     private static long normalizeTimeWindowMs(long candidateMs) {

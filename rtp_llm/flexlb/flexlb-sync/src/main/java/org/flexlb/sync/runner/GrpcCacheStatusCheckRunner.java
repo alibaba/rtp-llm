@@ -52,6 +52,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       long requestTimeoutMs,
                                       LongAdder syncCount,
                                       Long syncEngineStatusInterval,
+                                      boolean fullSnapshotDebugMode,
                                       Executor callbackExecutor) {
 
         this.ipPort = ipPort;
@@ -65,9 +66,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
-        this.debug = Optional.ofNullable(System.getenv("WHALE_CACHE_DEBUG_MODE"))
-                .map(Boolean::parseBoolean)
-                .orElse(false);
+        this.debug = fullSnapshotDebugMode;
         this.requestTimeoutMs = requestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;

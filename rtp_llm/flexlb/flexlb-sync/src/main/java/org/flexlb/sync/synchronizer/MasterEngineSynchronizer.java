@@ -63,12 +63,10 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
 
-        this.syncEngineStatusInterval = System.getenv("SYNC_STATUS_INTERVAL") != null
-                ? Long.parseLong(System.getenv("SYNC_STATUS_INTERVAL"))
-                : 20;
-        this.syncRequestTimeoutMs = System.getenv("SYNC_REQUEST_TIMEOUT_MS") != null
-                ? Long.parseLong(System.getenv("SYNC_REQUEST_TIMEOUT_MS"))
-                : 5000;  // 5s default for gRPC calls, must not fallback to sync interval (20ms) which is too short
+        this.syncEngineStatusInterval = flexlbConfig.getWorkerRegistry().getHealth()
+                .getStatusPollIntervalMs();
+        this.syncRequestTimeoutMs = flexlbConfig.getWorkerRegistry().getHealth()
+                .getStatusRpcTimeoutMs();
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
@@ -110,6 +108,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                flexlbConfig.getWorkerRegistry().getCacheStatus()
+                                        .isFullSnapshotDebugMode(),
                                 priorityScheduler, endpointRegistry
                         ));
                     } else {

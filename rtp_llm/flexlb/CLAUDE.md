@@ -53,22 +53,20 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 Key concepts:
 - **Router pattern**: `Router` interface + `DefaultRouter` implementation for multi-role request routing
 - **LoadBalanceStrategy pattern**: Strategy interface for worker selection (Random, WeightedCache, ShortestTTFT)
-- **Queue-based scheduling**: `QueueManager` + `RequestScheduler` for async request processing
-- **Dynamic resource management**: `DynamicWorkerManager` for adaptive capacity control
+- **Queue-based scheduling**: `PriorityScheduler` + per-prefill `WorkerBatcher` queues
+- **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
 - **Graceful lifecycle**: Hook-based online/shutdown management
 
 Queue scheduling components:
-- `QueueManager`: Manages request queue with configurable capacity, timeout handling, and request cancellation
-- `RequestScheduler`: Worker thread pool that consumes queue and routes requests (configurable pool size)
-- `RouteService`: High-level routing service supporting queue/direct routing modes
+- `PriorityScheduler`: Canonical lifecycle owner for every QUEUE ordering and dispatcher combination
+- `WorkerBatcher`: Per-prefill queue and dispatch loop for BATCH and NON_BATCH delivery
+- `RouteService`: High-level service that delegates DIRECT requests to the router and QUEUE requests to `PriorityScheduler`
 
 Resource management components:
-- `DynamicWorkerManager`: Adjusts worker capacity based on resource water levels
 - `ResourceMeasure`: Interface for resource availability abstraction (PrefillResourceMeasure, DecodeResourceMeasure)
 - `ResourceMeasureFactory`: Factory for creating resource measures
-- `ReducibleSemaphore`: Semaphore that supports reducing permits
 
 Lifecycle hook interfaces:
 - `AppOnlineHooker`: Online service hooks (replaces OnlineListener)
@@ -120,8 +118,14 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 
 ### Testing
 ```bash
-# Run all tests
+# Run all functional tests (performance regressions are excluded)
 ./mvnw test
+
+# Run FlexLB Sync performance regressions in a dedicated Maven invocation
+./mvnw -Psync-performance-regression -pl flexlb-sync -am test
+
+# Run the FlexLB API end-to-end performance regression separately
+./mvnw -Papi-performance-regression -pl flexlb-api -am test
 
 # Run tests for specific module
 ./mvnw test -pl flexlb-sync
@@ -173,75 +177,27 @@ Four baseline strategies are available (registered with `LoadBalanceStrategyFact
 - **COST_BASED_DECODE**: Select worker with lowest cost for decode requests
 - **SHORTEST_TTFT**: Select worker with lowest predicted TTFT (prefill time + queue time) using candidate pool mechanism (RATIO/FIXED modes) with CAS fairness
 
-Each `RoleType` can use a different compatible strategy. `SHORTEST_TTFT` and
-`COST_BASED_PREFILL` are intended for PREFILL/PDFUSION endpoints, not DECODE or VIT. See
-`LoadBalanceStrategyEnum` in flexlb-common. Both prefill strategies can enable the same bounded
-cache-affinity policy with `cacheAffinityEnabled: true`; configure
-`cacheAffinityMaxExtraTtftMs` and `cacheAffinityMinHitRate` for its cost and hit-rate gates.
-The feature defaults to disabled; threshold defaults are `0` ms and `5` percent.
+Each `RoleType` can use a different compatible strategy. The public choices are tagged
+selectors under `FLEXLB_CONFIG.router.roles`: PREFILL/PDFUSION use `RANDOM` or
+`ESTIMATED_TTFT`, DECODE uses `RANDOM` or `KV_USAGE_WEIGHTED_RANDOM`, and VIT uses
+`RANDOM`. Under `ESTIMATED_TTFT`, `LEAST_RECENTLY_USED_IN_POOL` maps to the shortest-TTFT
+candidate-pool path; the other candidate choices map to cost-based prefill selection.
+Cache affinity is enabled only by including `router.roles.prefill.cacheAffinity`, with
+`maxExtraTtftMs` and `minPrefixHitPercent`; omit the object to disable it.
 
 ### Queue-Based Request Scheduling
 
-FlexLB supports two routing modes controlled by `FLEXLB_CONFIG.enableQueueing`:
+Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
-**Direct Mode** (queue disabled): Requests route directly to workers, returning immediate success/failure.
+- `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
+- `scheduler.type=QUEUE`: Uses `PriorityScheduler` for lifecycle, capacity, cancellation, and timeout ownership. Queue ordering is `FIFO` or `PRIORITY`.
+- `dispatcher.type=NON_BATCH`: A `WorkerBatcher` dispatches one request immediately.
+- `dispatcher.type=BATCH`: A `WorkerBatcher` collects and dispatches a bounded batch.
 
-**Queue Mode** (queue enabled): Requests enter a blocking queue and are processed asynchronously by worker threads:
-
-- `QueueManager`:
-  - Manages `BlockingDeque<BalanceContext>` with max capacity `FLEXLB_CONFIG.maxQueueSize`
-  - `tryRouteAsync()`: Non-blocking attempt to enqueue with timeout
-  - `offerToHead()`: Priority insertion for retries (e.g., DECODE retry after PREFILL success)
-  - `takeRequest()`: Worker thread consumption
-  - `snapshotQueue()`: Debugging snapshot of queue state
-  - Handles request cancellation and timeout
-
-- `RequestScheduler`:
-  - Fixed worker thread pool (size: `FLEXLB_CONFIG.scheduleWorkerSize`)
-  - Polls queue and calls `RouteService.routeRequest()`
-  - Retry mechanism for resource-unavailable errors (NO_X_WORKER)
-  - Graceful shutdown with 10-second timeout
-
-- `RouteService`:
-  - `routeRequest()`: Main routing entry point
-  - Supports queue mode (async) and direct mode (sync)
-  - `cancelRequest()`: Request cancellation via sequence ID
-
-**Request Lifecycle in Queue Mode**:
-1. Client submits request → `QueueManager.tryRouteAsync()`
-2. Request enqueued with `enqueueTime` and `sequenceId`
-3. Worker thread dequeues → `RequestScheduler` processes
-4. Routes through `DefaultRouter`
-5. If resource unavailable → retry via `offerToHead()`
-6. Response completes the `CompletableFuture<BalanceContext>`
-
-### Dynamic Resource Management
-
-FlexLB dynamically adjusts worker capacity based on resource availability:
-
-- `DynamicWorkerManager`:
-  - Periodically recalculates capacity (interval: `FLEXLB_CONFIG.resourceCheckIntervalMs`)
-  - Uses `ReducibleSemaphore` for dynamic permit management
-  - Gradual adjustment (step size = 1) to avoid oscillation
-  - Water level calculation determines when to increase/decrease capacity
-
-- `ResourceMeasure` interface:
-  - `PrefillResourceMeasure`: Uses `WAIT_TIME` indicator for resource calculation
-  - `DecodeResourceMeasure`: Uses `REMAINING_KV_CACHE` indicator
-  - `getWaterLevel()`: Returns 0-100% based on worker resource metrics
-
-- `ReducibleSemaphore`:
-  - Extends standard semaphore with permit reduction capability
-  - Used by `DynamicWorkerManager` to adjust capacity atomically
-
-- `ResourceMeasureFactory`:
-  - Creates appropriate `ResourceMeasure` based on `RoleType.resourceMeasureIndicator`
-
-**Capacity Adjustment Logic**:
-1. Calculate water level across all workers of a role
-2. If water level < threshold → increase capacity
-3. If water level > threshold → decrease capacity
-4. Apply changes via `ReducibleSemaphore.reducePermits()` / `release()`
+Every QUEUE combination follows the same lifecycle: `RouteService` submits to
+`PriorityScheduler`, the scheduler selects a prefill endpoint, and that endpoint's
+`WorkerBatcher` performs the configured delivery. There is no secondary routing queue or
+resource-unavailable retry loop.
 
 ### Worker Status Synchronization
 
@@ -299,30 +255,20 @@ For high availability, FlexLB uses ZooKeeper-based master election:
 
 FlexLB reads configuration from environment variables:
 
-### FLEXLB_CONFIG (required)
+### FLEXLB_CONFIG (single public behavior document)
 ```json
 {
-  "deploy": "DISAGGREGATED",
-  "loadBalanceStrategy": "ROUND_ROBIN_LOWEST_CONCURRENCY",
-  "prefillBatchWaitTimeMs": 100,
-  "kvCache": "LOCAL_STATIC",
-  "staticCacheBlockSize": 500,
-  "batchSize": 1,
-  "prefillLbTimeoutMs": 300,
-  "prefillGenerateTimeoutMs": 5000,
-  "enableGrpcPrefillMaster": false,
-  "enableQueueing": true,
-  "maxQueueSize": 1000,
-  "scheduleWorkerSize": 10,
-  "resourceCheckIntervalMs": 5000
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "ordering": {"type": "FIFO"}
+  },
+  "dispatcher": {"type": "NON_BATCH"}
 }
 ```
 
-New configuration fields:
-- `enableQueueing`: Enable/disable queue-based routing (default: true)
-- `maxQueueSize`: Maximum queue capacity for `QueueManager`
-- `scheduleWorkerSize`: Worker thread pool size for `RequestScheduler`
-- `resourceCheckIntervalMs`: Resource check interval for `DynamicWorkerManager`
+The parser is strict: fields belonging to an inactive scheduler, ordering, or dispatcher
+variant are rejected instead of being silently ignored.
 
 ### MODEL_SERVICE_CONFIG (required)
 ```json
@@ -352,21 +298,18 @@ When multi-stage routing partially fails, the system must rollback local state u
 `EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP` is shared between routing threads (reading) and sync threads (writing). Updates are performed atomically using proper synchronization.
 
 ### Queue Concurrency
-The request queue is a `BlockingDeque<BalanceContext>` accessed by both HTTP request threads (for enqueueing) and worker scheduler threads (for dequeueing). Use non-blocking operations (`offer()`, `poll()`) for thread-safe access.
+`PriorityScheduler` owns request lifecycle and global capacity. Each prefill endpoint owns a
+bounded `WorkerBatcher` queue. Reservation and release paths must remain idempotent across
+completion, timeout, and cancellation races.
 
 ### BalanceContext Extensions
 `BalanceContext` (request state) includes queue-related fields:
-- `future`: `CompletableFuture<BalanceContext>` for async response
-- `cancelled`: AtomicBoolean for request cancellation
-- `retryCount`: Number of retry attempts
+- `future`: `CompletableFuture<Response>` for async response
 - `enqueueTime`: Timestamp when request entered queue
-- `dequeueTime`: Timestamp when request left queue
-- `sequenceId`: Unique request identifier for cancellation
+- `schedulingMetadata`: Immutable request id, priority, and absolute expiration metadata
 
 Methods:
-- `cancel()`: Mark request as cancelled
-- `isCancelled()`: Check if request is cancelled
-- `incrementRetryCount()`: Increment retry counter
+- Cancellation and lifecycle state are owned by `PriorityScheduler`, keyed by request id.
 
 ### Reactive Programming
 The flexlb-api module uses Spring WebFlux for non-blocking reactive request handling. All HTTP endpoints return `Mono` or `Flux` types.
@@ -389,8 +332,8 @@ FlexLB provides comprehensive monitoring through Spring Boot Actuator:
 OpenTelemetry integration for distributed tracing (configured via `OTEL_EXPORTER_OTLP_ENDPOINT`).
 
 Monitoring enhancements:
-- `RoutingQueueReporter`: Reports queue size, wait time, execution time metrics
-- `ResourceMonitorReporter`: Reports resource utilization metrics
+- `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
+- `PrioritySchedulerReporter`: Reports priority admission and lifecycle metrics
 - `ActiveRequestCounter`: Tracks concurrent active requests
 
 ## Error Types

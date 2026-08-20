@@ -8,6 +8,7 @@ import org.flexlb.balance.strategy.FormulaPredictor;
 import org.flexlb.balance.strategy.LearningPredictor;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -129,15 +130,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Auto-TPM priority-aware queue wait estimate (design doc 8.4):
      * counts only items ordered ahead of the incoming request.
      */
-    public long batcherEstimatedWaitMs(int priority, long deadlineMs, long requestId) {
-        return batcher.queueManager().estimateWaitMs(priority, deadlineMs, requestId);
+    public long batcherEstimatedWaitMs(int priority, long requestId) {
+        return batcher.queueManager().estimateWaitMs(priority, requestId);
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
-        if ("learning".equalsIgnoreCase(cfg.getPrefillPredictorType())) {
+        RoutingConfig.ExecutionTimeEstimatorConfig estimator = cfg.getRouter()
+                .getRoles().getPrefill().getExecutionTimeEstimator();
+        if (estimator instanceof RoutingConfig.LearningEstimatorConfig) {
             return new LearningPredictor();
         }
-        return new FormulaPredictor(cfg.getCostFormula());
+        RoutingConfig.FormulaEstimatorConfig formula =
+                (RoutingConfig.FormulaEstimatorConfig) estimator;
+        return new FormulaPredictor(formula.getExpression());
     }
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {

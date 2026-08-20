@@ -49,21 +49,7 @@ public interface PrefillTimePredictor {
     double predictBatchMsUncached(List<BatchItem> items);
 
     /**
-     * Learn from a completed batch's actual execution time.
-     *
-     * @param items       the batch requests (contains seqLen, hitCache, etc.)
-     * @param predictedMs the formula-predicted execution time for the batch
-     * @param actualMs    the engine-reported actual execution time
-     */
-    void learn(List<BatchItem> items, long predictedMs, long actualMs);
-
-    /**
      * Payload-free learning entry point used by long-lived inflight accounting.
-     *
-     * <p>The default adapter preserves source and binary compatibility for
-     * predictors implementing the original {@code List<BatchItem>} callback.
      */
-    default void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
-        learn(features == null ? List.of() : features.toBatchItems(), predictedMs, actualMs);
-    }
+    void learn(PrefillBatchFeatures features, long predictedMs, long actualMs);
 }

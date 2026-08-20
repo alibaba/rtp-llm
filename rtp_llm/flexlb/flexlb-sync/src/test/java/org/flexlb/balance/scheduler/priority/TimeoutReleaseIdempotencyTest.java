@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler.priority;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PrefillQueueManager;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -56,7 +57,8 @@ class TimeoutReleaseIdempotencyTest {
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(2001L, future, 2001L);
 
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         // Simulate orTimeout firing
@@ -77,7 +79,8 @@ class TimeoutReleaseIdempotencyTest {
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(2002L, future, 2002L);
 
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         // Race: orTimeout fires first
@@ -107,7 +110,8 @@ class TimeoutReleaseIdempotencyTest {
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(2003L, future, 2003L);
 
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         // Dispatch succeeds first → markDeliverySucceeded (CAS 0→1)
@@ -133,7 +137,8 @@ class TimeoutReleaseIdempotencyTest {
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(2004L, future, 2004L);
 
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         // Dispatch fails first → close() runs
@@ -157,7 +162,8 @@ class TimeoutReleaseIdempotencyTest {
         CompletableFuture<Response> future = new CompletableFuture<>();
         BatchItem item = batchItemWithDecode(2005L, future, 2005L);
 
-        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, null, null);
         lease.bindTo(future);
 
         // Attach a real orTimeout (1ms) and wait for it to fire
@@ -195,6 +201,7 @@ class TimeoutReleaseIdempotencyTest {
                                                   CompletableFuture<Response> future,
                                                   long decodeRequestId) {
         BalanceContext ctx = new BalanceContext();
+        ctx.setConfig(SchedulingTestConfig.batchConfig());
         Request request = new Request();
         request.setRequestId(requestId);
         ctx.setRequest(request);

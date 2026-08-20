@@ -14,6 +14,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -75,6 +76,18 @@ class LoggerTest {
 
         Logger.setLevel(null);
         assertEquals(LogLevel.INFO, Logger.getLevel());
+    }
+
+    @Test
+    @DisplayName("isDebugEnabled follows the effective FlexLB log level")
+    void isDebugEnabled_followsEffectiveLogLevel() {
+        assertFalse(Logger.isDebugEnabled());
+
+        Logger.setLevel(LogLevel.DEBUG);
+        assertTrue(Logger.isDebugEnabled());
+
+        Logger.setLevel(LogLevel.INFO);
+        assertFalse(Logger.isDebugEnabled());
     }
 
     @Test

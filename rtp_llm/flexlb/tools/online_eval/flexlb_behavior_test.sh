@@ -51,10 +51,67 @@ FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-18081}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
 
-# Test-specific config (short TTL, low quota, short gRPC timeout)
-FLEXLB_INFLIGHT_TTL_MS="${FLEXLB_INFLIGHT_TTL_MS:-30000}"
-FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES="${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES:-4}"
-SYNC_REQUEST_TIMEOUT_MS="${SYNC_REQUEST_TIMEOUT_MS:-1000}"
+# Test-profile inputs used to construct the one strict FlexLB JSON document.
+export EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS="${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS:-30000}"
+export EXPERIMENT_MAX_INFLIGHT_BATCHES="${EXPERIMENT_MAX_INFLIGHT_BATCHES:-4}"
+export EXPERIMENT_STATUS_RPC_TIMEOUT_MS="${EXPERIMENT_STATUS_RPC_TIMEOUT_MS:-1000}"
+DEFAULT_FLEXLB_CONFIG="$(python3 - \
+  "${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS}" \
+  "${EXPERIMENT_MAX_INFLIGHT_BATCHES}" \
+  "${EXPERIMENT_STATUS_RPC_TIMEOUT_MS}" <<'PY'
+import json
+import sys
+
+stale_ms, max_batches, status_rpc_ms = map(int, sys.argv[1:])
+print(json.dumps({
+    "schemaVersion": 1,
+    "scheduler": {
+        "type": "QUEUE",
+        "ordering": {"type": "PRIORITY"},
+        "capacity": {"maxOutstandingRequestsGlobal": 5000},
+        "lifecycle": {
+            "staleInflightTimeoutMs": stale_ms,
+            "deliveredNotAcceptedTimeoutMs": 30000,
+            "maxDeliveredNotAcceptedRequestsGlobal": 200,
+        },
+    },
+    "dispatcher": {
+        "type": "BATCH",
+        "maxRequests": 32,
+        "maxCollectionWaitMs": 10,
+        "earlyDispatchPredictedExecutionMs": 550,
+        "maxInflightBatchesPerPrefillWorker": max_batches,
+    },
+    "router": {
+        "availabilityHysteresisPercent": 0,
+        "roles": {
+            "prefill": {
+                "availability": {"maxPendingRequests": 100000},
+                "selector": {
+                    "type": "ESTIMATED_TTFT",
+                    "candidateChoice": {
+                        "type": "RANDOM_WITHIN_TOLERANCE",
+                        "outlierRejection": {
+                            "maxPendingVsAverageMultiplier": 1.5,
+                            "maxWaitVsAverageMultiplier": 3.0,
+                        },
+                    },
+                },
+            },
+            "decode": {"availability": {"maxEngineRequests": 132}},
+        },
+    },
+    "workerRegistry": {
+        "health": {
+            "statusPollIntervalMs": 20,
+            "statusRpcTimeoutMs": status_rpc_ms,
+            "statusStaleAfterMs": max(10000, status_rpc_ms * 2),
+        },
+    },
+}, separators=(",", ":")))
+PY
+)"
+FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 
 # Load client defaults
 LOAD_CLIENT_REPLAY_SPEED="${LOAD_CLIENT_REPLAY_SPEED:-20}"
@@ -231,25 +288,8 @@ PY
 )
   env \
     "${env_args[@]+"${env_args[@]}"}" \
-    "LOAD_BALANCE_STRATEGY=COST_BASED_PREFILL" \
-    "DECODE_LOAD_BALANCE_STRATEGY=COST_BASED_DECODE" \
+    "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
-    "HYSTERESIS_BIAS_PERCENT=0" \
-    "MAX_QUEUE_SIZE=5000" \
-    "FLEXLB_BATCH_ALGORITHM=fixed_window" \
-    "FLEXLB_BATCH_FIXED_WAIT_MS=10" \
-    "FLEXLB_BATCH_PREDICT_THRESHOLD_MS=550" \
-    "FLEXLB_BATCH_SIZE_MAX=32" \
-    "FLEXLB_BATCH_MIN_SIZE=1" \
-    "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES=${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES}" \
-    "FLEXLB_INFLIGHT_TTL_MS=${FLEXLB_INFLIGHT_TTL_MS}" \
-    "SYNC_REQUEST_TIMEOUT_MS=${SYNC_REQUEST_TIMEOUT_MS}" \
-    "DECODE_CONCURRENCY_LIMIT=132" \
-    "PREFILL_QUEUE_SIZE_THRESHOLD=100000" \
-    "COST_SLO_MS=30000" \
-    "COST_HOTSPOT_MULTIPLIER=1.5" \
-    "DEFAULT_SCHEDULE_MODE=BATCH" \
-    "STRATEGY_CONFIGS={}" \
     "OTEL_TRACE_SKIP_PATTERN=.*" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
     "HIPPO_ROLE=flexlb_behavior_test" \
@@ -413,7 +453,7 @@ scenario_1_ttl_cleanup() {
   local sd="${RUN_DIR}/scenario1"
   log "=========================================="
   log "  Scenario 1: Stuck inflight TTL cleanup"
-  log "  Target: Verify stuck inflight cleaned after TTL=${FLEXLB_INFLIGHT_TTL_MS}ms"
+  log "  Target: Verify stuck inflight cleaned after TTL=${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS}ms"
   log "=========================================="
 
   setup_environment 2 2 "Scenario1" "scenario1"
@@ -536,7 +576,7 @@ with open('${TRACE_FILE}') as f:
 
   log "  Result: ${s1_pass}"
   [[ -n "${s1_reasons}" ]] && log "  Reasons: ${s1_reasons}"
-  log "  Cleanup time: ${cleanup_time}s (TTL=${FLEXLB_INFLIGHT_TTL_MS}ms)"
+  log "  Cleanup time: ${cleanup_time}s (TTL=${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS}ms)"
 
   # Save results
   cat > "${sd}/result.json" <<JSONEOF
@@ -547,7 +587,7 @@ with open('${TRACE_FILE}') as f:
   "inflight_before_kill": ${inflight_after_kill},
   "inflight_final": ${inflight_final},
   "cleanup_time_s": ${cleanup_time},
-  "ttl_ms": ${FLEXLB_INFLIGHT_TTL_MS}
+  "ttl_ms": ${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS}
 }
 JSONEOF
 
@@ -667,7 +707,7 @@ scenario_3_quota_blocking() {
   local p0_port=${MOCK_BASE_GRPC_PORT}
 
   # Step 1: Send 4 requests to fill per-worker quota
-  log "T=0s: sending 4 requests to fill quota (MAX_INFLIGHT_BATCHES=${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES}) ..."
+  log "T=0s: sending 4 requests to fill quota (MAX_INFLIGHT_BATCHES=${EXPERIMENT_MAX_INFLIGHT_BATCHES}) ..."
   send_requests "${SHORT_TRACE}" 4 4 10000 "${sd}/fill_quota" "fill_quota"
   sleep 2
   local inflight_filled
@@ -921,7 +961,7 @@ with open('${TRACE_FILE}') as f:
 
   log "  Result: ${s4_pass}"
   [[ -n "${s4_reasons}" ]] && log "  Reasons: ${s4_reasons}"
-  log "  Calibrate cleanup time: ${cleanup_time}s (vs TTL=${FLEXLB_INFLIGHT_TTL_MS}ms)"
+  log "  Calibrate cleanup time: ${cleanup_time}s (vs TTL=${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS}ms)"
 
   cat > "${sd}/result.json" <<JSONEOF
 {
@@ -931,7 +971,7 @@ with open('${TRACE_FILE}') as f:
   "inflight_before_stop": ${inflight_before},
   "inflight_stuck": ${inflight_stuck},
   "cleanup_time_s": ${cleanup_time},
-  "ttl_ms": ${FLEXLB_INFLIGHT_TTL_MS}
+  "ttl_ms": ${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS}
 }
 JSONEOF
 
@@ -989,9 +1029,9 @@ w("# FlexLB Engine Behavior Test Report")
 w("")
 w(f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 w(f"**Run Directory**: `{run_dir}`")
-w(f"**TTL**: {os.environ.get('FLEXLB_INFLIGHT_TTL_MS', '30000')}ms")
-w(f"**MAX_INFLIGHT_BATCHES**: {os.environ.get('FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES', '4')}")
-w(f"**SYNC_REQUEST_TIMEOUT_MS**: {os.environ.get('SYNC_REQUEST_TIMEOUT_MS', '1000')}")
+w(f"**TTL**: {os.environ.get('EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS', '30000')}ms")
+w(f"**MAX_INFLIGHT_BATCHES**: {os.environ.get('EXPERIMENT_MAX_INFLIGHT_BATCHES', '4')}")
+w(f"**STATUS_RPC_TIMEOUT_MS**: {os.environ.get('EXPERIMENT_STATUS_RPC_TIMEOUT_MS', '1000')}")
 w("")
 
 # Summary table
@@ -1171,9 +1211,9 @@ java -version 2>&1 | head -1
 echo "  JAR: ${FLEXLB_JAR}"
 echo "  Trace: ${TRACE_FILE} ($(wc -l < "${TRACE_FILE}") lines)"
 echo "  Short trace: ${SHORT_TRACE_LINES} lines"
-echo "  TTL: ${FLEXLB_INFLIGHT_TTL_MS}ms"
-echo "  MAX_INFLIGHT_BATCHES: ${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES}"
-echo "  SYNC_REQUEST_TIMEOUT_MS: ${SYNC_REQUEST_TIMEOUT_MS}"
+echo "  TTL: ${EXPERIMENT_STALE_INFLIGHT_TIMEOUT_MS}ms"
+echo "  MAX_INFLIGHT_BATCHES: ${EXPERIMENT_MAX_INFLIGHT_BATCHES}"
+echo "  STATUS_RPC_TIMEOUT_MS: ${EXPERIMENT_STATUS_RPC_TIMEOUT_MS}"
 echo "  Scenarios: ${SCENARIOS}"
 echo "  All prerequisites OK."
 

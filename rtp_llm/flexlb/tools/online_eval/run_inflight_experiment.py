@@ -37,33 +37,79 @@ FLEXLB_MGMT_PORT = 7002
 
 SPEEDS = [3, 5, 7]
 
+PREFILL_EXECUTION_TIME_EXPRESSION = (
+    "max(300, 244.865367146 + 37.2748283785*log(batchSize + 1) "
+    "+ 0*2048*log(1 + exp((sum(computeTokens) - 8192)/2048)) "
+    "+ 0.00768264457133*4096*log(1 + exp((sum(computeTokens) - 24576)/4096)) "
+    "+ 0*8192*log(1 + exp((sum(computeTokens) - 65536)/8192)) "
+    "+ 0.000913293127052*8192*log(1 + exp((sum(computeTokens) - 81920)/8192)) "
+    "+ 0.000238132170008*sum(hitCacheTokens) "
+    "+ 48.1819941798*(sum(hasHitCache)/batchSize) "
+    "+ 14.6526667921*(sum(hitCacheTokens/(inputTokens + 1))/batchSize))"
+)
+
 DEFAULT_FLEXLB_CONFIG = json.dumps(
     {
-        "loadBalanceStrategy": "COST_BASED_PREFILL",
-        "decodeLoadBalanceStrategy": "COST_BASED_DECODE",
-        "cacheHitMaxCacheKeys": 80000000,
-        "cacheHitMetricReportEnabled": True,
-        "cacheHitTimeWindowMs": 1800000,
-        "cacheHitTraceLogEnabled": False,
-        "cacheHitWindowWriteEnabled": True,
-        "decodeConcurrencyLimit": 132,
-        "flexlbBatchAlgorithm": "fixed_window",
-        "flexlbBatchFixedWaitMs": 220,
-        "flexlbBatchPredictThresholdMs": 550,
-        "flexlbBatchSizeMax": 32,
-        "hysteresisBiasPercent": 30,
-        "maxQueueSize": 5000,
-        "prefillQueueSizeThreshold": 100000,
-        "defaultScheduleMode": "BATCH",
-        "flexlbBatchFixedMaxInflightBatches": 2,
-        "costSloMs": 1000,
-        "flexlbBatchMinSize": 8,
-        "prefillLbTimeoutMs": 5000,
-    }
-)
-DEFAULT_STRATEGY_CONFIGS = json.dumps(
-    {
-        "shortestTtft": {"candidatePool": {"mode": "FIXED", "size": 2}},
+        "schemaVersion": 1,
+        "scheduler": {
+            "type": "QUEUE",
+            "ordering": {"type": "PRIORITY", "defaultPriority": 50},
+            "capacity": {"maxOutstandingRequestsGlobal": 1000000},
+        },
+        "dispatcher": {
+            "type": "BATCH",
+            "maxRequests": 32,
+            "maxCollectionWaitMs": 220,
+            "maxWaitingRequestsPerPrefillWorker": 1024,
+            "earlyDispatchPredictedExecutionMs": 550,
+            "maxInflightBatchesPerPrefillWorker": 2,
+            "enqueueRpcTimeoutMs": 5000,
+        },
+        "router": {
+            "availabilityHysteresisPercent": 30,
+            "roles": {
+                "prefill": {
+                    "availability": {"maxPendingRequests": 100000},
+                    "executionTimeEstimator": {
+                        "type": "FORMULA",
+                        "expression": PREFILL_EXECUTION_TIME_EXPRESSION,
+                    },
+                    "selector": {
+                        "type": "ESTIMATED_TTFT",
+                        "candidateChoice": {
+                            "type": "RANDOM_WITHIN_TOLERANCE"
+                        },
+                    },
+                },
+                "decode": {
+                    "availability": {
+                        "maxKvUsagePercent": 90,
+                        "maxEngineRequests": 132,
+                    },
+                    "kvReservation": {"maxOutputTokensForEstimate": 1000},
+                    "selector": {"type": "KV_USAGE_WEIGHTED_RANDOM"},
+                },
+                "vit": {"selector": {"type": "RANDOM"}},
+            },
+        },
+        "observability": {
+            "cacheHit": {
+                "recentKeyWindow": {
+                    "writeEnabled": True,
+                    "durationMs": 1800000,
+                    "maxKeyOccurrences": 80000000,
+                },
+                "metricsEnabled": True,
+                "requestTraceLogEnabled": False,
+            },
+        },
+        "workerRegistry": {
+            "health": {
+                "statusPollIntervalMs": 50,
+                "statusRpcTimeoutMs": 5000,
+                "statusStaleAfterMs": 10000,
+            },
+        },
     }
 )
 
@@ -219,7 +265,6 @@ def start_flexlb_master(experiment_dir: Path) -> subprocess.Popen:
     full_env.update(endpoint_env)
     full_env.update(process_env)  # process config overrides endpoint env
     full_env["FLEXLB_CONFIG"] = DEFAULT_FLEXLB_CONFIG
-    full_env["STRATEGY_CONFIGS"] = DEFAULT_STRATEGY_CONFIGS
     full_env["OTEL_TRACE_SKIP_PATTERN"] = ".*"
     full_env["OTEL_EXPORTER_OTLP_ENDPOINT"] = "none"
     full_env["HIPPO_ROLE"] = "flexlb_eval_master"

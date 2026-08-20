@@ -24,19 +24,4 @@ public record RequestLifecycleSnapshot(long requestId,
                     "only batch enqueue delivery may carry a batchId");
         }
     }
-
-    /**
-     * Compatibility constructor for callers that predate delivery-aware
-     * snapshots. A positive batch id implies a batch enqueue claim.
-     */
-    public RequestLifecycleSnapshot(long requestId,
-                                    RequestLifecycleState state,
-                                    long batchId,
-                                    long createdAtMs,
-                                    long updatedAtMs,
-                                    String detail) {
-        this(requestId, state,
-                batchId > 0 ? DeliveryClaimKind.BATCH_ENQUEUE : DeliveryClaimKind.NONE,
-                batchId, createdAtMs, updatedAtMs, detail);
-    }
 }

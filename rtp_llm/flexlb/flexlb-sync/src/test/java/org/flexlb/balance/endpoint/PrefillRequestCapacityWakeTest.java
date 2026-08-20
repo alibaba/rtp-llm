@@ -4,12 +4,14 @@ import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DecisionGroupMetadata;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
+import org.flexlb.config.PriorityOrderingConfig;
+import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
@@ -41,7 +43,7 @@ class PrefillRequestCapacityWakeTest {
             assertEquals(0, endpoint.availableRequestSlots(1));
 
             long beforeOfferVersion = endpoint.getBatcher().queueVersion();
-            assertTrue(endpoint.getBatcher().tryOffer(batchItem(2, true)));
+            assertTrue(endpoint.getBatcher().tryOffer(batchItem(2)));
             awaitTrue(() -> endpoint.getBatcher().queueVersion() > beforeOfferVersion + 1);
             assertEquals(1, delivered.getCount());
 
@@ -55,14 +57,13 @@ class PrefillRequestCapacityWakeTest {
 
     private static FlexlbConfig config() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchAlgorithm("fixed_window");
-        config.setFlexlbBatchSizeMax(1);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setFlexlbBatchFixedMaxInflightBatches(0);
-        config.setFlexlbBatchQueueMaxSize(16);
-        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
-        config.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
+        QueueSchedulerConfig scheduler = new QueueSchedulerConfig();
+        scheduler.setOrdering(new PriorityOrderingConfig());
+        scheduler.getCapacity().setMaxOutstandingRequestsGlobal(16);
+        NonBatchDispatcherConfig dispatcher = new NonBatchDispatcherConfig();
+        dispatcher.setMaxInflightRequestsPerPrefillWorker(1);
+        config.setScheduler(scheduler);
+        config.setDispatcher(dispatcher);
         return config;
     }
 
@@ -75,7 +76,7 @@ class PrefillRequestCapacityWakeTest {
         return status;
     }
 
-    private static BatchItem batchItem(long requestId, boolean routeDecision) {
+    private static BatchItem batchItem(long requestId) {
         long now = System.currentTimeMillis();
         Request request = new Request();
         request.setRequestId(requestId);
@@ -83,10 +84,8 @@ class PrefillRequestCapacityWakeTest {
         request.setPriority(50);
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
-        context.setBudget(ScheduleBudget.forDeadline(50, now, now + 60_000));
-        if (routeDecision) {
-            context.setScheduleMode(ScheduleModeEnum.QUEUE);
-        }
+        context.setConfig(config());
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, now + 60_000));
         return new BatchItem(context, new CompletableFuture<>(), null,
                 null, null, null, null, now);
     }

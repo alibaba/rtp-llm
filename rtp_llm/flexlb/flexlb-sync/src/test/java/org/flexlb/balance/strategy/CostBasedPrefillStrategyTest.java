@@ -6,9 +6,11 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -145,9 +147,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setScoreTieRandomEnabled(false);
+        useBestOnly(config);
 
         ServerStatus result = strategy.select(buildContext(1000, 11L, config), RoleType.PREFILL, null);
 
@@ -162,9 +162,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setScoreTieRandomEnabled(false);
+        useBestOnly(config);
 
         ServerStatus result = strategy.select(buildContext(1000, 12L, config), RoleType.PREFILL, null);
 
@@ -202,7 +200,7 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void cacheAffinityDisabledKeepsCostBasedSelection() {
-        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        setFormula(endpointConfig, "sum(computeTokens) + 2*sum(hitCacheTokens)");
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
@@ -211,7 +209,7 @@ class CostBasedPrefillStrategyTest {
                 .thenReturn(Map.of("10.0.0.2:8080", 1));
 
         FlexlbConfig config = affinityConfig(10_000, 0);
-        config.setCacheAffinityEnabled(false);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(null);
         ServerStatus result = strategy.select(
                 buildContext(1000, 301L, config), RoleType.PREFILL, null);
 
@@ -223,7 +221,7 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void cacheAffinitySelectsLongestPrefixInsideCostCap() {
-        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        setFormula(endpointConfig, "sum(computeTokens) + 2*sum(hitCacheTokens)");
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
@@ -250,7 +248,7 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void cacheAffinityFallsBackToCostBasedWhenCacheCostIsOverCap() {
-        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        setFormula(endpointConfig, "sum(computeTokens) + 2*sum(hitCacheTokens)");
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
@@ -271,7 +269,7 @@ class CostBasedPrefillStrategyTest {
 
     @Test
     void costBasedCacheAffinityUsesRequestBlockSizeForPageRr() {
-        endpointConfig.setCostFormula("sum(computeTokens) + 2*sum(hitCacheTokens)");
+        setFormula(endpointConfig, "sum(computeTokens) + 2*sum(hitCacheTokens)");
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
@@ -328,7 +326,7 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
-    void sloRiskFilterExcludesOverloadedWorker() {
+    void scoringPrefersLowerWaitWithoutSloFiltering() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 2000));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 10));
@@ -389,7 +387,8 @@ class CostBasedPrefillStrategyTest {
         hot.onWorkerStatusUpdate(hot.getStatus(), response);
 
         FlexlbConfig resourceConfig = new FlexlbConfig();
-        resourceConfig.setPrefillQueueSizeThreshold(64);
+        resourceConfig.getRouter().getRoles().getPrefill().getAvailability()
+                .setMaxPendingRequests(64);
         ConfigService resourceConfigService = Mockito.mock(ConfigService.class);
         Mockito.when(resourceConfigService.loadBalanceConfig()).thenReturn(resourceConfig);
         PrefillResourceMeasure actualMeasure = new PrefillResourceMeasure(resourceConfigService);
@@ -419,7 +418,6 @@ class CostBasedPrefillStrategyTest {
         }
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
 
         ServerStatus result = strategy.select(buildContext(500, 7L, config), RoleType.PREFILL, null);
 
@@ -568,6 +566,7 @@ class CostBasedPrefillStrategyTest {
         req.setSeqLen(seqLen);
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(req);
+        ctx.setConfig(SchedulingTestConfig.batchConfig());
         // For prediction, hitCache comes from prefill.debugInfo.  Use null prefill → 0,
         // but the caller's hitCache parameter is what matters for prediction — we set it
         // via the constructor as a convenience; the predictor will call item.hitCache()
@@ -583,21 +582,31 @@ class CostBasedPrefillStrategyTest {
     }
 
     private BalanceContext buildContext(long seqLen, long requestId) {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
-        return buildContext(seqLen, requestId, config);
+        return buildContext(seqLen, requestId, new FlexlbConfig());
     }
 
     private FlexlbConfig affinityConfig(long maxExtraTtftMs, double minHitRate) {
         FlexlbConfig config = new FlexlbConfig();
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setScoreTieRandomEnabled(false);
-        config.setCacheAffinityEnabled(true);
-        config.setCacheAffinityMaxExtraTtftMs(maxExtraTtftMs);
-        config.setCacheAffinityMinHitRate(minHitRate);
+        useBestOnly(config);
+        RoutingConfig.CacheAffinityConfig affinity = new RoutingConfig.CacheAffinityConfig();
+        affinity.setMaxExtraTtftMs(maxExtraTtftMs);
+        affinity.setMinPrefixHitPercent(minHitRate);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         return config;
+    }
+
+    private static void useBestOnly(FlexlbConfig config) {
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
+                        .getPrefill().getSelector();
+        selector.setCandidateChoice(new RoutingConfig.BestOnlyConfig());
+    }
+
+    private static void setFormula(FlexlbConfig config, String expression) {
+        RoutingConfig.FormulaEstimatorConfig estimator =
+                (RoutingConfig.FormulaEstimatorConfig) config.getRouter().getRoles()
+                        .getPrefill().getExecutionTimeEstimator();
+        estimator.setExpression(expression);
     }
 
     private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {

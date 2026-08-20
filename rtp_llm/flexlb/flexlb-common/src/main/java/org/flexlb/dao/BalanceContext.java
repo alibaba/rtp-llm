@@ -5,11 +5,8 @@ import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.enums.ScheduleModeEnum;
-import org.flexlb.util.Prioritized;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @author zjw
@@ -18,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @Data
 @ToString
-public class BalanceContext implements Prioritized {
+public class BalanceContext {
 
     //======================== Basic =======================//
 
@@ -31,13 +28,9 @@ public class BalanceContext implements Prioritized {
     @ToString.Exclude
     private byte[] generateInputPbBytes;
 
-    private volatile ScheduleModeEnum scheduleMode = ScheduleModeEnum.BATCH;
-
     //======================== Queue ========================//
 
     private CompletableFuture<Response> future;
-
-    private final AtomicInteger retryCount = new AtomicInteger(0);
 
     //======================== Meters =======================//
 
@@ -65,8 +58,6 @@ public class BalanceContext implements Prioritized {
 
     private long enqueueTime;
 
-    private long dequeueTime;
-
     /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
      * Set when PriorityScheduler confirms the EnqueueBatch acknowledgement.
@@ -78,29 +69,27 @@ public class BalanceContext implements Prioritized {
     /** Monotonic counterpart of {@link #ackAtMs}. */
     private long ackAtNanos;
 
-    private long sequenceId;
-
     private boolean success = true;
 
     private String errorMessage;
 
-    //===================== Auto-TPM =================//
+    //===================== Scheduling =================//
 
     /**
-     * Immutable per-request schedule budget (normalized priority, SLO, coarse
-     * deadline). {@code null} when Auto-TPM is disabled — every accessor that
-     * delegates to budget performs a null check and returns a legacy default.
+     * Immutable per-request scheduling metadata. The expiration is an
+     * absolute caller-supplied Unix timestamp and is shared by DIRECT, QUEUE,
+     * and BATCH without being reset on retry or rescue.
      */
-    private ScheduleBudget budget;
+    private SchedulingMetadata schedulingMetadata;
 
     /**
-     * Number of Auto-TPM plan attempts consumed for this request (1-based).
-     * 0 when the Auto-TPM path did not schedule it (§19.1 schedule_attempt).
+     * Number of priority scheduling plan attempts consumed for this request (1-based).
+     * 0 when the priority scheduling path did not schedule it (§19.1 schedule_attempt).
      */
     private int scheduleAttempt;
 
     /**
-     * Auto-TPM plan type that finally placed the request:
+     * priority scheduling plan type that finally placed the request:
      * normal / prefill_evict / decode_evict. Empty when not applicable
      * (§19.1 plan_type).
      */
@@ -134,72 +123,37 @@ public class BalanceContext implements Prioritized {
     }
 
     /**
-     * Normalized Auto-TPM priority of the request (1-100, higher = more
-     * important). Delegates to {@link #budget} when set; falls back to
-     * {@code request.getPriority()} on the legacy path (Auto-TPM off).
-     *
-     * <p>Satisfies {@link Prioritized#priority()} for the top-level request
-     * queue ({@code QueueManager}'s {@code PriorityBlockingQueue}).
-     */
-    @Override
-    public int priority() {
-        return budget != null ? budget.priority() : request.getPriority();
-    }
-
-    /**
-     * Convenience accessor for the normalized priority (same as
-     * {@link #priority()}). Retained for call-site compatibility with
-     * Lombok-style getter naming.
+     * Normalized priority of the request (1-100, higher = more important).
+     * Immutable scheduling metadata is authoritative; the request fallback
+     * supports manually constructed internal contexts.
      */
     public int getPriority() {
-        return priority();
+        return schedulingMetadata != null
+                ? schedulingMetadata.priority()
+                : request.getPriority();
     }
 
     /**
-     * Monotonic enqueue sequence used as the same-priority FIFO tie-break in
-     * {@link org.flexlb.util.PriorityOrdering#STRICT}. Set once at enqueue
-     * time by {@code QueueManager} via {@code setSequenceId} and never
-     * mutated — a re-offer (retry / rescue) keeps the original sequence so
-     * the item sorts back to its priority-correct position.
+     * Absolute request expiration timestamp in Unix epoch milliseconds.
      */
-    @Override
-    public long enqueueSeq() {
-        return sequenceId;
+    public long getRequestExpiresAtMs() {
+        if (schedulingMetadata != null) {
+            return schedulingMetadata.expiresAtMs();
+        }
+        if (config != null && config.isQueue()) {
+            return config.queueScheduler().resolveExpiresAtMs(startTime);
+        }
+        return Long.MAX_VALUE;
     }
 
-    /**
-     * Coarse admission deadline (epoch ms). Delegates to {@link #budget};
-     * returns 0 on the legacy path.
-     */
-    public long getDeadlineMs() {
-        return budget != null ? budget.deadlineMs() : 0;
+    public boolean requestExpired(long nowMs) {
+        long expiresAtMs = getRequestExpiresAtMs();
+        return expiresAtMs <= 0 || nowMs >= expiresAtMs;
     }
 
-    /**
-     * Per-request SLO in ms. Delegates to {@link #budget}; returns 0 on the
-     * legacy path.
-     */
-    public long getRequestSloMs() {
-        return budget != null ? budget.requestSloMs() : 0;
+    /** Direct accessor for immutable scheduling metadata. */
+    public SchedulingMetadata schedulingMetadata() {
+        return schedulingMetadata;
     }
 
-    /** Direct accessor for the schedule budget (may be {@code null}). */
-    public ScheduleBudget budget() {
-        return budget;
-    }
-
-    /**
-     * Increment retry count
-     * @return the new retry count after incrementing
-     */
-    public int incrementRetryCount() {
-        return retryCount.incrementAndGet();
-    }
-
-    /**
-     * Get current retry count
-     */
-    public int getRetryCount() {
-        return retryCount.get();
-    }
 }

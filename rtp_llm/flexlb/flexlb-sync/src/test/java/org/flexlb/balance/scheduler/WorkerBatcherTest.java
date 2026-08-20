@@ -3,9 +3,8 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -46,8 +45,7 @@ class WorkerBatcherTest {
     @BeforeEach
     void setUp() {
         config = new FlexlbConfig();
-        config.setFlexlbBatchAlgorithm("fixed_window");
-        config.setAutoTpmEnabled(true);
+        SchedulingTestConfig.usePriorityQueue(config);
     }
 
     private WorkerBatcher newBatcher() {
@@ -72,8 +70,8 @@ class WorkerBatcherTest {
     }
 
     @Test
-    void legacy_items_without_budget_fall_into_priority_zero_bucket() {
-        config.setAutoTpmEnabled(false);
+    void items_without_scheduling_metadata_fall_into_priority_zero_bucket() {
+        SchedulingTestConfig.useFifoQueue(config);
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
@@ -98,20 +96,20 @@ class WorkerBatcherTest {
 
         // Drain the P70 item: its bucket drops out (present-only, no zero-fill
         // — same empty-bucket behavior as wait-time-by-priority)
-        List<BatchItem> removed = batcher.tryRemoveNoVersion(List.of(1L), "test-drain");
+        List<BatchItem> removed = batcher.tryRemove(List.of(1L), "test-drain");
         assertEquals(1, removed.size());
 
         assertEquals(Map.of(50, 1), batcher.queueSizeByPriority());
 
         // Fully drained queue reports no buckets at all
-        assertEquals(1, batcher.tryRemoveNoVersion(List.of(2L), "test-drain").size());
+        assertEquals(1, batcher.tryRemove(List.of(2L), "test-drain").size());
         assertEquals(Map.of(), batcher.queueSizeByPriority());
     }
 
     @Test
     void decisionCallbackFailure_restoresOnlyStagedItemsWithoutDepthLeak() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
-                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
         BatchItem first = item(1, 50, 100);
         BatchItem second = item(2, 50, 200);
         queue.add(first);
@@ -149,11 +147,11 @@ class WorkerBatcherTest {
 
     @Test
     void routeCallbackFailureRestoresToReadyBacklog_andRemovalAndShutdownDoNotLeak() {
-        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(1);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.availableRequestSlots(1)).thenReturn(1);
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
-                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
         BatchItem first = routeItem(1, 50, 100);
         BatchItem second = routeItem(2, 50, 200);
         queue.add(first);
@@ -205,10 +203,7 @@ class WorkerBatcherTest {
 
     @Test
     void readyBacklogRemainsVisibleAndRemovableThroughQueueManager() throws Exception {
-        config.setFlexlbBatchSizeMax(2);
-        config.setFlexlbBatchFixedWaitMs(200);
-        config.setFlexlbBatchPredictThresholdMs(0);
-        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(1);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.availableRequestSlots(1)).thenReturn(0);
         AtomicInteger deliveryCalls = new AtomicInteger();
@@ -246,9 +241,8 @@ class WorkerBatcherTest {
             assertEquals(List.of(1L, 2L), batcher.queueManager().snapshot().items().stream()
                     .map(item -> item.requestId()).toList());
             assertEquals(Map.of(70, 1, 50, 1), batcher.queueSizeByPriority());
-            assertEquals(400, batcher.queueManager().estimateWaitMs(
-                    100, System.currentTimeMillis() + 5_000, 99),
-                    "ready requests are request-accounted, not divided by batchSizeMax");
+            assertEquals(2, batcher.queueManager().estimateWaitMs(100, 99),
+                    "NON_BATCH wait accounts for each pending request independently");
             assertEquals(0, deliveryCalls.get());
 
             batcher.queueManager().tryRemove(1L, "ready-lease-timeout");
@@ -265,9 +259,9 @@ class WorkerBatcherTest {
     }
 
     @Test
-    void autoTpmEmptyWorkerWaitsOnConditionAndEnqueueWakesIt() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
-        config.setFlexlbBatchFixedMaxInflightBatches(0);
+    void priorityQueueEmptyWorkerWaitsOnConditionAndEnqueueWakesIt() throws Exception {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightBatchesPerPrefillWorker(0);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         CountDownLatch delivered = new CountDownLatch(1);
         WorkerBatcher batcher = new WorkerBatcher(
@@ -296,9 +290,9 @@ class WorkerBatcherTest {
 
     @Test
     void routeSlotSignalWakesReadyOnlyWorkerWithoutPolling() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(1);
         AtomicInteger slots = new AtomicInteger();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.availableRequestSlots(1)).thenAnswer(ignored -> slots.get());
@@ -333,10 +327,10 @@ class WorkerBatcherTest {
 
     @Test
     void fullRouteCapDoesNotHeadOfLineBlockLegacyBatchWork() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
-        config.setFlexlbBatchFixedWaitMs(60_000);
-        config.setFlexlbBatchFixedMaxInflightBatches(0);
-        config.setAutoTpmPrefillMaxInflightRequestsPerWorker(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightBatchesPerPrefillWorker(0);
+        SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(1);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.availableRequestSlots(1)).thenReturn(0);
         AtomicInteger routeDeliveries = new AtomicInteger();
@@ -376,7 +370,7 @@ class WorkerBatcherTest {
     @Test
     void successfulLegacyCallbackConsumesDistinctItemsSharingRequestId() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
-                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
         BatchItem first = item(0, 50, 100);
         BatchItem second = item(0, 50, 200);
         queue.add(first);
@@ -414,7 +408,7 @@ class WorkerBatcherTest {
     @Test
     void claimedDeliveryCompletesOnce_andFinallyCannotRequeueIt() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
-                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
         BatchItem item = item(7, 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
@@ -461,7 +455,7 @@ class WorkerBatcherTest {
     @Test
     void claimedCallbackFailure_usesDeliveryFailureWithoutPendingLeakOrRequeue() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
-                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
         BatchItem item = item(8, 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
@@ -506,7 +500,7 @@ class WorkerBatcherTest {
     @Test
     void shutdownDrainWinsStagedItemExactlyOnce() throws Exception {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
-                11, WorkerBatcher.AUTO_TPM_QUEUE_ORDER);
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
         BatchItem item = item(9, 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
@@ -563,12 +557,12 @@ class WorkerBatcherTest {
 
     private static BatchItem item(long requestId, int priority, long enqueuedAtMs) {
         BalanceContext ctx = newContext(requestId, priority);
-        ctx.setBudget(ScheduleBudget.forDeadline(priority, enqueuedAtMs, enqueuedAtMs + 5_000));
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         return new BatchItem(ctx, new CompletableFuture<>(), null,
                 null, null, null, null, enqueuedAtMs);
     }
 
-    /** Legacy path: budget = null, so {@link BatchItem#priority()} returns 0. */
+    /** Missing scheduling metadata preserves the untrusted priority-zero sentinel. */
     private static BatchItem legacyItem(long requestId, long enqueuedAtMs) {
         return new BatchItem(newContext(requestId, 0), new CompletableFuture<>(), null,
                 null, null, null, null, enqueuedAtMs);
@@ -576,9 +570,8 @@ class WorkerBatcherTest {
 
     private static BatchItem routeItem(long requestId, int priority, long enqueuedAtMs) {
         BalanceContext ctx = newContext(requestId, priority);
-        ctx.setBudget(ScheduleBudget.forDeadline(
-                priority, enqueuedAtMs, enqueuedAtMs + 5_000));
-        ctx.setScheduleMode(ScheduleModeEnum.QUEUE);
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
+        SchedulingTestConfig.useNonBatchDispatcher(ctx.getConfig());
         return new BatchItem(ctx, new CompletableFuture<>(), null,
                 null, null, null, null, enqueuedAtMs);
     }
@@ -590,6 +583,7 @@ class WorkerBatcherTest {
         request.setPriority(priority);
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
+        ctx.setConfig(new FlexlbConfig());
         return ctx;
     }
 
@@ -604,7 +598,7 @@ class WorkerBatcherTest {
                                    AtomicInteger depth,
                                    DecisionGroupHandler handler) {
         return new BatcherContext("test-worker", endpoint, config, handler, queue, depth,
-                new AtomicLong(), new ReentrantLock(), WorkerBatcher.AUTO_TPM_QUEUE_ORDER,
+                new AtomicLong(), new ReentrantLock(), WorkerBatcher.PRIORITY_QUEUE_ORDER,
                 mock(BatchSchedulerReporter.class));
     }
 

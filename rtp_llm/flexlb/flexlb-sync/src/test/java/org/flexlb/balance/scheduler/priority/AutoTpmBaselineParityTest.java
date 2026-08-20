@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -12,9 +14,8 @@ import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -73,9 +74,9 @@ class AutoTpmBaselineParityTest {
     void decodeAcceptedWorkerStatusClosesLeaseAndReopensAdmissionCapacity() throws Exception {
         Harness h = new Harness(cfg -> {
             Harness.enableAll(cfg);
-            cfg.setFlexlbBatchSizeMax(1);
-            cfg.setAutoTpmPostSuccessBackpressureLimit(1);
-            cfg.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
+            SchedulingTestConfig.useBatchDispatcher(cfg).setMaxRequests(1);
+            cfg.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
+            cfg.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
         });
         try {
             Response first = h.submit(1, 50).get(2, TimeUnit.SECONDS);
@@ -103,9 +104,9 @@ class AutoTpmBaselineParityTest {
             throws Exception {
         Harness h = new Harness(cfg -> {
             Harness.enableAll(cfg);
-            cfg.setFlexlbBatchSizeMax(1);
-            cfg.setAutoTpmPostSuccessBackpressureLimit(1);
-            cfg.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
+            SchedulingTestConfig.useBatchDispatcher(cfg).setMaxRequests(1);
+            cfg.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
+            cfg.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
         });
         try {
             Response delivered = h.submit(3, 50).get(2, TimeUnit.SECONDS);
@@ -180,10 +181,10 @@ class AutoTpmBaselineParityTest {
     @Test
     void all_on_uniform_priority_admits_same_set_and_never_evicts_under_capacity_pressure()
             throws Exception {
-        Harness off = new Harness(cfg -> cfg.setDecodeConcurrencyLimit(2));
+        Harness off = new Harness(cfg -> cfg.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (2)));
         Harness on = new Harness(cfg -> {
             Harness.enableAll(cfg);
-            cfg.setDecodeConcurrencyLimit(2);
+            cfg.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (2));
         });
         try {
             // 2 个 decode 槽位、5 个全同优先级请求顺序提交：
@@ -217,8 +218,8 @@ class AutoTpmBaselineParityTest {
             Harness.enableAll(cfg);
             // Keep Decode routable; this case is deliberately a Prefill
             // FIFO/queue-capacity rejection, not a Decode slot rejection.
-            cfg.setDecodeConcurrencyLimit(100);
-            cfg.setFlexlbBatchQueueMaxSize(1);
+            cfg.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100));
+            SchedulingTestConfig.useBatchDispatcher(cfg).setMaxWaitingRequestsPerPrefillWorker(1);
         });
         try {
             DecodeEndpoint decodeEp = on.endpointRegistry.getDecode(DECODE_IP_PORT);
@@ -234,7 +235,7 @@ class AutoTpmBaselineParityTest {
             assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
                     AdmissionFailureClassifier.classifyPrefill(
                             new PriorityRequestEnvelope(32, 50, 128, 8,
-                                    System.currentTimeMillis(), 0, 0, 128, 136),
+                                    System.currentTimeMillis(), 128, 136),
                             fullQueue).reason());
 
             // Prefill 队列已被先到的同优先级请求占满：Master 必须从
@@ -260,17 +261,19 @@ class AutoTpmBaselineParityTest {
     @Test
     void mixed_switch_matrix_uniform_priority_stays_equivalent() throws Exception {
         List<Consumer<FlexlbConfig>> matrix = List.of(
-                cfg -> cfg.setAutoTpmPrefillQueueEvictEnabled(true),
-                cfg -> cfg.setAutoTpmDecodeReservedEvictEnabled(true),
+                cfg -> SchedulingTestConfig.allowVictim(
+                        cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED),
+                cfg -> SchedulingTestConfig.allowVictim(
+                        cfg, org.flexlb.config.VictimStage.DECODE_RESERVED),
                 cfg -> {
-                    cfg.setAutoTpmPrefillQueueEvictEnabled(true);
-                    cfg.setAutoTpmDecodeReservedEvictEnabled(true);
+                    SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+                    SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
                 });
         for (Consumer<FlexlbConfig> combo : matrix) {
             Harness h = new Harness(cfg -> {
-                cfg.setAutoTpmEnabled(true);
+                SchedulingTestConfig.usePriorityQueue(cfg);
                 combo.accept(cfg);
-                cfg.setDecodeConcurrencyLimit(1);
+                cfg.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
             });
             try {
                 DecodeEndpoint decodeEp = h.endpointRegistry.getDecode(DECODE_IP_PORT);
@@ -308,14 +311,11 @@ class AutoTpmBaselineParityTest {
             EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
 
-            config.setScheduleWorkerSize(1);
             // park 模式：队列驻留不派发，便于确定性观测队列序
-            config.setFlexlbBatchSizeMax(100);
-            config.setFlexlbBatchFixedWaitMs(10_000);
-            config.setFlexlbBatchWindowMs(10_000);
-            config.setCostSloMs(50_000L);
-            config.setCostSloRiskMarginMs(50L);
-            config.setDecodeConcurrencyLimit(100);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+            config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100));
             customize.accept(config);
             when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -340,11 +340,10 @@ class AutoTpmBaselineParityTest {
             dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
             priorityScheduler = new PriorityAdmissionScheduler(
                     configService, router, endpointRegistry, new PlanCommitter(),
-                    new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                            PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                     priorityReporter, reporter, new UnsupportedEngineCancelChannel());
             scheduler = new PriorityScheduler(configService, router,
-                    endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+                    endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                    new UnsupportedEngineCancelChannel());
 
             WorkerStatus prefillWs = new WorkerStatus();
             prefillWs.setIp("10.0.0.1");
@@ -364,9 +363,9 @@ class AutoTpmBaselineParityTest {
         }
 
         static void enableAll(FlexlbConfig cfg) {
-            cfg.setAutoTpmEnabled(true);
-            cfg.setAutoTpmPrefillQueueEvictEnabled(true);
-            cfg.setAutoTpmDecodeReservedEvictEnabled(true);
+            SchedulingTestConfig.usePriorityQueue(cfg);
+            SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+            SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
             // PR-D: rescue removed — orTimeout + AdmissionLease handle stuck/deadline requests
         }
 
@@ -376,10 +375,10 @@ class AutoTpmBaselineParityTest {
 
         private Response routeAnswer(BalanceContext ctx) {
             DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-            if (decodeEp.getTotalLoad() + 1 > config.getDecodeConcurrencyLimit()) {
+            if (decodeEp.getTotalLoad() + 1 > config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests()) {
                 return Response.error(StrategyErrorType.NO_DECODE_WORKER);
             }
-            decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority(), ctx.getDeadlineMs());
+            decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority());
             return successRoute(ctx.getRequestId());
         }
 
@@ -409,9 +408,9 @@ class AutoTpmBaselineParityTest {
 
         private CompletableFuture<Response> submit(long requestId, int priority) {
             BalanceContext ctx = context(requestId, priority, 128);
-            if (config.isAutoTpmEnabled()) {
+            if (config.isPriorityOrdering()) {
                 long now = System.currentTimeMillis();
-                ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 30_000));
+                ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 30_000));
             }
             return scheduler.submit(ctx);
         }

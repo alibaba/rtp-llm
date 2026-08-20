@@ -83,16 +83,14 @@ class DefaultRouterTest {
 
         // Mock config service
         when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        lenient().when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.COST_BASED_PREFILL);
-        when(loadBalanceConfig.getStrategyForRoleType(any(RoleType.class))).thenAnswer(inv -> {
+        when(loadBalanceConfig.strategyFor(any(RoleType.class))).thenAnswer(inv -> {
             RoleType roleType = inv.getArgument(0);
-            if (roleType == RoleType.DECODE) {
-                return LoadBalanceStrategyEnum.COST_BASED_DECODE;
-            }
-            if (roleType == RoleType.PDFUSION) {
-                return LoadBalanceStrategyEnum.RANDOM;
-            }
-            return LoadBalanceStrategyEnum.COST_BASED_PREFILL;
+            return switch (roleType) {
+                case DECODE -> LoadBalanceStrategyEnum.COST_BASED_DECODE;
+                case PDFUSION -> LoadBalanceStrategyEnum.RANDOM;
+                case PREFILL, VIT -> LoadBalanceStrategyEnum.COST_BASED_PREFILL;
+                case FRONTEND -> null;
+            };
         });
 
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, prefillStrategy);

@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
@@ -10,9 +12,8 @@ import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -54,7 +55,6 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -93,19 +93,16 @@ class PriorityAdmissionSchedulerTest {
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        config.setScheduleWorkerSize(1);
-        config.setFlexlbBatchSizeMax(2);
-        config.setFlexlbBatchWindowMs(10_000);
-        config.setCostSloMs(50000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setAutoTpmEnabled(true);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.usePriorityQueue(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             endpointRegistry.getDecode(DECODE_IP_PORT)
                     .reserve(ctx.getRequestId(), 128, 136,
-                            ctx.getPriority(), ctx.getDeadlineMs());
+                            ctx.getPriority());
             return successRoute(ctx.getRequestId());
         });
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
@@ -120,11 +117,10 @@ class PriorityAdmissionSchedulerTest {
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         priorityScheduler = spy(new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
-                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel()));
         scheduler = new PriorityScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+                endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                new UnsupportedEngineCancelChannel());
 
         // Prefill worker matching successRoute()
         WorkerStatus prefillWs = new WorkerStatus();
@@ -153,7 +149,7 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void switch_off_uses_legacy_path_and_never_invokes_priority_scheduler() throws Exception {
-        config.setAutoTpmEnabled(false);
+        SchedulingTestConfig.useFifoQueue(config);
 
         CompletableFuture<Response> first = scheduler.submit(context(11));
         CompletableFuture<Response> second = scheduler.submit(context(12));
@@ -199,6 +195,7 @@ class PriorityAdmissionSchedulerTest {
         // normalize() always assigns 1-100 in production, so the switch is
         // the sole gate — even a raw priority-0 context goes through the
         // priority scheduler and is placed normally.
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
         Response response = scheduler.submit(context(61, 0)).get(2, TimeUnit.SECONDS);
 
         assertTrue(response.isSuccess());
@@ -221,13 +218,13 @@ class PriorityAdmissionSchedulerTest {
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
-    // ==================== task40: slo deadline exceeded is rejected ====================
+    // ==================== request expiration ====================
 
     @Test
-    void expired_deadline_is_resource_exhausted() throws Exception {
+    void expired_priority_request_remains_resource_exhausted() throws Exception {
         BalanceContext ctx = context(71);
-        ctx.setBudget(ScheduleBudget.forDeadline(50,
-                ctx.getStartTime(), System.currentTimeMillis() - 1_000));
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
+                50, System.currentTimeMillis() - 1_000));
 
         Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 
@@ -235,31 +232,35 @@ class PriorityAdmissionSchedulerTest {
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
         assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
-        assertTrue(response.getErrorMessage().contains("admission budget already expired"));
+        assertTrue(response.getErrorMessage().contains("request expired"));
         verify(router, never()).route(any(BalanceContext.class));
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
-    void expired_deadline_is_not_checked_when_switch_off() throws Exception {
-        config.setAutoTpmEnabled(false);
+    void expired_fifo_request_remains_batch_slo_expired() throws Exception {
+        SchedulingTestConfig.useFifoQueue(config);
         BalanceContext ctx = context(72);
-        ctx.setBudget(ScheduleBudget.forDeadline(50,
-                ctx.getStartTime(), System.currentTimeMillis() - 1_000));
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
+                50, System.currentTimeMillis() - 1_000));
 
-        Response response = scheduler.submit(ctx).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 
-        assertTrue(response.isSuccess());
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED,
+                response.getAdmissionRejectReason());
         verify(priorityScheduler, never()).schedule(any(), any(), any());
+        verify(router, never()).route(any(BalanceContext.class));
     }
 
     // ==================== admission permit hard limit ====================
 
     @Test
     void admissionPermitLimitIsAtomicAcrossConcurrentScheduling() throws Exception {
-        config.setAutoTpmPostSuccessBackpressureLimit(1);
-        config.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
-        config.setFlexlbBatchSizeMax(1);
+        config.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
+        config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
 
         CountDownLatch firstRouteEntered = new CountDownLatch(1);
         CountDownLatch allowFirstRoute = new CountDownLatch(1);
@@ -274,7 +275,7 @@ class PriorityAdmissionSchedulerTest {
             }
             endpointRegistry.getDecode(DECODE_IP_PORT)
                     .reserve(ctx.getRequestId(), 128, 136,
-                            ctx.getPriority(), ctx.getDeadlineMs());
+                            ctx.getPriority());
             return successRoute(ctx.getRequestId());
         });
 
@@ -310,10 +311,10 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void admissionPermitIsReleasedWhenLeaseAttachmentThrows() {
-        config.setAutoTpmPostSuccessBackpressureLimit(1);
-        config.setFlexlbBatchSizeMax(100);
+        config.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
 
-        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        InflightRegistrar registrar = openRegistrar();
         when(registrar.registerInflight(any(BatchItem.class))).thenReturn(true);
         when(registrar.attachAdmissionLease(any(BatchItem.class), any(AdmissionLease.class)))
                 .thenThrow(new IllegalStateException("attach failed"));
@@ -330,9 +331,9 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void successfulPrefillOnlyAdmissionsDoNotConsumeTheHardLimit() throws Exception {
-        config.setAutoTpmPostSuccessBackpressureLimit(1);
-        config.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
-        config.setFlexlbBatchSizeMax(1);
+        config.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
+        config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
         when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
             BalanceContext ctx = invocation.getArgument(0);
             return prefillOnlyRoute(ctx.getRequestId());
@@ -351,10 +352,10 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void shutdownCancelsPendingLeaseTimeoutAndRejectsNewAdmission() throws Exception {
-        config.setAutoTpmPostSuccessSoftTimeoutMs(60_000);
-        config.setFlexlbBatchSizeMax(100);
+        config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
 
-        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        InflightRegistrar registrar = openRegistrar();
         AtomicReference<AdmissionLease> attachedLease = new AtomicReference<>();
         when(registrar.registerInflight(any(BatchItem.class))).thenReturn(true);
         when(registrar.attachAdmissionLease(any(BatchItem.class), any(AdmissionLease.class)))
@@ -398,18 +399,16 @@ class PriorityAdmissionSchedulerTest {
         priorityScheduler.shutdown();
         priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
-                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel());
-        config.setAutoTpmPostSuccessSoftTimeoutMs(1);
-        config.setFlexlbBatchSizeMax(100);
+        config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
 
         long firstRequestId = 176L;
         long secondRequestId = 177L;
         CountDownLatch firstFenceEntered = new CountDownLatch(1);
         CountDownLatch releaseFirstFence = new CountDownLatch(1);
         CountDownLatch shutdownStarted = new CountDownLatch(1);
-        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        InflightRegistrar registrar = openRegistrar();
         when(registrar.registerInflight(any(BatchItem.class))).thenReturn(true);
         when(registrar.attachAdmissionLease(any(BatchItem.class), any(AdmissionLease.class)))
                 .thenReturn(true);
@@ -490,7 +489,7 @@ class PriorityAdmissionSchedulerTest {
     @Test
     void decodeCapacityBlockedByUnattributedEngineOccupantIsAdmissionUnavailable()
             throws Exception {
-        config.setDecodeConcurrencyLimit(1);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         WorkerStatus decodeStatus = decodeEp.getStatus();
         TaskInfo untrackedRunning = new TaskInfo();
@@ -519,12 +518,8 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void offer_failure_releases_decode_reservation_and_fails_explicitly() throws Exception {
-        // Pin the legacy versioned commit: under the default lockfree strategy
-        // a second OFFER_FAILED fast-rejects after 2 routes (covered by the
-        // redesign tests); this case asserts the legacy full-retry contract.
-        config.setAutoTpmCommitStrategy("versioned");
-        config.setFlexlbBatchQueueMaxSize(1);
-        config.setFlexlbBatchSizeMax(100);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
         // Route performs the decode reservation (D reserve first), like production Router
@@ -541,79 +536,15 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(context(31)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.UNSPECIFIED,
+        assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
                 response.getAdmissionRejectReason());
-        // One route per attempt (MAX_PLAN_RETRIES = 3)
-        verify(router, times(3)).route(any(BalanceContext.class));
+        // Primary offer plus one fallback route, then capacity fast-reject.
+        verify(router, times(2)).route(any(BalanceContext.class));
         // Rollback: every decode reservation released (shadow load/KV restored)
         assertEquals(0, decodeEp.getInflightCount());
         assertEquals(0, decodeEp.inflightHardKvReserved());
         assertEquals(0, decodeEp.getTotalLoad());
-    }
-
-    // ==================== version mismatch: retry then succeed ====================
-
-    @Test
-    void version_mismatch_retries_with_fresh_plan_and_succeeds() throws Exception {
-        // Pin the legacy versioned commit: queue-version OCC no longer exists
-        // under the default lockfree strategy (redesign N3).
-        config.setAutoTpmCommitStrategy("versioned");
-        config.setFlexlbBatchSizeMax(2);
-        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
-
-        AtomicInteger routeCalls = new AtomicInteger();
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            if (routeCalls.incrementAndGet() == 1) {
-                // Concurrent enqueue between snapshot and commit → queue version bump
-                assertTrue(batcher.tryOffer(dummyItem(901)));
-            }
-            endpointRegistry.getDecode(DECODE_IP_PORT)
-                    .reserve(ctx.getRequestId(), 128, 136,
-                            ctx.getPriority(), ctx.getDeadlineMs());
-            return successRoute(ctx.getRequestId());
-        });
-
-        Response response = scheduler.submit(context(41)).get(2, TimeUnit.SECONDS);
-
-        assertTrue(response.isSuccess());
-        assertTrue(response.isEnqueuedByMaster());
-        // Attempt 1 hits VERSION_MISMATCH, attempt 2 commits
-        verify(router, times(2)).route(any(BalanceContext.class));
-        verify(priorityReporter, atLeastOnce()).reportNormalPlacement(eq(50));
-    }
-
-    @Test
-    void version_mismatch_on_every_attempt_exhausts_retries_and_fails_explicitly() throws Exception {
-        // Pin the legacy versioned commit: this reproduces the pure-OCC
-        // exhaustion (8515) that the lockfree strategy eliminates by design.
-        config.setAutoTpmCommitStrategy("versioned");
-        config.setFlexlbBatchSizeMax(100);
-        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
-        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-
-        AtomicInteger routeCalls = new AtomicInteger();
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            decodeEp.reserve(ctx.getRequestId(), 128, 136);
-            // Interfere on every attempt → commit always sees a stale version
-            assertTrue(batcher.tryOffer(dummyItem(900 + routeCalls.incrementAndGet())));
-            return successRoute(ctx.getRequestId());
-        });
-
-        Response response = scheduler.submit(context(51)).get(2, TimeUnit.SECONDS);
-
-        assertFalse(response.isSuccess());
-        // Pure OCC has no reliable priority-blocker evidence, so the production
-        // admission contract falls back to typed resource exhaustion.
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
-        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                response.getAdmissionRejectReason());
-        verify(router, times(3)).route(any(BalanceContext.class));
-        // All decode reservations rolled back across the retries
-        assertEquals(0, decodeEp.getInflightCount());
-        assertEquals(0, decodeEp.inflightHardKvReserved());
     }
 
     // ==================== helpers ====================
@@ -647,14 +578,14 @@ class PriorityAdmissionSchedulerTest {
                 .toList();
     }
 
-    private static BalanceContext context(long requestId) {
+    private BalanceContext context(long requestId) {
         // Production requests always carry a normalized 1-100 priority
         // (normalize() default is 50); the raw-0 overload above documents
         // the removed hasPriority gate.
         return context(requestId, 50);
     }
 
-    private static BalanceContext context(long requestId, int priority) {
+    private BalanceContext context(long requestId, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);
@@ -665,17 +596,24 @@ class PriorityAdmissionSchedulerTest {
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
-        ctx.setConfig(new FlexlbConfig());
+        ctx.setConfig(config);
         ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
         return ctx;
     }
 
-    private static BalanceContext contextWithBudget(long requestId) {
+    private BalanceContext contextWithBudget(long requestId) {
         BalanceContext ctx = context(requestId);
         long nowMs = System.currentTimeMillis();
-        ctx.setBudget(ScheduleBudget.forDeadline(
-                ctx.getPriority(), nowMs, nowMs + 60_000));
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
+                ctx.getPriority(), nowMs + 60_000));
         return ctx;
+    }
+
+    private static InflightRegistrar openRegistrar() {
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        when(registrar.isAdmissionOpen(anyLong(), any())).thenReturn(true);
+        when(registrar.claimAdmissionMutation(anyLong(), any())).thenReturn(true);
+        return registrar;
     }
 
     private void reportDecodePhase(long requestId, TaskPhase phase) {

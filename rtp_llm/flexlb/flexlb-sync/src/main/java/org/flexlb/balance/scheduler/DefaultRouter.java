@@ -51,7 +51,7 @@ public class DefaultRouter implements Router {
         this.loadBalanceStrategyMap = new EnumMap<>(RoleType.class);
 
         for (RoleType roleType : RoleType.values()) {
-            LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
+            LoadBalanceStrategyEnum strategy = config.strategyFor(roleType);
             if (strategy != null) {
                 loadBalanceStrategyMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalanceStrategy(strategy));
             }

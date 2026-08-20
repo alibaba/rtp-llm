@@ -6,7 +6,6 @@ package org.flexlb.balance.scheduler.priority;
  *
  * @param requestId      unique request id
  * @param priority       normalized priority (30/40/50/60/70)
- * @param deadlineMs     admission deadline (epoch ms); 0 = unset
  * @param arrivalTimeMs  batcher enqueue timestamp (epoch ms)
  * @param seqLen         prompt sequence length in tokens
  * @param cacheHitTokens cache-hit tokens on the assigned prefill endpoint
@@ -16,7 +15,6 @@ package org.flexlb.balance.scheduler.priority;
 public record QueuedRequestSnapshot(
         long requestId,
         int priority,
-        long deadlineMs,
         long arrivalTimeMs,
         long seqLen,
         long cacheHitTokens,

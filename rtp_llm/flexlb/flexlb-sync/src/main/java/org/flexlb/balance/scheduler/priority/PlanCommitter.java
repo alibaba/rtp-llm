@@ -1,39 +1,16 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 /**
  * Validates and applies an admission plan.
  *
- * <p>Two commit strategies (redesign N3 §3.2/3.3, gray switch
- * {@code autoTpmCommitStrategy}):
- *
- * <p><b>lockfree</b> (default) — the normal placement path carries no
- * optimistic version checks: the decode reservation was already atomically
- * booked inside {@code router.route()} (other reserve/release/calibrate
- * activity cannot invalidate it), and the prefill offer decides queue-full /
- * stopped locally inside the {@code queueLock} critical section. The plan's
- * version fields are retained for observability only (plan age / staleness).
- * {@link CommitResult#VERSION_MISMATCH} is never returned on this path.
- *
- * <p><b>versioned</b> (legacy fallback, kept for one version cycle):
- * <ol>
- *   <li>Re-check the target decode admission version against the value
- *       captured in the plan; a mismatch aborts with
- *       {@link CommitResult#VERSION_MISMATCH} (the caller releases the
- *       decode reservation and retries)</li>
- *   <li>Register the item as inflight, then offer it to the prefill batcher
- *       via {@code WorkerBatcher.offerAtVersion}, which re-checks the prefill
- *       queue version and enqueues in one {@code queueLock} critical section
- *       (task10 P1-4 — no window between version check and enqueue). A stale
- *       queue version undoes the registration and returns
- *       {@link CommitResult#VERSION_MISMATCH}; an offer failure (stopped /
- *       full queue) undoes the registration and returns
- *       {@link CommitResult#OFFER_FAILED} (the caller releases the decode
- *       reservation)</li>
- * </ol>
+ * <p>The decode reservation is already atomically booked by
+ * {@code router.route()}. Commit therefore has one protocol: register the
+ * request as inflight, then let the target worker queue atomically decide
+ * whether it can accept the item. Unrelated queue mutations never invalidate
+ * a valid reservation or force a full route retry.
  */
 @Component
 public class PlanCommitter {
@@ -41,62 +18,28 @@ public class PlanCommitter {
     public enum CommitResult {
         /** Plan applied; item queued on the prefill batcher. */
         SUCCESS,
-        /** Snapshot versions stale; nothing applied (decode reservation still held by caller). */
-        VERSION_MISMATCH,
         /** Offer to prefill batcher failed (stopped/full) or duplicate request id. */
         OFFER_FAILED
     }
 
-    /** Legacy entry point — the versioned (optimistic-concurrency) protocol. */
     public CommitResult commit(NormalPlacementPlan plan, InflightRegistrar registrar) {
-        return commit(plan, registrar, false);
-    }
-
-    public CommitResult commit(NormalPlacementPlan plan, InflightRegistrar registrar,
-                               boolean lockfree) {
         // The production future is PriorityScheduler's request-generation
         // gate. Holding it from registration through queue publication makes
-        // Cancel/deadline linearize either before the whole commit or after
+        // cancellation/expiration linearize either before the whole commit or after
         // the item is externally visible to the batcher.
         synchronized (plan.item().future()) {
             if (!registrar.isAdmissionOpen(
                     plan.item().requestId(), plan.item().future())) {
                 return CommitResult.OFFER_FAILED;
             }
-            if (!lockfree && plan.decodeEp() != null
-                    && plan.decodeEp().admissionVersion() != plan.decodeAdmissionVersion()) {
-                Logger.debug("[auto-tpm] commit version mismatch (decode admission), request_id={}",
-                        plan.envelope().requestId());
-                return CommitResult.VERSION_MISMATCH;
-            }
             if (!registrar.registerInflight(plan.item())) {
-                Logger.warn("[auto-tpm] commit failed: duplicate request_id={}",
+                Logger.warn("[priority-scheduler] commit failed: duplicate request_id={}",
                         plan.envelope().requestId());
                 return CommitResult.OFFER_FAILED;
             }
-            if (lockfree) {
-                // N3 §3.3: no version checks — queue-full/stopped are decided
-                // locally and atomically inside the offer's queueLock section.
-                if (!plan.prefillEp().getBatcher().tryOffer(plan.item())) {
-                    registrar.unregisterInflight(plan.item());
-                    Logger.debug("[auto-tpm] commit offer failed (batcher stopped/full), request_id={}",
-                            plan.envelope().requestId());
-                    return CommitResult.OFFER_FAILED;
-                }
-                return CommitResult.SUCCESS;
-            }
-            // Version check + enqueue in one queueLock critical section.
-            WorkerBatcher.OfferAtVersionResult offer = plan.prefillEp().getBatcher()
-                    .offerAtVersion(plan.item(), plan.prefillQueueVersion());
-            if (offer == WorkerBatcher.OfferAtVersionResult.VERSION_MISMATCH) {
+            if (!plan.prefillEp().getBatcher().tryOffer(plan.item())) {
                 registrar.unregisterInflight(plan.item());
-                Logger.debug("[auto-tpm] commit version mismatch (prefill queue), request_id={}",
-                        plan.envelope().requestId());
-                return CommitResult.VERSION_MISMATCH;
-            }
-            if (offer == WorkerBatcher.OfferAtVersionResult.OFFER_FAILED) {
-                registrar.unregisterInflight(plan.item());
-                Logger.debug("[auto-tpm] commit offer failed (batcher stopped/full), request_id={}",
+                Logger.debug("[priority-scheduler] commit offer failed (batcher stopped/full), request_id={}",
                         plan.envelope().requestId());
                 return CommitResult.OFFER_FAILED;
             }

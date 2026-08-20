@@ -16,7 +16,7 @@ import java.util.List;
 public interface DecisionGroupHandler {
 
     /**
-     * Called when the head item's SLO deadline has expired.
+     * Called when the head request has expired.
      * The scheduler removes it from inflight, rolls back the route, and fails the future.
      */
     void onExpired(BatchItem head);

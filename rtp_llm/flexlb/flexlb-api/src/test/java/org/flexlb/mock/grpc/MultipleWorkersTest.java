@@ -57,14 +57,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
 
     @Override
     protected FlexlbConfig createConfig() {
-        FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchSizeMax(1);        // each request dispatches independently
-        cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
-        cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
-        cfg.setFlexlbInflightTtlMs(300_000L);
-        return cfg;
+        return super.createConfig();
     }
 
     @Test
@@ -82,6 +75,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             boolean useB = routeCounter.getAndIncrement() % 2 == 1;
+            reserveDecode(ctx);
             return buildRouteResponse(ctx.getRequestId(), useB);
         });
 
@@ -96,7 +90,8 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         for (int i = 0; i < requestIds.length; i++) {
             Response resp = futures[i].get(10, TimeUnit.SECONDS);
             assertTrue(resp.isSuccess(),
-                    "Request " + requestIds[i] + " should succeed, got code=" + resp.getCode());
+                    "Request " + requestIds[i] + " should succeed, got code=" + resp.getCode()
+                            + ", error=" + resp.getErrorMessage());
         }
 
         // 5. Verify: worker A received at least 1 EnqueueBatch

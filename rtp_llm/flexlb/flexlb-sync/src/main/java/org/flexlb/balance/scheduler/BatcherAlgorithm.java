@@ -24,43 +24,17 @@ public interface BatcherAlgorithm {
     void processQueue(BatcherContext ctx) throws InterruptedException;
 
     /**
-     * Compute the sort key used to order items in the per-worker
-     * priority queue. Called by {@link WorkerBatcher#offer} before the
-     * item is enqueued; the result is stored via
-     * {@link BatchItem#setSortKey(long)}.
-     *
-     * <p>Different algorithms compute this differently:
-     * <ul>
-     *   <li>SLO-budget: SLO deadline = now + (sloMs - predMs - workerQueueMs)</li>
-     *   <li>Fixed-window: FIFO (arrival timestamp)</li>
-     * </ul>
-     *
-     * <p>The implementation can resolve SLO, predictor coefficients,
-     * and worker queue depth from {@link BatcherContext#cfg()} and
-     * {@link BatcherContext#prefillEp()}.
-     */
-    long computeSortKey(BatcherContext ctx, BatchItem item);
-
-    /**
-     * Hook called by {@link WorkerBatcher#offer} after the sort key is
-     * computed and set. Gives the algorithm a chance to update arrival
-     * statistics or perform lightweight bookkeeping.
+     * Hook called by {@link WorkerBatcher#offer} before enqueue. Gives the
+     * algorithm a chance to update arrival statistics or perform lightweight
+     * bookkeeping.
      */
     default void onOffer(BatcherContext ctx, BatchItem item, long nowMs) {
     }
 
     /**
-     * Estimated time a new request would wait before its batch is dispatched.
-     * Deadline-based algorithms can use the head sort key directly; algorithms
-     * with different dispatch semantics should override this method.
+     * Estimated time a new request would wait before its configured dispatch.
      */
-    default long queueWaitMs(BatcherContext ctx) {
-        BatchItem head = ctx.peek();
-        if (head == null) {
-            return 0;
-        }
-        return Math.max(0, head.sortKey() - ctx.now());
-    }
+    long queueWaitMs(BatcherContext ctx);
 
     /**
      * Hook called by {@link WorkerBatcher#shutdown} before the queue is drained.

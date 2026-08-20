@@ -8,9 +8,9 @@ import java.util.concurrent.CompletableFuture;
  * Explicit no-op {@link EngineCancelChannel} for tests and isolated callers
  * that intentionally do not provide an engine Cancel transport. It is not a
  * Spring component: production always wires {@link GrpcEngineCancelChannel},
- * while the accepted-eviction business gate
- * ({@code autoTpmDecodeAcceptedEvictEnabled && channel.isSupported(...)})
- * controls whether the planner may invoke the injected transport. No fake gRPC stub —
+ * while {@code preemption.allowedVictimStages=DECODE_ENGINE_OWNED} and
+ * {@code channel.isSupported(...)} together control whether the planner may
+ * invoke the injected transport. No fake gRPC stub —
  * {@link #cancel} only reports the unsupported branch defensively in case it
  * is ever reached despite the planning gate.
  */

@@ -30,7 +30,7 @@ import java.util.concurrent.CompletableFuture;
  *   <li>the property name carries the {@code test.mock} prefix,</li>
  *   <li>{@link #logTestOnlyWarning()} shouts at startup,</li>
  *   <li>even if misconfigured, planning still requires the
- *       {@code AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED} gate (EvictionPlanner
+ *       {@code preemption.allowedVictimStages=DECODE_ENGINE_OWNED} gate (EvictionPlanner
  *       business gate).</li>
  * </ol>
  *

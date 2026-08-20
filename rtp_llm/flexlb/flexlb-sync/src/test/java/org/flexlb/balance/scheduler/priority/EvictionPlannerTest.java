@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -16,16 +15,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Phase 3 tests for the pure {@link EvictionPlanner} (design doc 9.1-9.4):
  * strictly-lower-priority candidates only, candidate preference order,
- * deficit/feasibility rules and the anti-inversion cache benefit bound.
+ * deficit/feasibility rules and deterministic plan ordering.
  */
 class EvictionPlannerTest {
 
-    private FlexlbConfig config;
     private Map<String, String> failures;
 
     @BeforeEach
     void setUp() {
-        config = new FlexlbConfig();
         failures = new HashMap<>();
     }
 
@@ -35,49 +32,48 @@ class EvictionPlannerTest {
     void full_queue_evicts_the_lowest_priority_candidate_first() {
         long now = System.currentTimeMillis();
         PrefillQueueSnapshot queue = queue("ep1", 3,
-                snap(1, 50, now + 1_000, now),
-                snap(2, 30, now + 2_000, now),
-                snap(3, 50, now + 3_000, now));
+                snap(1, 50, now),
+                snap(2, 30, now),
+                snap(3, 50, now));
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(queue), Map.of(), config, failures);
+                envelope(9, 70), List.of(queue), failures);
 
         assertNotNull(proposal);
         assertEquals(1, proposal.victims().size());
         assertEquals(2L, proposal.victims().get(0).requestId());
         assertEquals(PriorityCostFunction.f(30), proposal.rawCost());
-        assertEquals(proposal.rawCost(), proposal.netCost());
     }
 
     @Test
     void equal_priority_never_yields() {
         long now = System.currentTimeMillis();
         PrefillQueueSnapshot queue = queue("ep1", 3,
-                snap(1, 50, now + 1_000, now),
-                snap(2, 60, now + 2_000, now),
-                snap(3, 70, now + 3_000, now));
+                snap(1, 50, now),
+                snap(2, 60, now),
+                snap(3, 70, now));
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 50), List.of(queue), Map.of(), config, failures);
+                envelope(9, 50), List.of(queue), failures);
 
         assertNull(proposal);
         assertEquals("insufficient_lower_priority_candidates", failures.get("ep1"));
     }
 
     @Test
-    void same_priority_candidates_prefer_later_deadline_then_newer_arrival() {
+    void same_priority_candidates_prefer_newer_arrival() {
         long now = System.currentTimeMillis();
-        // All victims P30; deadline desc first, then arrival desc
+        // All victims P30; newest arrival is evicted first.
         PrefillQueueSnapshot queue = queue("ep1", 3,
-                snap(1, 30, now + 1_000, now),
-                snap(2, 30, now + 9_000, now),
-                snap(3, 30, now + 9_000, now + 500));
+                snap(1, 30, now),
+                snap(2, 30, now + 100),
+                snap(3, 30, now + 500));
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(queue), Map.of(), config, failures);
+                envelope(9, 70), List.of(queue), failures);
 
         assertNotNull(proposal);
-        // Latest deadline (more slack) wins; among equals the newest arrival
+        // Newest arrival wins once priority is equal.
         assertEquals(List.of(3L),
                 proposal.victims().stream().map(QueuedRequestSnapshot::requestId).toList());
     }
@@ -87,16 +83,16 @@ class EvictionPlannerTest {
         long now = System.currentTimeMillis();
         // 4 queued + 1 incoming vs capacity 3 -> deficit 2
         PrefillQueueSnapshot queue = queue("ep1", 3,
-                snap(1, 30, now + 1_000, now),
-                snap(2, 40, now + 1_000, now),
-                snap(3, 50, now + 1_000, now),
-                snap(4, 30, now + 5_000, now));
+                snap(1, 30, now),
+                snap(2, 40, now),
+                snap(3, 50, now),
+                snap(4, 30, now + 500));
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(queue), Map.of(), config, failures);
+                envelope(9, 70), List.of(queue), failures);
 
         assertNotNull(proposal);
-        // Both P30s go before the P40: later deadline first among the P30s
+        // Both P30s go before the P40: newest arrival first among the P30s.
         assertEquals(List.of(4L, 1L),
                 proposal.victims().stream().map(QueuedRequestSnapshot::requestId).toList());
         assertEquals(2 * PriorityCostFunction.f(30), proposal.rawCost());
@@ -110,11 +106,11 @@ class EvictionPlannerTest {
         // Queue full of legacy (no-priority) items: none may be evicted even
         // though 0 < envelope.priority numerically.
         PrefillQueueSnapshot queue = queue("ep1", 2,
-                snap(1, 0, 0, now),
-                snap(2, 0, 0, now));
+                snap(1, 0, now),
+                snap(2, 0, now));
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(queue), Map.of(), config, failures);
+                envelope(9, 70), List.of(queue), failures);
 
         assertNull(proposal);
         assertEquals("insufficient_lower_priority_candidates", failures.get("ep1"));
@@ -124,11 +120,11 @@ class EvictionPlannerTest {
     void mixed_queue_only_evicts_priority_carrying_candidates() {
         long now = System.currentTimeMillis();
         PrefillQueueSnapshot queue = queue("ep1", 2,
-                snap(1, 0, 0, now),
-                snap(2, 30, now + 2_000, now));
+                snap(1, 0, now),
+                snap(2, 30, now));
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(queue), Map.of(), config, failures);
+                envelope(9, 70), List.of(queue), failures);
 
         assertNotNull(proposal);
         assertEquals(List.of(2L),
@@ -141,14 +137,14 @@ class EvictionPlannerTest {
     void not_full_or_unbounded_queue_is_infeasible() {
         long now = System.currentTimeMillis();
 
-        PrefillQueueSnapshot notFull = queue("ep1", 5, snap(1, 30, now + 1_000, now));
+        PrefillQueueSnapshot notFull = queue("ep1", 5, snap(1, 30, now));
         assertNull(EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(notFull), Map.of(), config, failures));
+                envelope(9, 70), List.of(notFull), failures));
         assertEquals("queue_not_full", failures.get("ep1"));
 
-        PrefillQueueSnapshot unbounded = queue("ep2", 0, snap(2, 30, now + 1_000, now));
+        PrefillQueueSnapshot unbounded = queue("ep2", 0, snap(2, 30, now));
         assertNull(EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(unbounded), Map.of(), config, failures));
+                envelope(9, 70), List.of(unbounded), failures));
         assertEquals("queue_unbounded", failures.get("ep2"));
     }
 
@@ -159,12 +155,12 @@ class EvictionPlannerTest {
         // victim cap: feasibility is determined only by eligible capacity.
         QueuedRequestSnapshot[] items = new QueuedRequestSnapshot[10];
         for (int i = 0; i < items.length; i++) {
-            items[i] = snap(i + 1, 30, now + (i + 1) * 1_000L, now);
+            items[i] = snap(i + 1, 30, now + i);
         }
         PrefillQueueSnapshot queue = queue("ep1", 1, items);
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(99, 70), List.of(queue), Map.of(), config, failures);
+                envelope(99, 70), List.of(queue), failures);
 
         assertNotNull(proposal);
         assertEquals(10, proposal.victims().size());
@@ -179,63 +175,19 @@ class EvictionPlannerTest {
         // P30 victims because no amount of lower-priority harm may spill into P40.
         QueuedRequestSnapshot[] lowerPriorityItems = new QueuedRequestSnapshot[1_025];
         for (int i = 0; i < lowerPriorityItems.length; i++) {
-            lowerPriorityItems[i] = snap(i + 1, 30, now + i, now);
+            lowerPriorityItems[i] = snap(i + 1, 30, now + i);
         }
         PrefillQueueSnapshot manyP30 = queue("many-p30", 1, lowerPriorityItems);
         PrefillQueueSnapshot oneP40 = queue("one-p40", 1,
-                snap(2_000, 40, now + 1_000, now));
+                snap(2_000, 40, now));
 
         PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(3_000, 70), List.of(oneP40, manyP30),
-                Map.of(), config, failures);
+                envelope(3_000, 70), List.of(oneP40, manyP30), failures);
 
         assertNotNull(proposal);
         assertEquals("many-p30", proposal.endpointId());
         assertEquals(1_025, proposal.victims().size());
         assertTrue(proposal.rawCost() > PriorityCostFunction.f(40));
-    }
-
-    // ==================== cache benefit bound (anti-inversion) ====================
-
-    @Test
-    void bounded_cache_benefit_cannot_reverse_the_priority_boundary() {
-        config.setAutoTpmPlanCacheHitBenefitCap(1_000_000);
-        long now = System.currentTimeMillis();
-        // epA would evict a P40 (rawCost 1024) but has a huge cache benefit;
-        // epB evicts a P30 (rawCost 1) with no benefit.
-        PrefillQueueSnapshot cached = queue("epA", 1, snap(1, 40, now + 1_000, now));
-        PrefillQueueSnapshot uncached = queue("epB", 1, snap(2, 30, now + 1_000, now));
-
-        PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(cached, uncached),
-                Map.of("epA", 1_000_000L), config, failures);
-
-        assertNotNull(proposal);
-        // Benefit is clamped to MIN_ADJACENT_GAP / 2 = 511, so
-        // netCost(epA) = 1024 - 511 = 513 > netCost(epB) = 1
-        assertEquals("epB", proposal.endpointId());
-        assertEquals(1, proposal.netCost());
-
-        PrefillEvictionProposal cachedOnly = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(cached), Map.of("epA", 1_000_000L), config, failures);
-        assertNotNull(cachedOnly);
-        assertEquals(PriorityCostFunction.MIN_ADJACENT_GAP / 2, cachedOnly.boundedCacheBenefit());
-        assertEquals(PriorityCostFunction.f(40) - PriorityCostFunction.MIN_ADJACENT_GAP / 2,
-                cachedOnly.netCost());
-        assertTrue(cachedOnly.netCost() > PriorityCostFunction.f(30));
-    }
-
-    @Test
-    void cache_benefit_defaults_to_zero_when_cap_is_unset() {
-        long now = System.currentTimeMillis();
-        PrefillQueueSnapshot queue = queue("ep1", 1, snap(1, 30, now + 1_000, now));
-
-        PrefillEvictionProposal proposal = EvictionPlanner.planPrefillQueue(
-                envelope(9, 70), List.of(queue), Map.of("ep1", 1_000_000L), config, failures);
-
-        assertNotNull(proposal);
-        assertEquals(0, proposal.boundedCacheBenefit());
-        assertEquals(proposal.rawCost(), proposal.netCost());
     }
 
     // ==================== helpers ====================
@@ -246,14 +198,14 @@ class EvictionPlannerTest {
     }
 
     private static QueuedRequestSnapshot snap(long requestId, int priority,
-                                              long deadlineMs, long arrivalMs) {
-        return new QueuedRequestSnapshot(requestId, priority, deadlineMs, arrivalMs,
+                                              long arrivalMs) {
+        return new QueuedRequestSnapshot(requestId, priority, arrivalMs,
                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
     }
 
     private static PriorityRequestEnvelope envelope(long requestId, int priority) {
         long now = System.currentTimeMillis();
         return new PriorityRequestEnvelope(requestId, priority, 128, 8,
-                now, 60_000, now + 60_000, 128, 136);
+                now, 128, 136);
     }
 }

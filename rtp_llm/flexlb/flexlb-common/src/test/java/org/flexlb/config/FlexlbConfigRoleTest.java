@@ -1,5 +1,8 @@
 package org.flexlb.config;
 
+import org.flexlb.config.RoutingConfig.LeastRecentlyUsedInPoolConfig;
+import org.flexlb.config.RoutingConfig.RandomDecodeSelectorConfig;
+import org.flexlb.config.RoutingConfig.RandomPrefillSelectorConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.junit.jupiter.api.Test;
@@ -9,45 +12,71 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class FlexlbConfigRoleTest {
 
     @Test
-    void should_define_strategy_for_supported_worker_roles() {
+    void maps_role_selectors_to_current_router_implementations() {
         FlexlbConfig config = new FlexlbConfig();
 
         assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL,
-                config.getStrategyForRoleType(RoleType.PREFILL));
+                config.strategyFor(RoleType.PREFILL));
+        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL,
+                config.strategyFor(RoleType.PDFUSION));
         assertEquals(LoadBalanceStrategyEnum.COST_BASED_DECODE,
-                config.getStrategyForRoleType(RoleType.DECODE));
-        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL,
-                config.getStrategyForRoleType(RoleType.PDFUSION));
+                config.strategyFor(RoleType.DECODE));
         assertEquals(LoadBalanceStrategyEnum.RANDOM,
-                config.getStrategyForRoleType(RoleType.VIT));
+                config.strategyFor(RoleType.VIT));
+
+        config.getRouter().getRoles().getPrefill()
+                .setSelector(new RandomPrefillSelectorConfig());
+        config.getRouter().getRoles().getDecode()
+                .setSelector(new RandomDecodeSelectorConfig());
+        assertEquals(LoadBalanceStrategyEnum.RANDOM,
+                config.strategyFor(RoleType.PREFILL));
+        assertEquals(LoadBalanceStrategyEnum.RANDOM,
+                config.strategyFor(RoleType.DECODE));
     }
 
     @Test
-    void should_not_clamp_max_new_tokens_when_cap_is_zero() {
+    void pdfusion_reuses_prefill_configuration() {
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                new RoutingConfig.EstimatedTtftSelectorConfig();
+        selector.setCandidateChoice(new LeastRecentlyUsedInPoolConfig());
         FlexlbConfig config = new FlexlbConfig();
-        config.setMaxNewTokensCap(0L);
-        // cap = 0 means no clamping
-        assertEquals(393216L, config.effectiveMaxNewTokensForReservation(393216L));
-        assertEquals(0L, config.effectiveMaxNewTokensForReservation(0L));
+        config.getRouter().getRoles().getPrefill().setSelector(selector);
+
+        assertEquals(LoadBalanceStrategyEnum.SHORTEST_TTFT,
+                config.strategyFor(RoleType.PREFILL));
+        assertEquals(LoadBalanceStrategyEnum.SHORTEST_TTFT,
+                config.strategyFor(RoleType.PDFUSION));
     }
 
     @Test
-    void should_apply_default_cap_of_1000() {
+    void output_token_reservation_uses_absence_for_no_cap() {
         FlexlbConfig config = new FlexlbConfig();
-        // default cap = 1000 based on actual generation distribution
-        assertEquals(1000L, config.effectiveMaxNewTokensForReservation(393216L));
-        assertEquals(500L, config.effectiveMaxNewTokensForReservation(500L));
+        assertEquals(1000L, config.effectiveMaxOutputTokensForReservation(393216L));
+        assertEquals(500L, config.effectiveMaxOutputTokensForReservation(500L));
+
+        config.getRouter().getRoles().getDecode().getKvReservation()
+                .setMaxOutputTokensForEstimate(8192L);
+        assertEquals(8192L, config.effectiveMaxOutputTokensForReservation(393216L));
+
+        config.getRouter().getRoles().getDecode().getKvReservation()
+                .setMaxOutputTokensForEstimate(null);
+        assertEquals(393216L,
+                config.effectiveMaxOutputTokensForReservation(393216L));
     }
 
     @Test
-    void should_clamp_max_new_tokens_when_cap_is_positive() {
+    void decode_reservation_is_non_negative_saturating_and_capacity_capped() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setMaxNewTokensCap(8192L);
-        // declared exceeds cap → clamped to cap
-        assertEquals(8192L, config.effectiveMaxNewTokensForReservation(393216L));
-        // declared below cap → unchanged
-        assertEquals(100L, config.effectiveMaxNewTokensForReservation(100L));
-        // declared equals cap → unchanged
-        assertEquals(8192L, config.effectiveMaxNewTokensForReservation(8192L));
+
+        assertEquals(1500L, config.decodeKvReservationTokens(500L, 10_000L, 0L));
+        assertEquals(1200L, config.decodeKvReservationTokens(500L, 10_000L, 1200L));
+        assertEquals(0L, config.decodeKvReservationTokens(-1L, -1L, 0L));
+
+        config.getRouter().getRoles().getDecode().getKvReservation()
+                .setMaxOutputTokensForEstimate(null);
+        assertEquals(Long.MAX_VALUE, config.decodeKvReservationTokens(
+                Long.MAX_VALUE - 10L, 100L, 0L));
+        assertEquals(4096L, config.decodeKvReservationTokens(
+                Long.MAX_VALUE - 10L, 100L, 4096L));
     }
 }

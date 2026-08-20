@@ -1,7 +1,7 @@
 package org.flexlb.httpserver;
 
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 
@@ -44,10 +44,10 @@ class ServerScheduleLatencyRecorderTest {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
 
-        // Budget-carried priorities (Auto-TPM path)
-        recorder.recordCompletion(contextWithBatchWait(end, 5, budget(40)), end);
-        recorder.recordCompletion(contextWithBatchWait(end, 10, budget(50)), end);
-        // Legacy path: priority carried on the request only (budget == null)
+        // Scheduling-metadata priorities (PRIORITY path)
+        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(50)), end);
+        // Fallback path: priority carried on the request only (metadata == null)
         BalanceContext legacy = contextWithBatchWait(end, 20, null);
         Request request = new Request();
         request.setPriority(70);
@@ -73,7 +73,7 @@ class ServerScheduleLatencyRecorderTest {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
 
-        // Neither budget nor request present
+        // Neither scheduling metadata nor request present
         recorder.recordCompletion(contextWithBatchWait(end, 5, null), end);
         // Request present but priority unset (proto3 default 0)
         BalanceContext unset = contextWithBatchWait(end, 7, null);
@@ -92,8 +92,8 @@ class ServerScheduleLatencyRecorderTest {
 
         long end = System.nanoTime();
         // Record higher priority first to verify ascending output order
-        recorder.recordCompletion(contextWithBatchWait(end, 10, budget(50)), end);
-        recorder.recordCompletion(contextWithBatchWait(end, 5, budget(40)), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 10, metadata(50)), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)), end);
 
         assertEquals(" batch_wait_p95_prio40_ms=5 batch_wait_p95_prio50_ms=10",
                 recorder.batchWaitPriorityLogSuffix());
@@ -104,7 +104,7 @@ class ServerScheduleLatencyRecorderTest {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();
         recorder.recordArrival(end);
-        recorder.recordCompletion(contextWithBatchWait(end, 5, budget(40)), end);
+        recorder.recordCompletion(contextWithBatchWait(end, 5, metadata(40)), end);
         recorder.reset();
 
         Map<String, Object> snapshot = recorder.snapshot();
@@ -114,19 +114,22 @@ class ServerScheduleLatencyRecorderTest {
         assertEquals("", recorder.batchWaitPriorityLogSuffix());
     }
 
-    private static ScheduleBudget budget(int priority) {
+    private static SchedulingMetadata metadata(int priority) {
         long now = System.currentTimeMillis();
-        return ScheduleBudget.forDeadline(priority, now, now + 1000);
+        return SchedulingMetadata.explicit(priority, now + 1000);
     }
 
-    private static BalanceContext contextWithBatchWait(long end, long batchWaitMs, ScheduleBudget budget) {
+    private static BalanceContext contextWithBatchWait(
+            long end,
+            long batchWaitMs,
+            SchedulingMetadata metadata) {
         BalanceContext context = new BalanceContext();
         context.setGrpcEntryNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 10));
         context.setServiceStartNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 8));
         context.setRouteSubmittedNanos(end - TimeUnit.MILLISECONDS.toNanos(batchWaitMs + 5));
         context.setBatchDispatchedNanos(end - TimeUnit.MILLISECONDS.toNanos(5));
         context.setAckAtNanos(end - TimeUnit.MILLISECONDS.toNanos(2));
-        context.setBudget(budget);
+        context.setSchedulingMetadata(metadata);
         return context;
     }
 

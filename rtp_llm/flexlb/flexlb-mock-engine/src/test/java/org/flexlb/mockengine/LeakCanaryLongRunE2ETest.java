@@ -1,5 +1,6 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -35,18 +36,22 @@ class LeakCanaryLongRunE2ETest {
     @Test
     @Timeout(115)
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, false)) {
-            h.config.setAutoTpmPrefillQueueEvictEnabled(true);
+        // Use the mock's authoritative Cancel channel. An unsupported channel
+        // intentionally retains post-delivery ambiguous ownership behind an
+        // EngineFence, which is a production safety property rather than a leak.
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
+            h.allowPreemption(VictimStage.PREFILL_QUEUED);
             // PR-D: rescue removed — reducer deadline + AdmissionLease handle expiry
             // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
-            h.config.setFlexlbBatchQueueMaxSize(64);
-            h.config.setFlexlbBatchSizeMax(4);
-            h.config.setFlexlbBatchFixedWaitMs(5);
+            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(64);
+            h.config.batchDispatcher().setMaxRequests(4);
+            h.config.batchDispatcher().setMaxCollectionWaitMs(5);
             // This canary verifies queue eviction and the two injected
             // EnqueueBatch fault windows. Keep the independent post-success
             // backpressure gate out of the way, otherwise it can reject the
             // whole tail as 8431 before the injected 8510 path is exercised.
-            h.config.setAutoTpmPostSuccessBackpressureLimit(0);
+            h.config.queueScheduler().getLifecycle()
+                    .setMaxDeliveredNotAcceptedRequestsGlobal(0);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
             h.startAutoPump(10);
 
@@ -90,11 +95,9 @@ class LeakCanaryLongRunE2ETest {
 
             // 终态码只允许落在已知集合内
             Map<Integer, Integer> codeTally = new TreeMap<>();
-            Map<Long, Integer> codeByRid = new java.util.HashMap<>();
             for (int i = 0; i < futures.size(); i++) {
                 Response response = futures.get(i).get(1, TimeUnit.SECONDS);
                 int code = response.isSuccess() ? 200 : response.getCode();
-                codeByRid.put(100_000L + i, code);
                 codeTally.merge(code, 1, Integer::sum);
                 assertTrue(code == 200 || code == 8400 || code == 8429
                                 || code == 8430 || code == 8431
@@ -114,28 +117,8 @@ class LeakCanaryLongRunE2ETest {
                         "LEAK on engine " + svc.getGrpcPort());
             }
 
-            // 调度器账目归零。
-            // 已知 mock 缺陷（只报不修，见报告）：JavaMockEngineCluster.recordCompletion
-            // 先 incrementAndGet 版本号、后 completions.add —— 并发 getWorkerStatus
-            // 可能宣告一个尚未入队的 latestFinishedVersion，令泵的游标跳过该完成
-            // 记录，对应 decode 影子预留永远等不到 finished 上报。生产环境由
-            // EndpointRegistry 的周期性 TTL 清扫兜底（evictExpiredAll @Scheduled），
-            // harness 不跑 Spring 调度，这里等价地手工执行一轮 TTL 清扫。
-            java.util.Set<Long> lostReports =
-                    new java.util.HashSet<>(h.decodeEndpoint(0).reservedView().keySet());
-            for (long lostRid : lostReports) {
-                System.out.printf("[task35-D] finished-report lost by mock race: "
-                        + "rid=%d terminal=%s (settled via production TTL sweep)%n",
-                        lostRid, codeByRid.get(lostRid));
-            }
-            assertTrue(lostReports.size() <= Math.max(5, futures.size() / 500),
-                    "lost finished reports must stay rare (mock race), got " + lostReports.size());
-            // We have already waited 2.5s after all public futures and all
-            // engines drained. Use a strictly smaller TTL so the cleanup is
-            // deterministic even when the lost completion belongs to the
-            // very last submitted request.
-            h.decodeEndpoint(0).evictExpiredRequests(2_000);
-
+            // 调度器账目必须由 finished 上报正常收敛，不依赖 TTL 清扫
+            // 掩盖完成游标丢记录。
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");
             assertEquals(0L, h.decodeEndpoint(0).inflightHardKvReserved(),

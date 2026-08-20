@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
@@ -10,9 +12,8 @@ import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -55,9 +56,8 @@ import static org.mockito.Mockito.when;
  * {@link PriorityAdmissionScheduler} wired through
  * {@link PriorityScheduler#submit}: higher priority evicts strictly lower
  * priority on a full queue (the queued victim yields with the retryable
- * NO_AVAILABLE_WORKER, contract 5.3), equal priority never yields, the gate
- * keeps the legacy retry path, victim termination is idempotent, and Auto-TPM
- * never silently drops an expired head (design doc 8.3, 9.1-9.5, 17.2-17.3).
+ * NO_AVAILABLE_WORKER, contract 5.3), equal priority never yields, admission
+ * retries remain fenced, and victim termination is idempotent.
  */
 class PriorityEvictionSchedulerTest {
 
@@ -84,16 +84,13 @@ class PriorityEvictionSchedulerTest {
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        config.setScheduleWorkerSize(1);
         // Large batch + window + SLO keep queued items parked (no dispatch),
         // so eviction races with neither dispatch nor expiry.
-        config.setFlexlbBatchSizeMax(100);
-        config.setFlexlbBatchWindowMs(10_000);
-        config.setCostSloMs(50_000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setAutoTpmEnabled(true);
-        config.setAutoTpmPrefillQueueEvictEnabled(true);
-        config.setFlexlbBatchQueueMaxSize(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // Route reserves the decode (D reserve first), like production Router
@@ -114,11 +111,10 @@ class PriorityEvictionSchedulerTest {
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
-                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel());
         scheduler = new PriorityScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+                endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                new UnsupportedEngineCancelChannel());
 
         WorkerStatus prefillWs = new WorkerStatus();
         prefillWs.setIp("10.0.0.1");
@@ -179,11 +175,11 @@ class PriorityEvictionSchedulerTest {
 
         // Admit two victims, then lower the live hard limit so the next
         // request must atomically replace both of them.
-        config.setFlexlbBatchQueueMaxSize(2);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(2);
         CompletableFuture<Response> firstVictim = scheduler.submit(context(3, 20));
         CompletableFuture<Response> secondVictim = scheduler.submit(context(4, 30));
         await(() -> batcher.queueSize() == 2);
-        config.setFlexlbBatchQueueMaxSize(1);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
 
         doThrow(new IllegalStateException("victim metrics unavailable"))
                 .doNothing()
@@ -245,11 +241,11 @@ class PriorityEvictionSchedulerTest {
         await(() -> decodeEp.getInflightCount() == 1);
     }
 
-    // ==================== gate off: legacy retry-exhausted path ====================
+    // ==================== preemption disabled ====================
 
     @Test
     void evict_switch_off_never_plans_and_fast_rejects_on_capacity() throws Exception {
-        config.setAutoTpmPrefillQueueEvictEnabled(false);
+        SchedulingTestConfig.disallowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
@@ -262,8 +258,8 @@ class PriorityEvictionSchedulerTest {
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
         assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
-        // N3 §3.3 (default lockfree): a capacity failure is not transient —
-        // primary + one fallback offer, then typed resource exhaustion.
+        // A capacity failure is not transient: primary + one fallback offer,
+        // then typed resource exhaustion.
         assertTrue(response.getErrorMessage().contains("admission capacity is temporarily exhausted"),
                 "expected resource-exhaustion detail, got: " + response.getErrorMessage());
         // 1 victim route + primary + one fallback re-route for the incoming
@@ -321,22 +317,6 @@ class PriorityEvictionSchedulerTest {
         assertEquals(0, decodeEp.getTotalLoad());
     }
 
-    // ==================== 8.3: never a silent drop ====================
-
-    @Test
-    void expired_head_is_dispatched_not_dropped_when_auto_tpm_enabled() throws Exception {
-        // Legacy would drop the head as deadline_expired with this SLO;
-        // Auto-TPM must instead dispatch it via the deadline guard.
-        config.setCostSloMs(1L);
-        config.setFlexlbBatchSizeMax(2);
-
-        Response response = scheduler.submit(context(61, 50)).get(2, TimeUnit.SECONDS);
-
-        assertTrue(response.isSuccess());
-        assertTrue(response.isEnqueuedByMaster());
-        assertEquals(1, sentBatches.size());
-    }
-
     // ==================== helpers ====================
 
     private static void await(BooleanSupplier condition) throws InterruptedException {
@@ -386,9 +366,9 @@ class PriorityEvictionSchedulerTest {
         ctx.setRequest(request);
         ctx.setConfig(new FlexlbConfig());
         ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
-        // Mirror production admission: set a ScheduleBudget so that
-        // item.priority() / item.deadlineMs() delegate correctly.
-        ctx.setBudget(ScheduleBudget.forDeadline(priority, ctx.getStartTime(), ctx.getStartTime() + 30_000));
+        // Mirror production admission: bind normalized priority and expiry once.
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
+                priority, ctx.getStartTime() + 30_000));
         return ctx;
     }
 

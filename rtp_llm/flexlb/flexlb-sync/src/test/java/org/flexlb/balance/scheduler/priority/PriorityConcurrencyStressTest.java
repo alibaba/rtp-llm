@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -8,7 +10,6 @@ import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -286,19 +287,16 @@ class PriorityConcurrencyStressTest {
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
             PrioritySchedulerReporter priorityReporter = mock(PrioritySchedulerReporter.class);
 
-            config.setScheduleWorkerSize(1);
             // 快速 dispatch 制造 accepted 流转；小队列制造 queue-full 驱逐竞争
-            config.setFlexlbBatchSizeMax(4);
-            config.setFlexlbBatchFixedWaitMs(10);
-            config.setFlexlbBatchQueueMaxSize(16);
-            config.setCostSloMs(50_000L);
-            config.setCostSloRiskMarginMs(50L);
-            config.setAutoTpmEnabled(true);
-            config.setAutoTpmPrefillQueueEvictEnabled(true);
-            config.setAutoTpmDecodeReservedEvictEnabled(true);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(4);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(16);
+            SchedulingTestConfig.usePriorityQueue(config);
+            SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+            SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
             // PR-D: rescue removed — orTimeout on submit() handles stuck requests
             // 有限 decode 槽位：并发下持续触发 slot-full 仲裁
-            config.setDecodeConcurrencyLimit(6);
+            config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (6));
             when(configService.loadBalanceConfig()).thenReturn(config);
 
             when(router.route(any(BalanceContext.class)))
@@ -311,8 +309,6 @@ class PriorityConcurrencyStressTest {
             dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
             priorityScheduler = new PriorityAdmissionScheduler(
                     configService, router, endpointRegistry, new PlanCommitter(),
-                    new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                            PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                     priorityReporter, reporter, new UnsupportedEngineCancelChannel()) {
                 @Override
                 protected ServerStatus selectPrefillForDecodeEviction(BalanceContext ctx,
@@ -322,7 +318,8 @@ class PriorityConcurrencyStressTest {
                 }
             };
             scheduler = new PriorityScheduler(configService, router,
-                    endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+                    endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                    new UnsupportedEngineCancelChannel());
 
             registerPrefill(PREFILL_IP_PORT, "10.0.0.1");
             registerPrefill(PREFILL2_IP_PORT, "10.0.0.3");
@@ -372,10 +369,10 @@ class PriorityConcurrencyStressTest {
         /** 容量感知 route 替身：镜像生产 decode 硬过滤 + 带优先级的影子预留。 */
         private Response routeAnswer(BalanceContext ctx) {
             DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-            if (decodeEp.getTotalLoad() + 1 > config.getDecodeConcurrencyLimit()) {
+            if (decodeEp.getTotalLoad() + 1 > config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests()) {
                 return Response.error(StrategyErrorType.NO_DECODE_WORKER);
             }
-            decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority(), ctx.getDeadlineMs());
+            decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority());
             return successRoute(ctx.getRequestId());
         }
 

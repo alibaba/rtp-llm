@@ -32,10 +32,10 @@ public class ChannelConfiguration {
     @Bean
     public ThreadPoolExecutor managedChannelThreadPoolExecutor() {
         return new ThreadPoolExecutor(
-                config.getGrpcClientExecutorCoreSize(),
-                config.getGrpcClientExecutorMaxSize(),
+                config.getInternalRuntime().getGrpcClientExecutorThreads(),
+                config.getInternalRuntime().getGrpcClientExecutorThreads(),
                 5, TimeUnit.MINUTES,
-                new LinkedBlockingQueue<>(config.getGrpcClientExecutorQueueSize()),
+                new LinkedBlockingQueue<>(config.getInternalRuntime().getGrpcClientExecutorQueueCapacity()),
                 new NamedThreadFactory("engine-grpc-client-executor")
         );
     }
@@ -64,7 +64,7 @@ public class ChannelConfiguration {
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
         return new NioEventLoopGroup(
-                config.getGrpcClientEventLoopThreads(),
+                config.getInternalRuntime().getGrpcClientEventLoopThreads(),
                 null,
                 DefaultEventExecutorChooserFactory.INSTANCE,
                 SelectorProvider.provider(),
@@ -77,7 +77,7 @@ public class ChannelConfiguration {
     @Bean(destroyMethod = "")
     public EventLoopGroup grpcServerEventLoopGroup() {
         return new NioEventLoopGroup(
-                config.getGrpcServerWorkerEventLoopThreads(),
+                config.getInternalRuntime().getGrpcServerWorkerEventLoopThreads(),
                 new DefaultThreadFactory("grpc-server-elg")
         );
     }

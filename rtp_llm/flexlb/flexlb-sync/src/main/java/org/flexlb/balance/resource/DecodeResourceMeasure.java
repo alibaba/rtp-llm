@@ -29,11 +29,16 @@ public class DecodeResourceMeasure implements ResourceMeasure {
 
     public DecodeResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
-        this.availableThreshold = config.getDecodeAvailableMemoryThreshold();
-        this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
-        this.fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
-        this.stopThreshold = config.getDecodeStopThreshold();
-        this.concurrencyLimit = config.getDecodeConcurrencyLimit();
+        this.availableThreshold = config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxKvUsagePercent();
+        this.hysteresisBiasPercent = config.getRouter().getAvailabilityHysteresisPercent();
+        this.fullSpeedThreshold = config.getInternalRuntime()
+                .getDecodeFullSpeedBelowKvUsagePercent();
+        this.stopThreshold = config.getInternalRuntime()
+                .getDecodeSaturatedAtKvUsagePercent();
+        Long configuredLimit = config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxEngineRequests();
+        this.concurrencyLimit = configuredLimit == null ? 0 : configuredLimit;
     }
 
     @Override

@@ -25,8 +25,8 @@ import java.util.Map;
  * every dispatched request times out on a dead endpoint, the request is
  * retried onto another stale entry, and the cycle amplifies until the entire
  * decode fleet appears saturated. This component is the backstop that breaks
- * the cycle — once a worker's last report is older than {@code workerTimeoutMs}
- * (default 15 s = 3× the 5 s gRPC sync timeout), the entry is removed from both
+ * the cycle — once a worker's last report is older than
+ * {@code workerRegistry.health.statusStaleAfterMs}, the entry is removed from both
  * {@link EngineWorkerStatus} and {@link EndpointRegistry}, forcing the
  * scheduler to rediscover live workers on the next sync round.
  *
@@ -50,29 +50,14 @@ public class ExpirationCleaner {
     /**
      * Resolve the worker expiration timeout in microseconds.
      *
-     * <p>Priority:
-     * <ol>
-     *   <li>Legacy env var {@code WORKER_TIMEOUT_US} (microseconds) — backward compat,
-     *       honored if explicitly set to a valid value.</li>
-     *   <li>FlexlbConfig {@code workerTimeoutMs} (milliseconds, default 15000) —
-     *       converted to microseconds. Overridable via env {@code WORKER_TIMEOUT_MS}.</li>
-     * </ol>
-     * The default 15 s is 3× the gRPC sync timeout (5 s), eliminating the race
+     * <p>The worker registry owns this timeout. It is configured in milliseconds
+     * and converted to the monotonic microsecond clock used by WorkerStatus.
+     * The default 10 s is 2× the gRPC sync timeout (5 s), eliminating the race
      * where a transient gRPC delay causes the cleaner to evict a still-alive endpoint.
      */
     private static long resolveWorkerTimeoutUs(ConfigService configService) {
-        long configMs = configService.loadBalanceConfig().getWorkerTimeoutMs();
-        String legacy = System.getenv("WORKER_TIMEOUT_US");
-        if (legacy != null && !legacy.trim().isEmpty()) {
-            try {
-                long legacyUs = Long.parseLong(legacy.trim());
-                logger.warn("Using legacy WORKER_TIMEOUT_US={}us (override config workerTimeoutMs={}ms)",
-                        legacyUs, configMs);
-                return legacyUs;
-            } catch (NumberFormatException ignored) {
-                logger.warn("Invalid WORKER_TIMEOUT_US='{}', falling back to workerTimeoutMs={}ms", legacy, configMs);
-            }
-        }
+        long configMs = configService.loadBalanceConfig().getWorkerRegistry()
+                .getHealth().getStatusStaleAfterMs();
         return configMs * 1000L;
     }
 

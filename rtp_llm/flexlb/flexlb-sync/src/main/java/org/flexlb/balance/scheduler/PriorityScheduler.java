@@ -12,10 +12,11 @@ import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar.PriorityCanceledObservation;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
-import org.flexlb.balance.scheduler.priority.UnsupportedEngineCancelChannel;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -80,6 +81,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private static final int DEFAULT_COMPLETION_WORKERS = Math.max(
             2, Math.min(8, Runtime.getRuntime().availableProcessors()));
     private static final int DEFAULT_COMPLETION_QUEUE_CAPACITY = 1_024;
+    private static final long DEFAULT_CANCEL_ACK_TIMEOUT_MS = 50L;
+    private static final int OUTSTANDING_ADMISSION_CLOSED = -1;
     private static final long DELIVERY_LIFECYCLE_CLOSED = Long.MIN_VALUE;
     private static final long DELIVERY_LIFECYCLE_COUNT_MASK = Long.MAX_VALUE;
 
@@ -95,7 +98,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      * Timer threads only enqueue deadline reducers; they never run scheduler
      * state transitions or caller continuations themselves.
      */
-    private final ScheduledThreadPoolExecutor admissionTimeoutTimer;
+    private final ScheduledThreadPoolExecutor requestExpirationTimer;
     /** Owns every delayed Engine-fence reconciliation for this scheduler instance. */
     private final ScheduledThreadPoolExecutor engineFenceRetryTimer;
     /** One-way lifecycle gate; terminal completions remain allowed after it closes. */
@@ -105,6 +108,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      * already crossed the shutdown gate. Normal entry/exit is monitor-free.
      */
     private final AtomicLong deliveryLifecycle = new AtomicLong();
+    /**
+     * Exact cluster-wide QUEUE ownership bound. Unlike {@code inflight.size()},
+     * this counter includes admissions which have not reached registration yet.
+     * The CAS increment is the capacity linearization point for every submit.
+     */
+    private final AtomicInteger outstandingRequestCount = new AtomicInteger();
     /** Used only by shutdown and the final active delivery leaving after close. */
     private final Object deliveryDrainMonitor = new Object();
 
@@ -140,17 +149,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private final BatchIdGenerator batchIdGenerator;
     /** Linearizes the final endpoint-ledger commit and external delivery with fencing. */
     private final Object deliveryFence = new Object();
-
-    public PriorityScheduler(ConfigService configService,
-                                Router router,
-                                EndpointRegistry endpointRegistry,
-                                BatchDispatcher batchDispatcher,
-                                BatchSchedulerReporter reporter,
-                                PriorityAdmissionScheduler admissionScheduler,
-                                Environment environment) {
-        this(configService, router, endpointRegistry, batchDispatcher, reporter,
-                admissionScheduler, environment, new UnsupportedEngineCancelChannel());
-    }
 
     @Autowired
     public PriorityScheduler(ConfigService configService,
@@ -221,7 +219,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         this.engineFencePolicy = Objects.requireNonNull(engineFencePolicy);
         this.responseCompletionExecutor = newResponseCompletionExecutor(
                 Objects.requireNonNull(completionExecutorPolicy));
-        this.admissionTimeoutTimer = newTimer("priority-scheduler-deadline-timer");
+        this.requestExpirationTimer = newTimer("priority-scheduler-request-expiration");
         this.engineFenceRetryTimer = newTimer("priority-scheduler-engine-fence-timer");
         // Initialize Snowflake batch ID generator with master identity
         this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort(environment));
@@ -278,6 +276,26 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
     }
 
+    /** Reserve one global request slot without a check-then-act window. */
+    private boolean tryAcquireOutstandingPermit(int limit) {
+        while (true) {
+            int current = outstandingRequestCount.get();
+            if (current == OUTSTANDING_ADMISSION_CLOSED
+                    || current == Integer.MAX_VALUE
+                    || (limit > 0 && current >= limit)) {
+                return false;
+            }
+            if (outstandingRequestCount.compareAndSet(current, current + 1)) {
+                return true;
+            }
+        }
+    }
+
+    /** Package-visible exact capacity diagnostic used by concurrency tests. */
+    int outstandingRequestCount() {
+        return Math.max(0, outstandingRequestCount.get());
+    }
+
     // ==================== Request submission ====================
 
     public CompletableFuture<Response> submit(BalanceContext ctx) {
@@ -293,7 +311,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 completeError(future, StrategyErrorType.INVALID_REQUEST, null);
                 return future;
             }
-
+            ctx.setEnqueueTime(System.currentTimeMillis());
             RequestGenerationGate prior = generationGates.putIfAbsent(
                     ctx.getRequestId(), generation);
             if (prior != null) {
@@ -302,6 +320,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 return future;
             }
             future.whenComplete((ignored, error) -> {
+                // A public terminal is no longer outstanding admission work.
+                // Later lifecycle cleanup calls the same exact-once release.
+                generation.releaseOutstandingPermit();
                 InflightEntry entry = inflight.get(ctx.getRequestId());
                 boolean mutationInProgress;
                 synchronized (generation) {
@@ -320,36 +341,64 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 return future;
             }
 
-            int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
-            if (maxInflight > 0 && inflight.size() >= maxInflight) {
-                if (configService.loadBalanceConfig().isAutoTpmEnabled()) {
+            FlexlbConfig activeConfig = configService.loadBalanceConfig();
+            int maxOutstanding = activeConfig.queueScheduler()
+                    .getCapacity().getMaxOutstandingRequestsGlobal();
+            if (!tryAcquireOutstandingPermit(maxOutstanding)) {
+                if (shuttingDown.get()
+                        || outstandingRequestCount.get() == OUTSTANDING_ADMISSION_CLOSED) {
+                    completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                            "priority scheduler is shutting down");
+                } else if (activeConfig.isPriorityOrdering()) {
                     Response response = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
                             AdmissionRejectReason.RESOURCE_EXHAUSTED);
                     response.setErrorMessage(StrategyErrorType.RESOURCE_EXHAUSTED
-                            .buildErrorMessage("master inflight capacity exhausted"));
+                            .buildErrorMessage("master outstanding capacity exhausted"));
                     future.complete(response);
                 } else {
                     completeError(future, StrategyErrorType.QUEUE_FULL, null);
                 }
                 return future;
             }
+            if (!generation.bindOutstandingPermit(outstandingRequestCount)) {
+                return future;
+            }
+            if (shuttingDown.get()) {
+                completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        "priority scheduler is shutting down");
+                return future;
+            }
 
-            // Auto-TPM priority path: delegate plan/commit to the priority
-            // scheduler. Disabled by default — the legacy path below is
-            // byte-for-byte unchanged when the switch is off.
-            // normalize() always assigns 1-100, so every request participates
-            // when Auto-TPM is enabled; no separate hasPriority gate needed.
-            if (configService.loadBalanceConfig().isAutoTpmEnabled() && admissionScheduler != null) {
+            long nowMs = System.currentTimeMillis();
+            if (ctx.requestExpired(nowMs)) {
+                if (activeConfig.isPriorityOrdering()) {
+                    AdmissionFailure failure = AdmissionFailure.resourceExhausted();
+                    Response response = Response.error(
+                            failure.errorType(), failure.reason());
+                    response.setErrorMessage(failure.errorType().buildErrorMessage(
+                            "request expired: expires_at_ms="
+                                    + ctx.getRequestExpiresAtMs() + " now_ms=" + nowMs));
+                    future.complete(response);
+                } else {
+                    completeError(future, generation.deadlineErrorType,
+                            "request scheduling deadline has expired");
+                }
+                return future;
+            }
+            // Arm the one absolute-expiration reducer before scheduling can
+            // publish a delivery. Priority admission rechecks expiration
+            // inside its mutation boundary to close this observation race.
+            attachRequestExpiration(ctx, future);
+
+            // PRIORITY ordering delegates plan/commit to the priority
+            // admission scheduler; FIFO continues through the ordinary path.
+            if (activeConfig.isPriorityOrdering() && admissionScheduler != null) {
                 if (shuttingDown.get()) {
                     completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
                             "priority scheduler is shutting down");
                     return future;
                 }
                 admissionScheduler.schedule(ctx, future, this);
-                // The deadline is an ordinary terminal event in the same
-                // reducer as dispatch/worker failures. It must compete with a
-                // priority-preemption claim before completing the public future.
-                attachAdmissionTimeout(ctx, future);
                 return future;
             }
 
@@ -504,7 +553,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                             ctx.getRequestId(), telemetryFailure);
                 }
             } catch (Throwable submitFailure) {
-                cleanupFailedLegacySubmission(
+                cleanupFailedFifoSubmission(
                         submittedEntry, submittedItem, routeResponse, submitFailure);
                 throw submitFailure;
             } finally {
@@ -529,11 +578,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     /**
-     * Unwind the exact legacy route transaction before its mutation claim is
+     * Unwind the exact FIFO route transaction before its mutation claim is
      * released. A pending Cancel therefore cannot become terminal while a
      * route reservation or a partially offered queue item is still live.
      */
-    private void cleanupFailedLegacySubmission(
+    private void cleanupFailedFifoSubmission(
             InflightEntry entry,
             BatchItem item,
             Response routeResponse,
@@ -555,7 +604,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
         if (cleanup) {
             releaseLocalAdmissionCleanup(
-                    entry, "legacy submit failed: " + submitFailure.getMessage());
+                    entry, "FIFO submit failed: " + submitFailure.getMessage());
         } else if (item != null && inflight.get(item.requestId()) == null) {
             // Registration did not commit, or another exact reducer already
             // detached it. Endpoint release is idempotent and cannot affect a
@@ -565,26 +614,26 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     /**
-     * Schedule the admission deadline as a reducer event. Directly attaching
+     * Schedule request expiration as a reducer event. Directly attaching
      * {@link CompletableFuture#orTimeout(long, TimeUnit)} would let the timer
      * permanently complete the frontend future while a priority Cancel owns
      * the request; a later authoritative CANCELED observation could then no
-     * longer publish PRIORITY_PREEMPTED. The legacy submit path does not
-     * attach this admission timer and keeps its existing TTL cleanup.
+     * longer publish PRIORITY_PREEMPTED. FIFO and PRIORITY both arm this same
+     * absolute-expiration timer.
      */
-    void attachAdmissionTimeout(BalanceContext ctx,
-                                CompletableFuture<Response> future) {
-        if (ctx.budget() == null || shuttingDown.get()) {
+    void attachRequestExpiration(BalanceContext ctx,
+                                 CompletableFuture<Response> future) {
+        if (shuttingDown.get()) {
             return;
         }
-        long remainingMs = ctx.budget().remainingMs(System.currentTimeMillis());
+        long remainingMs = ctx.getRequestExpiresAtMs() - System.currentTimeMillis();
         long delayMs = Math.max(1, remainingMs);
         long requestId = ctx.getRequestId();
         ScheduledFuture<?> timeout;
         try {
-            timeout = admissionTimeoutTimer.schedule(
+            timeout = requestExpirationTimer.schedule(
                     () -> executeResponseTask(
-                            () -> onAdmissionDeadline(requestId, future)),
+                            () -> onRequestExpired(requestId, future)),
                     delayMs, TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException timerStopped) {
             if (shuttingDown.get()) {
@@ -592,18 +641,17 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             }
             throw timerStopped;
         }
-        // Successful requests normally finish long before their admission
-        // budget. Eager cancellation plus remove-on-cancel prevents the timer
-        // queue from retaining future -> request context until that deadline.
+        // Eager cancellation plus remove-on-cancel prevents the timer queue
+        // from retaining future -> request context until expiration.
         future.whenComplete((ignored, error) -> timeout.cancel(false));
     }
 
-    int admissionTimeoutQueueSize() {
-        return admissionTimeoutTimer.getQueue().size();
+    int requestExpirationQueueSize() {
+        return requestExpirationTimer.getQueue().size();
     }
 
-    boolean removesCanceledAdmissionTimeouts() {
-        return admissionTimeoutTimer.getRemoveOnCancelPolicy();
+    boolean removesCanceledRequestExpirations() {
+        return requestExpirationTimer.getRemoveOnCancelPolicy();
     }
 
     int engineFenceRetryQueueSize() {
@@ -626,10 +674,10 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         return responseCompletionExecutor.awaitTermination(timeout, unit);
     }
 
-    /** Deliver one admission deadline through the ordinary-terminal reducer. */
-    // Package-visible for the dispatch/deadline linearization test.
-    void onAdmissionDeadline(long requestId,
-                             CompletableFuture<Response> expectedFuture) {
+    /** Deliver request expiration through the ordinary-terminal reducer. */
+    // Package-visible for dispatch/expiration linearization tests.
+    void onRequestExpired(long requestId,
+                          CompletableFuture<Response> expectedFuture) {
         if (shuttingDown.get()) {
             return;
         }
@@ -645,7 +693,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     }
                     reduceInflight = true;
                 } else {
-                    publication = reduceAdmissionDeadline(
+                    publication = reduceRequestExpiration(
                             requestId, expectedFuture, gate);
                 }
             }
@@ -657,11 +705,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     && !expectedFuture.isDone()) {
                 reduceInflight = true;
             } else {
-                publication = reduceAdmissionDeadline(requestId, expectedFuture, null);
+                publication = reduceRequestExpiration(requestId, expectedFuture, null);
             }
         }
         if (reduceInflight) {
-            // All live-request deadline semantics share the public Cancel
+            // All live-request expiration semantics share the public Cancel
             // reducer: priority handoff, NOT_FOUND transfer, delivery fencing
             // and first-cause retention therefore cannot drift by caller.
             cancelRequest(requestId, 0, CancelReason.DEADLINE_EXCEEDED);
@@ -670,8 +718,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         submitResponseCompletion(publication);
     }
 
-    /** Reduce the deadline while the optional request-scoped admission gate is held. */
-    private ResponseCompletion reduceAdmissionDeadline(
+    /** Reduce expiration while the optional request-scoped admission gate is held. */
+    private ResponseCompletion reduceRequestExpiration(
             long requestId,
             CompletableFuture<Response> expectedFuture,
             RequestGenerationGate gate) {
@@ -695,7 +743,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 || !gate.closeCommits()) {
             return null;
         }
-        String detail = "admission deadline exceeded before inflight registration";
+        String detail = "request scheduling deadline exceeded before inflight registration";
         RequestLifecycle lifecycle = new RequestLifecycle(requestId);
         lifecycle.requestCancel(detail);
         if (gate.admissionMutationInProgress) {
@@ -706,14 +754,16 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         RequestLifecycleSnapshot terminal = lifecycle.timeout(detail);
         terminalStates.put(requestId, terminal);
         return ResponseCompletion.terminal(gate,
-                buildErrorResponse(StrategyErrorType.BATCH_SLO_EXPIRED, detail));
+                buildErrorResponse(gate == null
+                        ? StrategyErrorType.BATCH_SLO_EXPIRED
+                        : gate.deadlineErrorType, detail));
     }
 
-    // ==================== InflightRegistrar (Auto-TPM commit protocol) ====================
+    // ==================== InflightRegistrar (priority commit protocol) ====================
 
     /**
-     * Register an Auto-TPM admitted item into the same inflight tracking as
-     * the legacy path, so dispatch/completion/TTL/rollback behave identically.
+     * Register a priority-admitted item into the shared inflight tracking so
+     * dispatch, completion, expiration, and rollback behave identically.
      * Mirrors the duplicate-request check in {@link #submit}.
      */
     @Override
@@ -721,8 +771,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         if (shuttingDown.get()) {
             return false;
         }
-        // This registrar is the Auto-TPM commit boundary. Legacy submit()
-        // constructs its entry directly with autoTpmAdmission=false.
+        // This registrar is the priority-admission commit boundary. FIFO
+        // submit() constructs its entry directly with priorityAdmission=false.
         RequestGenerationGate gate = generationGates.get(item.requestId());
         if (gate == item.future()) {
             synchronized (gate) {
@@ -803,7 +853,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 publication = ResponseCompletion.terminal(
                         generation,
                         buildErrorResponse(
-                                cancelErrorType(generation.pendingAdmissionCancelReason),
+                                cancelErrorType(generation.pendingAdmissionCancelReason,
+                                        generation.deadlineErrorType),
                                 terminal.detail()));
             } else if (future.isDone() && inflight.get(requestId) == null) {
                 generationGates.remove(requestId, generation);
@@ -812,12 +863,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         submitResponseCompletion(publication);
     }
 
-    private boolean registerInflightOpen(BatchItem item, boolean autoTpmAdmission) {
+    private boolean registerInflightOpen(BatchItem item, boolean priorityAdmission) {
         if (shuttingDown.get() || item.future().isDone()
                 || terminalStates.containsKey(item.requestId())) {
             return false;
         }
-        InflightEntry entry = new InflightEntry(item, autoTpmAdmission);
+        InflightEntry entry = new InflightEntry(item, priorityAdmission);
         InflightEntry existing = inflight.putIfAbsent(item.requestId(), entry);
         if (existing == null && !terminalStates.containsKey(item.requestId())
                 && !shuttingDown.get()) {
@@ -832,7 +883,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /**
      * Bind external completion to the exact registered generation. This is a
-     * scheduler concern for both legacy and Auto-TPM requests; an optional
+     * scheduler concern for both FIFO and PRIORITY requests; an optional
      * AdmissionLease may independently close its permit/timer, but is not the
      * only path which can drive request resource reconciliation.
      */
@@ -847,8 +898,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         || entry.externalFutureTerminalClaimed) {
                     return;
                 }
-                // Legacy requests have no AdmissionLease. Claim their future
-                // terminal here; Auto-TPM requests attach a lease under this
+                // FIFO requests have no AdmissionLease. Claim their future
+                // terminal here; priority requests attach a lease under this
                 // same entry monitor and therefore have exactly one observer.
                 entry.externalFutureTerminalClaimed = true;
             }
@@ -1521,7 +1572,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         generationCompletion = ResponseCompletion.terminal(
                                 generation,
                                 buildErrorResponse(
-                                        cancelErrorType(reason),
+                                        cancelErrorType(reason,
+                                                generation.deadlineErrorType),
                                         generationResult.detail()));
                     }
                 } else if (generationEntry.item.future() == generation) {
@@ -1825,7 +1877,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     entry.cancellationReason,
                     cancelDetail(entry.cancellationReason));
             publication = errorPublicationLocked(entry,
-                    cancelErrorType(entry.cancellationReason), terminal.detail());
+                    cancelErrorType(entry.cancellationReason,
+                            entry.deadlineErrorType), terminal.detail());
             finishEntry(entry, terminal);
         }
         submitResponseCompletion(publication);
@@ -1841,7 +1894,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 entry.cancellationReason,
                 cancelDetail(entry.cancellationReason) + "; " + proof);
         ResponseCompletion publication = errorPublicationLocked(entry,
-                cancelErrorType(entry.cancellationReason), terminal.detail());
+                cancelErrorType(entry.cancellationReason,
+                        entry.deadlineErrorType), terminal.detail());
         finishEntry(entry, terminal);
         return publication;
     }
@@ -1862,9 +1916,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 : "request cancelled by client";
     }
 
-    private static StrategyErrorType cancelErrorType(CancelReason reason) {
+    private static StrategyErrorType cancelErrorType(
+            CancelReason reason,
+            StrategyErrorType deadlineErrorType) {
         return reason == CancelReason.DEADLINE_EXCEEDED
-                ? StrategyErrorType.BATCH_SLO_EXPIRED
+                ? deadlineErrorType
                 : StrategyErrorType.REQUEST_CANCELLED;
     }
 
@@ -2224,7 +2280,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 return null;
             }
             case FAILURE -> {
-                // A failure can escape after Auto-TPM registration/offer
+                // A failure can escape after priority scheduling registration/offer
                 // (for example from telemetry or timer setup). Remove any
                 // still-queued item before retiring the generation.
                 removeQueuedItem(entry, terminal.detail());
@@ -2290,6 +2346,45 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         return inflight.size();
     }
 
+    /**
+     * Current number of requests waiting in the canonical per-Prefill
+     * scheduler queues. This is the operational queue-depth view for every
+     * QUEUE ordering/dispatcher combination.
+     */
+    public int getQueuedRequestCount() {
+        long queued = 0;
+        for (PrefillEndpoint endpoint : endpointRegistry.getPrefillEndpoints().values()) {
+            queued += endpoint.getBatcher().queueSize();
+            if (queued >= Integer.MAX_VALUE) {
+                return Integer.MAX_VALUE;
+            }
+        }
+        return (int) queued;
+    }
+
+    /**
+     * Weakly-consistent immutable view of all scheduler-owned live request
+     * lifecycles. The inflight map is authoritative; no diagnostic-only
+     * shadow queue is maintained.
+     */
+    public List<RequestLifecycleSnapshot> snapshotActiveRequests() {
+        List<RequestLifecycleSnapshot> snapshots = new ArrayList<>(inflight.size());
+        for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
+            InflightEntry entry = candidate.getValue();
+            synchronized (entry) {
+                if (inflight.get(candidate.getKey()) == entry) {
+                    snapshots.add(entry.lifecycle.snapshot());
+                }
+            }
+        }
+        snapshots.sort((left, right) -> {
+            int createdOrder = Long.compare(left.createdAtMs(), right.createdAtMs());
+            return createdOrder != 0
+                    ? createdOrder : Long.compare(left.requestId(), right.requestId());
+        });
+        return List.copyOf(snapshots);
+    }
+
     /** Package-visible exact-generation retention diagnostic for leak tests. */
     int generationGateCount() {
         return generationGates.size();
@@ -2339,7 +2434,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         if (shuttingDown.get()) {
             return;
         }
-        long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
+        FlexlbConfig config = configService.loadBalanceConfig();
+        if (!config.isQueue()) {
+            return;
+        }
+        long ttlMs = config.queueScheduler().getLifecycle().getStaleInflightTimeoutMs();
         long now = System.currentTimeMillis();
         int expiredCount = 0;
         long oldestExpiredAgeMs = 0;
@@ -2576,15 +2675,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     @Override
     public void onExpired(BatchItem head) {
-        InflightEntry entry = entryFor(head);
-        if (entry != null) {
-            ResponseCompletion publication;
-            synchronized (entry) {
-                publication = reduceOrdinaryTerminalLocked(entry,
-                        DeferredTerminal.timeout(
-                                "decision-group SLO expired before delivery"));
-            }
-            submitResponseCompletion(publication);
+        if (entryFor(head) != null) {
+            // The batcher and the request timer may observe the same absolute
+            // expiration concurrently. Both must enter the cancellation
+            // reducer so first-cause ownership and the existing external
+            // timeout classification cannot depend on which thread wins.
+            onRequestExpired(head.requestId(), head.future());
         } else if (!head.future().isDone() && !terminalStates.containsKey(head.requestId())) {
             rollback(head);
         }
@@ -2659,7 +2755,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     @Override
     public void onOfferFailure(BatchItem item, Throwable error) {
-        // Auto-TPM: over-capacity requests carry a dedicated non-retryable error code
+        // priority scheduling: over-capacity requests carry a dedicated non-retryable error code
         // instead of the generic (retryable) delivery failure (design doc 8.3).
         StrategyErrorType errorType = error instanceof BatchTokenCapacityExceededException
                 ? StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED
@@ -2707,8 +2803,10 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         // [SYNC] Compute prediction and commit only active items to endpoint
         long predMs = 0;
         long batchId = batchIdGenerator.nextBatchId();
-        long decodeConcurrencyLimit = configService.loadBalanceConfig()
-                .getDecodeConcurrencyLimit();
+        Long configuredDecodeLimit = configService.loadBalanceConfig().getRouter()
+                .getRoles().getDecode().getAvailability().getMaxEngineRequests();
+        long decodeConcurrencyLimit = configuredDecodeLimit == null
+                ? 0 : configuredDecodeLimit;
         List<BatchItem> readyForEnqueue = new ArrayList<>(items.size());
         for (BatchItem item : items) {
             boolean callbackOwnsPending = false;
@@ -2787,7 +2885,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 predMs = (long) predictor.predictBatchMs(readyForEnqueue);
             }
             synchronized (deliveryFence) {
-                // Prediction may yield to an admission deadline/cancel fence.
+                // Prediction may yield to a request-expiration/cancel fence.
                 // Revalidate dispatch ownership immediately before the first
                 // externally visible commit/send step.
                 readyForEnqueue = readyForEnqueue.stream().filter(item -> {
@@ -2895,14 +2993,14 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         nowMs - waitEntry.getValue(),
                         waitEntry.getKey());
             }
-            FlexlbConfig config = configService.loadBalanceConfig();
+            BatchDispatcherConfig batch = configService.loadBalanceConfig().batchDispatcher();
             Logger.debug("flexlb_batch_dispatch batch_id={} reason={} batch_size={} wait_ms={} "
                             + "predicted_ms={} threshold_ms={} fixed_wait_ms={} batch_size_max={} "
                             + "queue_after={} worker={}",
                     batchId, reason, dispatched.size(), waitMs, predictedMs,
-                    config.getFlexlbBatchPredictThresholdMs(),
-                    config.getFlexlbBatchFixedWaitMs(),
-                    config.getFlexlbBatchSizeMax(), metadata.queueDepth(),
+                    batch.getEarlyDispatchPredictedExecutionMs(),
+                    batch.getMaxCollectionWaitMs(),
+                    batch.getMaxRequests(), metadata.queueDepth(),
                     prefillEp != null ? prefillEp.ipPort() : "");
         } catch (RuntimeException telemetryFailure) {
             Logger.warn("Failed to report batch dispatch: batch_id={}",
@@ -2931,8 +3029,15 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         WorkerBatcher batcher = prefillEp.getBatcher();
         PrefillTimePredictor predictor = prefillEp.getPredictor();
         FlexlbConfig config = configService.loadBalanceConfig();
-        int prefillRequestLimit = config.getAutoTpmPrefillMaxInflightRequestsPerWorker();
-        long decodeConcurrencyLimit = config.getDecodeConcurrencyLimit();
+        Integer configuredPrefillLimit = config.getDispatcher()
+                instanceof NonBatchDispatcherConfig nonBatch
+                ? nonBatch.getMaxInflightRequestsPerPrefillWorker() : null;
+        int prefillRequestLimit = configuredPrefillLimit == null
+                ? 0 : configuredPrefillLimit;
+        Long configuredDecodeLimit = config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxEngineRequests();
+        long decodeConcurrencyLimit = configuredDecodeLimit == null
+                ? 0 : configuredDecodeLimit;
         List<BatchItem> deliverable = new ArrayList<>(items.size());
 
         for (BatchItem item : items) {
@@ -3170,7 +3275,14 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         long nowMs = System.currentTimeMillis();
         item.ctx().setAckAtMs(nowMs);
         item.ctx().setAckAtNanos(System.nanoTime());
-        return ResponseCompletion.success(item, response,
+        // A Prefill-only delivery has no later Decode-acceptance edge. Capture
+        // its exact lease so admission backpressure can be retired before the
+        // successful public future becomes observable. Completing the future
+        // first and relying on whenComplete lets a waiting caller submit its
+        // next request before the lease callback has run.
+        AdmissionLease prefillOnlyLease = item.decodeEp() == null
+                ? entry.admissionLease : null;
+        return ResponseCompletion.success(item, response, prefillOnlyLease,
                 snapshot.deliveryClaimKind(), batchId, reporter, prefillIp,
                 snapshot.deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE
                         && batchEnqueueStartedAtMs > 0
@@ -3254,7 +3366,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             }
         }
         boolean completed = publication.future() instanceof RequestGenerationGate generation
-                ? generation.completeOwned(publication.response())
+                ? generation.completeOwned(
+                        publication.response(), publication.prefillOnlyLease())
                 : publication.future().complete(publication.response());
         if (!completed) {
             return;
@@ -3574,7 +3687,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
         CompletableFuture<EngineCancelChannel.CancelOutcome> cancelFuture = null;
         Throwable synchronousFailure = null;
-        long cancelAckTimeoutMs = 1;
+        long cancelAckTimeoutMs = DEFAULT_CANCEL_ACK_TIMEOUT_MS;
         synchronized (entry) {
             if (shuttingDown.get()
                     || inflight.get(entry.item.requestId()) != entry
@@ -3591,8 +3704,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 EngineCancelChannel.CancelTarget target = prefill == null ? null
                         : new EngineCancelChannel.CancelTarget(
                                 prefill.getServerIp(), prefill.getGrpcPort());
-                cancelAckTimeoutMs = Math.max(1,
-                        configService.loadBalanceConfig().getAutoTpmCancelAckTimeoutMs());
                 cancelFuture = engineCancelChannel.cancel(
                         target, entry.item.requestId(), cancelAckTimeoutMs);
             } catch (Throwable error) {
@@ -3886,7 +3997,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private ResponseCompletion timeoutEntry(InflightEntry entry, String detail) {
         AdmissionFailure admissionFailure = null;
         PrefillEndpoint prefill = entry.item.prefillEp();
-        if (entry.autoTpmAdmission) {
+        if (entry.priorityAdmission) {
             admissionFailure = classifyAdmissionTimeout(entry.item, prefill);
             if (prefill != null) {
                 prefill.getBatcher().queueManager().tryRemove(
@@ -3898,14 +4009,14 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         releasePrefillAccounting(entry);
         ResponseCompletion publication;
         if (admissionFailure != null) {
-            Logger.debug("[auto-tpm] admission timeout classified: request_id={} "
+            Logger.debug("[priority] admission timeout classified: request_id={} "
                             + "priority={} lifecycle={} error_code={} reason={} trigger={}",
                     entry.item.requestId(), entry.item.priority(), terminal.state(),
                     admissionFailure.errorType().getErrorCode(), admissionFailure.reason(), detail);
             publication = admissionErrorPublicationLocked(entry, admissionFailure, detail);
         } else {
             publication = errorPublicationLocked(
-                    entry, StrategyErrorType.BATCH_SLO_EXPIRED, detail);
+                    entry, entry.deadlineErrorType, detail);
         }
         finishEntry(entry, terminal);
         return publication;
@@ -3920,7 +4031,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         for (QueuedRequestSnapshot queued
                 : prefill.getBatcher().queueManager().snapshot().items()) {
             if (queued.requestId() == item.requestId()) {
-                return AdmissionFailureClassifier.classifyQueuedDeadline(
+                return AdmissionFailureClassifier.classifyQueuedTimeout(
                         item.priority(), ahead);
             }
             ahead.add(queued);
@@ -3975,6 +4086,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private void removeInflightGeneration(InflightEntry entry) {
         inflight.remove(entry.item.requestId(), entry);
         if (entry.item.future() instanceof RequestGenerationGate generation) {
+            generation.releaseOutstandingPermit();
             // An incomplete future is still the generation's publication
             // owner. Retain its gate until whenComplete (or the mutation
             // handoff) observes the completion; this prevents a late planner
@@ -3999,7 +4111,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     // ==================== Internal: static utilities ====================
 
-    /** Locate the first server of a role in a route response (shared with the Auto-TPM path). */
+    /** Locate the first server of a role in a route response (shared with the priority scheduling path). */
     public static ServerStatus findServer(Response response, RoleType roleType) {
         if (response.getServerStatus() == null) {
             return null;
@@ -4036,7 +4148,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         return result;
     }
 
-    /** Defensive copy of a route server status (shared with the Auto-TPM path). */
+    /** Defensive copy of a route server status (shared with the priority scheduling path). */
     public static ServerStatus copyOf(ServerStatus src) {
         if (src == null) {
             return null;
@@ -4169,8 +4281,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             entry.getValue().reportBatchMetrics(reporter);
         }
 
-        // Auto-TPM: per-endpoint prefill queue depth gauge (design doc 19.2)
-        if (admissionScheduler != null && configService.loadBalanceConfig().isAutoTpmEnabled()) {
+        // PRIORITY: per-endpoint admission queue/resource gauges.
+        if (admissionScheduler != null
+                && configService.loadBalanceConfig().isPriorityOrdering()) {
             admissionScheduler.reportPrefillQueueDepths();
             admissionScheduler.reportDecodeAdmissionGauges();
         }
@@ -4181,9 +4294,16 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         if (!shuttingDown.compareAndSet(false, true)) {
             return;
         }
+        // Close the permit CAS before draining generations. A submit which
+        // crossed the boolean check cannot reserve after this linearization
+        // point; generation release remains exact-idempotent below.
+        outstandingRequestCount.getAndSet(OUTSTANDING_ADMISSION_CLOSED);
+        for (RequestGenerationGate generation : generationGates.values()) {
+            generation.releaseOutstandingPermit();
+        }
         closeDeliveryLifecycleAndAwait();
         completeOutstandingRequestsForShutdown();
-        admissionTimeoutTimer.shutdownNow();
+        requestExpirationTimer.shutdownNow();
         engineFenceRetryTimer.shutdownNow();
         for (InflightEntry entry : inflight.values()) {
             synchronized (entry) {
@@ -4295,9 +4415,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     /**
      * Internal reconciliation policy, intentionally not another live config
      * surface. Production performs eight quick probes: exponential delays from
-     * 100 ms capped at 5 s (11.3 s total delay), plus at most the existing
-     * {@code autoTpmCancelAckTimeoutMs} for each invocation. Afterwards the
-     * request moves to the minute-level quarantine sweep.
+     * 100 ms capped at 5 s (11.3 s total delay), plus the internal Cancel ACK
+     * bound for each invocation. Afterwards the request moves to the
+     * minute-level quarantine sweep.
      */
     record EngineFencePolicy(int maxFastAttempts,
                              long initialRetryDelayMs,
@@ -4344,7 +4464,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private static final class InflightEntry {
         final BatchItem item;
         final RequestLifecycle lifecycle;
-        final boolean autoTpmAdmission;
+        final boolean priorityAdmission;
+        final StrategyErrorType deadlineErrorType;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
         AdmissionLease admissionLease;
         EngineOwnershipState engineOwnershipState = EngineOwnershipState.DECODE_PENDING;
@@ -4358,11 +4479,14 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         /** Non-null only when the frontend-facing Cancel reducer won first cause. */
         CancelReason cancellationReason;
 
-        InflightEntry(BatchItem item, boolean autoTpmAdmission) {
+        InflightEntry(BatchItem item, boolean priorityAdmission) {
             this.item = Objects.requireNonNull(item);
             Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
             this.lifecycle = new RequestLifecycle(item.requestId());
-            this.autoTpmAdmission = autoTpmAdmission;
+            this.priorityAdmission = priorityAdmission;
+            this.deadlineErrorType = item.future() instanceof RequestGenerationGate generation
+                    ? generation.deadlineErrorType
+                    : StrategyErrorType.BATCH_SLO_EXPIRED;
         }
 
         public long createdAtMs() {
@@ -4382,8 +4506,58 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private static final class RequestGenerationGate extends CompletableFuture<Response> {
         private boolean closed;
         private volatile boolean admissionMutationInProgress;
+        private volatile StrategyErrorType deadlineErrorType =
+                StrategyErrorType.BATCH_SLO_EXPIRED;
         private RequestLifecycle pendingAdmissionCancellation;
         private CancelReason pendingAdmissionCancelReason;
+        private AtomicInteger outstandingCounter;
+        private boolean outstandingPermitReleaseRequested;
+        private boolean outstandingPermitReleased;
+        /** Exact-once guard for a response whose reducer already owns publication. */
+        private boolean ownedCompletionPublished;
+
+        /**
+         * Bind the slot already reserved by the scheduler. Completion or
+         * shutdown may win before this method; in that case binding performs
+         * the deferred release and tells submit to stop immediately.
+         */
+        private synchronized boolean bindOutstandingPermit(AtomicInteger counter) {
+            if (outstandingCounter != null) {
+                throw new IllegalStateException("outstanding permit already bound");
+            }
+            outstandingCounter = Objects.requireNonNull(counter);
+            if (outstandingPermitReleaseRequested || isDone()) {
+                releaseOutstandingPermitLocked();
+                return false;
+            }
+            return true;
+        }
+
+        /** One terminal/reconciliation entry point for every permit owner. */
+        private synchronized void releaseOutstandingPermit() {
+            outstandingPermitReleaseRequested = true;
+            releaseOutstandingPermitLocked();
+        }
+
+        private void releaseOutstandingPermitLocked() {
+            if (outstandingCounter == null || outstandingPermitReleased) {
+                return;
+            }
+            outstandingPermitReleased = true;
+            while (true) {
+                int current = outstandingCounter.get();
+                if (current == OUTSTANDING_ADMISSION_CLOSED) {
+                    return;
+                }
+                if (current <= 0) {
+                    throw new IllegalStateException(
+                            "outstanding request permit counter underflow");
+                }
+                if (outstandingCounter.compareAndSet(current, current - 1)) {
+                    return;
+                }
+            }
+        }
 
         private boolean isOpen() {
             return !closed && !isDone();
@@ -4428,6 +4602,34 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
 
         private boolean completeOwned(Response response) {
+            return completeOwned(response, null);
+        }
+
+        /**
+         * Publish a reducer-owned response without trying to claim the gate a
+         * second time. A {@link ResponseCompletion} exists only after either
+         * the request entry claimed response publication or the gate was
+         * closed by the winning pre-registration reducer. Requiring
+         * {@link #closeCommits()} again would reject that winner and leave the
+         * public future incomplete.
+         *
+         * <p>The exact-once bit also preserves the response-claim ordering
+         * when a later Cancel closes the gate before the asynchronous
+         * publication runs. Prefill-only lease retirement remains ordered
+         * before the public success becomes observable.</p>
+         */
+        private boolean completeOwned(Response response,
+                                      AdmissionLease prefillOnlyLease) {
+            synchronized (this) {
+                if (ownedCompletionPublished || isDone()) {
+                    return false;
+                }
+                ownedCompletionPublished = true;
+                closed = true;
+            }
+            if (prefillOnlyLease != null) {
+                prefillOnlyLease.markDeliverySucceeded();
+            }
             return super.complete(response);
         }
     }
@@ -4686,6 +4888,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private record ResponseCompletion(CompletableFuture<Response> future,
                                        Response response,
                                        BatchItem item,
+                                       AdmissionLease prefillOnlyLease,
                                        DeliveryClaimKind deliveryClaimKind,
                                        long batchId,
                                        BatchSchedulerReporter reporter,
@@ -4693,20 +4896,22 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                                        long batchEnqueueAckLatencyMs) {
         private static ResponseCompletion success(BatchItem item,
                                                    Response response,
+                                                   AdmissionLease prefillOnlyLease,
                                                    DeliveryClaimKind deliveryClaimKind,
                                                    long batchId,
                                                    BatchSchedulerReporter reporter,
                                                    String prefillIp,
                                                    long batchEnqueueAckLatencyMs) {
             return new ResponseCompletion(
-                    item.future(), response, item, deliveryClaimKind, batchId,
+                    item.future(), response, item, prefillOnlyLease,
+                    deliveryClaimKind, batchId,
                     reporter, prefillIp, batchEnqueueAckLatencyMs);
         }
 
         private static ResponseCompletion terminal(CompletableFuture<Response> future,
                                                     Response response) {
-            return new ResponseCompletion(future, response, null, null, 0,
-                    null, null, -1);
+            return new ResponseCompletion(future, response, null, null, null,
+                    0, null, null, -1);
         }
     }
 

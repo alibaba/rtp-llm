@@ -292,6 +292,18 @@
                     </dependency>
                 </dependencies>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludedGroups>performance-regression</excludedGroups>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
         <pluginManagement>
             <plugins>
@@ -343,6 +355,80 @@
     </build>
 
     <profiles>
+        <!-- Run FlexLB Sync performance regressions in a dedicated Maven invocation. -->
+        <profile>
+            <id>sync-performance-regression</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>default-test</id>
+                                <configuration combine.self="override">
+                                    <includes>
+                                        <include>**/SchedulingConfigAndExpirationPerformanceTest.java</include>
+                                        <include>**/AutoTpmSchedulingOverheadPerfTest.java</include>
+                                        <include>**/CostBasedPrefillRoutingPerformanceTest.java</include>
+                                    </includes>
+                                    <forkCount>1</forkCount>
+                                    <reuseForks>false</reuseForks>
+                                    <failIfNoTests>false</failIfNoTests>
+                                    <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Run FlexLB API performance regressions in a separate Maven invocation. -->
+        <profile>
+            <id>api-performance-regression</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>default-test</id>
+                                <configuration combine.self="override">
+                                    <includes>
+                                        <include>**/MasterBatchEndToEndPerformanceTest.java</include>
+                                    </includes>
+                                    <!--
+                                      The real-payload E2E burst serializes more than 50 million
+                                      token ids in one fresh fork. Fix the heap size so the gate
+                                      measures gRPC/scheduling throughput instead of JVM heap
+                                      expansion; production JVM settings are unaffected.
+                                    -->
+                                    <argLine>
+                                        -Xms2g -Xmx2g
+                                        --add-modules ALL-SYSTEM
+                                        --add-opens java.base/java.lang=ALL-UNNAMED
+                                        --add-opens java.base/java.lang.invoke=ALL-UNNAMED
+                                        --add-opens java.base/java.util=ALL-UNNAMED
+                                        --add-opens java.base/java.util.concurrent=ALL-UNNAMED
+                                        --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED
+                                        --add-opens java.base/java.nio=ALL-UNNAMED
+                                        --add-opens java.base/sun.nio.ch=ALL-UNNAMED
+                                        --add-opens java.instrument/sun.instrument=ALL-UNNAMED
+                                    </argLine>
+                                    <forkCount>1</forkCount>
+                                    <reuseForks>false</reuseForks>
+                                    <failIfNoTests>false</failIfNoTests>
+                                    <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
         <!-- Internal profile - automatically activated when internal dependencies exists -->
         <profile>
             <id>internal</id>

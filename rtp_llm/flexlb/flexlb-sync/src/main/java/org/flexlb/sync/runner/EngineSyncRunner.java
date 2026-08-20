@@ -50,6 +50,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final boolean cacheFullSnapshotDebugMode;
+
     private final PriorityScheduler priorityScheduler;
 
     private final EndpointRegistry endpointRegistry;
@@ -65,6 +67,7 @@ public class EngineSyncRunner implements Runnable {
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
+                            boolean cacheFullSnapshotDebugMode,
                             PriorityScheduler priorityScheduler,
                             EndpointRegistry endpointRegistry) {
 
@@ -79,6 +82,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
         this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
     }
@@ -160,7 +164,8 @@ public class EngineSyncRunner implements Runnable {
                         GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                                 workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval, statusCheckExecutor);
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                cacheFullSnapshotDebugMode, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getCacheCheckInProgress().set(false);

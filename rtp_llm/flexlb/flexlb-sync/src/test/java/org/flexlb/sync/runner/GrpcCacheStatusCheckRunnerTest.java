@@ -50,7 +50,7 @@ class GrpcCacheStatusCheckRunnerTest {
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
                 modelName, ipPort, site, RoleType.PREFILL, workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                20, new LongAdder(), 50L, Runnable::run);
+                20, new LongAdder(), 50L, true, Runnable::run);
         runner.run();
 
         // Give some time for async execution

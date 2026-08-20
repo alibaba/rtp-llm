@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -70,10 +70,9 @@ class DecodeAcceptanceLinearizationTest {
         BatchDispatcher dispatcher = mock(BatchDispatcher.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         FlexlbConfig config = new FlexlbConfig();
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchFixedWaitMs(3_600_000);
-        config.setFlexlbBatchSizeMax(100);
-        config.setAutoTpmCancelAckTimeoutMs(30_000);
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
@@ -97,14 +96,14 @@ class DecodeAcceptanceLinearizationTest {
         endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeStatus);
         decodeEndpoint = endpointRegistry.getDecode(DECODE_IP_PORT);
 
-        item = item();
+        item = item(config);
         assertTrue(scheduler.registerInflight(item));
         lease = new AdmissionLease(item, decodeEndpoint,
-                prefillEndpoint.getBatcher().queueManager(), scheduler);
+                prefillEndpoint.getBatcher().queueManager(), scheduler,
+                0, null, null);
         assertTrue(scheduler.attachAdmissionLease(item, lease));
         lease.bindTo(item.future());
-        decodeEndpoint.reserve(REQUEST_ID, 128, 136, 50,
-                System.currentTimeMillis() + 30_000);
+        decodeEndpoint.reserve(REQUEST_ID, 128, 136, 50);
         decodeEndpoint.markQueuedPhase(REQUEST_ID);
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
         RequestLifecycleSnapshot dispatched = scheduler.getRequestState(REQUEST_ID, 0);
@@ -211,7 +210,7 @@ class DecodeAcceptanceLinearizationTest {
         reportDecode(TaskPhase.KV_ALLOCATED);
 
         Method deadline = PriorityScheduler.class.getDeclaredMethod(
-                "onAdmissionDeadline", long.class, CompletableFuture.class);
+                "onRequestExpired", long.class, CompletableFuture.class);
         deadline.setAccessible(true);
         deadline.invoke(scheduler, REQUEST_ID, item.future());
 
@@ -340,7 +339,7 @@ class DecodeAcceptanceLinearizationTest {
         scheduler.onWorkerStatusUpdate(response);
     }
 
-    private BatchItem item() {
+    private BatchItem item(FlexlbConfig config) {
         Request request = new Request();
         request.setRequestId(REQUEST_ID);
         request.setPriority(50);
@@ -348,8 +347,9 @@ class DecodeAcceptanceLinearizationTest {
         request.setMaxNewTokens(8);
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
-        context.setBudget(ScheduleBudget.forDeadline(
-                50, System.currentTimeMillis(), System.currentTimeMillis() + 30_000));
+        context.setConfig(config);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(
+                50, System.currentTimeMillis() + 30_000));
 
         ServerStatus prefill = server(RoleType.PREFILL, "10.0.0.1", 8080, 8081);
         ServerStatus decode = server(RoleType.DECODE, "10.0.0.2", 8081, 8082);

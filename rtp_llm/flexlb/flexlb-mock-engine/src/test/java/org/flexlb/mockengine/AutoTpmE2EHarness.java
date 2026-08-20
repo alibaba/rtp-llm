@@ -15,10 +15,13 @@ import org.flexlb.balance.scheduler.priority.PlanCommitter;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.scheduler.priority.UnsupportedEngineCancelChannel;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
+import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.PriorityOrderingConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -39,6 +42,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -123,7 +127,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     /**
      * @param autoTpm must be decided at construction time: {@code WorkerBatcher}
-     *                freezes its queue comparator from {@code isAutoTpmEnabled()}
+     *                freezes its queue comparator from the configured ordering
      *                when the endpoint is registered — flipping the switch after
      *                construction does NOT change the batch queue ordering.
      */
@@ -156,20 +160,16 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
 
         // Conservative defaults; scenarios override before submitting traffic.
-        // autoTpm must be set BEFORE registerEndpoint (WorkerBatcher freezes it).
-        config.setAutoTpmEnabled(autoTpm);
-        config.setScheduleWorkerSize(1);
-        config.setFlexlbBatchSizeMax(100);
-        config.setFlexlbBatchWindowMs(10_000);
+        // Priority ordering must be set BEFORE registerEndpoint (WorkerBatcher freezes it).
+        if (autoTpm) {
+            config.queueScheduler().setOrdering(new PriorityOrderingConfig());
+        }
+        config.batchDispatcher().setMaxRequests(100);
+        config.batchDispatcher().setMaxCollectionWaitMs(10_000);
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
-        config.setFlexlbBatchFixedWaitMs(10_000);
-        config.setFlexlbBatchQueueMaxSize(1024);
-        // single dispatch thread → engine arrival order == dispatch order
-        // (sends are non-blocking whenCompleteAsync, so this never stalls)
-        config.setFlexlbBatchDispatchPoolSize(1);
-        config.setCostSloMs(50_000L);
-        config.setCostSloRiskMarginMs(50L);
+        config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+        config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(1024);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         routeFn = this::defaultRoute;
@@ -225,8 +225,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 : new UnsupportedEngineCancelChannel();
         priorityScheduler = new PriorityAdmissionScheduler(
                 configService, router, endpointRegistry, new PlanCommitter(),
-                new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 priorityReporter, reporter, cancelChannel,
                 new DecodePreemptionCoordinator(cancelChannel)) {
             @Override
@@ -237,7 +235,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             }
         };
         scheduler = new PriorityScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+                endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                cancelChannel);
         schedulerRef.set(scheduler);
 
         for (JavaMockEngineCluster.FastRpcService svc : prefillEngines) {
@@ -294,6 +293,16 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         decodeEndpoint(index).onWorkerStatusUpdate(status, new WorkerStatusResponse());
     }
 
+    void allowPreemption(VictimStage first, VictimStage... additional) {
+        PreemptionConfig preemption = new PreemptionConfig();
+        EnumSet<VictimStage> stages = EnumSet.of(first, additional);
+        preemption.setAllowedVictimStages(stages);
+        if (stages.contains(VictimStage.DECODE_ENGINE_OWNED)) {
+            preemption.setEngineCancellation(new EngineCancellationConfig());
+        }
+        config.priorityOrdering().setPreemption(preemption);
+    }
+
     ServerStatus prefillServer(int index, long requestId) {
         int grpcPort = prefillEngines.get(index).getGrpcPort();
         return server(RoleType.PREFILL, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
@@ -307,14 +316,16 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     /** Capacity-aware route stand-in mirroring the production decode hard filter. */
     Response defaultRoute(BalanceContext ctx) {
         DecodeEndpoint decodeEp = decodeEndpoint(0);
-        if (config.getDecodeConcurrencyLimit() > 0
-                && decodeEp.getEngineLoad() + 1 > config.getDecodeConcurrencyLimit()) {
+        Long decodeConcurrencyLimit = config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxEngineRequests();
+        if (decodeConcurrencyLimit != null && decodeConcurrencyLimit > 0
+                && decodeEp.getEngineLoad() + 1 > decodeConcurrencyLimit) {
             return Response.error(StrategyErrorType.NO_DECODE_WORKER);
         }
         if (decodeEp.realKvTotal() > 0 && decodeEp.realKvAvailable() < 128) {
             return Response.error(StrategyErrorType.NO_DECODE_WORKER);
         }
-        decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority(), ctx.getDeadlineMs());
+        decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority());
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -353,12 +364,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
-        ctx.setConfig(new FlexlbConfig());
+        ctx.setConfig(config);
         ctx.setGenerateInputPbBytes(generateInputBytes(requestId, (int) seqLen, maxNewTokens));
-        // Mirror production admission: set a ScheduleBudget so that
-        // item.priority() / item.deadlineMs() delegate correctly.
-        // 30 s SLO avoids accidental expiry during eviction tests.
-        ctx.setBudget(ScheduleBudget.forDeadline(priority, ctx.getStartTime(), ctx.getStartTime() + 30_000));
+        // Mirror production admission with immutable request scheduling metadata.
+        // A 30 s request lifetime avoids accidental expiry during eviction tests.
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
+                priority, ctx.getStartTime() + 30_000));
         return ctx;
     }
 
@@ -392,7 +403,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private void pumpEngine(JavaMockEngineCluster.FastRpcService svc) {
         int port = svc.getGrpcPort();
         EngineRpcService.WorkerStatusPB status = workerStatus(svc, pumpCursor.get(port));
-        pumpCursor.put(port, status.getLatestFinishedVersion());
 
         boolean isDecode = decodeEngines.contains(svc);
         WorkerStatusResponse resp = new WorkerStatusResponse();
@@ -420,6 +430,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             endpointRegistry.getDecode(ipPortByEnginePort.get(port))
                     .onWorkerStatusUpdate(ws, resp);
         }
+        // Commit the cursor only after every consumer accepted the snapshot.
+        // If processing throws, the next pump round must be able to retry the
+        // same finished records instead of losing them permanently.
+        pumpCursor.put(port, status.getLatestFinishedVersion());
     }
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
@@ -542,10 +556,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                     "prefill", Map.of("scale", 1.0),
                     "decode", Map.of("scale", 1.0,
                             "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
-            MAPPER.writeValue(master.toFile(), Map.of(
-                    "zone_process_setting", Map.of(
-                            "process_info", Map.of(
-                                    "envs", List.of(List.of("PREFILL_TIME_FORMULA", prefillFormulaMs))))));
+            MockMasterConfig.writeWithPrefillExpression(master, prefillFormulaMs);
             return MockPerformanceModel.load(performance.toString(), master.toString());
         } catch (IOException e) {
             throw new UncheckedIOException(e);

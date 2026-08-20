@@ -8,14 +8,16 @@ import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -76,8 +78,7 @@ class ShortestTtftCacheAffinityTest {
     @Test
     void selectsGlobalCacheLeaderWithinExtraTtftBound() {
         FlexlbConfig config = cacheAffinityConfig(150, 5);
-        config.setShortestTtftCandidatePoolMode("FIXED");
-        config.setShortestTtftCandidatePoolSize(1);
+        useFixedCandidatePool(config, 1);
 
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 650);
@@ -95,8 +96,7 @@ class ShortestTtftCacheAffinityTest {
     @Test
     void selectsCacheLeaderWhenItIsAlsoShortestTtft() {
         FlexlbConfig config = cacheAffinityConfig(0, 5);
-        config.setShortestTtftCandidatePoolMode("FIXED");
-        config.setShortestTtftCandidatePoolSize(2);
+        useFixedCandidatePool(config, 2);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
         stubCacheMatches(Map.of("10.0.0.1:8080", 3));
@@ -153,8 +153,7 @@ class ShortestTtftCacheAffinityTest {
     @Test
     void coldRequestRetainsShortestTtftCandidatePoolFairness() {
         FlexlbConfig config = cacheAffinityConfig(1000, 0);
-        config.setShortestTtftCandidatePoolMode("FIXED");
-        config.setShortestTtftCandidatePoolSize(2);
+        useFixedCandidatePool(config, 2);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 10);
 
@@ -182,8 +181,10 @@ class ShortestTtftCacheAffinityTest {
         PrefillEndpoint endpoint = Mockito.mock(PrefillEndpoint.class);
         Mockito.when(endpoint.realWaitTimeMs()).thenReturn(100L);
         Mockito.when(endpoint.batcherWaitMs()).thenReturn(200L);
-        BalanceContext context = buildContext(1000, 44L, new FlexlbConfig());
-        context.setScheduleMode(ScheduleModeEnum.DIRECT);
+        FlexlbConfig config = new FlexlbConfig();
+        config.setScheduler(new DirectSchedulerConfig());
+        config.setDispatcher(new NonBatchDispatcherConfig());
+        BalanceContext context = buildContext(1000, 44L, config);
 
         assertEquals(100L, strategy.estimatedQueueWaitMs(endpoint, context));
     }
@@ -324,8 +325,7 @@ class ShortestTtftCacheAffinityTest {
     @Test
     void refreshesSelectionSnapshotsBeforeBaselineAfterAllAffinityClaimsFail() {
         FlexlbConfig config = cacheAffinityConfig(0, 5);
-        config.setShortestTtftCandidatePoolMode("FIXED");
-        config.setShortestTtftCandidatePoolSize(2);
+        useFixedCandidatePool(config, 2);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
         stubCacheMatches(Map.of("10.0.0.1:8080", 3));
@@ -365,9 +365,10 @@ class ShortestTtftCacheAffinityTest {
 
     private FlexlbConfig cacheAffinityConfig(long maxExtraTtftMs, double minHitRate) {
         FlexlbConfig config = new FlexlbConfig();
-        config.setCacheAffinityEnabled(true);
-        config.setCacheAffinityMaxExtraTtftMs(maxExtraTtftMs);
-        config.setCacheAffinityMinHitRate(minHitRate);
+        RoutingConfig.CacheAffinityConfig affinity = new RoutingConfig.CacheAffinityConfig();
+        affinity.setMaxExtraTtftMs(maxExtraTtftMs);
+        affinity.setMinPrefixHitPercent(minHitRate);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         return config;
     }
 
@@ -413,6 +414,7 @@ class ShortestTtftCacheAffinityTest {
         request.setSeqLen(seqLen);
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
+        context.setConfig(new FlexlbConfig());
         return new BatchItem(context, null, null, null, null, null, null, 0);
     }
 
@@ -424,7 +426,18 @@ class ShortestTtftCacheAffinityTest {
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
         context.setConfig(config);
-        context.setScheduleMode(config.getDefaultScheduleModeEnum());
         return context;
+    }
+
+    private static void useFixedCandidatePool(FlexlbConfig config, int workers) {
+        RoutingConfig.FixedCandidatePoolConfig pool = new RoutingConfig.FixedCandidatePoolConfig();
+        pool.setWorkers(workers);
+        RoutingConfig.LeastRecentlyUsedInPoolConfig choice =
+                new RoutingConfig.LeastRecentlyUsedInPoolConfig();
+        choice.setPool(pool);
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
+                        .getPrefill().getSelector();
+        selector.setCandidateChoice(choice);
     }
 }

@@ -4,6 +4,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -20,7 +21,6 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -76,9 +76,6 @@ class FlexlbServiceImplTest {
                 configService,
                 batchSchedulerReporter,
                 serverLatencyRecorder,
-                new PrioritySloPolicy(
-                        PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                 mock(PrioritySchedulerReporter.class)
         );
 
@@ -424,7 +421,7 @@ class FlexlbServiceImplTest {
                 captor.getValue().getCode());
         assertPvContains("\"code\":8511");
         assertPvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
-        assertPvContains("\"generateTimeoutMs\":12345");
+        assertPvContains("\"requestExpiresAtMs\":");
         assertPvContains("\"realMasterHost\":\"10.0.0.2:7001\"");
     }
 
@@ -511,6 +508,64 @@ class FlexlbServiceImplTest {
         assertEquals(100L, capturedRequest.getBlockCacheKeys().get(0));
         assertEquals(200L, capturedRequest.getBlockCacheKeys().get(1));
         assertEquals(2048L, capturedRequest.getSeqLen());
+        assertEquals(Request.DEFAULT_GENERATE_TIMEOUT_MS,
+                capturedRequest.getGenerateTimeout());
+        assertEquals(capturedCtx.getStartTime() + 3_600_000L,
+                capturedCtx.getRequestExpiresAtMs());
+    }
+
+    @Test
+    void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
+        FlexlbConfig queueConfig = ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
+                    "ordering":{"type":"FIFO"}},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """);
+        when(configService.loadBalanceConfig()).thenReturn(queueConfig);
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(context.capture())).thenReturn(
+                CompletableFuture.completedFuture(response));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(100_001L)
+                .setGenerateTimeout(1L)
+                .setRequestTimeMs(1L)
+                .build(), mock(StreamObserver.class));
+
+        BalanceContext captured = context.getValue();
+        assertEquals(captured.getStartTime() + 7777L, captured.getRequestExpiresAtMs());
+    }
+
+    @Test
+    void directModeHasNoSchedulingTimeout() {
+        FlexlbConfig directConfig = ConfigService.parse("""
+                {
+                  "scheduler":{"type":"DIRECT"},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """);
+        when(configService.loadBalanceConfig()).thenReturn(directConfig);
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ArgumentCaptor<BalanceContext> context = ArgumentCaptor.forClass(BalanceContext.class);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(context.capture())).thenReturn(
+                CompletableFuture.completedFuture(response));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(100_002L)
+                .setGenerateTimeout(1L)
+                .setRequestTimeMs(1L)
+                .build(), mock(StreamObserver.class));
+
+        assertEquals(Long.MAX_VALUE, context.getValue().getRequestExpiresAtMs());
     }
 
     @Test
@@ -522,7 +577,8 @@ class FlexlbServiceImplTest {
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
         when(routeService.getRequestState(700L, 0)).thenReturn(
                 new RequestLifecycleSnapshot(700L, RequestLifecycleState.ACKNOWLEDGED,
-                        1001L, 10L, 20L, "engine acknowledged batch"));
+                        DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L,
+                        "engine acknowledged batch"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()

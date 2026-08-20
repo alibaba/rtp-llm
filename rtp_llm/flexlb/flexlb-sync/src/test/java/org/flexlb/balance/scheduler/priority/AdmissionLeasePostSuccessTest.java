@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler.priority;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PrefillQueueManager;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -325,6 +326,7 @@ class AdmissionLeasePostSuccessTest {
                                        CompletableFuture<Response> future,
                                        DecodeEndpoint decodeEndpoint) {
         BalanceContext context = new BalanceContext();
+        context.setConfig(SchedulingTestConfig.batchConfig());
         Request request = new Request();
         request.setRequestId(requestId);
         context.setRequest(request);

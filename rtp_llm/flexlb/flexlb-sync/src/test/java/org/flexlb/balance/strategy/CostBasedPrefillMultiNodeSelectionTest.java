@@ -8,9 +8,12 @@ import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PriorityOrderingConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -58,9 +61,10 @@ class CostBasedPrefillMultiNodeSelectionTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
 
         config = new FlexlbConfig();
-        config.setCostSloMs(500_000L);
-        config.setCostSloRiskMarginMs(50L);
-        config.setScoreTieRandomEnabled(false);
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
+                        .getPrefill().getSelector();
+        selector.setCandidateChoice(new RoutingConfig.BestOnlyConfig());
         configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -136,10 +140,10 @@ class CostBasedPrefillMultiNodeSelectionTest {
     @Test
     void sixNodeMatrixNeverSelectsInfeasibleEndpointsAndPicksCheapestFeasible() {
         // 6 节点矩阵：dead / resource-unavailable 两个"评分最优"的陷阱节点 +
-        // SLO 超限节点 + 三个可行节点（wait 300/100/200）→ 必选 wait=100 的节点。
+        // 一个极高等待节点 + 三个低等待节点（300/100/200）→ 必选 wait=100 的节点。
         createWorker("10.0.1.1", 0, false);          // dead：分数最优但绝不可入选
         createWorker("10.0.1.2", 0, true);           // resource-unavailable（下方 stub）
-        createWorker("10.0.1.3", 600_000, true);     // SLO 超限：wait >> sloMs
+        createWorker("10.0.1.3", 600_000, true);     // 极高等待：仍参与评分，但不会胜出
         createWorker("10.0.1.4", 300, true);
         createWorker("10.0.1.5", 100, true);
         createWorker("10.0.1.6", 200, true);
@@ -181,10 +185,11 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     /** auto-tpm 开启 + 背压 park 配置：batcher 队列确定性驻留不被 drain。 */
     private void setUpAutoTpmBatcherConfig() {
-        config.setAutoTpmEnabled(true);
-        config.setFlexlbBatchFixedWaitMs(1_000);
-        config.setFlexlbBatchSizeMax(10);
-        config.setFlexlbBatchFixedMaxInflightBatches(1);
+        config.queueScheduler().setOrdering(new PriorityOrderingConfig());
+        BatchDispatcherConfig dispatcher = config.batchDispatcher();
+        dispatcher.setMaxCollectionWaitMs(1_000);
+        dispatcher.setMaxRequests(10);
+        dispatcher.setMaxInflightBatchesPerPrefillWorker(1);
     }
 
     /**
@@ -213,7 +218,8 @@ class CostBasedPrefillMultiNodeSelectionTest {
             req.setPriority(priority);
             BalanceContext ctx = new BalanceContext();
             ctx.setRequest(req);
-            ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 30_000));
+            ctx.setConfig(config);
+            ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 30_000));
             BatchItem item = new BatchItem(ctx, null, null, null, null, ep, null, now);
             ep.getBatcher().offer(item);
         }
@@ -225,7 +231,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
         BalanceContext ctx = buildContext(requestId);
         ctx.getRequest().setPriority(priority);
         long now = System.currentTimeMillis();
-        ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 60_000));
+        ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 60_000));
         return ctx;
     }
 

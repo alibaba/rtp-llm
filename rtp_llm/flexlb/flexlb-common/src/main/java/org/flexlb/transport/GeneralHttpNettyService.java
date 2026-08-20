@@ -54,10 +54,11 @@ public class GeneralHttpNettyService {
         this.nettyClient = nettyClient;
         FlexlbConfig config = configService.loadBalanceConfig();
         httpRequestExecutor = new ThreadPoolExecutor(
-                config.getHttpRequestExecutorCoreSize(),
-                config.getHttpRequestExecutorMaxSize(),
+                config.getInternalRuntime().getHttpRequestExecutorThreads(),
+                config.getInternalRuntime().getHttpRequestExecutorThreads(),
                 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(config.getHttpRequestExecutorQueueSize()),
+                new LinkedBlockingQueue<>(
+                        config.getInternalRuntime().getHttpRequestExecutorQueueCapacity()),
                 new NamedThreadFactory("req-thread"),
                 // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
                 new ThreadPoolExecutor.CallerRunsPolicy());

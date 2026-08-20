@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
+
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
@@ -7,9 +9,8 @@ import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -78,9 +79,9 @@ class AutoTpmSchedulingOverheadPerfTest {
         List<RoundResult> autoTpmRounds = new ArrayList<>();
         for (int round = 0; round < ROUNDS; round++) {
             try (PerfHarness h = new PerfHarness(cfg -> {
-                cfg.setAutoTpmEnabled(true);
-                cfg.setAutoTpmPrefillQueueEvictEnabled(true);
-                cfg.setAutoTpmDecodeReservedEvictEnabled(true);
+                SchedulingTestConfig.usePriorityQueue(cfg);
+                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
             })) {
                 autoTpmRounds.add(runBurst(h, "autotpm-" + round));
             }
@@ -133,9 +134,9 @@ class AutoTpmSchedulingOverheadPerfTest {
 
             RoundResult autoTpm;
             try (PerfHarness h = new PerfHarness(cfg -> {
-                cfg.setAutoTpmEnabled(true);
-                cfg.setAutoTpmPrefillQueueEvictEnabled(true);
-                cfg.setAutoTpmDecodeReservedEvictEnabled(true);
+                SchedulingTestConfig.usePriorityQueue(cfg);
+                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
             })) {
                 runWarmup(h);
                 autoTpm = runRateLimited(h, requestCount, targetQps);
@@ -281,19 +282,14 @@ class AutoTpmSchedulingOverheadPerfTest {
             PrioritySchedulerReporter priorityReporter = mock(PrioritySchedulerReporter.class);
 
             // Perf config matching MasterBatchEndToEndPerformanceTest
-            config.setFlexlbBatchAlgorithm("fixed_window");
-            config.setFlexlbBatchFixedWaitMs(10L);
-            config.setFlexlbBatchPredictThresholdMs(0L);
-            config.setFlexlbBatchSizeMax(16);
-            config.setFlexlbBatchQueueMaxSize(4_096);
-            config.setFlexlbBatchMaxInflight(20_000);
-            config.setFlexlbBatchDispatchPoolSize(32);
-            config.setFlexlbBatchDispatchQueueSize(2_048);
-            config.setPrefillQueueSizeThreshold(1_000_000L);
-            config.setScheduleWorkerSize(1);
-            config.setCostSloMs(50_000L);
-            config.setCostSloRiskMarginMs(50L);
-            config.setDecodeConcurrencyLimit(100_000);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10L);
+            SchedulingTestConfig.useBatchDispatcher(config).setEarlyDispatchPredictedExecutionMs((long) (0L));
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(16);
+            SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(4_096);
+            config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(20_000);
+            config.getRouter().getRoles().getPrefill().getAvailability()
+                    .setMaxPendingRequests(1_000_000L);
+            config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100_000));
             customize.accept(config);
             when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -340,7 +336,7 @@ class AutoTpmSchedulingOverheadPerfTest {
                 DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
                 decodeEp.reserve(ctx.getRequestId(), (int) ctx.getRequest().getSeqLen(),
                         (int) ctx.getRequest().getSeqLen() + 8,
-                        ctx.getPriority(), ctx.getDeadlineMs());
+                        ctx.getPriority());
                 return successRoute(ctx.getRequestId());
             });
 
@@ -349,12 +345,11 @@ class AutoTpmSchedulingOverheadPerfTest {
             // Build priority scheduler (always created; only active when autoTpmEnabled=true)
             priorityScheduler = new PriorityAdmissionScheduler(
                     configService, router, endpointRegistry, new PlanCommitter(),
-                    new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
-                            PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
                     priorityReporter, reporter, new UnsupportedEngineCancelChannel());
 
             scheduler = new PriorityScheduler(configService, router,
-                    endpointRegistry, dispatcher, reporter, priorityScheduler, null);
+                    endpointRegistry, dispatcher, reporter, priorityScheduler, null,
+                    new UnsupportedEngineCancelChannel());
             schedulerRef.set(scheduler);
 
             // Register endpoints
@@ -422,8 +417,8 @@ class AutoTpmSchedulingOverheadPerfTest {
             ctx.setRequest(request);
             ctx.setConfig(config);
             ctx.setGenerateInputPbBytes(generateInputBytes(requestId, (int) seqLen));
-            ctx.setBudget(ScheduleBudget.forDeadline(priority,
-                    ctx.getStartTime(), ctx.getStartTime() + 30_000));
+            ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
+                    priority, ctx.getStartTime() + 30_000));
             return ctx;
         }
 

@@ -68,14 +68,7 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
     @Override
     protected FlexlbConfig createConfig() {
-        FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchSizeMax(1);
-        cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
-        cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
-        cfg.setFlexlbInflightTtlMs(300_000L);
-        return cfg;
+        return super.createConfig();
     }
 
     @Test

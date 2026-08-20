@@ -103,11 +103,6 @@ public class FormulaPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public void learn(List<BatchItem> items, long predictedMs, long actualMs) {
-        learn(PrefillBatchFeatures.from(items), predictedMs, actualMs);
-    }
-
-    @Override
     public void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
         logger.debug("learn sample: batchSize={} predictedMs={} actualMs={}",
                 features != null ? features.batchSize() : 0, predictedMs, actualMs);

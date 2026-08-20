@@ -23,15 +23,17 @@ import java.util.Map;
  */
 @Component
 public class PrefillResourceMeasure implements ResourceMeasure {
-    private final long queueSizeThreshold;
+    private final long maxPendingRequests;
     private final long hysteresisBiasPercent;
-    private final long maxQueueSize;
+    private final long prefillSaturatedAtPendingRequests;
 
     public PrefillResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
-        this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
-        this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
-        this.maxQueueSize = config.getMaxPrefillQueueSize();
+        this.maxPendingRequests = config.getRouter().getRoles().getPrefill()
+                .getAvailability().getMaxPendingRequests();
+        this.hysteresisBiasPercent = config.getRouter().getAvailabilityHysteresisPercent();
+        this.prefillSaturatedAtPendingRequests = config.getInternalRuntime()
+                .getPrefillSaturatedAtPendingRequests();
     }
 
     @Override
@@ -46,11 +48,14 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-        long queueSize = endpoint.realPendingCount();
-        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
+        long pendingRequests = endpoint.realPendingCount();
+        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(
+                pendingRequests, maxPendingRequests, hysteresisBiasPercent);
         if (!available) {
-            Logger.debug("Prefill worker {} resource unavailable: queueSize={}, threshold={}, alive={}",
-                    endpoint.getIp(), queueSize, queueSizeThreshold, endpoint.getStatus().isAlive());
+            Logger.debug("Prefill worker {} resource unavailable: pendingRequests={}, "
+                            + "maxPendingRequests={}, alive={}",
+                    endpoint.getIp(), pendingRequests, maxPendingRequests,
+                    endpoint.getStatus().isAlive());
         }
         return available;
     }
@@ -83,14 +88,14 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long queueSize = countWaitingTasks(workerStatus);
+        long pendingRequests = countWaitingTasks(workerStatus);
 
-        if (queueSize <= 0) {
+        if (pendingRequests <= 0) {
             return 0.0;
-        } else if (queueSize >= maxQueueSize) {
+        } else if (pendingRequests >= prefillSaturatedAtPendingRequests) {
             return 100.0;
         } else {
-            return (queueSize * 100.0) / maxQueueSize;
+            return (pendingRequests * 100.0) / prefillSaturatedAtPendingRequests;
         }
     }
 

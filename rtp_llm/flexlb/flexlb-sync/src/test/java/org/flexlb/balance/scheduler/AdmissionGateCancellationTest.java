@@ -15,7 +15,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,7 +52,7 @@ class AdmissionGateCancellationTest {
     void setUp() {
         configService = mock(ConfigService.class);
         config = new FlexlbConfig();
-        config.setAutoTpmEnabled(true);
+        SchedulingTestConfig.usePriorityQueue(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
         admissionScheduler = mock(PriorityAdmissionScheduler.class);
         cancelChannel = mock(EngineCancelChannel.class);
@@ -136,7 +135,7 @@ class AdmissionGateCancellationTest {
         BalanceContext context = context(requestId);
         CompletableFuture<Response> scheduleResult = scheduler.submit(context);
 
-        scheduler.onAdmissionDeadline(requestId, scheduleResult);
+        scheduler.onRequestExpired(requestId, scheduleResult);
 
         Response response = scheduleResult.get(1, TimeUnit.SECONDS);
         assertEquals(8511, response.getCode());
@@ -158,7 +157,7 @@ class AdmissionGateCancellationTest {
 
         RequestLifecycleSnapshot cancelled = scheduler.cancelRequest(
                 requestId, 0, CancelReason.CLIENT_CANCELLED);
-        scheduler.onAdmissionDeadline(requestId, scheduleResult);
+        scheduler.onRequestExpired(requestId, scheduleResult);
 
         assertEquals(RequestLifecycleState.CANCELLED, cancelled.state());
         assertEquals(8504, scheduleResult.get(1, TimeUnit.SECONDS).getCode());
@@ -191,7 +190,8 @@ class AdmissionGateCancellationTest {
         CompletableFuture<Response> result = scheduler.submit(context);
         BatchItem item = item(context, result);
         assertTrue(scheduler.registerInflight(item));
-        AdmissionLease lease = new AdmissionLease(item, null, null, scheduler);
+        AdmissionLease lease = new AdmissionLease(item, null, null, scheduler,
+                0, null, null);
         assertTrue(scheduler.attachAdmissionLease(item, lease));
         lease.bindTo(result);
 
@@ -207,7 +207,7 @@ class AdmissionGateCancellationTest {
     @Test
     void legacyRoutingCannotCommitAfterCancelClosesGeneration() throws Exception {
         scheduler.shutdown();
-        config.setAutoTpmEnabled(false);
+        SchedulingTestConfig.useFifoQueue(config);
         CountDownLatch routing = new CountDownLatch(1);
         CountDownLatch finishRouting = new CountDownLatch(1);
         Router router = mock(Router.class);
@@ -268,7 +268,7 @@ class AdmissionGateCancellationTest {
     @Test
     void legacyQueuedExternalFutureCancelUsesSchedulerReducer() {
         scheduler.shutdown();
-        config.setAutoTpmEnabled(false);
+        SchedulingTestConfig.useFifoQueue(config);
         Router router = mock(Router.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
@@ -310,7 +310,7 @@ class AdmissionGateCancellationTest {
     void legacyOfferFailureKeepsOwnershipWhileCancelRacesResourceUnwind()
             throws Exception {
         scheduler.shutdown();
-        config.setAutoTpmEnabled(false);
+        SchedulingTestConfig.useFifoQueue(config);
         Router router = mock(Router.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
@@ -367,7 +367,7 @@ class AdmissionGateCancellationTest {
     void shutdownCompletesGenerationHeldInLegacyRouteAndStillRollsBack()
             throws Exception {
         scheduler.shutdown();
-        config.setAutoTpmEnabled(false);
+        SchedulingTestConfig.useFifoQueue(config);
         Router router = mock(Router.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
@@ -422,14 +422,13 @@ class AdmissionGateCancellationTest {
     @Test
     void orphanCleanupRetainsReservationOwnedByActiveAdmissionMutation() {
         long requestId = 20_011L;
-        config.setFlexlbInflightTtlMs(0);
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(0);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         RequestInflight reservation = new RequestInflight(
                 128,
                 136,
                 System.currentTimeMillis() - 1_000,
                 50,
-                0,
                 DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN);
         when(decode.reservedView()).thenReturn(Map.of(requestId, reservation));
         when(decode.releaseReservationIfCurrent(requestId, reservation))
@@ -454,14 +453,13 @@ class AdmissionGateCancellationTest {
     @Test
     void orphanCleanupCannotOvertakeAdmissionMutationCommit() throws Exception {
         long requestId = 20_012L;
-        config.setFlexlbInflightTtlMs(0);
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(0);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         RequestInflight reservation = new RequestInflight(
                 128,
                 136,
                 System.currentTimeMillis() - 1_000,
                 50,
-                0,
                 DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN);
         CountDownLatch snapshotCaptured = new CountDownLatch(1);
         CountDownLatch continueCleanup = new CountDownLatch(1);
@@ -500,7 +498,7 @@ class AdmissionGateCancellationTest {
         request.setMaxNewTokens(8);
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
-        context.setScheduleMode(ScheduleModeEnum.BATCH);
+        context.setConfig(new FlexlbConfig());
         return context;
     }
 

@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PreemptionConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -18,20 +20,17 @@ import java.util.Set;
  * per-endpoint reasons recorded into {@code failures}.
  *
  * <p>Absolute rule (design doc 3.3): only strictly lower-priority queued
- * requests are eviction candidates; equal priority never yields. The bounded
- * cache benefit (see {@link PriorityCostFunction#boundedCacheBenefit}) cannot
- * reverse that boundary.
+ * requests are eviction candidates; equal priority never yields.
  */
 public final class EvictionPlanner {
 
     /**
      * Candidate preference (design doc 9.3, first = evicted first):
-     * priority asc → deadline desc (more slack first) → arrival desc
-     * (newest first) → requestId asc (deterministic).
+     * priority asc → arrival desc (newest first) → requestId asc
+     * (deterministic).
      */
     static final Comparator<QueuedRequestSnapshot> CANDIDATE_ORDER = Comparator
             .comparingInt(QueuedRequestSnapshot::priority)
-            .thenComparing(QueuedRequestSnapshot::deadlineMs, Comparator.reverseOrder())
             .thenComparing(QueuedRequestSnapshot::arrivalTimeMs, Comparator.reverseOrder())
             .thenComparingLong(QueuedRequestSnapshot::requestId);
 
@@ -51,21 +50,16 @@ public final class EvictionPlanner {
      * @param envelope       incoming request descriptor
      * @param queues         candidate queue snapshots (production passes the
      *                       router-selected endpoint's queue only)
-     * @param cacheHitTokens incoming cache-hit tokens per endpointId (may be empty)
-     * @param config         live config (cache benefit cap)
      * @param failures       out-param: per-endpoint infeasibility reason
      * @return the best proposal by {@link PrefillEvictionProposal#ORDER}, or
      *         {@code null} when no endpoint has a feasible plan
      */
     public static PrefillEvictionProposal planPrefillQueue(PriorityRequestEnvelope envelope,
                                                            List<PrefillQueueSnapshot> queues,
-                                                           Map<String, Long> cacheHitTokens,
-                                                           FlexlbConfig config,
                                                            Map<String, String> failures) {
         PrefillEvictionProposal best = null;
         for (PrefillQueueSnapshot queue : queues) {
-            PrefillEvictionProposal proposal = planOne(envelope, queue,
-                    cacheHitTokens.getOrDefault(queue.endpointId(), 0L), config, failures);
+            PrefillEvictionProposal proposal = planOne(envelope, queue, failures);
             if (proposal != null
                     && (best == null || PrefillEvictionProposal.ORDER.compare(proposal, best) < 0)) {
                 best = proposal;
@@ -76,8 +70,6 @@ public final class EvictionPlanner {
 
     private static PrefillEvictionProposal planOne(PriorityRequestEnvelope envelope,
                                                    PrefillQueueSnapshot queue,
-                                                   long endpointCacheHitTokens,
-                                                   FlexlbConfig config,
                                                    Map<String, String> failures) {
         int hardLimit = queue.queueCapacity();
         if (hardLimit <= 0) {
@@ -111,10 +103,10 @@ public final class EvictionPlanner {
         candidates.sort(CANDIDATE_ORDER);
         List<QueuedRequestSnapshot> victims = List.copyOf(candidates.subList(0, queueDeficit));
 
-        // 9.3: netCost = rawCost - boundedCacheBenefit.
+        // 9.3: retain the scalar cost for diagnostics; structured priority
+        // harm is the absolute comparison dimension.
         long rawCost = 0;
         int minVictimPriority = Integer.MAX_VALUE;
-        long latestVictimDeadline = Long.MIN_VALUE;
         long tieBreak = Long.MAX_VALUE;
         PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
         for (QueuedRequestSnapshot victim : victims) {
@@ -122,18 +114,12 @@ public final class EvictionPlanner {
                     rawCost, PriorityCostFunction.f(victim.priority()));
             harmProfile.add(victim.priority(), 1);
             minVictimPriority = Math.min(minVictimPriority, victim.priority());
-            latestVictimDeadline = Math.max(latestVictimDeadline, victim.deadlineMs());
             tieBreak = Math.min(tieBreak, victim.requestId());
         }
-        long boundedBenefit = PriorityCostFunction.boundedCacheBenefit(
-                endpointCacheHitTokens, config.getAutoTpmPlanCacheHitBenefitCap());
-        long netCost = rawCost - boundedBenefit;
-
         PlanCost cost = new PlanCost(harmProfile.build(), minVictimPriority,
-                netCost, victims.size(),
-                boundedBenefit, latestVictimDeadline, tieBreak);
+                rawCost, victims.size(), tieBreak);
         return new PrefillEvictionProposal(queue.endpointId(), queue.queueVersion(), victims,
-                rawCost, endpointCacheHitTokens, boundedBenefit, netCost, cost);
+                rawCost, cost);
     }
 
     // ==================== Decode reserved-only eviction (design doc 11-13) ====================
@@ -141,24 +127,22 @@ public final class EvictionPlanner {
     /**
      * Candidate preference for slot eviction (design doc 11.3, first = evicted
      * first): priority asc → stage asc (reserved before accepted, Phase 5) →
-     * deadline desc (more slack first) → requestId asc.
+     * requestId asc.
      */
     static final Comparator<DecodeRequestSnapshot> DECODE_SLOT_ORDER = Comparator
             .comparingInt(DecodeRequestSnapshot::priority)
             .thenComparingInt(v -> v.phase().ordinal())
-            .thenComparing(DecodeRequestSnapshot::deadlineMs, Comparator.reverseOrder())
             .thenComparingLong(DecodeRequestSnapshot::requestId);
 
     /**
      * Candidate preference for KV eviction (design doc 12.4): priority asc →
      * stage asc (reserved before accepted, Phase 5) → kvBucket desc (bigger
-     * releases first, fewer victims) → deadline desc → requestId asc.
+     * releases first, fewer victims) → requestId asc.
      */
     static final Comparator<DecodeRequestSnapshot> DECODE_KV_ORDER = Comparator
             .comparingInt(DecodeRequestSnapshot::priority)
             .thenComparingInt(v -> v.phase().ordinal())
             .thenComparing(v -> PriorityCostFunction.kvBucket(v.kvTokens()), Comparator.reverseOrder())
-            .thenComparing(DecodeRequestSnapshot::deadlineMs, Comparator.reverseOrder())
             .thenComparingLong(DecodeRequestSnapshot::requestId);
 
     /**
@@ -166,7 +150,7 @@ public final class EvictionPlanner {
      * {@link #planDecode(PriorityRequestEnvelope, List, FlexlbConfig,
      * EngineCancelChannel, Map)} with no cancel channel, so engine-confirmed
      * layers are never considered. Kept for callers that must not preempt confirmed
-     * requests (e.g. deadline-rescue placement).
+     * requests.
      */
     public static DecodeEvictionProposal planDecode(PriorityRequestEnvelope envelope,
                                                     List<DecodeEndpointSnapshot> decodes,
@@ -179,16 +163,17 @@ public final class EvictionPlanner {
      * Plan the cheapest decode eviction that clears the incoming request's
      * slot and/or KV deficit across the given endpoints.
      *
-     * <p>Candidates are the strictly lower-priority reserved entries, plus —
-     * only when {@code autoTpmDecodeAcceptedEvictEnabled} is set AND the
-     * endpoint's engine supports the Cancel RPC — the strictly lower-priority
-     * engine-confirmed accepted/running entries (Phase 5). Running entries use
-     * a larger stage cost, so an otherwise equivalent accepted-not-running
-     * victim is preferred.
+     * <p>Candidates are the strictly lower-priority reserved entries when
+     * {@link VictimStage#DECODE_RESERVED} is allowed, plus — only when
+     * {@link VictimStage#DECODE_ENGINE_OWNED} is allowed and the endpoint's
+     * engine supports the Cancel RPC — the strictly lower-priority
+     * engine-confirmed accepted/running entries. Running entries use a larger
+     * stage cost, so an otherwise equivalent accepted-not-running victim is
+     * preferred.
      *
      * @param envelope incoming request descriptor (priority + hardKvTokens)
      * @param decodes  candidate decode endpoint snapshots
-     * @param config   live config (engine-confirmed-evict gate)
+     * @param config   live config (allowed victim-stage gates)
      * @param channel  engine cancel channel for the per-endpoint support gate;
      *                 {@code null} disables confirmed layers entirely
      * @param failures out-param: per-endpoint infeasibility reason
@@ -261,8 +246,13 @@ public final class EvictionPlanner {
             failures.put(ep.endpointId(), "decode_capacity_sufficient");
             return null;
         }
-        boolean localEvictionEnabled = config.isAutoTpmDecodeReservedEvictEnabled();
-        boolean engineCancelEnabled = config.isAutoTpmDecodeAcceptedEvictEnabled()
+        PreemptionConfig preemption = config.isPriorityOrdering()
+                ? config.priorityOrdering().getPreemption()
+                : null;
+        boolean localEvictionEnabled = preemption != null
+                && preemption.allows(VictimStage.DECODE_RESERVED);
+        boolean engineCancelEnabled = preemption != null
+                && preemption.allows(VictimStage.DECODE_ENGINE_OWNED)
                 && channel != null && channel.isSupported(ep.endpoint());
         DecodeEvictionProposal local = localEvictionEnabled
                 ? planDecodeOneOwnership(envelope, ep, slotDeficit, kvDeficit,
@@ -552,16 +542,13 @@ public final class EvictionPlanner {
                                                               long totalCost,
                                                               long freedKvTokens) {
         int minVictimPriority = Integer.MAX_VALUE;
-        long latestVictimDeadline = Long.MIN_VALUE;
         long tieBreak = Long.MAX_VALUE;
         for (DecodeRequestSnapshot victim : victims) {
             minVictimPriority = Math.min(minVictimPriority, victim.priority());
-            latestVictimDeadline = Math.max(latestVictimDeadline, victim.deadlineMs());
             tieBreak = Math.min(tieBreak, victim.requestId());
         }
         PlanCost cost = new PlanCost(harmProfile, minVictimPriority,
-                totalCost, victims.size(),
-                0, latestVictimDeadline, tieBreak);
+                totalCost, victims.size(), tieBreak);
         return new DecodeEvictionProposal(ep.endpointId(), ep.admissionVersion(),
                 List.copyOf(victims), evictionCase, totalCost, freedKvTokens, cost);
     }

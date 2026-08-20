@@ -29,13 +29,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
     @Override
     protected FlexlbConfig createConfig() {
-        FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchSizeMax(1);
-        cfg.setFlexlbBatchWindowMs(300);
-        cfg.setCostSloMs(50_000L);
-        cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
-        return cfg;
+        return super.createConfig();
     }
 
     @Test
@@ -45,7 +39,7 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch returns error");
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
-        assertEquals(1, mockPrefillWorker.getEnqueueCount());
+        assertEquals(1, mockPrefillWorker.getEnqueueCount(), response.getErrorMessage());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
 

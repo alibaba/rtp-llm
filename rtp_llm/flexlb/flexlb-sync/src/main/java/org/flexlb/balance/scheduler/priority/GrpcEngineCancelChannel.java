@@ -16,8 +16,8 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>This class is the production transport selected by
  * {@link EngineCancelChannelConfiguration}. Transport selection is independent
- * from the business gate: {@code AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED} is the
- * sole switch that lets the planner use accepted Decode eviction.
+ * from admission policy: {@code preemption.allowedVictimStages} must include
+ * {@code DECODE_ENGINE_OWNED} before the planner can use this transport.
  *
  * <p>Contract mirror of {@link EngineCancelChannel}: a cancel is an intent
  * injection only — settlement requires original-Prefill WorkerStatus carrying

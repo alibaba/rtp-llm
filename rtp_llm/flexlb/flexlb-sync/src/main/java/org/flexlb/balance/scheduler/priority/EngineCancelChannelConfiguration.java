@@ -11,9 +11,9 @@ import org.springframework.util.StringUtils;
  *
  * <p>Production always uses gRPC. The HTTP implementation is reachable only
  * through the explicit test-only mock control URL. This transport choice is
- * deliberately separate from admission policy:
- * {@code AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED} remains the sole business
- * switch for accepted Decode eviction in {@link EvictionPlanner}.
+ * deliberately separate from admission policy. Engine-owned Decode eviction
+ * is enabled only when {@code preemption.allowedVictimStages} contains
+ * {@code DECODE_ENGINE_OWNED}.
  */
 @Configuration(proxyBeanMethods = false)
 public class EngineCancelChannelConfiguration {

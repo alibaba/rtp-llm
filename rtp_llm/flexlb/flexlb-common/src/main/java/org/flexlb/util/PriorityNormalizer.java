@@ -38,9 +38,9 @@ public final class PriorityNormalizer {
      * by {@link #normalize(int, String, int)}.
      *
      * <p><b>This is the single home of the "has a priority" concept.</b>
-     * The only place a 0 priority can legitimately appear downstream is on
-     * items admitted by the legacy (non-Auto-TPM) path before the switch was
-     * flipped; such items never participate in any priority mechanism.
+     * A 0 priority may still appear in worker-reported task state because the
+     * engine protocol does not require that field. Such entries cannot be used
+     * as priority-preemption victims.
      * Downstream code MUST call this method instead of hand-rolling
      * {@code priority > 0} / {@code priority == 0} checks.
      */

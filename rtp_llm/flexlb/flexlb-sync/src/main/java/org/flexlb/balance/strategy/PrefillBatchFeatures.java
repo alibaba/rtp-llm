@@ -1,10 +1,6 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.DebugInfo;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.ServerStatus;
 
 import java.util.List;
 
@@ -26,26 +22,6 @@ public record PrefillBatchFeatures(List<Item> items) {
 
     public int batchSize() {
         return items.size();
-    }
-
-    /**
-     * Rebuild payload-free {@link BatchItem} views for predictors compiled
-     * against the legacy learning callback.
-     */
-    public List<BatchItem> toBatchItems() {
-        return items.stream().map(item -> {
-            Request request = new Request();
-            request.setSeqLen(item.seqLen());
-            BalanceContext context = new BalanceContext();
-            context.setRequest(request);
-
-            ServerStatus prefill = new ServerStatus();
-            DebugInfo debugInfo = new DebugInfo();
-            debugInfo.setHitCacheLen(item.hitCache());
-            prefill.setDebugInfo(debugInfo);
-            return new BatchItem(context, null, null, prefill,
-                    null, null, null, 0);
-        }).toList();
     }
 
     public record Item(long seqLen, long hitCache) {}

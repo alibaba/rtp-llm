@@ -1,81 +1,63 @@
-# Priority scheduler delivery modes
+# QUEUE ordering and dispatcher modes
 
 ## Purpose
 
-`PriorityScheduler` owns Auto-TPM admission, placement, priority ordering,
-preemption, and request lifecycle management. It deliberately does not make
-the transport choice part of those scheduling policies. A request captures one
-of two immutable delivery modes when it enters the scheduler:
+FlexLB exposes three separate configuration decisions in one strict
+`FLEXLB_CONFIG` JSON document:
 
-- `BATCH_ENQUEUE`: Master sends the ready group through `EnqueueBatch`.
-- `ROUTE_DECISION`: Master completes each routing call with
-  `enqueued_by_master=false`; the frontend sends the request to the selected
-  engine.
+1. `scheduler.type` chooses immediate routing (`DIRECT`) or scheduler-owned
+   request lifecycle (`QUEUE`).
+2. `scheduler.ordering.type`, present only for `QUEUE`, chooses arrival order
+   (`FIFO`) or priority order (`PRIORITY`).
+3. `dispatcher.type` chooses one-request route decisions (`NON_BATCH`) or
+   Master-side batch enqueue (`BATCH`).
 
-Both modes therefore make the same scheduling decision. They differ only at
-the delivery boundary and in the unit used for Prefill inflight accounting.
+These names are not interchangeable. In particular, `FIFO` is the peer of
+`PRIORITY`, `DIRECT` is the peer of `QUEUE`, and `NON_BATCH` is the peer of
+`BATCH`. `DIRECT` requires `NON_BATCH`; all four ordering/dispatcher
+combinations are valid under `QUEUE`.
+
+The Java class is still named `PriorityScheduler`, but it is the common QUEUE
+implementation for both FIFO and PRIORITY. That class name is an implementation
+detail, not another public mode.
 
 ## Class model
 
 ```mermaid
 classDiagram
     class RouteService
+    class DefaultRouter
     class PriorityScheduler {
         +submit(context) Future~Response~
         +onDecisionGroupReady(items, metadata)
     }
-    class PriorityAdmissionScheduler {
-        +schedule(item)
-    }
-    class PlanCommitter
+    class PriorityAdmissionScheduler
     class WorkerBatcher
-    class BatcherAlgorithm
-    class DecisionGroupHandler {
-        <<interface>>
-        +onDecisionGroupReady(items, metadata)
-    }
-    class DecisionDelivery {
-        <<interface>>
-        +deliver(payload, callback)
-    }
-    class DeliveryMode
-    class DeliveryClaimKind
-    class BatchEnqueueDelivery
+    class ImmediateNonBatchAlgorithm
+    class FixedWindowBatcherAlgorithm
     class RouteDecisionDelivery
+    class BatchEnqueueDelivery
     class BatchDispatcher
-    class PrefillEndpoint {
-        +commitBatch(...)
-        +tryCommitRequest(...)
-        +releaseRequest(requestId)
-    }
+    class PrefillEndpoint
     class DecodeEndpoint
-    class AdmissionLease
 
-    RouteService --> PriorityScheduler : BATCH or QUEUE + Auto-TPM
-    PriorityScheduler --> PriorityAdmissionScheduler : admission / preemption
-    PriorityAdmissionScheduler --> PlanCommitter : commit placement
-    PlanCommitter --> WorkerBatcher : enqueue request
-    WorkerBatcher --> BatcherAlgorithm : fixed-window or SLO-budget
-    BatcherAlgorithm --> DecisionGroupHandler : ready decision group
-    DecisionGroupHandler <|.. PriorityScheduler
-    PriorityScheduler --> DeliveryMode : immutable request mode
-    PriorityScheduler --> DeliveryClaimKind : lifecycle claim
-    PriorityScheduler --> BatchEnqueueDelivery : publish batch group
-    PriorityScheduler --> RouteDecisionDelivery : publish route requests
-    DecisionDelivery <|.. BatchEnqueueDelivery
-    DecisionDelivery <|.. RouteDecisionDelivery
-    BatchEnqueueDelivery --> BatchDispatcher : EnqueueBatch
-    PriorityScheduler --> PrefillEndpoint : batch or request ledger
-    PriorityScheduler --> DecodeEndpoint : request reservation
-    PriorityScheduler --> AdmissionLease : post-delivery ownership fence
+    RouteService --> DefaultRouter : DIRECT
+    RouteService --> PriorityScheduler : QUEUE
+    PriorityScheduler --> DefaultRouter : FIFO placement
+    PriorityScheduler --> PriorityAdmissionScheduler : PRIORITY placement/preemption
+    PriorityScheduler --> WorkerBatcher : per-Prefill queue
+    WorkerBatcher --> ImmediateNonBatchAlgorithm : NON_BATCH
+    WorkerBatcher --> FixedWindowBatcherAlgorithm : BATCH
+    PriorityScheduler --> RouteDecisionDelivery : NON_BATCH
+    PriorityScheduler --> BatchEnqueueDelivery : BATCH
+    BatchEnqueueDelivery --> BatchDispatcher : EnqueueBatch RPC
+    PriorityScheduler --> PrefillEndpoint : accounting
+    PriorityScheduler --> DecodeEndpoint : reservation/accounting
 ```
 
-`DecisionDelivery<T>` only publishes scheduler-prepared work. Its typed payload
-keeps batch-only transport data inside `BatchEnqueueDelivery`; route decisions
-use the already prepared request list directly. Delivery never owns scheduler
-state and never acquires or releases Prefill or Decode resources. This keeps
-transport failures inside one callback boundary and lifecycle transitions in
-`PriorityScheduler`, without a generic plan hierarchy or runtime type checks.
+`DIRECT` skips QUEUE admission and `WorkerBatcher`, but it uses the same
+`router.groupSelector` and `router.roles` worker-selection configuration as
+QUEUE. PDFUSION follows the prefill role configuration.
 
 ## Request flow
 
@@ -83,109 +65,205 @@ transport failures inside one callback boundary and lifecycle transitions in
 sequenceDiagram
     participant F as Frontend
     participant R as RouteService
-    participant P as PriorityScheduler
-    participant A as PriorityAdmissionScheduler
+    participant S as QUEUE scheduler
     participant W as WorkerBatcher
     participant E as Prefill / Decode engine
 
     F->>R: Schedule(request)
-    R->>P: submit(context)
-    P->>A: admit and place
-    A->>W: commit to selected Prefill queue
-    W-->>P: logical decision group ready
-    alt BATCH_ENQUEUE
-        P->>E: EnqueueBatch(group)
-        E-->>P: ACK
-        P-->>F: enqueued_by_master=true
-    else ROUTE_DECISION
-        P->>P: commit request ledger and dispatch claims
-        P-->>F: one route decision, enqueued_by_master=false
+    alt scheduler.type = DIRECT
+        R-->>F: route decision
         F->>E: GenerateStream(request)
+    else scheduler.type = QUEUE
+        R->>S: submit(context)
+        S->>S: admit, order, and place
+        S->>W: enqueue selected Prefill work
+        alt dispatcher.type = NON_BATCH
+            W-->>S: immediate one-request decision
+            S-->>F: route decision, enqueued_by_master=false
+            F->>E: GenerateStream(request)
+        else dispatcher.type = BATCH
+            W-->>S: fixed-window decision group
+            S->>E: EnqueueBatch(group)
+            E-->>S: ACK
+            S-->>F: enqueued_by_master=true
+        end
+        E-->>S: typed WorkerStatus
+        S->>S: settle lifecycle and ledgers exactly once
     end
-    E-->>P: typed WorkerStatus
-    P->>P: settle request lifecycle and ledgers exactly once
 ```
 
-The batching policy still decides when the logical group is ready in
-`ROUTE_DECISION` mode. The per-worker request cap only limits how many ready
-members are handed to frontends concurrently. Members that do not obtain a
-slot enter a bounded, per-worker ready backlog. They retain their priority and
-original enqueue time, remain removable by timeout/shutdown/preemption, and
-are handed off before the worker forms another logical decision group.
+`NON_BATCH` does not run a collection window: each request becomes a decision
+group as soon as it reaches its selected worker queue. `BATCH` dispatches when
+the group reaches `dispatcher.maxRequests`, the oldest member reaches
+`dispatcher.maxCollectionWaitMs`, or the optional predicted execution threshold
+is reached. There is no SLO-budget batching policy.
+
+## Ordering and expiration
+
+FIFO orders by enqueue sequence. PRIORITY orders by normalized priority
+(1–100, higher first) and then by enqueue sequence. `defaultPriority` is used
+only when the caller did not supply a priority.
+
+PRIORITY does not create a separate request TTL. QUEUE resolves one absolute
+scheduling expiration from the public configuration:
+
+```text
+expires_at_ms = flexlb_admission_time_ms + scheduler.queueTimeoutMs
+```
+
+The deadline covers queueing, routing, and delivery acknowledgement. Prompt
+length, priority, queue movement, retries, and preemption never extend or
+multiply it. DIRECT does not queue and therefore does not apply a scheduling
+timeout. The caller's protobuf `generate_timeout` remains a transport/engine
+field and does not control FlexLB scheduling. Consequently there are no SLO
+length buckets, SLO budgets, or priority TTL multipliers to configure.
+
+## Configuration reference
+
+Only `FLEXLB_CONFIG` controls these behaviors. The parser rejects unknown and
+inactive-variant fields, so fields listed for one tagged type cannot be placed
+on another type. Optional fields are disabled by omission; JSON `null` is not
+accepted.
+
+### Scheduler
+
+| JSON path | Applies to | Default | Meaning |
+| --- | --- | ---: | --- |
+| `scheduler.type` | all | `QUEUE` | `DIRECT` or `QUEUE` |
+| `scheduler.queueTimeoutMs` | `QUEUE` | `3600000` ms | Total scheduling lifetime from FlexLB admission through delivery acknowledgement |
+| `scheduler.ordering.type` | `QUEUE` | `FIFO` | `FIFO` or `PRIORITY` |
+| `scheduler.ordering.defaultPriority` | `QUEUE + PRIORITY` | `50` | Fallback priority in `[1, 100]` |
+| `scheduler.capacity.maxOutstandingRequestsGlobal` | `QUEUE` | `100000` | Exact cluster-wide cap on requests owned by QUEUE |
+| `scheduler.lifecycle.staleInflightTimeoutMs` | `QUEUE` | `300000` ms | Stale inflight reconciliation bound |
+| `scheduler.lifecycle.deliveredNotAcceptedTimeoutMs` | `QUEUE` | `30000` ms | Bound before reconciling work delivered but not accepted by Decode |
+| `scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal` | `QUEUE` | `200` | Global post-delivery ownership guard |
+
+FIFO has no additional fields. PRIORITY can optionally contain
+`scheduler.ordering.preemption`:
+
+| JSON path | Default | Meaning |
+| --- | ---: | --- |
+| `allowedVictimStages` | omitted | Non-empty subset of `PREFILL_QUEUED`, `DECODE_RESERVED`, and `DECODE_ENGINE_OWNED` |
+| `engineCancellation.ackTimeoutMs` | `50` ms | Cancel RPC acknowledgement bound |
+| `engineCancellation.completionTimeoutMs` | `1000` ms | Typed cancellation completion bound |
+
+`engineCancellation` is required when `DECODE_ENGINE_OWNED` is allowed and is
+rejected otherwise. Omit the whole `preemption` object to disable preemption.
+
+### Dispatcher
+
+| JSON path | Applies to | Default | Meaning |
+| --- | --- | ---: | --- |
+| `dispatcher.type` | all | `BATCH` | `BATCH` or `NON_BATCH`; DIRECT requires `NON_BATCH` |
+| `dispatcher.maxRequests` | `BATCH` | `8` | Maximum requests in one decision group |
+| `dispatcher.maxCollectionWaitMs` | `BATCH` | `300` ms | Maximum fixed-window collection wait; zero is allowed |
+| `dispatcher.maxWaitingRequestsPerPrefillWorker` | `BATCH` | `1024` | Hard per-Prefill waiting-queue bound |
+| `dispatcher.earlyDispatchPredictedExecutionMs` | `BATCH` | omitted | Optional positive predictor threshold for early dispatch |
+| `dispatcher.maxInflightBatchesPerPrefillWorker` | `BATCH` | omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
+| `dispatcher.enqueueRpcTimeoutMs` | `BATCH` | `5000` ms | EnqueueBatch RPC timeout |
+| `dispatcher.maxInflightRequestsPerPrefillWorker` | `QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill route-decision cap |
+
+The two optional inflight limits use omission, not zero, to mean unlimited.
+
+## Valid examples
+
+DIRECT with the default role routing configuration:
+
+```json
+{
+  "schemaVersion": 1,
+  "scheduler": {"type": "DIRECT"},
+  "dispatcher": {"type": "NON_BATCH"}
+}
+```
+
+FIFO QUEUE with one immediate route decision per request:
+
+```json
+{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "queueTimeoutMs": 3600000,
+    "ordering": {"type": "FIFO"},
+    "capacity": {"maxOutstandingRequestsGlobal": 100000},
+    "lifecycle": {
+      "staleInflightTimeoutMs": 300000,
+      "deliveredNotAcceptedTimeoutMs": 30000,
+      "maxDeliveredNotAcceptedRequestsGlobal": 200
+    }
+  },
+  "dispatcher": {
+    "type": "NON_BATCH",
+    "maxInflightRequestsPerPrefillWorker": 32
+  }
+}
+```
+
+PRIORITY QUEUE with fixed-window batching:
+
+```json
+{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "queueTimeoutMs": 3600000,
+    "ordering": {
+      "type": "PRIORITY",
+      "defaultPriority": 50,
+      "preemption": {
+        "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]
+      }
+    },
+    "capacity": {"maxOutstandingRequestsGlobal": 100000},
+    "lifecycle": {
+      "staleInflightTimeoutMs": 300000,
+      "deliveredNotAcceptedTimeoutMs": 30000,
+      "maxDeliveredNotAcceptedRequestsGlobal": 200
+    }
+  },
+  "dispatcher": {
+    "type": "BATCH",
+    "maxRequests": 32,
+    "maxCollectionWaitMs": 160,
+    "maxWaitingRequestsPerPrefillWorker": 1024,
+    "earlyDispatchPredictedExecutionMs": 500,
+    "maxInflightBatchesPerPrefillWorker": 2,
+    "enqueueRpcTimeoutMs": 5000
+  }
+}
+```
+
+The role-local prefill, decode, and VIT selectors shown in the top-level
+[README](../README.md) can be added unchanged to any of these valid modes.
 
 ## Accounting and concurrency invariants
 
-1. `PrefillEndpoint.inflightBatches` contains only real `EnqueueBatch`
-   operations. A route decision is never represented by a singleton or empty
-   synthetic batch.
-2. Route decisions use a request-keyed ledger and a separate atomic route
-   request counter. The per-worker route cap is linearized at
-   `tryCommitRequest`; concurrent decision groups cannot oversubscribe it.
-3. Decode accounting remains request-keyed in both modes.
-4. A request captures its `DeliveryMode` at admission. A live configuration
-   change cannot switch the ownership protocol of an inflight request.
-5. Lifecycle claims, preemption claims, and post-delivery engine fences are
-   mutually exclusive under the request-scoped state boundary. EnqueueBatch
-   invocation is linearized inside a short scheduler delivery fence. Callback
-   reducers may run or re-enter there, but caller futures are completed only
-   after scheduler locks have been released.
+1. `scheduler.capacity.maxOutstandingRequestsGlobal` is acquired atomically and
+   released exactly once across failure, cancellation, timeout, rollback, and
+   shutdown.
+2. `PrefillEndpoint.inflightBatches` contains only real `EnqueueBatch`
+   operations. NON_BATCH route decisions use a request-keyed ledger instead of
+   synthetic singleton batches.
+3. Decode reservation and accounting remain request-keyed in both dispatcher
+   modes.
+4. A request captures its delivery mode at admission. An inflight request cannot
+   switch ownership protocol.
+5. Lifecycle, preemption, and post-delivery claims are mutually exclusive under
+   the request-scoped state boundary.
 6. Prefill/Decode resources are released only after an authoritative terminal
-   WorkerStatus or cancellation proof. Timeouts start cancellation and
-   reconciliation; they do not assume the engine is idle.
-7. Cleanup operations are idempotent. WorkerStatus, cancellation, timeout, and
-   delivery-failure races converge on the same terminal transition.
-8. Once a logical route group is ready, capacity only delays delivery. It never
-   makes those members wait through another fixed-window or SLO decision.
-
-Cancel reconciliation uses a bounded fast-retry chain. Requests with no
-authoritative outcome then enter an observable quarantine: no recurring
-per-request delayed task remains, accounting stays conservatively charged, and
-the periodic cleanup loop performs a fair, rate-limited probe. A tombstone,
-typed Prefill `CANCELED`, or Decode terminal settles the quarantine exactly
-once. Local endpoint removal is not treated as proof because a previously
-published frontend request can still arrive late.
-
-The request ledger stores only compact request accounting data. Hot counters
-are striped or atomic; wait-time aggregation avoids scanning all inflight
-requests and avoids per-decision allocation on the homogeneous fast path.
-
-## Configuration
-
-| Setting | Unit and scope | Meaning |
-| --- | --- | --- |
-| `DEFAULT_SCHEDULE_MODE` | mode | `batch`, `queue`, or `direct` |
-| `AUTO_TPM_ENABLED` | boolean | Makes `queue` use the priority scheduler |
-| `AUTO_TPM_PREFILL_MAX_INFLIGHT_REQUESTS_PER_WORKER` | requests per Prefill worker | Hard cap for Auto-TPM route-decision requests; `0` is unlimited |
-| `DECODE_CONCURRENCY_LIMIT` | requests per Decode worker | Hard Decode admission cap shared by both delivery modes; `0` is unlimited |
-| `FLEXLB_BATCH_ALGORITHM` | policy | Logical grouping policy: `fixed_window` or `slo_budget` |
-| `FLEXLB_BATCH_SIZE_MAX` | requests per logical group | Maximum group size in either delivery mode |
-| `FLEXLB_BATCH_FIXED_WAIT_MS` | milliseconds | Maximum collection wait for `fixed_window` |
-| `FLEXLB_BATCH_WINDOW_MS` | milliseconds | Remaining-budget collection window for `slo_budget` |
-| `FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES` | batches per Prefill worker | Fixed-window Batch-RPC backpressure only |
-| `FLEXLB_BATCH_SLO_MAX_INFLIGHT_BATCHES` | batches per Prefill worker | SLO-budget Batch-RPC backpressure only |
-| `FLEXLB_BATCH_MAX_INFLIGHT` | requests in Master scheduler | Global scheduler admission limit |
-| `AUTO_TPM_PREFILL_QUEUE_EVICT_ENABLED` | boolean | Allows a higher-priority request to evict a queued Prefill request |
-| `AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED` | boolean | Allows preemption of Decode reservations not yet accepted by the engine |
-| `AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED` | boolean | Allows typed cancellation of Decode engine-owned requests |
-| `AUTO_TPM_CANCEL_ACK_TIMEOUT_MS` | milliseconds | Deadline for an Engine Cancel RPC acknowledgement |
-| `AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS` | milliseconds | Deadline for typed `CANCELED` confirmation after an accepted cancel |
-| `AUTO_TPM_POST_SUCCESS_BACKPRESSURE_LIMIT` | active request leases | Global guard for delivered but not Decode-accepted requests |
-| `AUTO_TPM_POST_SUCCESS_SOFT_TIMEOUT_MS` | milliseconds | Starts post-delivery cancellation/reconciliation when Decode ownership is still unresolved |
-
-The legacy `POST_SUCCESS` setting names are retained for environment-variable
-compatibility. In this scheduler they mean delivery success: an EnqueueBatch
-ACK for `BATCH_ENQUEUE`, or publishing the route response for `ROUTE_DECISION`.
-
-The logical grouping controls (`FLEXLB_BATCH_SIZE_MAX`, fixed-window wait, and
-SLO-budget parameters) apply to both delivery modes. To deliver a ready group
-in one pass, configure the route request cap to be at least the largest logical
-group size.
+   status or cancellation proof. Cleanup paths are idempotent.
+7. The absolute request expiration remains unchanged through queueing,
+   preemption, delivery, and reconciliation.
 
 ## Mode matrix
 
-| Schedule mode | Auto-TPM | Scheduling path | Delivery and accounting |
-| --- | --- | --- | --- |
-| `batch` | either | `PriorityScheduler` | Master `EnqueueBatch`; batch inflight cap |
-| `queue` | `true` | `PriorityScheduler` | Frontend `GenerateStream`; request inflight cap |
-| `queue` | `false` | legacy queue | Existing queue behavior |
-| `direct` | either | direct router | Existing direct behavior |
+| Scheduler | Ordering | Dispatcher | Scheduling path | Delivery |
+| --- | --- | --- | --- | --- |
+| `DIRECT` | — | `NON_BATCH` | `DefaultRouter` | Immediate route response; frontend sends |
+| `QUEUE` | `FIFO` | `NON_BATCH` | Common QUEUE lifecycle, FIFO placement | One route response; frontend sends |
+| `QUEUE` | `PRIORITY` | `NON_BATCH` | Priority admission/preemption | One route response; frontend sends |
+| `QUEUE` | `FIFO` | `BATCH` | Common QUEUE lifecycle, FIFO placement | Master `EnqueueBatch` |
+| `QUEUE` | `PRIORITY` | `BATCH` | Priority admission/preemption | Master `EnqueueBatch` |
+
+`DIRECT + BATCH` is rejected during configuration validation.

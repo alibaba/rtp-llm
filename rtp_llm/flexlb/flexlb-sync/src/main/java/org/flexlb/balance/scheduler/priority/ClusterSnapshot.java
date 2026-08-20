@@ -22,12 +22,19 @@ public record ClusterSnapshot(
         Map<String, DecodeEndpointSnapshot> decodes) {
 
     public static ClusterSnapshot capture(EndpointRegistry registry, FlexlbConfig config) {
+        int prefillQueueCapacity = config.isBatchDispatch()
+                ? config.batchDispatcher().getMaxWaitingRequestsPerPrefillWorker()
+                : config.getInternalRuntime().getNonBatchWaitingRequestsPerPrefillWorker();
+        Long configuredDecodeConcurrency = config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxEngineRequests();
+        long decodeConcurrencyLimit = configuredDecodeConcurrency == null
+                ? 0L : configuredDecodeConcurrency;
         Map<String, PrefillEndpointSnapshot> prefills = new HashMap<>();
         registry.getPrefillEndpoints().forEach((key, ep) ->
-                prefills.put(key, PrefillEndpointSnapshot.capture(ep, config.getFlexlbBatchQueueMaxSize())));
+                prefills.put(key, PrefillEndpointSnapshot.capture(ep, prefillQueueCapacity)));
         Map<String, DecodeEndpointSnapshot> decodes = new HashMap<>();
         registry.getDecodeEndpoints().forEach((key, ep) ->
-                decodes.put(key, DecodeEndpointSnapshot.capture(ep, config.getDecodeConcurrencyLimit())));
+                decodes.put(key, DecodeEndpointSnapshot.capture(ep, decodeConcurrencyLimit)));
         return new ClusterSnapshot(prefills, decodes);
     }
 }

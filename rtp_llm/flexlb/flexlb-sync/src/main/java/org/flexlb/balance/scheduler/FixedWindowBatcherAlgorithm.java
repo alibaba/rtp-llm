@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 
@@ -10,24 +11,23 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Fixed-window batching algorithm with batch-full early dispatch, optional
- * predictor-based early dispatch, queue deadline drop, and resource-shape filtering.
+ * predictor-based early dispatch, request-expiration drop, and resource-shape filtering.
  *
  * <h3>Algorithm</h3>
  * <ol>
- *   <li>Queue deadline: if the head request has waited longer than
- *       {@code flexlbBatchEnqueueDeadlineMs}, drop it as expired. This runs
+ *   <li>Request expiration: drop the head at its absolute expiration. This runs
  *       before backpressure to ensure stale requests are cleared even when
  *       the engine is under sustained backpressure.</li>
  *   <li>Oversized request rejection: if the head request's seqLen exceeds
- *       {@code flexlbBatchMaxCapacity}, it can never be picked by any batch,
+ *       the worker token capacity, it can never be picked by any batch,
  *       so it is dropped immediately instead of waiting for the deadline.</li>
  *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
- *   <li>Batch full: if queue size ≥ {@code flexlbBatchSizeMax}, dispatch
+ *   <li>Batch full: if queue size reaches {@code dispatcher.maxRequests}, dispatch
  *       immediately without waiting for the window to expire.</li>
  *   <li>Fixed window timeout: if the head request has waited
- *       {@code flexlbBatchFixedWaitMs} or longer, dispatch whatever has
+ *       {@code dispatcher.maxCollectionWaitMs} or longer, dispatch whatever has
  *       accumulated (up to batch size limit).</li>
- *   <li>Predictor-based early dispatch: if {@code flexlbBatchPredictThresholdMs > 0}
+ *   <li>Predictor-based early dispatch when configured
  *       and the predictor estimates the accumulated batch will take at least
  *       that long, dispatch immediately.</li>
  *   <li>Otherwise park briefly and retry.</li>
@@ -35,48 +35,36 @@ import java.util.concurrent.TimeUnit;
  *
  * <h3>Resource-shape filtering</h3>
  * When picking items for a batch, requests whose padded compute shape would
- * exceed {@code flexlbBatchMaxCapacity}, or whose combined sequence length
+ * exceed the worker/fallback token capacity, or whose combined sequence length
  * would exceed the latest worker-reported KV budget, remain in the queue for
  * a later batch.
  * <p>
  * However, a request whose own seqLen already exceeds
- * {@code flexlbBatchMaxCapacity} can never be picked by any batch. Such
+ * that capacity can never be picked by any batch. Such
  * oversized requests are rejected immediately when they reach the head of
  * the queue (see step 0.5 below), rather than waiting for the queue
- * deadline to expire.
+ * request expiration.
  *
- * <h3>Key differences from {@link SloBudgetBatcherAlgorithm}</h3>
- * <ul>
- *   <li>No SLO deadline tracking — the sort key is only used for FIFO ordering.</li>
- *   <li>No EMA arrival rate estimation.</li>
- *   <li>Uses FIFO selection subject to the Engine-reported aggregate token
- *       capacity; it does not use SLO incremental-cost admission.</li>
- *   <li>Deadline is a simple max-wait threshold, not an SLO-deadline
- *       computed from predicted prefill time.</li>
- * </ul>
  */
 public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     @Override
-    public long computeSortKey(BatcherContext ctx, BatchItem item) {
-        // FIFO: arrival timestamp as sort key
-        return item.enqueuedAtMs();
-    }
-
-    @Override
     public long queueWaitMs(BatcherContext ctx) {
-        long now = ctx.now();
-        long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
-        int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
+        BatchDispatcherConfig batch = ctx.cfg().batchDispatcher();
+        long fixedWaitMs = batch.getMaxCollectionWaitMs();
+        int batchMaxCount = Math.max(1, batch.getMaxRequests());
 
-        // 空队列 — 新请求启动新的 batch 周期
-        if (ctx.isActiveEmpty()) {
+        // The charged-depth read is lock-free and covers the overwhelmingly
+        // common empty-queue routing path. Fall back to the physical active
+        // queue only when another request is already charged.
+        if (ctx.isEmpty() || ctx.isActiveEmpty()) {
             if (batchMaxCount <= 1) {
                 return 0;
             }
             return fixedWaitMs;
         }
 
+        long now = ctx.now();
         BatchItem head = ctx.peek();
         if (head == null) {
             // 竞态：isEmpty() 和 peek() 之间队列被清空
@@ -125,11 +113,25 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        long elapsedMs = ctx.now() - head.enqueuedAtMs();
-        long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
-        int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
-        long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
+        long nowMs = ctx.now();
+        long elapsedMs = nowMs - head.enqueuedAtMs();
+        BatchDispatcherConfig batch = ctx.cfg().batchDispatcher();
+        long fixedWaitMs = batch.getMaxCollectionWaitMs();
+        int batchMaxCount = Math.max(1, batch.getMaxRequests());
+        Long configuredPredictThresholdMs = batch.getEarlyDispatchPredictedExecutionMs();
+        long predictThresholdMs = configuredPredictThresholdMs == null
+                ? 0 : configuredPredictThresholdMs;
         long batchMaxTokens = ctx.batchTokenCapacity();
+
+        // The caller's absolute request expiry is the only queue-age limit.
+        // It is created once at admission and is never reset by retries.
+        if (head.ctx().requestExpired(nowMs)) {
+            Logger.debug("flexlb_batch_drop request_id={} reason=request_expired "
+                            + "expires_at_ms={} now_ms={}",
+                    head.requestId(), head.ctx().getRequestExpiresAtMs(), nowMs);
+            ctx.dropHead(head);
+            return;
+        }
 
         // The Engine admits a group only when padded context tokens are strictly
         // below max_batch_tokens_size. Reject an impossible head explicitly so
@@ -139,28 +141,12 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        // 0. Queue deadline: drop the head request if it has waited longer
-        //     than the enqueue deadline. This runs BEFORE backpressure to
-        //     ensure stale requests are cleared even when the engine is
-        //     under sustained backpressure — otherwise the deadline check
-        //     would never execute and expired requests would accumulate.
-        //     Auto-TPM never drops requests silently (design doc 8.3):
-        //     entry rejection/rescue/eviction cover them; deadline rescue
-        //     is a later phase. When Auto-TPM is off, the drop stays.
-        long queueDeadlineMs = ctx.cfg().getFlexlbBatchEnqueueDeadlineMs();
-        if (queueDeadlineMs > 0 && elapsedMs > queueDeadlineMs
-                && !ctx.cfg().isAutoTpmEnabled()) {
-            Logger.debug("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded "
-                            + "elapsed_ms={} deadline_ms={}",
-                    head.requestId(), elapsedMs, queueDeadlineMs);
-            ctx.dropHead(head);
-            return;
-        }
-
         // 1. Engine backpressure: park if the prefill worker already has too
         //    many batches inflight, to prevent overloading the engine.
         if (head.deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
-            int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
+            Integer configuredMaxInflight = batch.getMaxInflightBatchesPerPrefillWorker();
+            int maxInflightBatches = configuredMaxInflight == null
+                    ? 0 : configuredMaxInflight;
             if (maxInflightBatches > 0
                     && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
                 TimeUnit.MILLISECONDS.sleep(1);

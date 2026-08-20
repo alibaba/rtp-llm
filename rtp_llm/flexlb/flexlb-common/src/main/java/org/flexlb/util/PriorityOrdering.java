@@ -36,9 +36,8 @@ public final class PriorityOrdering {
      * Strict priority-then-FIFO comparator for any {@link Prioritized} item.
      *
      * <p>Priority descending, then enqueue-sequence ascending. This is the
-     * shared ordering primitive for both the top-level request queue
-     * ({@code QueueManager}) and the per-worker batcher queue
-     * ({@code WorkerBatcher}).
+     * shared ordering primitive for the canonical per-worker scheduler
+     * queues ({@code WorkerBatcher}).
      */
     public static final Comparator<Prioritized> STRICT = (left, right) -> compare(
             left.priority(), left.enqueueSeq(),

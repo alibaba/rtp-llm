@@ -308,7 +308,7 @@ class AdmissionFailureClassifierTest {
     void prefillWithoutSnapshotDeficitIsResourceExhausted() {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 4,
-                List.of(new QueuedRequestSnapshot(1, 70, 0, 0,
+                List.of(new QueuedRequestSnapshot(1, 70, 0,
                         128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -322,7 +322,7 @@ class AdmissionFailureClassifierTest {
     void prefillResidualBlockedByLegacyOccupantIsAdmissionUnavailable() {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 1,
-                List.of(new QueuedRequestSnapshot(1, 0, 0, 0,
+                List.of(new QueuedRequestSnapshot(1, 0, 0,
                         128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -338,7 +338,7 @@ class AdmissionFailureClassifierTest {
                 "prefill-1", 1, 2,
                 List.of(
                         queued(1, 70),
-                        new QueuedRequestSnapshot(2, 0, 0, 0,
+                        new QueuedRequestSnapshot(2, 0, 0,
                                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -354,7 +354,7 @@ class AdmissionFailureClassifierTest {
                 "prefill-1", 1, 1,
                 List.of(
                         queued(1, 70),
-                        new QueuedRequestSnapshot(2, 0, 0, 0,
+                        new QueuedRequestSnapshot(2, 0, 0,
                                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -369,7 +369,7 @@ class AdmissionFailureClassifierTest {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 2,
                 List.of(
-                        new QueuedRequestSnapshot(1, 0, 0, 0,
+                        new QueuedRequestSnapshot(1, 0, 0,
                                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED),
                         queued(2, 30)));
 
@@ -383,8 +383,8 @@ class AdmissionFailureClassifierTest {
     }
 
     @Test
-    void queuedDeadlineUsesHigherPriorityPrefix() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+    void queuedTimeoutUsesHigherPriorityPrefix() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
                 50, List.of(
                         queued(1, 50),
                         queued(2, 70)));
@@ -394,8 +394,8 @@ class AdmissionFailureClassifierTest {
     }
 
     @Test
-    void queuedDeadlineUsesSamePriorityFifoPrefix() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+    void queuedTimeoutUsesSamePriorityFifoPrefix() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
                 50, List.of(queued(1, 30), queued(2, 50)));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -403,8 +403,8 @@ class AdmissionFailureClassifierTest {
     }
 
     @Test
-    void queuedDeadlineWithoutProtectedPrefixIsResourceExhausted() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+    void queuedTimeoutWithoutProtectedPrefixIsResourceExhausted() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
                 50, List.of(queued(1, 30)));
 
         assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
@@ -412,8 +412,8 @@ class AdmissionFailureClassifierTest {
     }
 
     @Test
-    void queuedDeadlineWithLegacyItemAheadIsAdmissionUnavailable() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+    void queuedTimeoutWithUnattributedItemAheadIsAdmissionUnavailable() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
                 50, List.of(queued(1, 0)));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
@@ -421,8 +421,8 @@ class AdmissionFailureClassifierTest {
     }
 
     @Test
-    void queuedDeadlineUsesProvenHigherBeforeUnattributedFallback() {
-        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedDeadline(
+    void queuedTimeoutUsesProvenHigherBeforeUnattributedFallback() {
+        AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
                 50, List.of(queued(1, 0), queued(2, 70)));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
@@ -430,7 +430,7 @@ class AdmissionFailureClassifierTest {
     }
 
     private static QueuedRequestSnapshot queued(long requestId, int priority) {
-        return new QueuedRequestSnapshot(requestId, priority, 0, requestId,
+        return new QueuedRequestSnapshot(requestId, priority, requestId,
                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
     }
 
@@ -482,12 +482,12 @@ class AdmissionFailureClassifierTest {
                                                   boolean priorityKnown,
                                                   boolean queued) {
         return new DecodeRequestSnapshot(requestId, priority, phase,
-                kvTokens, kvTokens, 0, priorityKnown, queued);
+                kvTokens, kvTokens, priorityKnown, queued);
     }
 
     private static PriorityRequestEnvelope incoming(int priority, long hardKvTokens) {
         return new PriorityRequestEnvelope(999, priority, hardKvTokens, 0,
-                0, 0, 0, hardKvTokens, hardKvTokens);
+                0, hardKvTokens, hardKvTokens);
     }
 
     private static void assertFailure(AdmissionFailure actual,

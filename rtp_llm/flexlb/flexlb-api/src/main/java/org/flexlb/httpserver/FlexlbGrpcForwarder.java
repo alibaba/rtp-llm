@@ -337,7 +337,8 @@ public class FlexlbGrpcForwarder {
         try {
             return FlexlbServiceGrpc.newBlockingStub(masterChannel(masterHostIpPort))
                     .withDeadlineAfter(
-                            configService.loadBalanceConfig().getPrefillLbTimeoutMs(),
+                            configService.loadBalanceConfig().getInternalRuntime()
+                                    .getMasterForwardRpcTimeoutMs(),
                             TimeUnit.MILLISECONDS);
         } catch (RuntimeException error) {
             Logger.debug("Failed to create FlexLB master stub for {}",

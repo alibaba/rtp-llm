@@ -152,19 +152,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
         reserve(requestId, kvTokens, expectedKvTokens,
-                RequestInflight.DEFAULT_PRIORITY, 0);
+                RequestInflight.DEFAULT_PRIORITY);
     }
 
     /**
      * Shadow-reserve decode capacity for a request, carrying its Auto-TPM
-     * priority and admission deadline so the reservation can later be ranked
-     * as a decode eviction candidate (design doc 10.1).
+     * priority so the reservation can later be ranked as a decode eviction
+     * candidate (design doc 10.1).
      */
     public void reserve(long requestId, long kvTokens, long expectedKvTokens,
-                        int priority, long deadlineMs) {
+                        int priority) {
         admissionLock.lock();
         try {
-            RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens, priority, deadlineMs);
+            RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens, priority);
             // A (re-)reserve puts the request back into the pre-queue state.
             if (queuedPhase.remove(requestId)) {
                 queuedPhaseCount.decrementAndGet();
@@ -369,7 +369,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public ReleaseReserveResult tryReleaseVictimsAndReserveIncoming(
             List<Long> victimIds,
             long incomingRequestId, long kvTokens, long expectedKvTokens,
-            int priority, long deadlineMs,
+            int priority,
             long expectedAdmissionVersion) {
         admissionLock.lock();
         try {
@@ -387,7 +387,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             for (Long victimId : victimIds) {
                 release(victimId);
             }
-            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority, deadlineMs);
+            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority);
             return ReleaseReserveResult.SUCCESS;
         } finally {
             admissionLock.unlock();
@@ -423,8 +423,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Presence-guarded decode eviction commit (redesign N3 §3.4,
-     * {@code autoTpmVictimGuardMode=victim_presence}): under the admission
+     * Presence-guarded decode eviction commit: under the admission
      * lock, conditionally release every victim still holding a
      * Master-queued reservation ({@link #releaseIfHeld}).
      * All victims freed → reserve the incoming request and succeed. Any
@@ -437,7 +436,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public PresenceEvictionOutcome tryReleaseVictimsIfHeldAndReserveIncoming(
             List<Long> victimIds,
             long incomingRequestId, long kvTokens, long expectedKvTokens,
-            int priority, long deadlineMs) {
+            int priority) {
         admissionLock.lock();
         try {
             List<Long> freed = new ArrayList<>(victimIds.size());
@@ -449,7 +448,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (freed.size() < victimIds.size()) {
                 return new PresenceEvictionOutcome(false, List.copyOf(freed));
             }
-            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority, deadlineMs);
+            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority);
             return new PresenceEvictionOutcome(true, List.copyOf(freed));
         } finally {
             admissionLock.unlock();
@@ -493,7 +492,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             List<ConfirmedTaskView> confirmed = new java.util.ArrayList<>(trackedConfirmed.size());
             trackedConfirmed.forEach((requestId, task) ->
-                    confirmed.add(new ConfirmedTaskView(requestId, task.priority(), task.deadlineMs(),
+                    confirmed.add(new ConfirmedTaskView(requestId, task.priority(),
                             task.kvTokens(), task.phase(), task.priorityKnown(),
                             preemptionClaims.containsKey(requestId)
                                     || engineFenceProtections.containsKey(requestId))));
@@ -523,7 +522,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Immutable point-in-time view of one layered-registry entry. */
     public record ConfirmedTaskView(long requestId,
                                     int priority,
-                                    long deadlineMs,
                                     long kvTokens,
                                     DecodeTaskPhase phase,
                                     boolean priorityKnown,
@@ -553,7 +551,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
-            long incomingDeadlineMs,
             long expectedAdmissionVersion,
             boolean requireVersionMatch) {
         admissionLock.lock();
@@ -596,7 +593,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Provisional incoming ownership closes the free-pool race while
             // Cancel runs.  It is not visible to the prefill queue yet.
             reserve(incomingRequestId, incomingKvTokens, incomingExpectedKvTokens,
-                    incomingPriority, incomingDeadlineMs);
+                    incomingPriority);
             for (Map.Entry<Long, ClaimOwner> entry : owners.entrySet()) {
                 RequestInflight shadow = inflightRequests.get(entry.getKey());
                 ConfirmedTask confirmed = trackedConfirmed.get(entry.getKey());
@@ -1084,10 +1081,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Register / refresh one engine-confirmed task in the layered registry:
      * {@code KV_ALLOCATED} → accepted layer, {@code RUNNING} → running layer.
-     * Priority/deadline are inherited from the shadow entry removed this
-     * round; when the WorkerStatus report precedes the reserve (or the shadow
-     * entry expired) they are unknown here and fall back to the defaults
-     * (priority 50, no deadline). KV is approximated by
+     * Priority is inherited from the shadow entry removed this round; when
+     * the WorkerStatus report precedes the reserve (or the shadow entry
+     * expired) it is unknown here and falls back to the default. KV is approximated by
      * {@code TaskInfo.inputLength} — the engine does not report per-request
      * KV usage, so 0 stays 0.
      */
@@ -1099,10 +1095,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         boolean priorityKnown = removed != null;
         if (tracked == null || (!tracked.priorityKnown() && priorityKnown)) {
             int priority = removed != null ? removed.priority() : RequestInflight.DEFAULT_PRIORITY;
-            long deadlineMs = removed != null ? removed.deadlineMs() : 0;
             long kvTokens = Math.max(0, task.getInputLength());
             trackedConfirmed.put(task.getRequestId(),
-                    new ConfirmedTask(priority, deadlineMs, kvTokens, layer, now, priorityKnown));
+                    new ConfirmedTask(priority, kvTokens, layer, now, priorityKnown));
         } else {
             tracked.refresh(layer, now);
         }
@@ -1603,23 +1598,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Mutable layered-registry entry for one engine-confirmed request
-     * (Phase 5). Identity fields (priority / deadline / KV estimate) are fixed
+     * (Phase 5). Identity fields (priority / KV estimate) are fixed
      * at first sight; {@code phase} and {@code lastSeenMs} are volatile and
      * only mutated under {@link #admissionLock} by calibration.
      */
     static final class ConfirmedTask {
 
         private final int priority;
-        private final long deadlineMs;
         private final long kvTokens;
         private final boolean priorityKnown;
         private volatile DecodeTaskPhase phase;
         private volatile long lastSeenMs;
 
-        ConfirmedTask(int priority, long deadlineMs, long kvTokens,
+        ConfirmedTask(int priority, long kvTokens,
                       DecodeTaskPhase layer, long now, boolean priorityKnown) {
             this.priority = priority;
-            this.deadlineMs = deadlineMs;
             this.kvTokens = kvTokens;
             this.priorityKnown = priorityKnown;
             this.phase = layer;
@@ -1627,7 +1620,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         int priority() { return priority; }
-        long deadlineMs() { return deadlineMs; }
         long kvTokens() { return kvTokens; }
         boolean priorityKnown() { return priorityKnown; }
         DecodeTaskPhase phase() { return phase; }
