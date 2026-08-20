@@ -7,7 +7,7 @@ import torch
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
-from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs
+from rtp_llm.ops.compute_ops import PyModelInputs
 
 
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
@@ -24,7 +24,7 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
-    def test_forward_requires_explicit_phase(self) -> None:
+    def test_forward_uses_fixed_role_entrypoints(self) -> None:
         model = _dspark_harness(gamma=3)
         model.v4 = SimpleNamespace(
             embed=SimpleNamespace(weight=torch.empty((1, 8), dtype=torch.bfloat16))
@@ -32,15 +32,20 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         model.kv_cache = None
         model._dspark_width = 3
         model._dspark_hidden_dim = 8
-        inputs = PyModelInputs()
-        inputs.input_ids = torch.zeros(3, dtype=torch.int32)
+        propose_inputs = PyModelInputs()
+        propose_inputs.input_ids = torch.zeros(3, dtype=torch.int32)
 
-        with self.assertRaisesRegex(RuntimeError, "explicit proposal/commit phase"):
-            model.forward(inputs)
+        with self.assertRaises(RuntimeError):
+            model.forward(propose_inputs)
 
-        inputs.dspark_call_phase = DSparkCallPhase.PROPOSE
-        outputs = model.forward(inputs)
-        self.assertEqual(tuple(outputs.draft_tokens.shape), (1, 3))
+        propose_outputs = model.forward_propose(propose_inputs)
+        self.assertEqual(tuple(propose_outputs.hidden_states.shape), (3, 8))
+        self.assertEqual(propose_outputs.hidden_states.dtype, torch.bfloat16)
+
+        commit_inputs = PyModelInputs()
+        commit_inputs.input_ids = torch.zeros(4, dtype=torch.int32)
+        commit_outputs = model.forward_commit(commit_inputs)
+        self.assertEqual(tuple(commit_outputs.hidden_states.shape), (0, 8))
 
     def test_padded_bucket_rows_have_no_attention_work(self) -> None:
         model = _dspark_harness()
@@ -87,13 +92,11 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
             noise_token_id=1,
             aux_feature_dim=24,
             hidden_dim=8,
-            vocab_size=17,
         )
 
         outputs = model.dspark_empty_outputs(2, torch.device("cpu"))
 
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
-        self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
 
     def test_padded_graph_slot_maps_no_rows_with_prefix_sum_starts(self) -> None:
         # A graph bucket of two requests replays a one-request batch. Rows

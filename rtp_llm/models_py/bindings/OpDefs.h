@@ -16,7 +16,6 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
-#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -359,10 +358,6 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
-    // Only interpreted by a DSpARK draft model. All other models leave NONE.
-    // Kept last so PyModelInputs stays an aggregate: existing brace-init sites
-    // that pass 8 members keep compiling and may append a 9th value.
-    rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -371,10 +366,6 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
-    // Optional in-model DSpARK proposal: [batch, gamma] tokens. Rejection
-    // sampling consumes these as an implicit point mass, so no per-vocab
-    // draft probabilities cross this boundary.
-    torch::Tensor draft_tokens;
 
     PyModelOutputs() = default;
 

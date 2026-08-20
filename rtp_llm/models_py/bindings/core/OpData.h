@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
-#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
+#include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -98,9 +98,6 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
-    // Only interpreted by a DSpARK draft model. All other models leave NONE.
-    DSparkCallPhase dspark_call_phase = DSparkCallPhase::NONE;
-
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
@@ -114,11 +111,6 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
-
-    // Optional in-model DSpARK proposal: [batch, gamma] tokens. Rejection
-    // sampling consumes these as an implicit point mass, so no per-vocab
-    // draft probabilities cross this boundary.
-    torch::Tensor draft_tokens;
 
     std::vector<torch::Tensor> moe_gating;
 };
@@ -348,16 +340,6 @@ struct AllGatherParams {
     std::vector<torch::Tensor>        send_buffers;
     bool                              inplace    = true;
     bool                              overlapped = false;
-};
-
-struct SpeculativeSamplingParams {
-    torch::Tensor draft_probs_d;
-    torch::Tensor draft_token_ids_d;
-    torch::Tensor uniform_samples_d;
-    torch::Tensor target_probs_d;
-    torch::Tensor output_token_ids_d;
-    torch::Tensor output_accepted_token_num_d;
-    torch::Tensor output_emitted_token_num_d;
 };
 
 struct RejectionSamplingParams {

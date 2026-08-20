@@ -160,6 +160,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
+            generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
+            generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
+
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();

@@ -367,8 +367,6 @@ build:rocm --copt="-DTORCH_CUDA_CU_API=" # PyTorch 2.9 ROCm compatibility
 ## Known mapping: ROCm 5.x → clang 17, ROCm 6.x → clang 18, ROCm 7.x → clang 22.
 build:rocm --linkopt="/opt/rocm/lib/llvm/lib/clang/22/lib/linux/libclang_rt.builtins-x86_64.a"
 build:rocm --copt="-DLEGACY_HIPBLAS_DIRECT"
-build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
-build:rocm --repo_env CK_LYNM_GEN_ARGS="--receipt 2"
 build:rocm --copt -Wno-tautological-compare # grpc
 build:rocm --copt="-Wno-array-parameter"
 build:rocm --copt="-Wno-error=array-bounds"

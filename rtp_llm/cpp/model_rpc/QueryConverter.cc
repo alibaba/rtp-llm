@@ -507,6 +507,10 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_local_reuse_len(response.aux_info.decode_local_reuse_len);
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
+            aux_info->set_speculative_draft_rounds(response.aux_info.speculative_draft_rounds);
+            for (const auto accepted_tokens : response.aux_info.speculative_accepted_tokens_per_pos) {
+                aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
+            }
             aux_info->set_aux_string(aux_string);
             auto* mm_map = aux_info->mutable_multimodal_lengths();
             for (const auto& [key, value] : response.aux_info.multimodal_lengths) {

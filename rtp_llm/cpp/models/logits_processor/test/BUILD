@@ -75,6 +75,35 @@ cc_test(
 )
 
 cc_test(
+    name = "spec_logits_verify_runner_test",
+    srcs = [
+        "SpecLogitsVerifyRunnerTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+# The benchmark is gated behind the DISABLED_ gtest prefix; run it explicitly
+# with --test_arg=--gtest_also_run_disabled_tests. Keeping the target in the
+# default test graph preserves compile coverage for the runner API.
+cc_test(
+    name = "spec_logits_verify_runner_perf_test",
+    srcs = [
+        "SpecLogitsVerifyRunnerPerfTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "grammar_logits_processor_test",
     srcs = [
         "GrammarLogitsProcessorTest.cc",

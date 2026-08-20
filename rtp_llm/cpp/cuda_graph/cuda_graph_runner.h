@@ -19,12 +19,13 @@ namespace rtp_llm {
 
 class CudaGraphRunner: public GraphBase {
 public:
-    CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
+    CudaGraphRunner(const GraphParams& graph_params,
+                    py::object         py_instance,
+                    const char*        forward_method_name = "forward"):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
-        dspark_call_phase_(graph_params.dspark_call_phase),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -49,7 +50,7 @@ public:
         }
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_    = py_instance_.attr("forward");
+        py_forward_method_    = py_instance_.attr(forward_method_name);
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -109,11 +110,12 @@ private:
         return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
     }
     bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
-        // DSpARK's input_hiddens width is len(target_layer_ids) * hidden_size, which is
-        // independent of hc_mult, so its fixed-width graphs must be recognised by phase
-        // as well: slicing their output buffer would mismatch the forward_decode
-        // [B * q_len, dim] result in captureOneGraphInstance.
-        return isMtpDraftPrefillCudaGraph() && (hc_mult_ > 1 || dspark_call_phase_ != DSparkCallPhase::NONE);
+        // DSpARK propose/commit now run as construction-time-role decode graphs
+        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
+        // prefill keeps the fixed-capacity Python path: slicing its output buffer
+        // would mismatch the forward_decode [B * q_len, dim] result in
+        // captureOneGraphInstance.
+        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -145,7 +147,6 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
-    DSparkCallPhase         dspark_call_phase_{DSparkCallPhase::NONE};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};

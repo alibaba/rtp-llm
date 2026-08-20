@@ -139,8 +139,12 @@ public:
     // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
     int cross_seq_diverge_start_combo = 0;
 
-    bool top1() {
+    bool top1() const {
         return top_k == 1;
+    }
+
+    bool stochastic() const {
+        return do_sample && !top1();
     }
 
     std::vector<RoleAddr> role_addrs;

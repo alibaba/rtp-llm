@@ -121,6 +121,8 @@ class AuxInfo:
     decode_memory_reuse_len: int = 0
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
+    speculative_draft_rounds: int = 0
+    speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

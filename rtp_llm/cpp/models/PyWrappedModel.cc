@@ -139,7 +139,8 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_ = py::object();
+        held_attn_pyobj_   = py::object();
+        py_forward_method_ = py::object();
         // Always release py_model_ since it's always initialized now
         py_model_.release();
         if (graph_runner_ != nullptr) {
@@ -712,9 +713,6 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                           attention_inputs_,
                                           attention_inputs_by_tag_,
                                           torch_ext::BertEmbeddingInputs()});
-    // DSpARK proposal and commit are both prefill-shaped; only the explicit
-    // phase distinguishes them for capture/replay selection.
-    py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
@@ -741,7 +739,6 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
                                               attention_inputs_,
                                               attention_inputs_by_tag_,
                                               torch_ext::BertEmbeddingInputs()});
-        py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -828,7 +825,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                                         attention_inputs_,
                                                         attention_inputs_by_tag_,
                                                         bert_embedding_inputs});
-        py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -853,42 +849,39 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs      = outputs.cast<PyModelOutputs>();
-            hidden_states         = py_model_outputs.hidden_states.clone();
+            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+            py_model_outputs = outputs.cast<PyModelOutputs>();
+            hidden_states    = py_model_outputs.hidden_states.clone();
         }
 
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        // In-model DSpARK proposals leave the Python boundary on
-        // PyModelOutputs::draft_tokens; carry them through whichever
-        // post-layers path this forward takes.
-        auto attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
-            outputs.draft_tokens = py_model_outputs.draft_tokens;
-            return outputs;
-        };
-        if (is_dspark_draft_) {
-            // DSpARK already applies its full-vocabulary lm_head and Markov
-            // head in Python. Running the generic C++ post-layers path would
-            // apply lm_head a second time and, under prefill CP, all-gather
-            // the replicated logits as though they were vocabulary shards.
+        if (dspark_model_role_ != DSparkModelRole::NONE) {
+            if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
+                // Python returns normalized [B*gamma, hidden_dim]. Reuse the
+                // regular C++ lm_head and TP logits gather for every proposal
+                // row; the speculative executor owns only Markov sampling.
+                return callForwardPostLayers(hidden_states, inputs, true);
+            }
+            // Commit only updates the draft KV cache and has no logits
+            // consumer. Preserve its row-aligned hidden output for the common
+            // CUDA graph contract without running lm_head.
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return attach_draft_outputs(std::move(outputs));
+            return outputs;
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return attach_draft_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
+                return forwardPostLayersLastHidden(hidden_states, inputs);
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return attach_draft_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
+            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
         }
-        return attach_draft_outputs(callForwardPostLayers(hidden_states, inputs, true));
+        return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

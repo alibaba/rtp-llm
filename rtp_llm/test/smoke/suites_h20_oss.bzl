@@ -601,8 +601,14 @@ def h20_oss_suites():
                     "decode":  "--use_local 1 --role_type DECODE  --tp_size 2 --act_type BF16 --seq_size_per_block 2048 --max_seq_len 8192 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },
                 envs={
-                    "prefill": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
-                    "decode":  ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                    # Pin the FP8 per-token-group quant to the legacy kernel: the
+                    # auto heuristic switches long prefills to the v2 kernel whose
+                    # reciprocal-multiply rounding differs by ulps, and this
+                    # prompt sits on a razor-thin argmax tie (~token 60) that then
+                    # varies per pod (JIT autotune state), breaking golden-exact
+                    # comparison. Production keeps the auto default.
+                    "prefill": ["ACCL_LOW_LATENCY_OPTIMIZE=1", "DSV4_FP8_QUANT_KERNEL=legacy"],
+                    "decode":  ["ACCL_LOW_LATENCY_OPTIMIZE=1", "DSV4_FP8_QUANT_KERNEL=legacy"],
                 },
                 gpu_type=["H20"],
                 data=native.glob(['data/model/qwen_vl/*.jpeg']),

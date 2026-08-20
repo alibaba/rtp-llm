@@ -187,7 +187,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
-            sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
+            sequence_lengths[batch_idx]   = stream->seqLength() + (score_batch ? i : propose_step);
             num_beams_in[batch_idx]       = stream->currentNumBeams();
             num_beams_out[batch_idx]      = stream->nextNumBeams();
             top_k[batch_idx]              = stream->generateConfig()->top_k;

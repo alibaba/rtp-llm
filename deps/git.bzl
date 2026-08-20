@@ -25,13 +25,6 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "cutlass_fa",
-        remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
-        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
-    )
-
-    new_git_repository(
         name = "cutlass",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "80243e0b8c644f281e2beb0c20fe78cf7b267061",
@@ -232,14 +225,6 @@ def git_deps():
         commit = "109c570727c3089fef655edcdd0dd02cc5958010",
         patches = ["@rtp_llm//patches/grpc:0001-Rename-gettid-functions.patch"],
         shallow_since = "1518192000 +0800",
-    )
-
-    git_repository(
-        name = "KleidiAI",
-        remote = "https://git.gitlab.arm.com/kleidi/kleidiai.git",
-        commit = "2d160cf675d6df7068a17da07ec6218fd9478541",
-        patch_args = ["-p1"],
-        patches = ["@rtp_llm//patches/kai:0001-add-a8w4-fp16-support.patch"],
     )
 
     http_archive(
