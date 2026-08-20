@@ -17,7 +17,7 @@ cc_test(
     copts = test_copts,
     deps = torch_deps() + [
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
+        "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base/stream:stream",

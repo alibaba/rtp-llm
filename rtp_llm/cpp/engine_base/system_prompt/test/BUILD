@@ -16,7 +16,7 @@ cc_library(
 
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
+    "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/engine_base/schedulers:schedulers",
     "//rtp_llm/cpp/test:test_utils",

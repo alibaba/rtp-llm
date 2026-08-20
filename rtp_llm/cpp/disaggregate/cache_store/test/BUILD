@@ -36,9 +36,8 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
-        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
+        "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
         "@com_google_googletest//:gtest",
-        "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
