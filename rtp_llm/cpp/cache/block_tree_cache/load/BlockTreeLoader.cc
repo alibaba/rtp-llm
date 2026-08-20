@@ -205,14 +205,14 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             TreeNode* const    source_node = source_tier == Tier::DEVICE ? nullptr : path[i];
             TransferDescriptor desc{
                 source_node, group_set_id, i, source_tier, Tier::DEVICE, resource.getBlocks(source_tier)};
-            const bool         is_joined = resource.transfer_state == GroupSetTransferState::LOADING;
+            const bool is_joined = resource.transfer_state == GroupSetTransferState::LOADING;
             if (!is_joined) {
                 group_set->referenceBlocks(
                     MultiNodeResource{group_set_id, source_tier, {{source_node, desc.source_blocks}}},
                     BlockRefType::REQUEST);
                 if (source_tier != Tier::DEVICE) {
                     resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
-                    evictor_.refreshCandidate(path[i], group_set_id);
+                    evictor_.suspendCandidate(path[i], group_set_id, source_tier);
                 }
             }
             pending_load_descs.emplace_back(std::move(desc));
@@ -365,14 +365,10 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
         const GroupSetTransferState expected_state =
             fully_prepared ? GroupSetTransferState::LOADING : GroupSetTransferState::LOAD_PENDING;
         if (!changeTransferState(desc.node, desc.group_set_id, expected_state, GroupSetTransferState::IDLE)) {
-            RTP_LLM_LOG_WARNING("load rollback state mismatch, group_set=%zu source=%s",
-                                desc.group_set_id,
-                                tierName(desc.source_tier));
-        } else if (fully_prepared) {
-            evictor_.refreshCandidate(desc.node, desc.group_set_id);
-        }
-        if (!fully_prepared) {
-            evictor_.refreshCandidate(desc.node, desc.group_set_id);
+            RTP_LLM_LOG_WARNING(
+                "load rollback state mismatch, group_set=%zu source=%s", desc.group_set_id, tierName(desc.source_tier));
+        } else {
+            evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
         }
     }
     if (tree_data_mutated || device_refs_released) {
@@ -400,9 +396,9 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
 }
 
 bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success) {
-    bool       settlement_success   = copy_success;
-    bool       state_settled        = false;
-    bool       tree_data_mutated    = false;
+    bool settlement_success = copy_success;
+    bool state_settled      = false;
+    bool tree_data_mutated  = false;
 
     if (copy_success) {
         for (const TransferDescriptor& desc : task.load_descs) {
@@ -450,8 +446,9 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
             state_settled = true;
             if (enable_device_cache_) {
                 evictor_.onLoaded(desc.node, desc.group_set_id);
+                evictor_.onTierChanged(desc.node, desc.group_set_id);
             } else {
-                evictor_.refreshCandidate(desc.node, desc.group_set_id);
+                evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
             }
             continue;
         }
@@ -462,7 +459,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
             RTP_LLM_LOG_WARNING(
                 "loading state mismatch, group_set=%zu source=%s", desc.group_set_id, tierName(desc.source_tier));
         } else {
-            evictor_.refreshCandidate(desc.node, desc.group_set_id);
+            evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
             state_settled = true;
         }
     }

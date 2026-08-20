@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
-
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
@@ -428,11 +427,10 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(transfer_dispatcher),
                                                   std::move(task_pool));
     if (cache->storageBackend()) {
-        RTP_LLM_CHECK_WITH_INFO(
-            cache->storageBackend()->init(std::move(storage_topology),
-                                          std::move(storage_device_pools),
-                                          std::move(storage_buffer_resolver)),
-            "StorageBackend init failed");
+        RTP_LLM_CHECK_WITH_INFO(cache->storageBackend()->init(std::move(storage_topology),
+                                                              std::move(storage_device_pools),
+                                                              std::move(storage_buffer_resolver)),
+                                "StorageBackend init failed");
     }
     if (!cache->init()) {
         return nullptr;
@@ -499,11 +497,15 @@ void BlockTreeCacheTestPeer::setTierWatermarkForTest(BlockTreeCache& cache, Tier
     }
 }
 
-void BlockTreeCacheTestPeer::refreshCandidateForTest(BlockTreeCache& cache,
-                                                      TreeNode*       node,
-                                                      size_t          group_set_id) {
+void BlockTreeCacheTestPeer::refreshCandidateForTest(BlockTreeCache& cache, TreeNode* node, size_t group_set_id) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
-    cache.evictor_.refreshCandidate(node, group_set_id);
+    const GroupSetResource&     resource = node->group_set_resources[group_set_id];
+    const Tier                  tier     = resource.getTopTier();
+    if (resource.transfer_state == GroupSetTransferState::IDLE) {
+        cache.evictor_.admitCandidate(node, group_set_id, tier);
+    } else {
+        cache.evictor_.suspendCandidate(node, group_set_id, tier);
+    }
 }
 
 void BlockTreeCacheTestPeer::markPathMatchedForTest(BlockTreeCache& cache, const std::vector<TreeNode*>& path) {
