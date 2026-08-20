@@ -71,6 +71,11 @@ class StrategyRegistry:
         logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
 
         if not candidates:
+            quant_method = (
+                config.model_config.quant_config.get_method()
+                if config.model_config.quant_config is not None
+                else None
+            )
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
                 f"quant_config={config.model_config.quant_config}, "
@@ -79,28 +84,40 @@ class StrategyRegistry:
                 f"tp_size={config.tp_size}, "
                 f"use_deepep_low_latency={config.moe_config.use_deepep_low_latency if config.moe_config else False}"
             )
+            if quant_method == "W8A8_INT8_PER_CHANNEL_COMPRESSED":
+                raise ValueError(
+                    "W8A8_INT8_PER_CHANNEL_COMPRESSED weights were loaded, but "
+                    "no registered MOE compute backend can consume them; install "
+                    "or register a backend with W8A8 INT8 per-channel execution "
+                    "support"
+                )
             raise ValueError(
                 f"No suitable MOE strategy found for configuration. "
                 f"Please check quant_config, ep_size, and parallelism settings."
             )
 
-        # Sort candidates by priority (descending, higher priority first)
-        candidates.sort(key=lambda s: s.priority, reverse=True)
+        # get_attributes() is not a plain accessor -- it does lazy imports and
+        # some backends log from it -- so resolve it once and reuse it for the
+        # candidate log and selection.
+        scored = [(strategy, strategy.get_attributes()) for strategy in candidates]
+
+        # Sort by priority (descending, higher priority first)
+        scored.sort(key=lambda pair: pair[1].calculate_priority(), reverse=True)
 
         # Log all candidate strategies
-        logger.info(f"Found {len(candidates)} candidate strategy(ies) for MOE:")
-        for strategy in candidates:
+        logger.info(f"Found {len(scored)} candidate strategy(ies) for MOE:")
+        for strategy, attrs in scored:
             logger.info(
                 f"  - {strategy.__class__.__name__}: "
-                f"{strategy.get_attributes()} (priority={strategy.priority})"
+                f"{attrs} (priority={attrs.calculate_priority()})"
             )
 
         # Select the strategy with highest priority (first in sorted list)
-        selected = candidates[0]
+        selected, selected_attrs = scored[0]
 
         logger.info(
             f"Selected strategy: {selected.__class__.__name__} "
-            f"with priority {selected.priority}"
+            f"with priority {selected_attrs.calculate_priority()}"
         )
 
         return selected
