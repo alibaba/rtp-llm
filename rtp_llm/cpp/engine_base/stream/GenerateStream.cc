@@ -1016,19 +1016,20 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         spec_tokens[1] = update_info.draft_token;
         propose_token_ = {target_last_token, update_info.draft_token};
     } else {
-        // Commit-only speculative steps (DSpARK prefill/decode tail) publish
-        // only accepted target tokens. Their next proposal is produced at the
-        // following decode round head and must not become persistent stream
-        // or PD side-channel state.
+        // The legacy CPU side channel has no proposal. This covers both
+        // commit-only steps and GPU-only fast paths, so GPU proposal lifetime
+        // is controlled independently by draft_token_gpu below.
         propose_token_.clear();
     }
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
-    // Cache the per-stream GPU propose tokens for the next decode step.
-    // PDFUSION path provides this; PD-disaggregate path leaves it undefined and
-    // readers fall back to the CPU `tokens` tensor.
-    sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
+    // Apply the explicit tri-state proposal update. PD partial updates use
+    // nullopt to preserve the handoff proposal; GPU/CPU proposal producers use
+    // a defined/undefined Tensor respectively to replace or clear the mirror.
+    if (update_info.draft_token_gpu.has_value()) {
+        sp_output_buffer_->propose_tokens_gpu = *update_info.draft_token_gpu;
+    }
 
     // for spec-decode linear attention, we need to adjust cache blocks
     if (accept_token_num > 1 && stream_cache_resource_) {

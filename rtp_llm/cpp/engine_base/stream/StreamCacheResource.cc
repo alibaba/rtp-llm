@@ -219,8 +219,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                payload->propose_tokens.data(),
                payload->propose_tokens.size() * sizeof(int));
 
-        const auto cuda_i32                  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-        sp_output_buffer->propose_tokens_gpu = sp_output_buffer->tokens.to(cuda_i32, /*non_blocking=*/true);
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
         if (tensorPbHasPayload(payload->propose_probs)) {
             sp_output_buffer->all_probs = TensorPbConvert::pbToTorch(payload->propose_probs).to(torch::kCUDA);
         }
@@ -231,12 +230,11 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         stream->setSPOutputBuffer(sp_output_buffer);
 
         if (payload->propose_tokens.size() >= 2) {
-            // Hand off every remaining proposal, not just the first one: the MTP verify path
-            // expects propose_tokens_gpu to hold all propose_step draft tokens.
-            auto propose_tokens_gpu =
-                sp_output_buffer->tokens.narrow(1, 1, static_cast<int64_t>(payload->propose_tokens.size() - 1))
-                    .to(cuda_i32, /*non_blocking=*/true);
-            auto accept_len     = torch::ones({1}, cuda_i32);
+            // Both the stream mirror and async state use the same draft-only
+            // contract: target column 0 is excluded and every draft is kept.
+            auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
+            sp_output_buffer->propose_tokens_gpu = propose_tokens_gpu;
+            auto accept_len                      = torch::ones({1}, cuda_i32);
             auto accept_tokens  = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
             accept_tokens[0][0] = sp_output_buffer->tokens[0][0];
             auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
