@@ -200,6 +200,60 @@ def run_native_process(
         return -1, "", str(e)
 
 
+def terminate_process_group(
+    proc: Optional[subprocess.Popen], grace_seconds: float = 5
+) -> None:
+    """Terminate and reap a process group started by this driver."""
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        proc.wait()
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    except ProcessLookupError:
+        proc.wait()
+
+
+def wait_for_log_marker(
+    proc: subprocess.Popen, log_path: str, marker: bytes, timeout_seconds: float
+) -> bool:
+    """Poll a file-backed process log without risking a blocked pipe read."""
+    deadline = time.monotonic() + timeout_seconds
+    marker_prefix = b""
+    with open(log_path, "rb") as log:
+        while True:
+            chunk = log.read()
+            if chunk:
+                searchable = marker_prefix + chunk
+                if marker in searchable:
+                    return True
+                marker_prefix = searchable[-max(0, len(marker) - 1) :]
+            if proc.poll() is not None:
+                return marker in marker_prefix + log.read()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+
+
+def read_log_tail(log_path: str, max_bytes: int = 500) -> str:
+    try:
+        with open(log_path, "rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - max_bytes))
+            return log.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
 def resolve_flamegraph_tools(
     configured_dir: Optional[str],
 ) -> Optional[Tuple[str, str]]:
@@ -332,6 +386,7 @@ def run_perf_record(
     frequency: int,
     flamegraph_tools: Tuple[str, str],
     process_timeout_seconds: int = 180,
+    attach_timeout_seconds: int = 900,
 ) -> Tuple[bool, str]:
     """Attach perf to the native process only during its measured window.
 
@@ -358,53 +413,62 @@ def run_perf_record(
 
     native = None
     perf_proc = None
+    native_log_path = os.path.join(output_dir, "perf_native.log")
+    perf_log_path = os.path.join(output_dir, "perf_record.log")
     try:
-        native = subprocess.Popen(
-            native_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+        with open(native_log_path, "wb") as native_log:
+            native = subprocess.Popen(
+                native_cmd,
+                stdout=native_log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
-        # Wait for the common attach marker with a generous setup+warmup timeout.
-        ready = False
-        deadline = time.time() + 900
-        for raw_line in native.stdout:
-            if time.time() > deadline:
-                break
-            if b"PROFILE_ATTACH_READY" in raw_line:
-                ready = True
-                break
-        if not ready:
-            return False, "native process did not announce a profiler attach marker"
+            if not wait_for_log_marker(
+                native,
+                native_log_path,
+                b"PROFILE_ATTACH_READY",
+                attach_timeout_seconds,
+            ):
+                detail = read_log_tail(native_log_path)
+                return False, (
+                    "native process did not announce a profiler attach marker"
+                    + (f": {detail}" if detail else "")
+                )
 
-        # Attach perf to the native pid; it samples until we terminate it.
-        perf_cmd = [
-            "perf",
-            "record",
-            "-F",
-            str(frequency),
-            "-g",
-            "--call-graph",
-            "dwarf,16384",
-            "-p",
-            str(native.pid),
-            "-o",
-            perf_data,
-        ]
-        perf_proc = subprocess.Popen(
-            perf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+            # Attach perf to the native pid; it samples until we terminate it.
+            perf_cmd = [
+                "perf",
+                "record",
+                "-F",
+                str(frequency),
+                "-g",
+                "--call-graph",
+                "dwarf,16384",
+                "-p",
+                str(native.pid),
+                "-o",
+                perf_data,
+            ]
+            with open(perf_log_path, "wb") as perf_log:
+                perf_proc = subprocess.Popen(
+                    perf_cmd,
+                    stdout=perf_log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
 
-        # Wait for the native process to finish its measured window and exit.
-        native.wait(timeout=process_timeout_seconds)
-        native_rc = native.returncode
-        native_stderr = native.stderr.read().decode()[:500] if native.stderr else ""
+                # Wait for the native process to finish its measured window and exit.
+                native.wait(timeout=process_timeout_seconds)
+                native_rc = native.returncode
 
-        # Stop perf; SIGTERM makes perf write out perf.data.
-        if perf_proc.poll() is None:
-            perf_proc.terminate()
-            perf_proc.wait(timeout=15)
-        _, perf_err = perf_proc.communicate() if perf_proc.stdout else (b"", b"")
+                # Stop perf; SIGTERM makes perf write out perf.data.
+                terminate_process_group(perf_proc, 15)
         if native_rc != 0:
-            return False, f"native benchmark failed rc={native_rc}: {native_stderr}"
+            return False, (
+                f"native benchmark failed rc={native_rc}: "
+                f"{read_log_tail(native_log_path)}"
+            )
 
         # Verify perf.data
         if not os.path.exists(perf_data) or os.path.getsize(perf_data) == 0:
@@ -434,27 +498,14 @@ def run_perf_record(
                 summary_file.write(quality.read())
         return True, "\n".join(lines)
     except subprocess.TimeoutExpired:
-        if native is not None:
-            try:
-                native.kill()
-            except Exception:
-                pass
         return False, "native benchmark timed out before perf attach completed"
     except FileNotFoundError:
         return False, "perf not found"
     except Exception as e:
         return False, str(e)
     finally:
-        if perf_proc is not None and perf_proc.poll() is None:
-            try:
-                perf_proc.kill()
-            except Exception:
-                pass
-        if native is not None and native.poll() is None:
-            try:
-                native.kill()
-            except Exception:
-                pass
+        terminate_process_group(perf_proc)
+        terminate_process_group(native)
 
 
 def run_perf_stat(
@@ -466,6 +517,7 @@ def run_perf_stat(
     max_device_memory_fraction: float,
     seed: int,
     model_profile: str,
+    process_timeout_seconds: int = 600,
 ) -> Tuple[bool, str]:
     """Run a single perf stat session."""
     perf_stat_path = os.path.join(output_dir, "perf_stat.txt")
@@ -488,15 +540,32 @@ def run_perf_stat(
         "--",
     ] + native_cmd
 
+    proc = None
+    process_log_path = os.path.join(output_dir, "perf_stat_process.log")
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        proc.communicate(timeout=600)
+        with open(process_log_path, "wb") as process_log:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=process_log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            proc.wait(timeout=process_timeout_seconds)
+        if proc.returncode != 0:
+            return False, (
+                f"perf stat failed rc={proc.returncode}: "
+                f"{read_log_tail(process_log_path)}"
+            )
         if os.path.exists(perf_stat_path) and os.path.getsize(perf_stat_path) > 0:
             with open(perf_stat_path) as f:
                 return True, f.read()[:500]
         return False, "perf stat produced no output"
+    except subprocess.TimeoutExpired:
+        return False, "perf stat timed out"
     except Exception as e:
         return False, str(e)
+    finally:
+        terminate_process_group(proc)
 
 
 def sample_nvidia_smi(output_dir: str, label: str) -> Optional[str]:
