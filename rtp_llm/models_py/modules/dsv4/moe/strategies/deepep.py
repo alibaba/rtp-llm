@@ -251,7 +251,6 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             raise RuntimeError("SM120 NCCL EP requires torch.distributed")
         group = dist.group.WORLD
         world = dist.get_world_size(group)
-        rank = dist.get_rank(group)
         cfg = self.cfg
         if cfg.ep_size != world:
             raise RuntimeError(
@@ -275,28 +274,15 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         destination = torch.div(
             indices, experts_per_rank, rounding_mode="floor"
         ).clamp_(0, world - 1)
-        # DSV4 top-k=6 reaches almost every one of four EP ranks (3.93 ranks
-        # per token in the 32K trace).  A fixed N-row block per peer costs
-        # less than 2% extra traffic, while removing the per-layer count
-        # all-gather, device-to-host synchronization, dynamic compaction and
-        # the source-side index_add.  Keep the compact implementation as an
-        # opt-out for models whose routing fanout is substantially lower.
-        padded_all_to_all = (
-            os.environ.get("DSV4_SM120_NCCL_EP_PADDED", "1") != "0"
-        )
+        # V4 top-k=6 reaches almost every EP4 rank. Fixed N-row peer blocks add
+        # less than 2% traffic and avoid dynamic compaction and source index_add.
+        token_ids = torch.arange(x.size(0), device=x.device)
+        padded_all_to_all = True
         send_payload_parts = []
-        send_token_parts = []
         send_counts = []
         for dst in range(world):
             owned = (destination == dst) & (indices >= 0)
-            if padded_all_to_all:
-                token_ids = torch.arange(x.size(0), device=x.device)
-            else:
-                token_ids = torch.nonzero(
-                    owned.any(dim=1), as_tuple=False
-                ).flatten()
             send_counts.append(token_ids.numel())
-            send_token_parts.append(token_ids)
 
             token_owned = owned.index_select(0, token_ids)
             token_weights = weights.index_select(0, token_ids)
@@ -326,34 +312,16 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             )
 
         send_payload = torch.cat(send_payload_parts, dim=0).contiguous()
-        send_token_ids = torch.cat(send_token_parts, dim=0)
 
-        if padded_all_to_all:
-            # DP ranks may own different active-token counts at batch boundaries.
-            # Each source sends local N rows to every destination, so receive
-            # splits must use source-rank counts rather than repeating local N.
-            local_count = torch.full(
-                (1,), x.size(0), dtype=torch.int64, device=x.device
-            )
-            gathered_counts = torch.empty(
-                world, dtype=torch.int64, device=x.device
-            )
-            dist.all_gather_into_tensor(
-                gathered_counts, local_count, group=group
-            )
-            recv_counts = [int(v) for v in gathered_counts.cpu().tolist()]
-        else:
-            send_counts_t = torch.tensor(
-                send_counts, dtype=torch.int64, device=x.device
-            )
-            counts_matrix = torch.empty(
-                world * world, dtype=torch.int64, device=x.device
-            )
-            dist.all_gather_into_tensor(
-                counts_matrix, send_counts_t, group=group
-            )
-            recv_counts_t = counts_matrix.view(world, world)[:, rank]
-            recv_counts = [int(v) for v in recv_counts_t.cpu().tolist()]
+        # DP ranks can own different active-token counts at batch boundaries.
+        local_count = torch.full(
+            (1,), x.size(0), dtype=torch.int64, device=x.device
+        )
+        gathered_counts = torch.empty(
+            world, dtype=torch.int64, device=x.device
+        )
+        dist.all_gather_into_tensor(gathered_counts, local_count, group=group)
+        recv_counts = [int(v) for v in gathered_counts.cpu().tolist()]
         recv_tokens = sum(recv_counts)
 
         recv_payload = torch.empty(
@@ -389,13 +357,10 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         local_w = recv_w * valid.to(recv_w.dtype)
         local_i = local_i.clamp(0, cfg.n_local_experts - 1)
 
-        fp8_combine = padded_all_to_all and (
-            os.environ.get("DSV4_SM120_NCCL_EP_FP8_COMBINE", "1") != "0"
-        )
         equal_peer_counts = all(count == x.size(0) for count in recv_counts)
+        fp8_combine = True
         pipeline_combine = (
-            fp8_combine
-            and equal_peer_counts
+            equal_peer_counts
             and os.environ.get("DSV4_SM120_NCCL_EP_PIPELINE", "0") != "0"
         )
         if pipeline_combine:

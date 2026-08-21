@@ -456,7 +456,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
                 offset += padded_count
             return scale_chunks
 
-        def quantize_groupwise(inp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def quantize_groupwise(inp: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
             inp_q, inp_scale = mxfp8_quantize(
                 inp.contiguous(), is_sf_swizzled_layout=False
             )
@@ -465,31 +465,52 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             inp_scale = inp_scale.reshape(inp.size(0), inp.size(1) // FP4_BLOCK)
             return inp_q, interleave_groupwise_scale(inp_scale)
 
-        def run_single_group_gemms(
+        def run_grouped_gemm(
             inp_q: torch.Tensor,
             scale_chunks: list[torch.Tensor],
             expert_weight: torch.Tensor,
             expert_scale: torch.Tensor,
         ) -> torch.Tensor:
-            outputs = []
-            offset = 0
-            for group_id, padded_count in enumerate(padded_counts):
-                group_indptr = torch.tensor(
-                    [0, padded_count], dtype=torch.int32, device=device
-                )
-                outputs.append(
-                    group_gemm_mxfp4_nt_groupwise(
-                        inp_q[offset : offset + padded_count],
-                        expert_weight[group_id : group_id + 1],
-                        scale_chunks[group_id],
-                        expert_scale[group_id : group_id + 1],
-                        group_indptr,
-                        tile_n=128,
-                        out_dtype=torch.bfloat16,
+            # FlashInfer's grouped SM120 kernel uses a 128-row SFA tile with
+            # an extra alignment term for every preceding group. Match the
+            # packing formula used by FlashInfer's own group-GEMM tests:
+            #   sf_offset[i] = floor((m_indptr[i] + i * 127) / 128) * 128.
+            indptr_values = [0]
+            for padded_count in padded_counts:
+                indptr_values.append(indptr_values[-1] + padded_count)
+            sf_offsets = [
+                ((offset + i * 127) // 128) * 128
+                for i, offset in enumerate(indptr_values)
+            ]
+            padded_scale_chunks = []
+            for i, chunk in enumerate(scale_chunks):
+                target_rows = sf_offsets[i + 1] - sf_offsets[i]
+                if chunk.size(0) < target_rows:
+                    chunk = torch.cat(
+                        (
+                            chunk,
+                            torch.zeros(
+                                target_rows - chunk.size(0),
+                                chunk.size(1),
+                                dtype=chunk.dtype,
+                                device=device,
+                            ),
+                        ),
+                        dim=0,
                     )
-                )
-                offset += padded_count
-            return torch.cat(outputs, dim=0)
+                padded_scale_chunks.append(chunk)
+            group_indptr = torch.tensor(
+                indptr_values, dtype=torch.int32, device=device
+            )
+            return group_gemm_mxfp4_nt_groupwise(
+                inp_q,
+                expert_weight,
+                torch.cat(padded_scale_chunks, dim=0),
+                expert_scale,
+                group_indptr,
+                tile_n=128,
+                out_dtype=torch.bfloat16,
+            )
 
         if routed_input_scale is None:
             routed_q, routed_scale = quantize_groupwise(routed_x)
@@ -499,7 +520,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         active_experts_t = torch.tensor(
             active_experts, dtype=torch.int64, device=device
         )
-        gate_up = run_single_group_gemms(
+        gate_up = run_grouped_gemm(
             routed_q,
             routed_scale,
             self._w13.view(torch.uint8).index_select(0, active_experts_t),
@@ -514,7 +535,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             up.clamp_(min=-cfg.swiglu_limit, max=cfg.swiglu_limit)
         hidden = (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
         hidden_q, hidden_scale = quantize_groupwise(hidden)
-        down = run_single_group_gemms(
+        down = run_grouped_gemm(
             hidden_q,
             hidden_scale,
             self._w2.view(torch.uint8).index_select(0, active_experts_t),
@@ -547,53 +568,6 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         indices: torch.Tensor,
     ) -> torch.Tensor:
         """Run SM120 grouped MoE from linear-layout MXFP8 activations."""
-        # The fused SM120 prefill path accumulates enough numerical drift over
-        # the full DSV4 stack to reduce DSpark acceptance versus the B300
-        # baseline. Keep the numerically aligned FlashInfer groupwise path as
-        # the default; fused prefill remains available as an explicit opt-in.
-        if os.environ.get("DSV4_SM120_FUSED_MOE_PREFILL", "0") != "0":
-            from flashinfer import block_scale_interleave
-            from flashinfer.fused_moe import cutlass_fused_moe
-            from flashinfer.fused_moe.core import ActivationType
-
-            cfg = self.cfg
-            n = x.size(0)
-            fake_input_scale = torch.ones(
-                cfg.n_routed_experts, dtype=torch.float32, device=x.device
-            )
-            swiglu_limit = torch.full_like(fake_input_scale, cfg.swiglu_limit)
-            output = torch.empty(
-                (n, cfg.dim), dtype=torch.bfloat16, device=x.device
-            )
-            input_sf = block_scale_interleave(
-                input_scale.reshape(n, cfg.dim // FP4_BLOCK).contiguous()
-            )
-            cutlass_fused_moe(
-                input=x.contiguous(),
-                token_selected_experts=indices.to(torch.int32).contiguous(),
-                token_final_scales=weights.float().contiguous(),
-                fc1_expert_weights=self._w13.view(torch.uint8).view(torch.long),
-                fc2_expert_weights=self._w2.view(torch.uint8).view(torch.long),
-                output_dtype=torch.bfloat16,
-                quant_scales=[
-                    self._s13_sm120.view(torch.int32),
-                    fake_input_scale,
-                    self._s2_sm120.view(torch.int32),
-                    fake_input_scale,
-                ],
-                input_sf=input_sf,
-                swiglu_limit=swiglu_limit,
-                output=output,
-                use_mxfp8_act_scaling=True,
-                use_fused_finalize=False,
-                enable_pdl=False,
-                workspace_buffer=self._get_sm120_fused_moe_workspace(
-                    x.device, max_tokens=n
-                ),
-                tune_max_num_tokens=n,
-                activation_type=ActivationType.Swiglu,
-            )
-            return output.float()
         return self._forward_sm120(x, weights, indices, input_scale=input_scale)
 
     def _get_sm120_fused_moe_workspace(
