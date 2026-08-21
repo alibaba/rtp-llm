@@ -20,6 +20,7 @@ import unittest
 from typing import Any, List, Optional, Tuple
 from unittest import mock
 
+from rtp_llm.model_loader import weight_manager as weight_manager_module
 from rtp_llm.model_loader import weight_memory_saver as wms
 from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.utils import nccl_memory
@@ -54,6 +55,7 @@ class WeightManagerCollectivesTest(unittest.TestCase):
         gate: bool,
         suspend_exc: Optional[BaseException] = None,
         resume_exc: Optional[BaseException] = None,
+        sleep_enabled: bool = True,
     ) -> None:
         def fake_suspend(device: Any, reason: str = "sleep") -> None:
             self.suspend_calls.append((device, reason))
@@ -67,6 +69,7 @@ class WeightManagerCollectivesTest(unittest.TestCase):
 
         for target, attr, value in (
             (wms, "release_collective_memory", lambda: gate),
+            (weight_manager_module, "sleep_mode_enabled", lambda: sleep_enabled),
             (nccl_memory, "suspend_for_sleep", fake_suspend),
             (nccl_memory, "resume_after_wake", fake_resume),
         ):
@@ -76,6 +79,13 @@ class WeightManagerCollectivesTest(unittest.TestCase):
 
     def test_suspend_is_a_no_op_while_the_switch_is_off(self) -> None:
         self._patch(gate=False)
+        _manager().suspend_collectives_for_sleep()
+        self.assertEqual(self.suspend_calls, [])
+
+    def test_suspend_is_a_no_op_outside_sleep_mode_even_if_collective_switch_is_on(
+        self,
+    ) -> None:
+        self._patch(gate=True, sleep_enabled=False)
         _manager().suspend_collectives_for_sleep()
         self.assertEqual(self.suspend_calls, [])
 

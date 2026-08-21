@@ -394,12 +394,15 @@ class WeightManager:
         best-effort, whereas a failure here leaves memory the wake path will
         dereference, so it must propagate and put the instance in ERROR.
 
-        No-op unless ``--sleep_release_collective_memory`` is on, and no-op on a
-        runtime NCCL without the suspend API.
+        No-op unless sleep mode and ``--sleep_release_collective_memory`` are on,
+        and no-op on a runtime NCCL without the suspend API. The C++ lifecycle
+        controller already gates the normal production path on ``effective()``;
+        this second check keeps the Python seam safe if it is called directly or
+        if the C++ and Python runtime configuration ever disagree.
         """
         from rtp_llm.model_loader.weight_memory_saver import release_collective_memory
 
-        if not release_collective_memory():
+        if not sleep_mode_enabled() or not release_collective_memory():
             return
         from rtp_llm.utils.nccl_memory import suspend_for_sleep
 

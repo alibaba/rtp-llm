@@ -486,21 +486,29 @@ void LocalRpcServer::installSleepHooks() {
         // once the engine is quiesced -- so a failure must NOT fail the sleep: swallow it, drain
         // the sticky CUDA error so it can't poison the subsequent wake, and continue.
 #if USING_CUDA || USING_ROCM
-        {
-            OptionalSleepDeviceGuard empty_cache_guard(local_rank);
-            try {
-                c10::cuda::CUDACachingAllocator::emptyCache();
-            } catch (const std::exception& e) {
-                // clear sticky error left by the failed free so it can't poison the next wake
+        if (ok) {
+            {
+                OptionalSleepDeviceGuard empty_cache_guard(local_rank);
+                try {
+                    c10::cuda::CUDACachingAllocator::emptyCache();
+                } catch (const std::exception& e) {
+                    // clear sticky error left by the failed free so it can't poison the next wake
 #if USING_CUDA
-                (void)cudaGetLastError();
+                    (void)cudaGetLastError();
 #elif USING_ROCM
-                (void)hipGetLastError();
+                    (void)hipGetLastError();
 #endif
-                RTP_LLM_LOG_WARNING("releaseRestorableGpuMemory: best-effort emptyCache() failed (%s); "
-                                    "continuing, GPU regions already released via VMM pause",
-                                    e.what());
+                    RTP_LLM_LOG_WARNING("releaseRestorableGpuMemory: best-effort emptyCache() failed (%s); "
+                                        "continuing, GPU regions already released via VMM pause",
+                                        e.what());
+                }
             }
+        } else {
+            // A critical VMM/NCCL release already failed. Do not issue another
+            // allocator/VMM operation on a potentially sticky CUDA error path;
+            // the controller will enter ERROR and the instance must be restarted.
+            RTP_LLM_LOG_WARNING("releaseRestorableGpuMemory: skipping best-effort emptyCache() "
+                                "after a critical release failure");
         }
 #endif
         // Terminal sleep state: weights + cuda_graph GPU memory released (level-2 keeps no backup).

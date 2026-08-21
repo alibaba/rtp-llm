@@ -76,11 +76,13 @@ the ``--sleep_release_collective_memory`` commit message.
 
 6. **A ``ncclSuccess`` resume is not proof of a clean resume.** The peer
    re-import loop only ``WARN``s and continues, and it runs *after*
-   ``manager->released`` is cleared, so ``ncclStatGpuMemSuspended`` reads 0 even
-   when individual peer buffers were left unmapped. :func:`_log_resume_evidence`
-   therefore catches a communicator that never finished resuming, but NOT a
-   partial peer import; for that, grep NCCL's own ``restoredPeerCount`` INFO line
-   and its "Could not find matching handle info" warnings after a suspicious wake.
+   ``manager->released`` is cleared, so ``ncclStatGpuMemSuspended`` can read 0
+   even when individual peer buffers were left unmapped. The wake hook therefore
+   performs a fail-closed, rank-symmetric evidence vote over the communicators it
+   actually resumed. A failed or unknown stat poisons the instance before weight
+   reload; for partial peer import, operators must still inspect NCCL's
+   ``restoredPeerCount`` INFO line and its "Could not find matching handle info"
+   warnings after a suspicious wake.
 
 7. **Resume must complete before ANY collective on the wake path.** Tighter than
    it looks: the level-2 weight reload broadcasts every checkpoint tensor over the
@@ -131,6 +133,15 @@ from rtp_llm.utils import nccl_memory_backend as _backend
 # current vote timeout only bounds rendezvous; once GO is unanimous, a process
 # death or an internal NCCL remap hang still requires the service supervisor to
 # restart the rank group.
+# TODO(nccl-memory): namespace rendezvous keys with a launcher-provided job/epoch
+# nonce before enabling this on elastic workers. A TCPStore that outlives a rank
+# restart can retain an old arrival counter and fabricate a quorum at seq=0.
+# TODO(nccl-memory): make every individual Store RPC obey the shared vote deadline
+# (and fail closed when the Store cannot install a bounded timeout); today the
+# default TCPStore is bounded, but a custom PrefixStore can expose a weaker limit.
+# TODO(nccl-memory): add a host-pinned-memory budget preflight. NCCL's offload is
+# one-for-one GPU->pinned-host, so memlock/MemAvailable exhaustion can still occur
+# after the unanimous vote and before the NCCL barrier returns.
 
 _MiB = 1024.0 * 1024.0
 
@@ -833,43 +844,27 @@ def resume_after_wake(device: object, reason: str = "wake") -> None:
         # aborting it -- in which the pointer would be dangling and resuming it a
         # use-after-free.
         #
-        # So only positive evidence poisons: a pointer that reads back DIFFERENT.
-        # An unanswerable question -- 0 because this thread's device does not own
-        # the comm, or a throw because a torch upgrade renamed the private API --
-        # is logged and the recorded pointer is trusted, because the reference we
-        # hold is the actual guarantee and the alternative is bricking a healthy
-        # wake over a failed lookup. The previous version asked comms() for the
-        # whole enumeration and treated "found less than I remember" as
-        # "destroyed", which turned exactly those two lookup failures into a
-        # mandatory instance restart.
-        changed: List[str] = []
+        # A missing/throwing lookup is not safe to ignore: a ProcessGroup reference
+        # prevents Python GC, but cannot prevent the NCCL watchdog from aborting the
+        # communicator underneath it. Passing the recorded raw pointer after an
+        # unanswerable lookup could therefore be a use-after-free. Fail closed and
+        # keep the recorded entry so ``is_suspended()`` remains truthful.
+        pointer_failures: List[str] = []
         for key, comm, pg in _suspended:
             try:
                 current = _backend.comm_ptr_for_group(pg, device)
             except Exception as e:  # noqa: BLE001
-                logging.warning(
-                    "[NcclMemory][%s] cannot re-read %s's communicator pointer (%s) "
-                    "-- private API rename? Proceeding on the recorded pointer, "
-                    "which the retained ProcessGroup reference keeps valid",
-                    reason,
-                    key,
-                    e,
-                )
+                pointer_failures.append(f"{key}(lookup_exc={e})")
                 continue
-            if current and current != comm:
-                changed.append(f"{key}(recorded=0x{comm:x},now=0x{current:x})")
-            elif not current:
-                logging.warning(
-                    "[NcclMemory][%s] %s reports no communicator for this device; "
-                    "proceeding on the recorded pointer",
-                    reason,
-                    key,
-                )
-        if changed:
+            if not current:
+                pointer_failures.append(f"{key}(recorded=0x{comm:x},lookup=0)")
+            elif current != comm:
+                pointer_failures.append(f"{key}(recorded=0x{comm:x},now=0x{current:x})")
+        if pointer_failures:
             _poisoned = (
-                f"communicator(s) {changed} were replaced while suspended; the "
-                "recorded pointers are dangling and resuming them would be a "
-                "use-after-free"
+                f"communicator pointer validation failed for {','.join(pointer_failures)} "
+                "while suspended; the recorded pointer cannot be trusted and "
+                "resuming it could be a use-after-free"
             )
             _record_failure(f"[{reason}] {_poisoned}")
             raise NcclMemoryError(_poisoned)
@@ -962,7 +957,6 @@ def resume_after_wake(device: object, reason: str = "wake") -> None:
         # is_suspended() report False while communicators are in fact still
         # unmapped -- a lie told at exactly the moment someone is debugging why
         # collectives are faulting.
-        _suspended[:] = still_suspended
         logging.info(
             "[NcclMemory][%s] resumed %d/%d comm(s) in %.3fs: driver_free "
             "%.0f -> %.0fMiB (reclaimed %.1fMiB)%s",
@@ -976,6 +970,7 @@ def resume_after_wake(device: object, reason: str = "wake") -> None:
             f" FAILED={failures}" if failures else "",
         )
         if failures:
+            _suspended[:] = still_suspended
             _poisoned = f"ncclCommResume failed for {','.join(failures)}"
             _record_failure(f"[{reason}] {_poisoned}; restart the instance")
             raise NcclMemoryError(
@@ -983,34 +978,70 @@ def resume_after_wake(device: object, reason: str = "wake") -> None:
                 "unmapped and every later collective would fault -- restart the "
                 "instance"
             )
-        _log_resume_evidence(api, reason, device)
+        # Keep ``_suspended`` intact until the post-resume evidence is collectively
+        # verified. A local stat failure must not let this rank report wake success
+        # while peers proceed to weight reload and traffic.
+        evidence_failures = _resume_evidence_failures(api, todo, reason)
+        evidence_fingerprint = _fingerprint(todo)
+        if evidence_failures:
+            evidence_fingerprint += ":evidence-failed"
+        try:
+            evidence_decided = _decide(f"{reason}-verify", evidence_fingerprint)
+        except NcclMemoryError as e:
+            _poisoned = f"resume evidence vote could not be settled: {e}"
+            _record_failure(f"[{reason}] {_poisoned}")
+            raise
+        if not evidence_decided or evidence_failures:
+            detail = (
+                ", ".join(evidence_failures)
+                if evidence_failures
+                else "peer evidence vote was vetoed"
+            )
+            _poisoned = f"resume evidence validation failed ({detail})"
+            _record_failure(f"[{reason}] {_poisoned}; restart the instance")
+            # The NCCL call returned success, but the communicator is not proven
+            # usable. Retain the entries for diagnostics and prevent a retry.
+            _suspended[:] = todo
+            raise NcclMemoryError(
+                f"{_poisoned}; communicator state is not safe for traffic -- "
+                "restart the instance"
+            )
+        _suspended.clear()
 
 
-def _log_resume_evidence(
-    api: "_backend.NcclApi", reason: str, device: object = None
-) -> None:
-    """Assert every communicator reports itself active again.
+def _resume_evidence_failures(
+    api: "_backend.NcclApi",
+    todo: Sequence[Tuple[str, int, object]],
+    reason: str,
+) -> List[str]:
+    """Return communicators whose post-resume state cannot be proven active.
 
     Rule (6): resume returns ``ncclSuccess`` even when individual peer imports
     failed -- those paths only ``WARN`` and continue -- so the return code alone
     does not prove the communicator is whole. ``ncclStatGpuMemSuspended`` is the
-    one machine-readable cross-check available from here; a stuck 1 means the
-    remap did not complete and the next collective will fault. Never raises: by
-    this point the caller has already committed, and a diagnostic must not turn a
-    working wake into a failed one.
+    machine-readable cross-check available from here; a stuck 1, an error, or an
+    unavailable entry is treated as failure. The caller turns the result into a
+    rank-symmetric vote before allowing weight reload or traffic.
     """
-    try:
-        for key, comm in comms(device):
-            if api.stat(comm, _STAT_SUSPENDED) == 1:
-                logging.error(
-                    "[NcclMemory][%s] %s still reports suspended after resume -- "
-                    "collectives on it will fault; check the NCCL log for "
-                    "'Could not find matching handle info' / import failures",
-                    reason,
-                    key,
-                )
-    except Exception as e:  # noqa: BLE001
-        logging.warning("[NcclMemory] post-resume check failed (ignored): %s", e)
+    failures: List[str] = []
+    for key, comm, _pg in todo:
+        try:
+            suspended = api.stat(comm, _STAT_SUSPENDED)
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"{key}(stat_exc={e})")
+            continue
+        if suspended != 0:
+            failures.append(f"{key}(suspended={suspended})")
+    if failures:
+        logging.error(
+            "[NcclMemory][%s] post-resume evidence failed for %d/%d comm(s): %s; "
+            "the wake will fail closed",
+            reason,
+            len(failures),
+            len(todo),
+            ",".join(failures),
+        )
+    return failures
 
 
 def _driver_free(device: object) -> int:

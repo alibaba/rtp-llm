@@ -1138,20 +1138,33 @@ class ResumeTest(NcclMemoryTestBase):
         """Rule (6): rc==0 is not proof. The cross-check must still look.
 
         NCCL's peer re-import loop only ``WARN``s and continues, so a resume can
-        return ``ncclSuccess`` with buffers left unmapped. This asserts the
-        diagnostic reads the flag back and, per its contract, does not turn a
-        committed wake into a failure.
+        return ``ncclSuccess`` with buffers left unmapped. Wake must fail closed
+        before weight reload rather than turn that known-bad communicator into
+        running traffic.
         """
         fake = _FakeNccl()
         self._suspend_ok(fake, [("Group.DP_AND_TP", _COMM_A)])
         fake.suspended_flag = 1  # NCCL still thinks it is suspended
 
-        with self.assertLogs(level="ERROR") as logs:
-            nccl_memory.resume_after_wake(device=None)  # must NOT raise
+        with self.assertRaises(nccl_memory.NcclMemoryError) as cm:
+            nccl_memory.resume_after_wake(device=None)
 
-        self.assertTrue(
-            any("still reports suspended" in m for m in logs.output), logs.output
-        )
+        self.assertIn("resume evidence validation failed", str(cm.exception))
+        self.assertIsNotNone(nccl_memory._poisoned)
+        self.assertTrue(nccl_memory.is_suspended())
+
+    def test_resume_evidence_treats_stat_error_as_unknown_and_fails_closed(
+        self,
+    ) -> None:
+        """An unreadable post-resume stat is not evidence of a healthy comm."""
+        fake = _FakeNccl()
+        self._suspend_ok(fake, [("Group.DP_AND_TP", _COMM_A)])
+        api = nccl_memory._backend.api()
+        with mock.patch.object(api, "stat", return_value=-1):
+            failures = nccl_memory._resume_evidence_failures(
+                api, list(nccl_memory._suspended), "wake"
+            )
+        self.assertEqual(failures, ["Group.DP_AND_TP(suspended=-1)"])
 
     # Rule (5) on the resume side. Suspend has always probed before voting; resume
     # used to go straight from _decide into ncclCommResume, even though resume runs
@@ -1299,17 +1312,15 @@ class ResumeTest(NcclMemoryTestBase):
 
         self.assertEqual(fake.resume_calls, [])
         message = str(cm.exception)
-        self.assertIn("were replaced while suspended", message)
+        self.assertIn("pointer validation failed", message)
         # Both pointers, so the log says which comm and what it became.
         self.assertIn(f"recorded=0x{_COMM_A:x}", message)
         self.assertIn("now=0xdead0000", message)
         self.assertIsNotNone(nccl_memory._poisoned)
 
-    # Case 14h -- and the two ways the cross-check can fail to *answer*. Neither is
-    # evidence of anything: only a pointer that reads back DIFFERENT is. Treating
-    # silence as poison here is what used to turn a torch rename, or a hook thread
-    # on the wrong device, into a mandatory instance restart on every wake.
-    def test_throwing_pointer_reread_resumes_on_the_recorded_pointer(self) -> None:
+    # Case 14h -- pointer validation is fail-closed. A ProcessGroup reference
+    # prevents Python GC but cannot rule out a watchdog abort underneath it.
+    def test_throwing_pointer_reread_refuses_to_resume(self) -> None:
         fake = _FakeNccl()
         self._suspend_ok(
             fake,
@@ -1317,22 +1328,26 @@ class ResumeTest(NcclMemoryTestBase):
             ptr_error={_COMM_A: RuntimeError("private API renamed")},
         )
 
-        nccl_memory.resume_after_wake(device=None)  # must not raise
+        with self.assertRaises(nccl_memory.NcclMemoryError) as cm:
+            nccl_memory.resume_after_wake(device=None)
 
-        self.assertEqual(fake.resume_calls, [_COMM_A])
-        self.assertEqual(self.suspended_keys(), [])
-        self.assertIsNone(nccl_memory._poisoned)
+        self.assertEqual(fake.resume_calls, [])
+        self.assertEqual(self.suspended_keys(), [("Group.DP_AND_TP", _COMM_A)])
+        self.assertIn("lookup_exc=private API renamed", str(cm.exception))
+        self.assertIsNotNone(nccl_memory._poisoned)
 
-    def test_null_pointer_reread_resumes_on_the_recorded_pointer(self) -> None:
-        # 0 is "no entry for this thread's current device", not "destroyed".
+    def test_null_pointer_reread_refuses_to_resume(self) -> None:
+        # 0 is an unknown communicator, not a safe raw pointer to reuse.
         fake = _FakeNccl()
         self._suspend_ok(fake, [("Group.DP_AND_TP", _COMM_A)], ptr_now={_COMM_A: 0})
 
-        nccl_memory.resume_after_wake(device=None)  # must not raise
+        with self.assertRaises(nccl_memory.NcclMemoryError) as cm:
+            nccl_memory.resume_after_wake(device=None)
 
-        self.assertEqual(fake.resume_calls, [_COMM_A])
-        self.assertEqual(self.suspended_keys(), [])
-        self.assertIsNone(nccl_memory._poisoned)
+        self.assertEqual(fake.resume_calls, [])
+        self.assertEqual(self.suspended_keys(), [("Group.DP_AND_TP", _COMM_A)])
+        self.assertIn("lookup=0", str(cm.exception))
+        self.assertIsNotNone(nccl_memory._poisoned)
 
     # Case 14i -- what makes the above safe. _suspended holds the owning
     # ProcessGroup, not just an integer, so the communicator cannot be collected
@@ -1572,11 +1587,12 @@ class CommsTest(NcclMemoryTestBase):
         nccl_memory.resume_after_wake(device=5)
         self.assertEqual(fake.resume_calls, [_COMM_A])
 
-        # suspend enumerates once; resume enumerates once more for the post-resume
-        # evidence check and does one per-group pointer cross-check. Every one of
-        # them must be device-5, not None.
+        # suspend enumerates once; wake verifies the recorded list directly rather
+        # than rescanning the mutable ProcessGroup registry, and does one
+        # per-group pointer cross-check. The enumeration and pointer lookup must
+        # still receive device-5, not None.
         self.assertEqual(set(self.enumerate_devices), {5})
-        self.assertGreaterEqual(len(self.enumerate_devices), 2)
+        self.assertEqual(self.enumerate_devices, [5])
         self.assertEqual(self.ptr_devices, [5])
 
 
