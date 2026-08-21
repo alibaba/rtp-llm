@@ -10,9 +10,9 @@ namespace rtp_llm {
 
 // Optional fast paths added after the original NoBlockCopy device interface.
 // Weak fallbacks let downstream backends keep their existing implementation;
-// returning false for non-empty work routes the caller to the generic copy path.
-RTP_LLM_WEAK bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
-    return params.tiles.empty();
+// NOT_SUPPORTED for non-empty work routes the caller to the generic copy path.
+RTP_LLM_WEAK BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
+    return params.tiles.empty() ? BatchedMemoryCopyStatus::SUCCESS : BatchedMemoryCopyStatus::NOT_SUPPORTED;
 }
 
 RTP_LLM_WEAK bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch*) {

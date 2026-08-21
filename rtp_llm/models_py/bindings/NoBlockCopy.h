@@ -32,6 +32,13 @@ struct BatchedMemoryCopyTile {
 struct BatchedMemoryCopyParams {
     std::vector<BatchedMemoryCopyTile> tiles;
     int                                device_index = -1;
+    bool                               serialize_calls = true;
+};
+
+enum class BatchedMemoryCopyStatus {
+    SUCCESS,
+    NOT_SUPPORTED,
+    EXECUTION_FAILED,
 };
 
 enum class StagedMemoryCopyDirection {
@@ -80,7 +87,9 @@ RTP_LLM_NO_BLOCK_COPY_API void execNoBlockCopy(const MultiCopyParams& params);
 
 // One CUDA runtime call copy executor for regular host/device pointers.
 // CUDA 12.8+ uses cudaMemcpyBatchAsync to avoid per-tile cudaMemcpyAsync launches.
-RTP_LLM_NO_BLOCK_COPY_API bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
+// Only NOT_SUPPORTED permits the caller to fall back to another strategy;
+// EXECUTION_FAILED means a CUDA call was attempted and failed.
+RTP_LLM_NO_BLOCK_COPY_API BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.
