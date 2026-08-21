@@ -17,15 +17,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass
-from typing import (
-    TYPE_CHECKING,
-    AsyncIterator,
-    Callable,
-    Iterable,
-    Optional,
-    Protocol,
-)
+from typing import TYPE_CHECKING, AsyncIterator, Callable, Iterable, Optional, Protocol
 
 import torch
 
@@ -46,7 +40,12 @@ from rtp_llm.config.response_format_compiler import (
     restore_final_constraint,
 )
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
-from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
+from rtp_llm.dash_sc.access_record import (
+    GrpcAccessRecord,
+    extract_body_trace_headers,
+    extract_span_external_request_id,
+    to_optional_int,
+)
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_ADMISSION_OVERLOADED,
@@ -66,21 +65,23 @@ from rtp_llm.dash_sc.codec import (
     LLMFinishReason,
     SamplingParams,
     StreamResponseBuilder,
+    _lookup_ds_request_control,
     _token_ids_list_from_generate_output,
     build_dash_error_response,
     parse_dash_sc_grpc_request,
+    parse_ds_header_attributes,
     parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
-)
-from rtp_llm.dash_sc.inference.grammar_validator import (
-    GrammarCheckUnavailable,
-    GrammarCompilationError,
-    GrammarValidator,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
     report_arrival_priority,
     report_chunk,
     report_frontend_rpc_done,
+)
+from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckUnavailable,
+    GrammarCompilationError,
+    GrammarValidator,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
@@ -90,6 +91,11 @@ from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_request_headers,
     extract_trace_id,
+)
+from rtp_llm.telemetry import CURRENT_TRACE_STATE, start_server_span
+from rtp_llm.telemetry.tracing import (
+    metadata_to_headers,
+    select_valid_server_trace_carrier,
 )
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
@@ -118,6 +124,15 @@ _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
+_DASH_RPC_METHOD = "GRPCInferenceService/ModelStreamInfer"
+_DASH_SERVER_SPAN_NAME = "dash_sc.ModelStreamInfer"
+_DASH_SERVER_ATTRIBUTES = {
+    "gen_ai.span.kind": "LLM",
+    "gen_ai.operation.name": "chat",
+    "gen_ai.system": "rtp_llm",
+    "rpc.system": "grpc",
+    "rpc.method": _DASH_RPC_METHOD,
+}
 
 
 def _build_mm_inputs_from_request(
@@ -145,6 +160,15 @@ def _build_mm_inputs_from_request(
         )
         for part in parts
     ]
+
+
+def _request_parameter_string(request, name: str) -> str:
+    if name not in request.parameters:
+        return ""
+    parameter = request.parameters[name]
+    if not parameter.HasField("string_param"):
+        return ""
+    return str(parameter.string_param or "")
 
 
 def _exception_metric_code(error_code: int | ExceptionType) -> str:
@@ -324,7 +348,8 @@ def _request_qos_level(
     if metadata_qos is not None:
         return metadata_qos
     request_headers = {
-        str(key).lower(): value for key, value in request_controls.request_headers.items()
+        str(key).lower(): value
+        for key, value in request_controls.request_headers.items()
     }
     return _parse_valid_qos_level(request_headers.get("x-dashscope-inner-qos-level"))
 
@@ -356,12 +381,23 @@ def stream_log_tag(
 def _headers_from_invocation_metadata(
     invocation_metadata: Optional[GrpcMetadata],
 ) -> dict[str, str]:
-    metadata_headers = {
-        str(key).lower(): value
-        for key, value in invocation_metadata or ()
-        if key is not None and value is not None
-    }
-    return extract_request_headers(metadata_headers)
+    return extract_request_headers(metadata_to_headers(invocation_metadata))
+
+
+def _finish_server_trace(
+    trace_state, record: GrpcAccessRecord, exc: Optional[BaseException]
+) -> None:
+    if trace_state is None:
+        return
+    try:
+        if record.status == "OK":
+            trace_state.finish()
+        else:
+            error_type = "Cancelled" if record.status == "CANCELLED" else record.status
+            trace_state.finish(error=exc, error_type=error_type)
+    finally:
+        if CURRENT_TRACE_STATE.get() is trace_state:
+            CURRENT_TRACE_STATE.set(None)
 
 
 class _InitialMetadataSender(Protocol):
@@ -832,6 +868,8 @@ async def iter_real_model_stream_infer(
     matched_echo_ids = _matched_echo_prefix_ids(input_ids_list, echo_prefix_ids)
     should_echo = bool(matched_echo_ids)
     echoed = False
+    stream: object | None = None
+    phase2_stream: object | None = None
     try:
         generate_config = sampling.to_generate_config(request_controls=request_controls)
         generate_config.trace_id = trace_str
@@ -1354,6 +1392,11 @@ async def iter_real_model_stream_infer(
         )
         stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response
+    finally:
+        if phase2_stream is not None:
+            await _close_async_stream_if_possible(phase2_stream, tag)
+        if stream is not None:
+            await _close_async_stream_if_possible(stream, tag)
 
 
 # ----------------------------------------------------------------------------
@@ -1547,10 +1590,20 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
     async def ModelStreamInfer(self, request_iterator, context):
+        request_start_time = time.time_ns()
+        request_start_ns = time.monotonic_ns()
+        try:
+            invocation_metadata = context.invocation_metadata()
+        except Exception:
+            invocation_metadata = ()
+        metadata_headers = metadata_to_headers(invocation_metadata)
         # Self-managed access-log lifecycle (the shared interceptor is gone).
         # Create/arrival/query go first — before any inbound frame — so a
         # frame-less RPC (peer closed before sending) still reports arrival and
         # produces an access line via the ``finally`` below.
+        # The SERVER span is delayed until the first frame reveals body-carried
+        # trace context. The finally block idempotently creates a metadata/root
+        # span for frame-less and pre-parse failure paths, then always ends it.
         record = GrpcAccessRecord.create(
             context,
             "ModelStreamInfer",
@@ -1558,27 +1611,74 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             raw_mode=False,
             repetition_monitor_config=self._rep_cfg,
         )
-        emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
+        trace_state = None
+        current_rtp_llm_request_id: Optional[int] = None
+        current_external_request_id = ""
+
+        def _ensure_span(body_headers: Optional[dict[str, str]] = None):
+            nonlocal trace_state
+            if trace_state is not None:
+                return trace_state
+            headers, source = select_valid_server_trace_carrier(
+                body_headers or {}, metadata_headers
+            )
+            trace_state = start_server_span(
+                _DASH_SERVER_SPAN_NAME,
+                headers,
+                _DASH_SERVER_ATTRIBUTES,
+                start_time=request_start_time,
+                request_start_ns=request_start_ns,
+            )
+            if trace_state is not None:
+                trace_state.set_attribute("rtp_llm.trace_context_source", source)
+                if current_rtp_llm_request_id is not None:
+                    trace_state.set_attribute(
+                        "request_id", str(current_rtp_llm_request_id)
+                    )
+                    trace_state.set_attribute(
+                        "rtp_llm.request_id", current_rtp_llm_request_id
+                    )
+                if current_external_request_id:
+                    trace_state.set_attribute(
+                        "rtp_llm.external_request_id", current_external_request_id
+                    )
+            return trace_state
+
         exc: Optional[BaseException] = None
         try:
-            try:
-                invocation_metadata = context.invocation_metadata()
-            except Exception:
-                invocation_metadata = ()
+            emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
             partial_metadata_sent = False
             first_request = True
             async for request in request_iterator:
                 record.req_count += 1
+                rtp_llm_request_id = self._next_rtp_llm_request_id()
+                current_rtp_llm_request_id = rtp_llm_request_id
+                current_external_request_id = extract_span_external_request_id(
+                    invocation_metadata, request
+                )
                 logging.debug(
                     "[DashScGrpc] ModelInferRequest: id=%s model_name=%s",
                     request.id,
                     request.model_name,
                 )
+                body_headers = extract_body_trace_headers(request)
+                _ensure_span(body_headers)
                 try:
                     parsed_input_ids, sampling, request_controls = (
                         parse_dash_sc_grpc_request(request)
                     )
                     mm_inputs = _build_mm_inputs_from_request(request)
+                    traceparent_new = _lookup_ds_request_control(
+                        parse_ds_header_attributes(request), "traceparent_new"
+                    )
+                    if (
+                        traceparent_new
+                        and body_headers.get("traceparent")
+                        and str(traceparent_new) != body_headers["traceparent"]
+                    ):
+                        logging.warning(
+                            "[DashScGrpc] body traceparent differs from traceparent_new"
+                        )
                 except (DashScParameterError, DashScInputIdsError) as e:
                     if first_request:
                         record.record_request_frame(request)
@@ -1698,13 +1798,13 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     yield resp
                     return
 
-                async for resp, stats in iter_real_model_stream_infer(
+                response_iter = iter_real_model_stream_infer(
                     request,
                     input_ids_list,
                     sampling,
                     request_controls,
                     self._backend_visitor,
-                    rtp_llm_request_id=self._next_rtp_llm_request_id(),
+                    rtp_llm_request_id=rtp_llm_request_id,
                     echo_prefix_ids=self._echo_prefix_ids,
                     extra_stop_word_ids=self._extra_stop_word_ids,
                     invocation_metadata=invocation_metadata,
@@ -1716,26 +1816,34 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     input_ids_tensor=parsed_input_ids.tensor,
                     yield_access_stats=True,
                     mm_inputs=mm_inputs,
-                ):
-                    (
-                        delta_len,
-                        finished,
-                        finish_reason,
-                        prompt_token_num,
-                        prompt_cached_token_num,
-                        generated_ids_for_log,
-                    ) = stats
-                    record.record_generated_ids(generated_ids_for_log)
-                    self._record_and_report_chunk(
-                        record,
-                        resp,
-                        delta_len=delta_len,
-                        finished=finished,
-                        finish_reason=finish_reason,
-                        prompt_token_num=prompt_token_num,
-                        prompt_cached_token_num=prompt_cached_token_num,
-                    )
-                    yield resp
+                )
+                try:
+                    async for resp, stats in response_iter:
+                        (
+                            delta_len,
+                            finished,
+                            finish_reason,
+                            prompt_token_num,
+                            prompt_cached_token_num,
+                            generated_ids_for_log,
+                        ) = stats
+                        record.record_generated_ids(generated_ids_for_log)
+                        self._record_and_report_chunk(
+                            record,
+                            resp,
+                            delta_len=delta_len,
+                            finished=finished,
+                            finish_reason=finish_reason,
+                            prompt_token_num=prompt_token_num,
+                            prompt_cached_token_num=prompt_cached_token_num,
+                        )
+                        if trace_state is not None and generated_ids_for_log:
+                            trace_state.record_frontend_output_tokens(
+                                len(generated_ids_for_log)
+                            )
+                        yield resp
+                finally:
+                    await response_iter.aclose()
                 return
             if first_request:
                 record.mark_request_done("eof")
@@ -1746,18 +1854,22 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             record.record_aux_info(getattr(e, "aux_info", None), overwrite=False)
             raise
         finally:
+            _ensure_span()
             end_ts = record.resolve_status(context, exc)
-            # Log first, metrics second — a kmonitor hiccup must never delay or
-            # drop the access record (user-mandated ordering).
-            emit_access_log(
-                record,
-                rank_id=self._rank_id,
-                server_id=self._server_id,
-                end_ts=end_ts,
-            )
-            report_frontend_rpc_done(
-                record,
-                rank_id=self._rank_id,
-                server_id=self._server_id,
-                status=record.status,
-            )
+            try:
+                # Log first, metrics second — a kmonitor hiccup must never delay or
+                # drop the access record (user-mandated ordering).
+                emit_access_log(
+                    record,
+                    rank_id=self._rank_id,
+                    server_id=self._server_id,
+                    end_ts=end_ts,
+                )
+                report_frontend_rpc_done(
+                    record,
+                    rank_id=self._rank_id,
+                    server_id=self._server_id,
+                    status=record.status,
+                )
+            finally:
+                _finish_server_trace(trace_state, record, exc)

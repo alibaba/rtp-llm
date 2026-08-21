@@ -880,7 +880,16 @@ proto_lang_toolchain(
     command_line = "--cpp_out=$(OUT)",
     runtime = ":protobuf",
     visibility = ["//visibility:public"],
-    blacklisted_protos = [":_internal_wkt_protos_genrule"],
+    # blacklisted_protos entries must carry ProtoInfo since bazel 6. The vendored
+    # 3.8-era value named the internal_copied_filegroup genrule, which has none,
+    # and only started failing analysis once the first native cc_proto_library in
+    # the tree (the OTLP trace exporter) forced this toolchain to be analyzed at
+    # all. Naming the well-known-type proto_library targets generated above keeps
+    # the blacklist meaningful - those .proto are already linked into :protobuf,
+    # so protoc must not emit a second copy of their C++ code - instead of just
+    # dropping the attribute, which would silently lose that protection for every
+    # future cc_proto_library.
+    blacklisted_protos = [proto[0] + "_proto" for proto in WELL_KNOWN_PROTO_MAP.items()],
 )
 
 proto_lang_toolchain(

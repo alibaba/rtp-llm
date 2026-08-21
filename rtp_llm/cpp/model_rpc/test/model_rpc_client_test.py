@@ -36,14 +36,25 @@ import unittest
 from typing import AsyncGenerator
 from unittest import TestCase, main
 
+import grpc
 import torch
+from grpc import StatusCode
 
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType, ThinkingMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    RoleAddr,
+    RoleType,
+    ThinkingMode,
+)
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
+    _engine_reported_finished,
+    _record_client_span_latency,
+    _record_client_span_usage,
+    _request_completed_normally,
     trans_input,
     trans_output,
 )
@@ -54,6 +65,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
     TensorPB,
 )
+from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -675,6 +687,533 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(run_and_close_after_finished())
 
         self.assertFalse(stub.fetch_iterator.cancelled)
+
+
+class _FakeAux:
+    def __init__(
+        self, input_len, output_len, first_token_cost_time=8.5, cost_time=20.0
+    ):
+        self.input_len = input_len
+        self.output_len = output_len
+        self.first_token_cost_time = first_token_cost_time
+        self.cost_time = cost_time
+
+
+class _FakeOut:
+    def __init__(
+        self,
+        finished,
+        input_len=8,
+        output_len=3,
+        first_token_cost_time=8.5,
+        cost_time=20.0,
+    ):
+        self.finished = finished
+        self.aux_info = _FakeAux(
+            input_len, output_len, first_token_cost_time, cost_time
+        )
+
+
+class _AsyncReturn:
+    def __init__(self, value):
+        self._value = value
+
+    async def __call__(self, *args, **kwargs):
+        return self._value
+
+
+class _FakeClientSpan:
+    """Mirrors tracing.ClientSpanHandle: idempotent finish, writes dropped after."""
+
+    def __init__(self):
+        self.attributes = {}
+        self.status = None
+        self.error_type = None
+        self.finished = False
+
+    def set_attribute(self, key, value):
+        if not self.finished:
+            self.attributes[key] = value
+
+    def finish(self, error=None, error_type=""):
+        if self.finished:
+            return
+        self.finished = True
+        if error is not None or error_type:
+            self.status = "ERROR"
+            self.error_type = error_type or type(error).__name__
+        else:
+            self.status = "OK"
+
+
+class _FakeTraceState:
+    """Mirrors the request completion contract used during stream teardown."""
+
+    def __init__(self, settled_ok=None, renderer_completed=False):
+        self.settled_ok = settled_ok
+        self.renderer_completed = renderer_completed
+
+    def set_attribute(self, key, value):
+        pass
+
+
+class _FakeRpcError(grpc.RpcError):
+    def __init__(self, status):
+        self._status = status
+
+    def code(self):
+        return self._status
+
+    def details(self):
+        return "injected terminal RPC error"
+
+    def trailing_metadata(self):
+        return {}
+
+
+class _SpanAwareStub:
+    """Yields `total` responses; the last one carries the engine finished flag."""
+
+    def __init__(self, total, finish_last=True, terminal_error=None):
+        self._total = total
+        self._finish_last = finish_last
+        self._terminal_error = terminal_error
+        self.iterator = None
+
+    def GenerateStreamCall(self, input_pb, timeout=None, metadata=None):
+        total, finish_last, terminal_error = (
+            self._total,
+            self._finish_last,
+            self._terminal_error,
+        )
+
+        class _Iterator:
+            def __init__(self):
+                self.cancelled = False
+                self.code_waited = False
+                self.code_resolved = False
+                self.events = []
+                self._terminal_status = None
+                self._terminal_ready = asyncio.Event()
+
+            def __aiter__(self):
+                return self._gen()
+
+            def cancel(self):
+                self.events.append("cancel")
+                if self._terminal_ready.is_set():
+                    return False
+                self.cancelled = True
+                self._terminal_status = StatusCode.CANCELLED
+                self._terminal_ready.set()
+                return True
+
+            async def code(self):
+                self.code_waited = True
+                self.events.append("code")
+                await self._terminal_ready.wait()
+                self.code_resolved = True
+                return self._terminal_status
+
+            async def _gen(self):
+                for i in range(total):
+                    outputs_pb = GenerateOutputsPB()
+                    output_pb = outputs_pb.flatten_output
+                    output_pb.output_ids.data_type = TensorPB.DataType.INT32
+                    output_pb.output_ids.shape.extend([1, i + 1])
+                    output_pb.output_ids.int32_data = struct.pack(
+                        "<" + "i" * (i + 1), *range(i + 1)
+                    )
+                    aux_info = output_pb.aux_info.add()
+                    aux_info.iter_count = i + 1
+                    aux_info.input_len = 8
+                    aux_info.output_len = i + 1
+                    output_pb.finished.extend([finish_last and i == total - 1])
+                    if finish_last and i == total - 1:
+                        # The real server can settle independently while the
+                        # Python message iterator remains suspended at yield.
+                        self._terminal_status = StatusCode.OK
+                        asyncio.get_running_loop().call_soon(self._terminal_ready.set)
+                    yield outputs_pb
+                if terminal_error is not None:
+                    self._terminal_status = terminal_error.code()
+                    self._terminal_ready.set()
+                    raise terminal_error
+                self._terminal_status = StatusCode.OK
+                self._terminal_ready.set()
+
+        self.iterator = _Iterator()
+        return self.iterator
+
+
+class ClientSpanSettlementTest(TestCase):
+    """Regression guard for the CLIENT span settlement timing and status.
+
+    render_response_stream breaks out of its `async for` as soon as every
+    sequence has a finish_reason, so enqueue() stays suspended on its last
+    yield until aclose()/GC injects GeneratorExit. Settling the span there
+    marked successful requests Cancelled, dropped the usage attributes and
+    pushed the span end past the root span.
+
+    The renderer now closes its owned upstream explicitly. On engine completion,
+    enqueue waits for grpc.aio's terminal status before ending the CLIENT span.
+    A teardown after the root already settled is retained only as a fail-open
+    fallback for other consumers.
+    """
+
+    USAGE_KEYS = (
+        "gen_ai.usage.input_tokens",
+        "gen_ai.usage.output_tokens",
+        "gen_ai.usage.prompt_tokens",
+        "gen_ai.usage.completion_tokens",
+        "gen_ai.usage.total_tokens",
+    )
+
+    def _build_client(
+        self, span, total, finish_last=True, trace_state=None, terminal_error=None
+    ):
+        client = ModelRpcClient(["127.0.0.1:1234"], {}, 0, False)
+        stub = _SpanAwareStub(total, finish_last, terminal_error)
+        client._channel_pool = MagicMock()
+        client._channel_pool.get = _AsyncReturn(MagicMock())
+        token = CURRENT_TRACE_STATE.set(trace_state)
+        self.addCleanup(CURRENT_TRACE_STATE.reset, token)
+        patcher_stub = patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        )
+        patcher_span = patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span",
+            return_value=(span, []),
+        )
+        self.addCleanup(patcher_stub.stop)
+        self.addCleanup(patcher_span.stop)
+        patcher_stub.start()
+        patcher_span.start()
+        client._test_stub = stub
+        return client
+
+    @staticmethod
+    def _make_input():
+        return GenerateInput(
+            token_ids=torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]),
+            generate_config=GenerateConfig(is_streaming=True),
+            request_id=7,
+            mm_inputs=[],
+        )
+
+    def test_engine_reported_finished_predicate(self):
+        self.assertFalse(_engine_reported_finished(None))
+        self.assertFalse(_engine_reported_finished(GenerateOutputs()))
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [_FakeOut(True), _FakeOut(False)]
+        self.assertFalse(_engine_reported_finished(outputs))
+        outputs.generate_outputs = [_FakeOut(True), _FakeOut(True)]
+        self.assertTrue(_engine_reported_finished(outputs))
+
+    def test_usage_attributes_skip_non_positive(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [_FakeOut(True, input_len=0, output_len=5)]
+        _record_client_span_usage(span, outputs)
+        self.assertEqual(span.attributes, {})
+        outputs.generate_outputs = [_FakeOut(True, input_len=8, output_len=3)]
+        _record_client_span_usage(span, outputs)
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+        self.assertEqual(span.attributes["gen_ai.usage.total_tokens"], 11)
+
+    def test_usage_attributes_sum_all_choices(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, input_len=8, output_len=3),
+            _FakeOut(True, input_len=8, output_len=5),
+        ]
+
+        _record_client_span_usage(span, outputs)
+
+        self.assertEqual(span.attributes["gen_ai.usage.input_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.output_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.prompt_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.completion_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.total_tokens"], 16)
+
+    def test_usage_attributes_skip_inconsistent_choices(self):
+        for choices in (
+            [
+                _FakeOut(True, input_len=8, output_len=3),
+                _FakeOut(True, input_len=9, output_len=5),
+            ],
+            [
+                _FakeOut(True, input_len=8, output_len=3),
+                _FakeOut(True, input_len=8, output_len=0),
+            ],
+        ):
+            with self.subTest(choices=choices):
+                span = _FakeClientSpan()
+                outputs = GenerateOutputs()
+                outputs.generate_outputs = choices
+                _record_client_span_usage(span, outputs)
+                self.assertEqual(span.attributes, {})
+
+    def test_engine_latency_attributes_from_single_sequence_stream(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(
+                True,
+                output_len=5,
+                first_token_cost_time=8.5,
+                cost_time=20.0,
+            )
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertEqual(
+            span.attributes["rtp_llm.engine.time_per_output_token_ms"], 2.875
+        )
+
+    def test_engine_latency_attributes_require_coherent_aux_info(self):
+        cases = (
+            _FakeOut(True, output_len=0),
+            _FakeOut(True, output_len=1),
+            _FakeOut(True, output_len=5, first_token_cost_time=0),
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=8.0),
+        )
+        for output in cases:
+            with self.subTest(output=output):
+                span = _FakeClientSpan()
+                outputs = GenerateOutputs(generate_outputs=[output])
+                _record_client_span_latency(span, outputs)
+                if output.aux_info.output_len == 1:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                elif output.aux_info.cost_time < output.aux_info.first_token_cost_time:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                else:
+                    self.assertEqual(span.attributes, {})
+                self.assertNotIn(
+                    "rtp_llm.engine.time_per_output_token_ms", span.attributes
+                )
+
+    def test_multi_return_shares_ttft_but_omits_ambiguous_tpot(self):
+        """n>1 rides one physical stream: TPOT per sequence is not a span value."""
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=7, first_token_cost_time=8.5, cost_time=26.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+    def test_multi_return_disagreeing_on_first_token_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=5, first_token_cost_time=9.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
+
+    def test_multi_return_with_one_empty_sequence_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=0, first_token_cost_time=8.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
+
+    def test_consumer_break_after_finished_keeps_span_ok(self):
+        """The final frame is withheld until the physical RPC reaches OK.
+
+        Once that terminal status is known the span settles immediately --
+        before the finished frame is even published. Consumers habitually
+        abandon this generator right after the finished frame and the
+        surrounding wrappers do not aclose the inner generator, so deferring
+        settlement to aclose()/GC time would leak the span unexported.
+        """
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3)
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            async for outputs in gen:
+                if outputs.generate_outputs and outputs.generate_outputs[0].finished:
+                    self.assertTrue(client._test_stub.iterator.code_resolved)
+                    self.assertEqual(client._test_stub.iterator.events, ["code"])
+                    break  # mirrors render_response_stream's _check_all_finished
+            self.assertTrue(span.finished, "span settles with the finished frame")
+            await gen.aclose()  # injects GeneratorExit at the suspended yield
+            self.assertTrue(client._test_stub.iterator.code_waited)
+            self.assertEqual(client._test_stub.iterator.events[:2], ["code", "cancel"])
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "OK")
+        self.assertIsNone(span.error_type)
+        self.assertEqual(span.attributes["rpc.response.status_code"], "OK")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_stream_iterated_to_completion_keeps_span_ok(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=2, finish_last=False)
+
+        async def run():
+            async for _ in client.enqueue(self._make_input()):
+                pass
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "OK")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_break_before_finished_still_reports_cancelled(self):
+        """Genuine interruption (client disconnect) must stay Cancelled.
+
+        The root span is unsettled here: the cancellation is still propagating
+        outward, so the request has not succeeded.
+        """
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3, finish_last=False)
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            async for _ in gen:
+                break
+            self.assertFalse(span.finished, "no finished flag seen yet")
+            await gen.aclose()
+            self.assertTrue(client._test_stub.iterator.cancelled)
+            self.assertTrue(client._test_stub.iterator.code_waited)
+            self.assertEqual(client._test_stub.iterator.events[:2], ["cancel", "code"])
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "ERROR")
+        self.assertEqual(span.error_type, "Cancelled")
+        self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_stop_word_break_with_renderer_milestone_keeps_span_ok(self):
+        """Stop-word truncation is normal before the root span is settled.
+
+        Context-dependent tokenization can make a string stop word miss the
+        engine's token-level list, so the renderer can break while the engine is
+        still generating. Its explicit milestone keeps that cleanup path OK.
+        """
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span,
+            total=3,
+            finish_last=False,
+            trace_state=_FakeTraceState(renderer_completed=True),
+        )
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            async for _ in gen:
+                break  # renderer hit a stop word
+            await gen.aclose()
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "OK")
+        self.assertIsNone(span.error_type)
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_break_with_failed_root_reports_cancelled(self):
+        """Root span settled with an error keeps the child Cancelled."""
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span, total=3, finish_last=False, trace_state=_FakeTraceState(False)
+        )
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            async for _ in gen:
+                break
+            await gen.aclose()
+
+        asyncio.run(run())
+        self.assertEqual(span.status, "ERROR")
+        self.assertEqual(span.error_type, "Cancelled")
+
+    def test_response_conversion_error_cancels_before_waiting_for_code(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=2, finish_last=False)
+        call_count = 0
+
+        def fail_second_response(*args):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise RuntimeError("conversion failed")
+            return trans_output(*args)
+
+        async def run():
+            with patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+                side_effect=fail_second_response,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "conversion failed"):
+                    async for _ in client.enqueue(self._make_input()):
+                        pass
+
+        asyncio.run(run())
+        iterator = client._test_stub.iterator
+        self.assertEqual(iterator.events[:2], ["cancel", "code"])
+        self.assertEqual(span.attributes["rpc.response.status_code"], "CANCELLED")
+        self.assertEqual(span.status, "ERROR")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_rpc_error_after_output_keeps_last_confirmed_usage(self):
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span,
+            total=1,
+            finish_last=False,
+            terminal_error=_FakeRpcError(StatusCode.UNAVAILABLE),
+        )
+
+        async def run():
+            with self.assertRaisesRegex(Exception, "injected terminal RPC error"):
+                async for _ in client.enqueue(self._make_input()):
+                    pass
+
+        asyncio.run(run())
+        self.assertEqual(span.attributes["rpc.response.status_code"], "UNAVAILABLE")
+        self.assertEqual(span.status, "ERROR")
+        self.assertEqual(span.error_type, "RpcError")
+        for key in self.USAGE_KEYS:
+            self.assertIn(key, span.attributes)
+
+    def test_request_completed_normally_predicate(self):
+        self.assertFalse(_request_completed_normally(None))
+        self.assertFalse(_request_completed_normally(_FakeTraceState(None)))
+        self.assertFalse(_request_completed_normally(_FakeTraceState(False)))
+        self.assertTrue(_request_completed_normally(_FakeTraceState(True)))
+        self.assertTrue(
+            _request_completed_normally(_FakeTraceState(None, renderer_completed=True))
+        )
 
 
 if __name__ == "__main__":

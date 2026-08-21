@@ -963,15 +963,26 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             messages=[ChatMessage(role=RoleEnum.user, content="hello")]
         )
         input_length = 1018
-        id_generator = fake_output_generator(
-            test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
-        )
+        backend_stream_closed = False
+
+        async def tracked_output_generator():
+            nonlocal backend_stream_closed
+            try:
+                async for output in fake_output_generator(
+                    test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0, input_length
+                ):
+                    yield output
+            finally:
+                backend_stream_closed = True
+
+        id_generator = tracked_output_generator()
         stream_generator = chat_renderer.render_response_stream(
             id_generator, request, GenerateConfig()
         )
         generate = OpenaiEndpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
+        self.assertTrue(backend_stream_closed)
         print(response)
         assert response.choices[
             0
