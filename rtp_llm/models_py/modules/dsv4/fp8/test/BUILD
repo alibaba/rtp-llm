@@ -34,6 +34,7 @@ _DSV4_FP8_TESTS = [
     "test_fp8_mqa_prefill_indexer_score",
     "test_fp8_paged_indexer_score",
     "test_indexer_compute_q_flat_input",
+    "test_indexer_cp_padded_gather_triton",
     "test_indexer_fp8_prefill_chain",
     "test_indexer_fp8_prefill_meta",
     "test_indexer_fp8_quant_triton",
@@ -49,6 +50,7 @@ _DSV4_FP8_TESTS = [
     "test_varlen_prefill_oracle",
     "test_workspace_prefill_varlen",
     "test_no_recompile",
+    "test_prefill_common_metadata_cuda",
 ]
 
 _DSV4_FP8_CPU_TESTS = [
@@ -87,6 +89,16 @@ py_test(
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "test_indexer_cp_padded_gather_distributed",
+    srcs = ["test_indexer_cp_padded_gather_distributed.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "H20", "gpu_count": "2"},
+    tags = ["H20"],
+    timeout = "moderate",
 )
 
 py_test(
