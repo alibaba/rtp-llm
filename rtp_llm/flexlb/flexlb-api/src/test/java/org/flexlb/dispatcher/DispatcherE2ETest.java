@@ -203,6 +203,165 @@ class DispatcherE2ETest {
     }
 
     @Test
+    void rerankerAppliesSortAndTopKGloballyAcrossChunks() throws Exception {
+        // Child responses are deliberately in document order. The best two scores span FE1 and
+        // FE2 and tie, which also pins stable global ordering by original document index.
+        fe1.enqueue(jsonResponse(200,
+                "{\"results\":["
+                        + "{\"index\":0,\"document\":\"d0\",\"relevance_score\":0.2},"
+                        + "{\"index\":1,\"document\":\"d1\",\"relevance_score\":0.9}],"
+                        + "\"total_tokens\":11}"));
+        fe2.enqueue(jsonResponse(200,
+                "{\"results\":["
+                        + "{\"index\":0,\"document\":\"d2\",\"relevance_score\":0.9},"
+                        + "{\"index\":1,\"document\":\"d3\",\"relevance_score\":0.4}],"
+                        + "\"total_tokens\":17}"));
+
+        WebTestClient client = buildClient(/*subBatchSize=*/2);
+        ObjectNode body = mapper.createObjectNode();
+        body.put("query", "cape pants");
+        body.putArray("documents").add("d0").add("d1").add("d2").add("d3");
+        body.put("top_k", 2);
+
+        JsonNode response = client.post().uri("/dispatcher/v1/reranker")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(response);
+        JsonNode results = response.get("results");
+        assertEquals(2, results.size());
+        assertEquals(1, results.get(0).get("index").asInt());
+        assertEquals("d1", results.get(0).get("document").asText());
+        assertEquals(2, results.get(1).get("index").asInt());
+        assertEquals("d2", results.get(1).get("document").asText());
+        assertEquals(28L, response.get("total_tokens").asLong());
+
+        JsonNode firstChunk = assertChunkRequest(
+                fe1.takeRequest(), "/v1/reranker", "documents", 2);
+        JsonNode secondChunk = assertChunkRequest(
+                fe2.takeRequest(), "/v1/reranker", "documents", 2);
+        for (JsonNode chunk : List.of(firstChunk, secondChunk)) {
+            assertFalse(chunk.get("sorted").asBoolean(),
+                    "FE must not sort independently inside each chunk");
+            assertNull(chunk.get("top_k"),
+                    "FE must return every chunk score before global top_k is applied");
+        }
+        assertEquals(0, fe3.getRequestCount());
+    }
+
+    @Test
+    void rerankerFansOutLoggedRequestJsonShapeWithHundredUnicodeDocuments() throws Exception {
+        String query = "古风男长裤怎么搭配斗篷";
+        String model = "bge_reranker_large-xinliu-online_clone_amd";
+        List<String> documents = new ArrayList<>();
+        documents.add("标题：斗篷大衣+牛仔神裤|显瘦还显腿长🟢\n"
+                + "内容：今日配色思路：绿+蓝+黑 🔵🟢⚫️\n-\n"
+                + "斗篷也可以搭出年轻休闲的风格呀\n"
+                + "内搭绿色打底 黑绿配色复古又高级\n"
+                + "搭配一条微喇牛仔裤 显瘦显腿长\n"
+                + "再混搭一个吸睛绿色大包包\n整套复古摩登又休闲飒气~");
+        documents.add("标题：斗篷姬袖长裤搭配来了！\n"
+                + "内容：更多搭配持续更新～#AG板房#alicegirl原创工作室#哥特风lolita#AG航海寻宝图鉴");
+        for (int i = documents.size(); i < 100; i++) {
+            documents.add("标题：本地拆批样本" + i + "✨\n"
+                    + "内容：古风男长裤与斗篷搭配测试 " + i + "，保留中文、emoji 和换行🧥");
+        }
+
+        int[] starts = {0, 40, 80};
+        int[] sizes = {40, 40, 20};
+        long[] tokenCounts = {6000, 7000, 6343};
+        List<MockWebServer> servers = List.of(fe1, fe2, fe3);
+        for (int chunk = 0; chunk < servers.size(); chunk++) {
+            ObjectNode feBody = mapper.createObjectNode();
+            var feResults = feBody.putArray("results");
+            for (int localIndex = 0; localIndex < sizes[chunk]; localIndex++) {
+                int globalIndex = starts[chunk] + localIndex;
+                ObjectNode item = feResults.addObject();
+                item.put("index", localIndex);
+                item.put("document", documents.get(globalIndex));
+                item.put("relevance_score", globalIndex / 100.0);
+            }
+            feBody.put("total_tokens", tokenCounts[chunk]);
+            servers.get(chunk).enqueue(jsonResponse(200, mapper.writeValueAsString(feBody)));
+        }
+
+        WebTestClient client = buildClient(/*subBatchSize=*/40);
+        ObjectNode body = mapper.createObjectNode();
+        body.put("query", query);
+        body.put("model", model);
+        body.put("__request_id__", 146280);
+        var requestDocuments = body.putArray("documents");
+        documents.forEach(requestDocuments::add);
+
+        JsonNode response = client.post().uri("/dispatcher/v1/reranker")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(response);
+        JsonNode results = response.get("results");
+        assertEquals(100, results.size());
+        for (int position = 0; position < results.size(); position++) {
+            int expectedGlobalIndex = 99 - position;
+            assertEquals(expectedGlobalIndex, results.get(position).get("index").asInt());
+            assertEquals(documents.get(expectedGlobalIndex),
+                    results.get(position).get("document").asText());
+            assertEquals(expectedGlobalIndex / 100.0,
+                    results.get(position).get("relevance_score").asDouble(), 0.0);
+        }
+        assertEquals(19343L, response.get("total_tokens").asLong());
+
+        for (int chunk = 0; chunk < servers.size(); chunk++) {
+            JsonNode child = assertChunkRequest(
+                    servers.get(chunk).takeRequest(), "/v1/reranker", "documents", sizes[chunk]);
+            assertEquals(query, child.get("query").asText());
+            assertEquals(model, child.get("model").asText());
+            assertEquals(146280, child.get("__request_id__").asInt());
+            assertFalse(child.get("sorted").asBoolean());
+            assertNull(child.get("top_k"));
+            for (int localIndex = 0; localIndex < sizes[chunk]; localIndex++) {
+                assertEquals(documents.get(starts[chunk] + localIndex),
+                        child.get("documents").get(localIndex).asText());
+            }
+        }
+    }
+
+    @Test
+    void rerankerFailsWholeRequestOnOneChunkFailure() throws Exception {
+        fe1.enqueue(jsonResponse(200,
+                "{\"results\":["
+                        + "{\"index\":0,\"relevance_score\":0.2},"
+                        + "{\"index\":1,\"relevance_score\":0.9}],\"total_tokens\":11}"));
+        fe2.enqueue(new MockResponse().setResponseCode(500).setBody("boom"));
+
+        WebTestClient client = buildClient(/*subBatchSize=*/2);
+        ObjectNode body = mapper.createObjectNode();
+        body.put("query", "cape pants");
+        body.putArray("documents").add("d0").add("d1").add("d2").add("d3");
+
+        JsonNode response = client.post().uri("/dispatcher/v1/reranker")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().is5xxServerError()
+                .expectBody(JsonNode.class)
+                .returnResult().getResponseBody();
+
+        assertNotNull(response);
+        assertEquals("sub_batch_failed", response.get("error").asText());
+        assertEquals(2, response.get("failed_count").asInt());
+        assertEquals(4, response.get("total_count").asInt());
+        assertEquals(2, response.get("total_chunks").asInt());
+    }
+
+    @Test
     void registeredPathWithNonBatchBodyFallsThroughToSingleFe() throws Exception {
         // /v1/embeddings is a registered batch endpoint, but OpenAI also allows `input` as a
         // plain string — that request must reach exactly one FE verbatim, not die with 400.

@@ -18,10 +18,10 @@ import java.util.stream.Collectors;
  *
  * <p>Bare {@code POST /} aliases {@code /batch_infer} semantics — rtp_llm FE historically
  * exposes batch generation on the root path and accepts the same {@code prompt_batch} /
- * {@code response_batch} wire shape. Embedding variants
- * ({@code /v1/embeddings/dense|sparse|colbert|similarity}, {@code /v1/reranker},
- * {@code /v1/classifier}) share the embedding response shape but use different request
- * fields — add them here, one row each.
+ * {@code response_batch} wire shape. {@code /v1/reranker} splits its {@code documents} field
+ * and uses endpoint hooks to restore the FE's global sort/top-k semantics. The remaining
+ * embedding variants ({@code /v1/embeddings/dense|sparse|colbert|similarity} and
+ * {@code /v1/classifier}) are not registered yet; add them here after verifying each wire shape.
  */
 @Value
 @Builder
@@ -41,6 +41,10 @@ public class BatchEndpointSpec {
     FailedItemFactory failedItemFactory;
     /** May be null when an endpoint has no cross-chunk aggregation. */
     PostMerger postMerger;
+    /** May be null when an endpoint's chunk bodies need no semantic rewrite. */
+    ChunkBodyTransformer chunkBodyTransformer;
+    /** May be null when the generic batch-shape checks are sufficient. */
+    RequestValidator requestValidator;
     /**
      * When true, outbound chunk bodies serialize with
      * {@link com.alibaba.fastjson2.JSONWriter.Feature#WriteNulls} so user-supplied null entries
@@ -71,6 +75,12 @@ public class BatchEndpointSpec {
      * report pre-assign metrics for a write FE never reads.
      */
     boolean preAssignable;
+    /**
+     * Whether one failed chunk invalidates the entire endpoint result. Ranking endpoints need
+     * this: a missing shard may contain the globally highest-scoring item, so returning a 200
+     * with the surviving shards would look authoritative while being mathematically incomplete.
+     */
+    boolean failOnPartialFailure;
 
     /**
      * The single split-vs-passthrough disposition shared by {@link BatchHandler} and
@@ -96,6 +106,18 @@ public class BatchEndpointSpec {
             }
         }
         return true;
+    }
+
+    /** Returns a caller-facing validation error, or {@code null} when fanout may proceed. */
+    public String validateForFanout(JSONObject body) {
+        return requestValidator == null ? null : requestValidator.validate(body);
+    }
+
+    /** Applies an endpoint-specific semantic rewrite to the already-sliced chunk bodies. */
+    public void prepareChunkBodies(JSONObject originalBody, List<JSONObject> chunkBodies) {
+        if (chunkBodyTransformer != null) {
+            chunkBodyTransformer.apply(originalBody, chunkBodies);
+        }
     }
 
     /**
@@ -136,7 +158,21 @@ public class BatchEndpointSpec {
         void apply(JSONObject mergedBody,
                    List<SubBatchResult> subs,
                    List<Integer> failedIndices,
-                   BatchEndpointSpec spec);
+                   BatchEndpointSpec spec,
+                   JSONObject originalRequest);
+    }
+
+    /** Rewrites per-chunk requests when endpoint semantics cannot be applied independently. */
+    @FunctionalInterface
+    public interface ChunkBodyTransformer {
+        void apply(JSONObject originalBody, List<JSONObject> chunkBodies);
+    }
+
+    /** Validates fields that the dispatcher consumes or rewrites instead of forwarding verbatim. */
+    @FunctionalInterface
+    public interface RequestValidator {
+        /** Returns {@code null} on success, otherwise a stable caller-facing error message. */
+        String validate(JSONObject body);
     }
 
     /**
@@ -198,6 +234,20 @@ public class BatchEndpointSpec {
                     .postMerger(EmbeddingMerger.INSTANCE)
                     .fanoutWriteNulls(true)
                     .splitRequiresStringItems(true)
+                    .build(),
+            BatchEndpointSpec.builder()
+                    .path("/v1/reranker")
+                    .requestArrayField("documents").responseArrayField("results")
+                    // Partial results are never served for reranking, so this placeholder only
+                    // exists to satisfy the generic merge path before failOnPartialFailure turns
+                    // the outcome into an error response.
+                    .failedItemFactory(FailedItemFactory.NULL)
+                    .postMerger(RerankerMerger.INSTANCE)
+                    .chunkBodyTransformer(RerankerMerger.INSTANCE)
+                    .requestValidator(RerankerMerger.INSTANCE)
+                    .fanoutWriteNulls(true)
+                    .splitRequiresStringItems(true)
+                    .failOnPartialFailure(true)
                     .build()
     );
 

@@ -27,11 +27,23 @@ import static org.mockito.Mockito.when;
 class DispatchRouterTest {
 
     private static final BatchEndpointSpec BATCH_INFER =
-            new BatchEndpointSpec("/batch_infer", "prompt_batch", "response_batch",
-                    FailedItemFactory.NULL, null, false, false, true);
+            BatchEndpointSpec.builder()
+                    .path("/batch_infer")
+                    .requestArrayField("prompt_batch")
+                    .responseArrayField("response_batch")
+                    .failedItemFactory(FailedItemFactory.NULL)
+                    .preAssignable(true)
+                    .build();
     private static final BatchEndpointSpec EMBEDDINGS =
-            new BatchEndpointSpec("/v1/embeddings", "input", "data",
-                    FailedItemFactory.EMBEDDING_NULL, EmbeddingMerger.INSTANCE, true, true, false);
+            BatchEndpointSpec.builder()
+                    .path("/v1/embeddings")
+                    .requestArrayField("input")
+                    .responseArrayField("data")
+                    .failedItemFactory(FailedItemFactory.EMBEDDING_NULL)
+                    .postMerger(EmbeddingMerger.INSTANCE)
+                    .fanoutWriteNulls(true)
+                    .splitRequiresStringItems(true)
+                    .build();
 
     @Test
     void nonDispatcherPathsAreNotMatched() {

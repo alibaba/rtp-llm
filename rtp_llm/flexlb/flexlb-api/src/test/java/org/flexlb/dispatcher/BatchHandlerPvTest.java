@@ -132,4 +132,47 @@ class BatchHandlerPvTest {
         assertTrue(pvJson.contains("client cancelled"),
                 "a cancelled request must carry the stable cancel reason: " + pvJson);
     }
+
+    @Test
+    void pv_identifies_endpoint_model_caller_and_chunk_shape_without_request_body() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/reranker");
+
+        JSONObject firstBody = JSONObject.of(
+                "results", JSONArray.of(
+                        JSONObject.of("index", 0, "relevance_score", 0.2),
+                        JSONObject.of("index", 1, "relevance_score", 0.8),
+                        JSONObject.of("index", 2, "relevance_score", 0.1)),
+                "total_tokens", 10);
+        JSONObject secondBody = JSONObject.of(
+                "results", JSONArray.of(
+                        JSONObject.of("index", 0, "relevance_score", 0.9),
+                        JSONObject.of("index", 1, "relevance_score", 0.7)),
+                "total_tokens", 11);
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
+                .thenReturn(Mono.just(List.of(
+                        SubBatchResult.ok(firstBody, 3, 0),
+                        SubBatchResult.ok(secondBody, 2, 3))));
+        byte[] body = ("{\"query\":\"q\",\"model\":\"bge_reranker_large\","
+                + "\"__request_id__\":146280,"
+                + "\"documents\":[\"d0\",\"d1\",\"d2\",\"d3\",\"d4\"]}")
+                .getBytes(StandardCharsets.UTF_8);
+        when(serverRequest.bodyToMono(byte[].class)).thenReturn(Mono.just(body));
+
+        BatchHandler handler = new BatchHandler(fanoutService, cfg, batchScheduleClient, passthroughClient,
+                DispatcherTestSupport.noopMetrics());
+        handler.handle(serverRequest, spec).block();
+
+        assertEquals(1, pvAppender.list.size(), "exactly one pv record per request");
+        JSONObject pv = JSONObject.parseObject(pvAppender.list.get(0).getFormattedMessage());
+        assertEquals("/v1/reranker", pv.getString("path"));
+        assertEquals("bge_reranker_large", pv.getString("model"));
+        assertEquals("146280", pv.getString("callerRequestId"));
+        assertEquals("count:2", pv.getString("splitPolicy"));
+        assertEquals(5, pv.getIntValue("totalItems"));
+        assertEquals(2, pv.getIntValue("chunkCount"));
+        assertEquals(2, pv.getIntValue("minChunkItems"));
+        assertEquals(3, pv.getIntValue("maxChunkItems"));
+        assertFalse(pv.toJSONString().contains("documents"),
+                "dispatcher PV must describe shape without duplicating request contents");
+    }
 }

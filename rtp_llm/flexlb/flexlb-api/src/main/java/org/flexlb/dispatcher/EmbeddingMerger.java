@@ -21,7 +21,7 @@ public final class EmbeddingMerger implements BatchEndpointSpec.PostMerger {
 
     @Override
     public void apply(JSONObject mergedBody, List<SubBatchResult> subs, List<Integer> failedIndices,
-                      BatchEndpointSpec spec) {
+                      BatchEndpointSpec spec, JSONObject originalRequest) {
         JSONArray data = mergedBody.getJSONArray(spec.getResponseArrayField());
         if (data != null) {
             for (int i = 0; i < data.size(); i++) {

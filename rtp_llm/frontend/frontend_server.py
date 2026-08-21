@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from fastapi import Request
 from fastapi import Request as RawRequest
@@ -142,6 +142,7 @@ class FrontendServer(object):
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
+        request_path = raw_request.url.path
         try:
             if isinstance(request, str):
                 request = json.loads(request)
@@ -156,7 +157,7 @@ class FrontendServer(object):
                 sequence,
             )
         except Exception as e:
-            return self._handle_exception(request, e)
+            return self._handle_exception(request, e, path=request_path)
 
         try:
             assert (
@@ -165,7 +166,9 @@ class FrontendServer(object):
             result, logable_result = await self._embedding_endpoint.embedding(request)
             # do not log result since too big
             if logable_result is not None:
-                self._access_logger.log_success_access(request, logable_result)
+                self._access_logger.log_success_access(
+                    request, logable_result, path=request_path
+                )
             end_time = time.time()
             kmonitor.report(
                 GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000
@@ -180,7 +183,7 @@ class FrontendServer(object):
                 usage = {}
             return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
         except BaseException as e:
-            return self._handle_exception(request, e)
+            return self._handle_exception(request, e, path=request_path)
         finally:
             self._global_controller.decrement()
 
@@ -376,7 +379,12 @@ class FrontendServer(object):
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
-    def _handle_exception(self, request: Dict[str, Any], e: BaseException):
+    def _handle_exception(
+        self,
+        request: Dict[str, Any],
+        e: BaseException,
+        path: Optional[str] = None,
+    ):
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
@@ -391,7 +399,7 @@ class FrontendServer(object):
                     "source": request.get("source", "unknown"),
                 },
             )
-            self._access_logger.log_exception_access(request, e)
+            self._access_logger.log_exception_access(request, e, path=path)
         else:
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
@@ -403,7 +411,7 @@ class FrontendServer(object):
                     "error_code": error_code_str,
                 },
             )
-            self._access_logger.log_exception_access(request, e)
+            self._access_logger.log_exception_access(request, e, path=path)
 
         rep = ORJSONResponse(exception_json, status_code=500)
         return rep

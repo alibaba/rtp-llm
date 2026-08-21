@@ -186,6 +186,32 @@ class BatchHandlerContractTest {
     }
 
     @Test
+    void emptyRerankerDocumentsReturnsSchemaCompleteEmptyResponse() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/reranker");
+        stubBody("{\"query\":\"cape pants\",\"documents\":[]}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.OK, out.statusCode());
+        ObjectNode response = parseBody(out);
+        assertEquals(0, response.get("results").size());
+        assertEquals(0L, response.get("total_tokens").asLong());
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
+    void rerankerRejectsInvalidRewrittenControlsBeforeFanout() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/reranker");
+        stubBody("{\"query\":\"cape pants\",\"documents\":[\"a\",\"b\"],\"top_k\":1.5}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
+        assertEquals("invalid_batch_request", parseBody(out).get("error").asText());
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
     void nonPreAssignableEndpointStillCallsMasterForFeButSkipsBeStamp() {
         // FE selection is sourced solely from the master (no local fallback), so the
         // /batch_schedule round-trip now happens even for endpoints whose FE model ignores
@@ -330,6 +356,30 @@ class BatchHandlerContractTest {
                 "a uniform FE 4xx across all sub-batches surfaces as that 4xx, not 500");
         ObjectNode body = parseBody(out);
         assertEquals("all_sub_batches_failed", body.get("error").asText());
+    }
+
+    @Test
+    void rerankerFailsClosedWhenOnlyOneChunkFails() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/v1/reranker");
+        stubBody("{\"query\":\"cape pants\",\"documents\":[\"d0\",\"d1\",\"d2\",\"d3\"]}");
+        JSONObject okBody = new JSONObject();
+        okBody.put("results", com.alibaba.fastjson2.JSONArray.of(
+                JSONObject.of("index", 0, "relevance_score", 0.1),
+                JSONObject.of("index", 1, "relevance_score", 0.2)));
+        okBody.put("total_tokens", 8);
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
+                .thenReturn(Mono.just(List.of(
+                        SubBatchResult.ok(okBody, 2, 0),
+                        SubBatchResult.failed(2, 2, "timeout"))));
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, out.statusCode());
+        ObjectNode response = parseBody(out);
+        assertEquals("sub_batch_failed", response.get("error").asText());
+        assertEquals(2, response.get("failed_count").asInt());
+        assertEquals(4, response.get("total_count").asInt());
+        assertEquals(2, response.get("total_chunks").asInt());
     }
 
     private ObjectNode parseBody(ServerResponse resp) {

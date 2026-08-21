@@ -15,6 +15,7 @@ class BatchEndpointSpecTest {
     void specsTableIsIndexedByPath() {
         assertNotNull(BatchEndpointSpec.BY_PATH.get("/batch_infer"));
         assertNotNull(BatchEndpointSpec.BY_PATH.get("/v1/embeddings"));
+        assertNotNull(BatchEndpointSpec.BY_PATH.get("/v1/reranker"));
         assertNull(BatchEndpointSpec.BY_PATH.get("/no-such-path"));
     }
 
@@ -34,29 +35,43 @@ class BatchEndpointSpecTest {
     @Test
     void allSpecRowsHaveExpectedFieldTuples() {
         assertRow("/", "prompt_batch", "response_batch",
-                BatchEndpointSpec.FailedItemFactory.NULL, false, false, false, true);
+                BatchEndpointSpec.FailedItemFactory.NULL,
+                false, false, false, false, false, true, false);
         assertRow("/batch_infer", "prompt_batch", "response_batch",
-                BatchEndpointSpec.FailedItemFactory.NULL, false, false, false, true);
+                BatchEndpointSpec.FailedItemFactory.NULL,
+                false, false, false, false, false, true, false);
         assertRow("/v1/batch/chat/completions", "requests", "responses",
-                BatchEndpointSpec.FailedItemFactory.OPENAI_ERROR, false, true, false, false);
+                BatchEndpointSpec.FailedItemFactory.OPENAI_ERROR,
+                false, false, false, true, false, false, false);
         assertRow("/v1/embeddings", "input", "data",
-                BatchEndpointSpec.FailedItemFactory.EMBEDDING_NULL, true, true, true, false);
+                BatchEndpointSpec.FailedItemFactory.EMBEDDING_NULL,
+                true, false, false, true, true, false, false);
+        assertRow("/v1/reranker", "documents", "results",
+                BatchEndpointSpec.FailedItemFactory.NULL,
+                true, true, true, true, true, false, true);
     }
 
     private static void assertRow(String path, String reqField, String respField,
                                   BatchEndpointSpec.FailedItemFactory factory, boolean hasPostMerger,
+                                  boolean hasChunkTransformer, boolean hasRequestValidator,
                                   boolean fanoutWriteNulls, boolean splitRequiresStringItems,
-                                  boolean preAssignable) {
+                                  boolean preAssignable, boolean failOnPartialFailure) {
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get(path);
         assertNotNull(spec, "missing spec row: " + path);
         assertEquals(reqField, spec.getRequestArrayField(), path + " requestArrayField");
         assertEquals(respField, spec.getResponseArrayField(), path + " responseArrayField");
         assertEquals(factory, spec.getFailedItemFactory(), path + " failedItemFactory");
         assertEquals(hasPostMerger, spec.getPostMerger() != null, path + " postMerger presence");
+        assertEquals(hasChunkTransformer, spec.getChunkBodyTransformer() != null,
+                path + " chunkBodyTransformer presence");
+        assertEquals(hasRequestValidator, spec.getRequestValidator() != null,
+                path + " requestValidator presence");
         assertEquals(fanoutWriteNulls, spec.isFanoutWriteNulls(), path + " fanoutWriteNulls");
         assertEquals(splitRequiresStringItems, spec.isSplitRequiresStringItems(),
                 path + " splitRequiresStringItems");
         assertEquals(preAssignable, spec.isPreAssignable(), path + " preAssignable");
+        assertEquals(failOnPartialFailure, spec.isFailOnPartialFailure(),
+                path + " failOnPartialFailure");
     }
 
     @Test

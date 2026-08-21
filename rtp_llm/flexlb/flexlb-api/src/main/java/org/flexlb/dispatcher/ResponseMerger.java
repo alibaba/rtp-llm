@@ -28,15 +28,25 @@ public final class ResponseMerger {
     public record MergedResponse(JSONObject body,
                                  int succeededChunks,
                                  int totalChunks,
+                                 int totalItems,
                                  List<Integer> failedIndices,
                                  List<String> failedReasons,
                                  int errorStatus) {
         public boolean allFailed() {
             return totalChunks > 0 && succeededChunks == 0;
         }
+
+        public boolean hasFailures() {
+            return !failedIndices.isEmpty();
+        }
     }
 
     public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec) {
+        return merge(subs, spec, null);
+    }
+
+    public static MergedResponse merge(List<SubBatchResult> subs, BatchEndpointSpec spec,
+                                       JSONObject originalRequest) {
         // The production caller (FanoutService.dispatchChunks) collects subs via flatMapSequential,
         // so they already arrive in chunk order; sort defensively so the stitched array — successful
         // items appended in order and failure placeholders filled per chunk — lines up with absolute
@@ -61,7 +71,7 @@ public final class ResponseMerger {
             for (SubBatchResult s : ordered) {
                 reasons.add(reasonFor(s));
             }
-            return new MergedResponse(new JSONObject(), 0, ordered.size(),
+            return new MergedResponse(new JSONObject(), 0, ordered.size(), totalItems,
                     allIndices(totalItems), reasons, commonErrorStatus(ordered));
         }
         JSONArray merged = envelope.getJSONArray(spec.getResponseArrayField());
@@ -93,9 +103,10 @@ public final class ResponseMerger {
             envelope.put("_partial_failure", pf);
         }
         if (spec.getPostMerger() != null) {
-            spec.getPostMerger().apply(envelope, ordered, failedIndices, spec);
+            spec.getPostMerger().apply(envelope, ordered, failedIndices, spec, originalRequest);
         }
-        return new MergedResponse(envelope, succeededChunks, ordered.size(), failedIndices, failedReasons, 500);
+        return new MergedResponse(envelope, succeededChunks, ordered.size(), totalItems,
+                failedIndices, failedReasons, 500);
     }
 
     /**

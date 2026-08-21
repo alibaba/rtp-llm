@@ -308,6 +308,28 @@ class DispatcherInspectionHandlerTest {
         }
 
         @Test
+        void rerankerDryRunShowsSemanticChildRewrite() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatcherInspectionHandler handler = handlerWith(false, client);
+            byte[] body = ("{\"query\":\"cape pants\","
+                    + "\"documents\":[\"d0\",\"d1\",\"d2\"],"
+                    + "\"sorted\":true,\"top_k\":2}").getBytes(StandardCharsets.UTF_8);
+            MockServerRequest req = MockServerRequest.builder()
+                    .method(HttpMethod.POST)
+                    .uri(URI.create("http://x/dispatcher/_dryrun/v1/reranker"))
+                    .body(Mono.just(body));
+
+            assertResponse(handler.dryRun(req), HttpStatus.OK, out -> {
+                assertEquals(2, out.get("chunkCount").asInt());
+                for (JsonNode chunk : out.get("chunks")) {
+                    assertFalse(chunk.get("sorted").asBoolean());
+                    assertNull(chunk.get("top_k"));
+                }
+            });
+            verifyNoInteractions(client);
+        }
+
+        @Test
         void nonObjectBodyReturns400() {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             DispatcherInspectionHandler handler = handlerWith(false, client);

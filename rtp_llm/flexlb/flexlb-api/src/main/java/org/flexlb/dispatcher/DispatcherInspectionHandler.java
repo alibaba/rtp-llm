@@ -96,6 +96,10 @@ public class DispatcherInspectionHandler {
             if (!spec.isSplittableBatch(body, arr)) {
                 return passthroughDiagnostic(spec, arr);
             }
+            String validationError = spec.validateForFanout(body);
+            if (validationError != null) {
+                return badRequest(validationError);
+            }
             // Mirror BatchHandler's guard: a non-object generate_config is a deterministic client
             // error. Without this the JSONException from chunk assembly falls into the catch-all and
             // is reported as a 500 — the exact production/dry-run drift this diagnostic must not have.
@@ -137,6 +141,7 @@ public class DispatcherInspectionHandler {
         List<JSONArray> chunks = BatchChunkAssembler.split(arr, cfg.getSubBatchSpec());
         List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
                 envelope, chunks, spec.getRequestArrayField());
+        spec.prepareChunkBodies(envelope, chunkBodies);
         boolean shouldResolveTargets = effectivePreAssign && spec.isPreAssignable() && !chunks.isEmpty();
         Mono<List<BatchScheduleTarget>> targetsMono = shouldResolveTargets
                 ? batchScheduleClient.requestTargets(chunks.size())

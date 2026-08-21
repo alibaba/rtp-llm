@@ -34,8 +34,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class BatchHandler {
 
+    private static final int MAX_LOG_SCALAR_CHARS = 256;
+
     private final FanoutService fanoutService;
     private final SubBatchSpec subBatch;
+    private final String splitPolicy;
     private final BatchScheduleClient batchScheduleClient;
     private final PassthroughClient passthroughClient;
     private final DispatcherMetricsReporter metricsReporter;
@@ -48,6 +51,7 @@ public class BatchHandler {
                         DispatcherMetricsReporter metricsReporter) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
+        this.splitPolicy = subBatch.mode().name().toLowerCase() + ":" + subBatch.value();
         this.batchScheduleClient = batchScheduleClient;
         this.passthroughClient = passthroughClient;
         this.metricsReporter = metricsReporter;
@@ -62,6 +66,7 @@ public class BatchHandler {
             if (body == null) {
                 return badRequest("expected a JSON object body");
             }
+            populateRequestLogFields(pv, body);
             JSONArray arr = BatchBodyParser.findArrayField(body, spec.getRequestArrayField());
             if (!spec.isSplittableBatch(body, arr)) {
                 // Registered path, but this body is not a splittable batch (absent array field,
@@ -71,9 +76,16 @@ public class BatchHandler {
                 delegatedToPassthrough.set(true);
                 return passthroughClient.forward(request, bytes);
             }
+            String validationError = spec.validateForFanout(body);
+            if (validationError != null) {
+                return badRequest(validationError);
+            }
             if (arr.isEmpty()) {
                 JSONObject emptyEnvelope = new JSONObject();
                 emptyEnvelope.put(spec.getResponseArrayField(), new JSONArray());
+                if (spec.getPostMerger() != null) {
+                    spec.getPostMerger().apply(emptyEnvelope, List.of(), List.of(), spec, body);
+                }
                 return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
             }
             // Chunk assembly copies generate_config per chunk, so a non-object value (e.g. a
@@ -86,8 +98,10 @@ public class BatchHandler {
             pv.setTotalItems(arr.size());
             List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
             pv.setChunkCount(chunks.size());
+            recordChunkShape(pv, chunks);
             List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
                     body, chunks, spec.getRequestArrayField());
+            spec.prepareChunkBodies(body, chunkBodies);
             return resolveTargets(chunks.size())
                     .flatMap(targets -> {
                         // BE role_addrs stamping stays gated on the toggle + endpoint support; FE
@@ -109,10 +123,11 @@ public class BatchHandler {
                                         request.headers().asHttpHeaders(), request.uri().getRawQuery())
                                 .doOnNext(subs -> metricsReporter.reportFanoutRt(
                                         System.currentTimeMillis() - fanoutStart))
-                                .map(subs -> ResponseMerger.merge(subs, spec))
+                                .map(subs -> ResponseMerger.merge(subs, spec, body))
                                 .flatMap(merged -> {
                                     pv.setFailedChunks(merged.failedReasons().size());
-                                    if (merged.allFailed()) {
+                                    if (merged.allFailed()
+                                            || (spec.isFailOnPartialFailure() && merged.hasFailures())) {
                                         return errorResponse(merged);
                                     }
                                     return DispatcherResponses.jsonBytes(
@@ -156,6 +171,42 @@ public class BatchHandler {
         }
     }
 
+    private void populateRequestLogFields(DispatchPvLogData pv, JSONObject body) {
+        pv.setSplitPolicy(splitPolicy);
+        pv.setModel(scalarForLog(body.get("model")));
+        Object requestId = body.get("__request_id__");
+        if (requestId == null) {
+            requestId = body.get("request_id");
+        }
+        pv.setCallerRequestId(scalarForLog(requestId));
+    }
+
+    private static void recordChunkShape(DispatchPvLogData pv, List<JSONArray> chunks) {
+        if (chunks.isEmpty()) {
+            return;
+        }
+        int min = Integer.MAX_VALUE;
+        int max = 0;
+        for (JSONArray chunk : chunks) {
+            min = Math.min(min, chunk.size());
+            max = Math.max(max, chunk.size());
+        }
+        pv.setMinChunkItems(min);
+        pv.setMaxChunkItems(max);
+    }
+
+    /** Keeps request-controlled observability fields scalar and bounded. */
+    private static String scalarForLog(Object value) {
+        if (!(value instanceof String || value instanceof Number || value instanceof Boolean)) {
+            return null;
+        }
+        String text = String.valueOf(value);
+        if (text.length() <= MAX_LOG_SCALAR_CHARS) {
+            return text;
+        }
+        return text.substring(0, MAX_LOG_SCALAR_CHARS);
+    }
+
     /**
      * The master's per-chunk FE assignment, index-aligned to {@code targets} (and thus to chunks).
      * A null entry — or an index past a short target list — means "no master FE for this chunk";
@@ -176,12 +227,14 @@ public class BatchHandler {
 
     private Mono<ServerResponse> errorResponse(ResponseMerger.MergedResponse merged) {
         JSONObject body = new JSONObject();
-        body.put("error", "all_sub_batches_failed");
-        // Item units, matching the success-path _partial_failure block; every item failed so
-        // failed_count == total_count. total_chunks is sub-batch units.
+        body.put("error", merged.allFailed()
+                ? "all_sub_batches_failed" : "sub_batch_failed");
+        // Item units, matching the success-path _partial_failure block. For the ordinary
+        // all-failed path failed_count == total_count; fail-closed endpoints can have fewer
+        // failed items than total items. total_chunks is sub-batch units.
         int failedItems = merged.failedIndices().size();
         body.put("failed_count", failedItems);
-        body.put("total_count", failedItems);
+        body.put("total_count", merged.totalItems());
         body.put("total_chunks", merged.totalChunks());
         JSONArray reasons = new JSONArray();
         merged.failedReasons().stream().distinct().forEach(reasons::add);

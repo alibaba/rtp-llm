@@ -27,15 +27,25 @@ public class DispatchPvLogData implements PvRecord {
 
     private String type;
     private String path;
+    /** Caller-supplied model selector, bounded before assignment. Null when absent/non-scalar. */
+    private String model;
+    /** Caller correlation id ({@code __request_id__}, falling back to {@code request_id}). */
+    private String callerRequestId;
     private int httpStatus;
     private boolean success;
     private long startTimeMs;
     private long costMs;
 
+    /** Batch-only: canonical chunking configuration, e.g. {@code size:40} or {@code count:5}. */
+    private String splitPolicy;
     /** Batch-only: total items in the inbound request array. 0 for passthrough. */
     private int totalItems;
     /** Batch-only: chunks fanned out (1 even for single-item batches). 0 for passthrough. */
     private int chunkCount;
+    /** Batch-only: smallest emitted chunk. 0 before splitting or for an empty batch. */
+    private int minChunkItems;
+    /** Batch-only: largest emitted chunk. 0 before splitting or for an empty batch. */
+    private int maxChunkItems;
     /** Batch-only: chunks that returned a non-2xx or threw. 0 for passthrough or all-OK batch. */
     private int failedChunks;
 

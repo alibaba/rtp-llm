@@ -5,3 +5,9 @@ py_library(
     ]),
     visibility = ["//visibility:public"]
 )
+
+py_test(
+    name = "access_logger_test",
+    srcs = ["access_logger_test.py"],
+    deps = [":access_logger"],
+)
