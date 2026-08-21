@@ -51,7 +51,8 @@ public:
                                  int  seq_len,
                                  int  reserve_step,
                                  int  reuse_blocks_len,
-                                 bool reuse_enabled = false) const override;
+                                 bool reuse_enabled = false,
+                                 const RequiredPositions& required_positions = {}) const override;
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
