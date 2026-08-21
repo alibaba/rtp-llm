@@ -22,6 +22,9 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.server_config_setup import (
+    validate_deepep_cuda_graph_compatibility,
+)
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
@@ -391,6 +394,12 @@ class ModelFactory:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        validate_deepep_cuda_graph_compatibility(
+            engine_config.moe_config,
+            engine_config.hw_kernel_config.enable_cuda_graph,
+            model_config.expert_num,
+        )
+
         # Finalize scheduler config based on ModelConfig (only once, for main model)
         finalize_scheduler_config(
             fifo_scheduler_config=engine_config.runtime_config.fifo_scheduler_config,
