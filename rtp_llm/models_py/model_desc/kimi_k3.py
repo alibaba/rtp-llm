@@ -24,6 +24,12 @@ import torch
 from torch import nn
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.kimi_k3.decode_ktp import (
+    DecodeOwnerLayout,
+    build_owner_attention_inputs,
+    decode_ktp_enabled,
+    logical_tp1_parallelism,
+)
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
@@ -48,6 +54,7 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
 )
+from rtp_llm.models_py.modules.factory.attention.attn_factory import AttnImplFactory
 from rtp_llm.models_py.modules.hybrid.dense_mlp import (
     DenseMLP,
     DenseMLPParallelExecutor,
@@ -128,6 +135,7 @@ class KimiK3DecoderMetadata:
     prefill_sp_layout: Optional[TokenShardLayout] = None
     kda_prefill_metadata: Optional[KimiKDAPrefillMetadata] = None
     kda_current_state_registry: Optional[KimiKDACurrentStateRegistry] = None
+    mla_owner_layout: Optional[DecodeOwnerLayout] = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +195,10 @@ class KimiK3DecoderLayer(nn.Module):
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
         ]
+        self.mla_dp_enabled = bool(
+            self.layer_type != HybridAttentionType.LINEAR
+            and decode_ktp_enabled(parallelism_config.role_type)
+        )
         self.self_attention_residual = KimiK3AttentionResidual(
             weights[K3W.SELF_ATTN_RES_NORM],
             weights[K3W.SELF_ATTN_RES_PROJ],
@@ -199,10 +211,15 @@ class KimiK3DecoderLayer(nn.Module):
         )
         self.attention_norm = RMSNorm(weights[W.pre_ln_gamma], self.eps)
         self.mlp_norm = RMSNorm(weights[W.post_ln_gamma], self.eps)
+        attention_parallelism = (
+            logical_tp1_parallelism(parallelism_config)
+            if self.mla_dp_enabled
+            else parallelism_config
+        )
         self.self_attn: nn.Module = (
             KimiK3KDA(config, parallelism_config, weights, layer_idx)
             if self.is_kda
-            else KimiK3MLA(config, parallelism_config, weights, layer_idx)
+            else KimiK3MLA(config, attention_parallelism, weights, layer_idx)
         )
         self.mlp: nn.Module
         if layer_idx in set(config.moe_layer_index):
@@ -260,7 +277,12 @@ class KimiK3DecoderLayer(nn.Module):
         mode = attn_meta.mode
         sequence_parallel = attn_meta.sequence_parallel
         prefill_sp_layout = attn_meta.prefill_sp_layout
-        decode_sp = sequence_parallel and mode == "decode"
+        owner_local_decode = bool(
+            self.mla_dp_enabled
+            and mode == "decode"
+            and attn_meta.mla_owner_layout is not None
+        )
+        decode_sp = sequence_parallel and mode == "decode" and not owner_local_decode
         logical_tokens = int(hidden_states.shape[0])
         tp_size = int(self.self_attn.parallelism_config.get_attn_tp_size())
         tp_rank = int(self.self_attn.parallelism_config.get_attn_tp_rank())
@@ -298,6 +320,14 @@ class KimiK3DecoderLayer(nn.Module):
             prefix_sum = None
         active_blocks = previous_blocks + int(writes_block)
         active_block_residual = block_residual[:, :active_blocks]
+        if owner_local_decode:
+            owner_layout = attn_meta.mla_owner_layout
+            assert owner_layout is not None
+            attention_input = owner_layout.narrow(attention_input)
+            if prefix_sum is not None:
+                prefix_sum = owner_layout.narrow(prefix_sum)
+            active_block_residual = owner_layout.narrow(active_block_residual)
+            local_valid_tokens = owner_layout.local_batch
         if self.is_kda:
             attention_output = self.self_attn(
                 attention_input,
@@ -360,7 +390,7 @@ class KimiK3DecoderLayer(nn.Module):
             valid_token_count=local_valid_tokens,
         )
         output = prefix_sum + mlp_output
-        if decode_sp:
+        if decode_sp or owner_local_decode:
             output = all_gather_trim(output, logical_tokens, group=Group.TP)
         return KimiK3DecoderOutput(output, block_residual)
 
@@ -445,6 +475,12 @@ class KimiK3Model(GptModelBase):
         self._prefill_mtp_draft_workspace: Optional[torch.Tensor] = None
         self._whole_chunk_prefill_active = False
         self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
+        self._decode_ktp_enabled = decode_ktp_enabled(parallelism_config.role_type)
+        self._mla_parallelism_config = (
+            logical_tp1_parallelism(parallelism_config)
+            if self._decode_ktp_enabled
+            else parallelism_config
+        )
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         """Bind runtime resources and reserve Prefill collective workspaces."""
@@ -749,10 +785,27 @@ class KimiK3Model(GptModelBase):
             )
         return bank.narrow(0, 0, required_rows)
 
-    # ``prepare_fmha_impl`` is inherited from ``GptModelBase``: it builds the
+    # ``prepare_fmha_impl`` normally builds the framework MLA implementation.
     # framework MLA impl via ``AttnImplFactory.get_fmha_impl`` (identical to the
     # generic MoE path).  K3's MLA layers consume that impl through
-    # ``KimiK3MLA`` (an ``MlaAttention`` subclass); K3's KDA layers ignore it.
+    # KTP Decode instead builds it from owner-local metadata after the current
+    # MLA cache group has been selected.
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        attention_inputs = inputs.attention_inputs
+        if (
+            self._decode_ktp_enabled
+            and attention_inputs is not None
+            and not attention_inputs.is_prefill
+        ):
+            if is_cuda_graph:
+                raise ValueError(
+                    "KIMI_K3_DECODE_KTP phase one does not support CUDA Graph"
+                )
+            return None
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
     def _embed(self, input_ids: torch.Tensor, multimodal_inputs: Any) -> torch.Tensor:
         multimodal_features = multimodal_inputs.multimodal_features
@@ -1166,6 +1219,43 @@ class KimiK3Model(GptModelBase):
             kda_prefill_metadata=kda_prefill_metadata,
             kda_current_state_registry=kda_current_state_registry,
         )
+        owner_attention_inputs: Optional[PyAttentionInputs] = None
+        owner_layout: Optional[DecodeOwnerLayout] = None
+        if self._decode_ktp_enabled and mode == "decode":
+            if is_target_verify:
+                raise ValueError("KIMI_K3_DECODE_KTP does not support target verify")
+            if os.environ.get("SP_TYPE", "").lower() == "eagle3":
+                raise ValueError("KIMI_K3_DECODE_KTP phase one does not support MTP")
+            if bool(getattr(attention_inputs, "is_cuda_graph", False)) or (
+                input_ids.is_cuda and torch.cuda.is_current_stream_capturing()
+            ):
+                raise ValueError(
+                    "KIMI_K3_DECODE_KTP phase one does not support CUDA Graph"
+                )
+            lengths_host = getattr(attention_inputs, "input_lengths_host", None)
+            if lengths_host is None or not lengths_host.numel():
+                raise ValueError("KIMI_K3_DECODE_KTP requires host input lengths")
+            global_batch = int(lengths_host.numel())
+            owner_layout = DecodeOwnerLayout.fixed(global_batch, tp_size, tp_rank)
+            if int(input_ids.numel()) != global_batch:
+                raise ValueError(
+                    "KIMI_K3_DECODE_KTP phase one requires q_len=1: "
+                    f"tokens={input_ids.numel()} BS={global_batch}"
+                )
+            owner_attention_inputs = build_owner_attention_inputs(
+                attention_inputs,
+                owner_layout,
+                device=input_ids.device,
+            )
+            attn_meta = KimiK3DecoderMetadata(
+                cu_seqlens=cu_seqlens,
+                mode=mode,
+                sequence_parallel=sp_active,
+                prefill_sp_layout=prefill_sp_layout,
+                kda_prefill_metadata=kda_prefill_metadata,
+                kda_current_state_registry=kda_current_state_registry,
+                mla_owner_layout=owner_layout,
+            )
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )
@@ -1194,25 +1284,44 @@ class KimiK3Model(GptModelBase):
             aux_layers = []
             aux_layer_set = set()
         for layer_idx, layer in enumerate(self.layers):
+            layer_attention_inputs = (
+                owner_attention_inputs
+                if layer.mla_dp_enabled and owner_attention_inputs is not None
+                else attention_inputs
+            )
             static_group_id = (
                 self._layer_group_ids[layer_idx]
                 if self._layer_group_ids is not None
                 and layer_idx < len(self._layer_group_ids)
                 else None
             )
-            select_block_map_for_layer(attention_inputs, layer_idx, static_group_id)
+            select_block_map_for_layer(
+                layer_attention_inputs, layer_idx, static_group_id
+            )
             layer_cache = (
                 self.kv_cache.get_layer_cache(layer_idx)
                 if self.kv_cache is not None
                 else None
             )
+            layer_fmha_impl = fmha_impl
+            if layer.mla_dp_enabled:
+                if layer_attention_inputs is None:
+                    raise RuntimeError("K3 MLA-DP is missing owner-local metadata")
+                layer_fmha_impl = AttnImplFactory.get_fmha_impl(
+                    self.config,
+                    self._mla_parallelism_config,
+                    self.weight,
+                    layer_attention_inputs,
+                    self.fmha_config,
+                    False,
+                )
             layer_output = layer(
                 hidden_states,
                 block_residual,
                 attn_meta=attn_meta,
                 kv_cache=layer_cache,
-                attention_inputs=attention_inputs,
-                fmha_impl=fmha_impl,
+                attention_inputs=layer_attention_inputs,
+                fmha_impl=layer_fmha_impl,
             )
             hidden_states = layer_output.hidden_states
             block_residual = layer_output.block_residual
