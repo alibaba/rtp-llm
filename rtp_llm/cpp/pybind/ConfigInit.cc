@@ -441,6 +441,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reco_get_broadcast_timeout", &KVCacheConfig::reco_get_broadcast_timeout)
         .def_readwrite("reco_put_broadcast_timeout", &KVCacheConfig::reco_put_broadcast_timeout)
         .def_readwrite("reco_client_config", &KVCacheConfig::reco_client_config)
+        .def_readwrite("block_tree_full_prefix_scan_interval_ms",
+                       &KVCacheConfig::block_tree_full_prefix_scan_interval_ms)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
@@ -495,10 +497,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
                                       self.device_cache_min_free_blocks,
-                                      self.memory_cache_max_descriptors_per_transfer_batch);
+                                      self.memory_cache_max_descriptors_per_transfer_batch,
+                                      self.block_tree_full_prefix_scan_interval_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 50 && t.size() != 51) {
+                if (t.size() != 50 && t.size() != 51 && t.size() != 52) {
                     throw std::runtime_error("Invalid KVCacheConfig state");
                 }
                 KVCacheConfig c;
@@ -554,6 +557,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.device_cache_min_free_blocks         = t[49].cast<int64_t>();
                 if (t.size() == 51) {
                     c.memory_cache_max_descriptors_per_transfer_batch = t[50].cast<int64_t>();
+                }
+                if (t.size() == 52) {
+                    c.memory_cache_max_descriptors_per_transfer_batch = t[50].cast<int64_t>();
+                    c.block_tree_full_prefix_scan_interval_ms         = t[51].cast<int64_t>();
                 }
                 return c;
             }));

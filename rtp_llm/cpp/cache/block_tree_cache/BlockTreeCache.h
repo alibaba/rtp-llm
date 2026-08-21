@@ -8,6 +8,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
@@ -60,6 +61,12 @@ struct BlockTreeCacheConfig {
     // Total Device<->Disk staging blocks per rank, split evenly across two pools.
     size_t device_disk_staging_block_count{4};
     size_t max_descriptors_per_transfer_batch{64};
+
+    // ---- FULL prefix invariant scanner (diagnostic only) ----
+    // Batch size and detail cap are scanner-internal constants; see FullPrefixInvariantScanner.h.
+    int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
+    int     world_rank{0};
+    int     local_rank{0};
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
@@ -168,18 +175,19 @@ private:
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
 
-    BlockTreeCacheConfig                     config_;
-    std::unique_ptr<BlockTree>               tree_;
-    std::shared_ptr<StorageBackend>          storage_backend_;
-    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
-    std::unique_ptr<BlockTreeTaskPool>       task_pool_;
-    BlockTreeCacheMetricsReporter            metrics_reporter_;
-    mutable std::mutex                       mutex_;
-    BlockTreeEvictor                         evictor_;
-    bool                                     initialized_{false};
-    int64_t                                  mutation_version_{0};
-    BlockTreeLoader                          loader_;
-    BlockTreeStorer                          storer_;
+    BlockTreeCacheConfig                        config_;
+    std::unique_ptr<BlockTree>                  tree_;
+    std::shared_ptr<StorageBackend>             storage_backend_;
+    std::unique_ptr<BlockTransferDispatcher>    transfer_dispatcher_;
+    std::unique_ptr<BlockTreeTaskPool>          task_pool_;
+    BlockTreeCacheMetricsReporter               metrics_reporter_;
+    mutable std::mutex                          mutex_;
+    BlockTreeEvictor                            evictor_;
+    bool                                        initialized_{false};
+    int64_t                                     mutation_version_{0};
+    BlockTreeLoader                             loader_;
+    BlockTreeStorer                             storer_;
+    std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

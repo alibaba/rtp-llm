@@ -655,6 +655,7 @@ class KVCacheConfig:
     host_eviction_policy: str
     disk_eviction_policy: str
     device_cache_min_free_blocks: int
+    block_tree_full_prefix_scan_interval_ms: int
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
