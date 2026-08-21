@@ -102,6 +102,7 @@ private:
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
+    std::atomic<bool>               commit_started_{false};
     bool                            committed_{false};
 
     std::mutex backend_match_mutex_;
