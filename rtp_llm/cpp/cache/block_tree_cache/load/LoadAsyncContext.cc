@@ -203,6 +203,10 @@ void LoadAsyncContext::failCommit() {
 }
 
 bool LoadAsyncContext::commit() {
+    bool expected = false;
+    if (!commit_started_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return false;
+    }
     if (!coordinator_->commit(context_id_)) {
         // The coordinator can reject before resolving the weak context. Make
         // that path terminal as well; failCommit is idempotent if a rejected
