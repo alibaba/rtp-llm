@@ -39,6 +39,7 @@ from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit import (
     mm_projector_forward,
 )
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
+from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import KimiK3Eagle3Model
 from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
@@ -379,6 +380,75 @@ class KimiK3MultimodalEmbeddingTest(TestCase):
             )
         )
         torch.testing.assert_close(actual, expected)
+
+
+class KimiK3Eagle3MultimodalEmbeddingTest(TestCase):
+    # Feature values stay well outside the embedding table's range (0..191) so a
+    # misplaced row can never compare equal to a text embedding.
+    IMAGE_A = torch.tensor([[1000.0, 1001.0, 1002.0], [2000.0, 2001.0, 2002.0]])
+    IMAGE_B = torch.tensor([[3000.0, 3001.0, 3002.0], [4000.0, 4001.0, 4002.0]])
+
+    def setUp(self):
+        self.embedding_weight = torch.arange(64 * 3, dtype=torch.float32).reshape(64, 3)
+        self.model = KimiK3Eagle3Model.__new__(KimiK3Eagle3Model)
+        nn.Module.__init__(self.model)
+        self.model.embedding = EmbeddingTorch(self.embedding_weight)
+        self.model.multimodal_embedding_injector = MultimodalEmbeddingInjector()
+
+    def _embed(self, input_ids, features, locations, cu_seqlens):
+        boundaries = torch.tensor(cu_seqlens, dtype=torch.int32)
+        inputs = SimpleNamespace(
+            input_ids=torch.tensor(input_ids, dtype=torch.int32),
+            multimodal_inputs=SimpleNamespace(
+                multimodal_features=features,
+                mm_features_locs_host=torch.tensor(locations, dtype=torch.int32),
+            ),
+            attention_inputs=SimpleNamespace(
+                cu_seqlens=boundaries, cu_seqlens_host=boundaries
+            ),
+        )
+        return self.model._embed_shifted_multimodal(inputs)
+
+    def test_draft_prefill_shifts_and_injects_image_features(self):
+        # Target [10, hash_0, hash_1, 11] shifts to [hash_0, hash_1, 11, sampled_12],
+        # while mm_features_locs still describes the target position (1).
+        output = self._embed(
+            [-101, -102, 11, 12], [self.IMAGE_A], [1], cu_seqlens=[0, 4]
+        )
+
+        self.assertTrue(torch.equal(output[0:2], self.IMAGE_A))
+        self.assertTrue(torch.equal(output[2], self.embedding_weight[11]))
+        self.assertTrue(torch.equal(output[3], self.embedding_weight[12]))
+
+    def test_draft_prefill_drops_the_row_shifted_out_of_the_window(self):
+        # Target [hash_0, hash_1, 11] starts with the image, so the shift pushes
+        # row 0 before token 0: it has no draft slot and must be dropped.
+        output = self._embed(
+            [-102, 11, 12, 13], [self.IMAGE_A], [0], cu_seqlens=[0, 4]
+        )
+
+        self.assertTrue(torch.equal(output[0], self.IMAGE_A[1]))
+        self.assertTrue(torch.equal(output[1], self.embedding_weight[11]))
+        self.assertTrue(torch.equal(output[2], self.embedding_weight[12]))
+        self.assertTrue(torch.equal(output[3], self.embedding_weight[13]))
+
+    def test_draft_prefill_clamps_features_to_their_own_request(self):
+        # Two 3-token requests; B's image sits at its own first token (loc 3 ==
+        # request start), where a global "loc - 1" would land in A's last slot.
+        output = self._embed(
+            [-101, -102, 20, -202, 22, 21],
+            [self.IMAGE_A, self.IMAGE_B],
+            [1, 3],
+            cu_seqlens=[0, 3, 6],
+        )
+
+        self.assertTrue(torch.equal(output[0:2], self.IMAGE_A))
+        # Request A's sampled token must survive untouched.
+        self.assertTrue(torch.equal(output[2], self.embedding_weight[20]))
+        # Request B keeps its own start: row 0 is shifted out, row 1 lands there.
+        self.assertTrue(torch.equal(output[3], self.IMAGE_B[1]))
+        self.assertTrue(torch.equal(output[4], self.embedding_weight[22]))
+        self.assertTrue(torch.equal(output[5], self.embedding_weight[21]))
 
 
 class KimiK3RendererTest(TestCase):
