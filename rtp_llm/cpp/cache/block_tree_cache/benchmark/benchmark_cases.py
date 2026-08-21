@@ -105,6 +105,7 @@ def _transfer_case(
     business_concurrency=0,
     descriptors_per_business=0,
     transfer_worker_count=1,
+    device_disk_staging_block_count=None,
 ):
     if descriptor_batch_size is None:
         descriptor_batch_size = concurrency
@@ -127,6 +128,9 @@ def _transfer_case(
         params["--disk-access-pattern"] = "sequential"
     if working_set_blocks > 0:
         params["--working-set-blocks"] = str(working_set_blocks)
+    if device_disk_staging_block_count is not None:
+        params["--device-disk-staging-block-count"] = str(device_disk_staging_block_count)
+
     return BenchmarkCase(
         name=name,
         suite="profile",
@@ -235,6 +239,7 @@ PROFILE_CASES = [
         disk_mode="direct",
         min_bytes=8 * _GIB,
         is_perf_rep=True,
+        device_disk_staging_block_count=8,
     ),
     _transfer_case(
         "transfer_device_disk_full_context_buffered",
@@ -244,6 +249,7 @@ PROFILE_CASES = [
         disk_mode="buffered",
         min_bytes=8 * _GIB,
         working_set_blocks=32768,
+        device_disk_staging_block_count=8,
     ),
     _transfer_case(
         "transfer_device_disk_swa_direct",
@@ -252,6 +258,7 @@ PROFILE_CASES = [
         8,
         disk_mode="direct",
         min_bytes=8 * _GIB,
+        device_disk_staging_block_count=8,
     ),
     _transfer_case(
         "transfer_device_disk_swa_buffered",
@@ -261,6 +268,7 @@ PROFILE_CASES = [
         disk_mode="buffered",
         min_bytes=8 * _GIB,
         working_set_blocks=4096,
+        device_disk_staging_block_count=8,
     ),
     # --- host-disk pair: Host <-> Disk, mixed h2disk+disk2h ---
     _transfer_case(

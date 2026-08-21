@@ -51,7 +51,8 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
     }
 
     BatchedMemoryCopyParams params;
-    params.device_index = device_index;
+    params.device_index    = device_index;
+    params.serialize_calls = options.cuda_batch_serialize;
     params.tiles.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
@@ -67,11 +68,12 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         params.tiles.push_back(batch_tile);
     }
 
-    // The bool API cannot distinguish "unsupported CUDART" from "CUDA runtime error".
-    // Conservatively fall back to generic until a proper attempt-status API is added.
-    bool ok = execBatchedMemoryCopy(params);
-    if (!ok) {
+    const auto status = execBatchedMemoryCopy(params);
+    if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
         return StrategyResult::notApplicable();
+    }
+    if (status == BatchedMemoryCopyStatus::EXECUTION_FAILED) {
+        return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
     return StrategyResult::done();
 }
