@@ -49,6 +49,7 @@ cc_library(
     srcs = [
         "BlockTree.cc",
         "BlockTreeCache.cc",
+        "diagnostic/FullPrefixInvariantScanner.cc",
         "storage_backend/StorageBackend.cc",
         "storage_backend/StorageBackendExecutor.cc",
         "BlockTreeCacheFactory.cc",
@@ -86,6 +87,7 @@ cc_library(
     hdrs = [
         "BlockTree.h",
         "BlockTreeCache.h",
+        "diagnostic/FullPrefixInvariantScanner.h",
         "BlockTreeCacheFactory.h",
         "BlockTreeCacheMetricsReporter.h",
         "group_set/GroupSetResource.h",
@@ -142,6 +144,7 @@ cc_library(
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+        "@havenask//aios/autil:thread",
     ] + torch_deps() + no_block_copy_link_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",

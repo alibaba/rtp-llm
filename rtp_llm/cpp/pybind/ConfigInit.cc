@@ -506,6 +506,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reco_get_broadcast_timeout", &KVCacheConfig::reco_get_broadcast_timeout)
         .def_readwrite("reco_put_broadcast_timeout", &KVCacheConfig::reco_put_broadcast_timeout)
         .def_readwrite("reco_client_config", &KVCacheConfig::reco_client_config)
+        .def_readwrite("block_tree_full_prefix_scan_interval_ms",
+                       &KVCacheConfig::block_tree_full_prefix_scan_interval_ms)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
         .def(py::pickle(
@@ -565,10 +567,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory_cache_max_descriptors_per_transfer_batch,
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
-                                      self.dsv4_fixed_pool_use_memory);
+                                      self.dsv4_fixed_pool_use_memory,
+                                      self.block_tree_full_prefix_scan_interval_ms);
             },
             [](py::tuple t) {
-                constexpr size_t kFieldCount = 54;
+                constexpr size_t kFieldCount = 55;
                 if (t.size() != kFieldCount + 2 || t[0].cast<std::string>() != "KVCacheConfig"
                     || t[1].cast<int>() != 1) {
                     throw std::runtime_error("invalid KVCacheConfig state");
@@ -630,6 +633,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.dsv4_fixed_pool_blocks                         = value(51).cast<uint32_t>();
                 c.dsv4_hca_state_pool_blocks                    = value(52).cast<uint32_t>();
                 c.dsv4_fixed_pool_use_memory                    = value(53).cast<bool>();
+                c.block_tree_full_prefix_scan_interval_ms             = value(54).cast<int64_t>();
                 return c;
             }));
 
