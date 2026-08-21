@@ -34,6 +34,7 @@ from rtp_llm.model_loader.weight_module import (
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
 )
+from rtp_llm.models.kimi_k3.decode_ktp import decode_ktp_enabled
 from rtp_llm.ops import HybridAttentionType, MlaOpsType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -208,6 +209,19 @@ class _KimiExpertByteWeight(MoeAtomicWeight):
         # K3's first correctness path does not additionally tensor-shard the
         # packed expert matrices; a future native MXFP4 kernel may do so.
         return sp_id
+
+
+class _KimiK3MLAWeight(MlaAttnAtomicWeight):
+    """Optionally replicate only K3 MLA tensors for Decode request-DP."""
+
+    def __init__(self, *args, replicate_for_decode_ktp: bool = False, **kwargs):
+        self.replicate_for_decode_ktp = bool(replicate_for_decode_ktp)
+        super().__init__(*args, **kwargs)
+
+    def _get_split_func(self):
+        if self.replicate_for_decode_ktp:
+            return sp_id
+        return super()._get_split_func()
 
 
 class KimiK3Weight(ModelDeployWeightInfo):
@@ -560,13 +574,17 @@ class KimiK3Weight(ModelDeployWeightInfo):
         """
 
         cfg = self._mla_config()
+        replicate = decode_ktp_enabled(self.role_type)
+        mla_tp_size = 1 if replicate else self.tp_size
+        mla_tp_rank = 0 if replicate else self.tp_rank
 
         def _mla(name, suffix, process_fun):
-            return MlaAttnAtomicWeight(
+            return _KimiK3MLAWeight(
                 name,
                 [CkptWeightInfo(self._layer_ckpt(suffix), identity)],
                 process_fun,
                 config=cfg,
+                replicate_for_decode_ktp=replicate,
             )
 
         weights: List[WeightModule] = [
@@ -587,7 +605,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
             _mla(W.mla_q_b_w, "self_attn.q_b_proj.weight", transpose),
             _mla(W.mla_q_a_ln_gamma, "self_attn.q_a_layernorm.weight", identity),
             # Q-A and KV-A are replicated; g_proj contributes this rank's heads.
-            MlaAttnAtomicWeight(
+            _KimiK3MLAWeight(
                 W.mla_fusedqkrope_w,
                 [
                     CkptWeightInfo(
@@ -603,10 +621,11 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 functools.partial(
                     _merge_mla_input_projections,
-                    tp_size=self.tp_size,
-                    tp_rank=self.tp_rank,
+                    tp_size=mla_tp_size,
+                    tp_rank=mla_tp_rank,
                 ),
                 config=cfg,
+                replicate_for_decode_ktp=replicate,
             ),
         ]
 
