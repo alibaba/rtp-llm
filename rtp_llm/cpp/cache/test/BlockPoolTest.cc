@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 #include <memory>
-#include <vector>
 #include <set>
+#include <string>
+#include <utility>
+#include <vector>
 #include <torch/torch.h>
 #include <numeric>
 #include <optional>
@@ -88,6 +90,23 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
                                                            /*is_mtp=*/true,
                                                            /*is_eagle=*/false);
     return cfg;
+}
+
+static GroupBase makeMtpLayoutGroup(const GroupBase&  source,
+                                    std::string       tag,
+                                    std::vector<int> layer_ids,
+                                    size_t           kv_block_stride_bytes,
+                                    size_t           kv_scale_stride_bytes) {
+    auto spec = source.spec->clone();
+    spec->tag = tag;
+
+    GroupBase group               = source;
+    group.tag                     = std::move(tag);
+    group.spec                    = std::move(spec);
+    group.layer_ids               = std::move(layer_ids);
+    group.kv_block_stride_bytes   = kv_block_stride_bytes;
+    group.kv_scale_stride_bytes   = kv_scale_stride_bytes;
+    return group;
 }
 
 }  // namespace
@@ -213,6 +232,249 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
               sc_k_off);
     EXPECT_EQ(reinterpret_cast<uintptr_t>(parts[3].addr) - reinterpret_cast<uintptr_t>(addr_mtp1.kv_scale_addr),
               sc_v_off);
+}
+
+TEST_F(BlockPoolTest, MTPLayoutUsesRealGroupAggregateStrides) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
+    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
+
+    auto&       sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto& source     = sub_config.topology().groupById(0);
+    ASSERT_NE(source.spec, nullptr);
+
+    constexpr uint32_t seq_size_per_block = 4;
+    constexpr uint32_t indexer_dim        = 128;
+    auto draft_spec = makeResolvedMlaSpec(DataType::TYPE_FP8_E4M3,
+                                          /*kv_lora_rank=*/128,
+                                          /*rope_head_dim=*/64,
+                                          seq_size_per_block,
+                                          /*tag=*/"draft");
+    ASSERT_NE(draft_spec, nullptr);
+
+    const size_t aggregate_kv_stride =
+        draft_spec->block_size_bytes() + static_cast<size_t>(seq_size_per_block) * 16;
+    const size_t aggregate_scale_stride =
+        (indexer_dim + indexer_dim / 128 * 4) * static_cast<size_t>(seq_size_per_block);
+    auto placeholder = makeMtpLayoutGroup(source,
+                                          "placeholder",
+                                          /*layer_ids=*/{},
+                                          source.spec->block_size_bytes() + 1,
+                                          source.spec->scale_block_size_bytes() + 1);
+    placeholder.local_kv_head_num = source.local_kv_head_num + 1;
+    GroupBase real_group                 = source;
+    real_group.tag                       = "draft";
+    real_group.spec                      = std::move(draft_spec);
+    real_group.layer_ids                 = {0};
+    real_group.local_kv_head_num         = 1;
+    real_group.seq_size_per_block        = seq_size_per_block;
+    real_group.kernel_seq_size_per_block = seq_size_per_block;
+    real_group.kv_block_stride_bytes     = aggregate_kv_stride;
+    real_group.kv_scale_stride_bytes     = aggregate_scale_stride;
+    sub_config.setTopology({std::move(placeholder), std::move(real_group)}, {{0, {"draft"}}});
+
+    // The shared pool owns one block-id space even if a stale sub-config still carries another count.
+    sub_config.block_num = 9;
+    sub_config.use_mla   = true;
+    sub_config.is_sparse = true;
+
+    const auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
+    ASSERT_EQ(pool_cfg.memory_layouts.size(), 2u);
+    const auto& mtp_layout = pool_cfg.memory_layouts[1];
+    const auto  real_gid   = static_cast<size_t>(sub_config.groupIdForTag("draft"));
+    const auto& real_spec  = sub_config.specForGroup(real_gid);
+
+    EXPECT_EQ(mtp_layout.block_num, cache_cfg.block_num);
+    EXPECT_EQ(mtp_layout.kv_block_stride_bytes, aggregate_kv_stride);
+    EXPECT_EQ(mtp_layout.kv_scale_stride_bytes, aggregate_scale_stride);
+    EXPECT_EQ(mtp_layout.kv_block_pool_size_bytes,
+              static_cast<size_t>(mtp_layout.layer_num) * cache_cfg.block_num * aggregate_kv_stride);
+    EXPECT_EQ(mtp_layout.kv_scale_pool_size_bytes,
+              static_cast<size_t>(mtp_layout.layer_num) * cache_cfg.block_num * aggregate_scale_stride);
+    EXPECT_EQ(mtp_layout.kv_scale_offset_bytes,
+              mtp_layout.kv_cache_offset_bytes + mtp_layout.kv_block_pool_size_bytes);
+    EXPECT_EQ(pool_cfg.total_size_bytes,
+              mtp_layout.kv_scale_offset_bytes + mtp_layout.kv_scale_pool_size_bytes);
+    EXPECT_GT(mtp_layout.kv_block_stride_bytes, real_spec->block_size_bytes());
+    EXPECT_GT(mtp_layout.kv_scale_stride_bytes, real_spec->scale_block_size_bytes());
+    EXPECT_EQ(mtp_layout.k_block_stride_bytes, real_spec->k_block_size_bytes());
+    EXPECT_EQ(mtp_layout.v_block_stride_bytes, real_spec->v_block_size_bytes());
+    EXPECT_EQ(mtp_layout.k_scale_stride_bytes, real_spec->k_scale_block_size_bytes());
+    EXPECT_EQ(mtp_layout.v_scale_stride_bytes, real_spec->v_scale_block_size_bytes());
+    EXPECT_EQ(mtp_layout.local_head_num_kv, sub_config.localKvHeadNumForGroup(real_gid));
+    EXPECT_EQ(mtp_layout.seq_size_per_block, sub_config.seqSizePerBlockForGroup(real_gid));
+    EXPECT_EQ(mtp_layout.kernel_blocks_per_kv_block, sub_config.kernelBlocksPerKvBlockForGroup(real_gid));
+    EXPECT_EQ(mtp_layout.dtype, real_spec->memoryLayoutDType());
+    EXPECT_EQ(mtp_layout.is_mla, sub_config.use_mla || sub_config.is_sparse);
+    EXPECT_EQ(mtp_layout.use_mla, sub_config.use_mla);
+    EXPECT_FALSE(mtp_layout.enable_hybrid_attention);
+
+    block_pool_ = std::make_shared<BlockPool>(pool_cfg);
+    ASSERT_TRUE(block_pool_->init());
+    const int global_mtp_layer = static_cast<int>(pool_cfg.memory_layouts[0].layer_num);
+    const auto first_block     = block_pool_->convertIndexToBuffer(global_mtp_layer, /*block_id=*/1);
+    const auto second_block    = block_pool_->convertIndexToBuffer(global_mtp_layer, /*block_id=*/2);
+    ASSERT_EQ(first_block.size(), 2u);
+    ASSERT_EQ(second_block.size(), 2u);
+    EXPECT_EQ(first_block[0].size_bytes, aggregate_kv_stride);
+    EXPECT_EQ(first_block[1].size_bytes, aggregate_scale_stride);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(second_block[0].addr)
+                  - reinterpret_cast<uintptr_t>(first_block[0].addr),
+              aggregate_kv_stride);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(second_block[1].addr)
+                  - reinterpret_cast<uintptr_t>(first_block[1].addr),
+              aggregate_scale_stride);
+
+    const auto partitioned =
+        block_pool_->convertIndexToBuffer(global_mtp_layer, /*block_id=*/1, /*partition_count=*/2, /*partition_id=*/1);
+    ASSERT_EQ(partitioned.size(), first_block.size());
+    EXPECT_EQ(partitioned[0].addr, first_block[0].addr);
+    EXPECT_EQ(partitioned[0].size_bytes, first_block[0].size_bytes);
+    EXPECT_EQ(partitioned[1].addr, first_block[1].addr);
+    EXPECT_EQ(partitioned[1].size_bytes, first_block[1].size_bytes);
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsZeroScaleStrideUnderSparse) {
+    // Before the fix the two scale CHECKs were vacuous under MLA+sparse (spec
+    // scale_block_size_bytes() is 0), so a sparse group whose scale region failed to
+    // allocate (stride 0) slipped through -- the exact shortfall this package fixes.
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 1u);
+    ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
+
+    auto&       sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto& source     = sub_config.topology().groupById(0);
+    ASSERT_NE(source.spec, nullptr);
+
+    constexpr uint32_t seq_size_per_block = 4;
+    auto draft_spec = makeResolvedMlaSpec(DataType::TYPE_FP8_E4M3,
+                                          /*kv_lora_rank=*/128,
+                                          /*rope_head_dim=*/64,
+                                          seq_size_per_block,
+                                          /*tag=*/"draft");
+    ASSERT_NE(draft_spec, nullptr);
+
+    const size_t aggregate_kv_stride =
+        draft_spec->block_size_bytes() + static_cast<size_t>(seq_size_per_block) * 16;
+    auto placeholder = makeMtpLayoutGroup(source,
+                                          "placeholder",
+                                          /*layer_ids=*/{},
+                                          source.spec->block_size_bytes() + 1,
+                                          source.spec->scale_block_size_bytes() + 1);
+    placeholder.local_kv_head_num        = source.local_kv_head_num + 1;
+    GroupBase real_group                 = source;
+    real_group.tag                       = "draft";
+    real_group.spec                      = std::move(draft_spec);
+    real_group.layer_ids                 = {0};
+    real_group.local_kv_head_num         = 1;
+    real_group.seq_size_per_block        = seq_size_per_block;
+    real_group.kernel_seq_size_per_block = seq_size_per_block;
+    real_group.kv_block_stride_bytes     = aggregate_kv_stride;
+    real_group.kv_scale_stride_bytes     = 0;  // sparse scale region not allocated
+    sub_config.setTopology({std::move(placeholder), std::move(real_group)}, {{0, {"draft"}}});
+    sub_config.block_num = 9;
+    sub_config.use_mla   = true;
+    sub_config.is_sparse = true;
+
+    EXPECT_ANY_THROW((void)rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg));
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsMissingPhysicalGroup) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    cache_cfg.mtp_sub_configs = {std::make_shared<CacheConfig>()};
+
+    EXPECT_ANY_THROW((void)rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg));
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsEquivalentSecondPhysicalGroup) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    auto& sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto source = sub_config.topology().groupById(0);
+
+    auto first = makeMtpLayoutGroup(
+        source, "first", {0}, source.kv_block_stride_bytes, source.kv_scale_stride_bytes);
+    auto second = makeMtpLayoutGroup(
+        source, "second", {0}, source.kv_block_stride_bytes, source.kv_scale_stride_bytes);
+    sub_config.setTopology({std::move(first), std::move(second)}, {{0, {"first", "second"}}});
+
+    EXPECT_ANY_THROW((void)rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg));
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsHeterogeneousNonEmptyGroups) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    auto& sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto source = sub_config.topology().groupById(0);
+
+    auto first = makeMtpLayoutGroup(
+        source, "first", {0}, source.kv_block_stride_bytes + 128, source.kv_scale_stride_bytes + 64);
+    auto second = makeMtpLayoutGroup(
+        source, "second", {0}, source.kv_block_stride_bytes + 129, source.kv_scale_stride_bytes + 64);
+    sub_config.setTopology({std::move(first), std::move(second)}, {{0, {"first", "second"}}});
+
+    EXPECT_ANY_THROW((void)rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg));
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsDuplicatePhysicalGroupTag) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    auto& sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto source = sub_config.topology().groupById(0);
+
+    auto first =
+        makeMtpLayoutGroup(source, "same", {0}, source.kv_block_stride_bytes, source.kv_scale_stride_bytes);
+    auto second =
+        makeMtpLayoutGroup(source, "same", {0}, source.kv_block_stride_bytes, source.kv_scale_stride_bytes);
+
+    EXPECT_ANY_THROW(sub_config.setTopology({std::move(first), std::move(second)}, {{0, {"same"}}}));
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsNonMlaAggregateKvEvenWhenSparse) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    auto& sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto source = sub_config.topology().groupById(0);
+
+    auto group = makeMtpLayoutGroup(source,
+                                    "draft",
+                                    {0},
+                                    source.spec->block_size_bytes() + 128,
+                                    source.spec->scale_block_size_bytes());
+    sub_config.setTopology({std::move(group)}, {{0, {"draft"}}});
+    sub_config.use_mla   = false;
+    sub_config.is_sparse = true;
+
+    EXPECT_ANY_THROW((void)rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg));
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsAggregateScaleWithoutSparseLayout) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    auto& sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto source = sub_config.topology().groupById(0);
+
+    auto group = makeMtpLayoutGroup(source,
+                                    "draft",
+                                    {0},
+                                    source.spec->block_size_bytes(),
+                                    source.spec->scale_block_size_bytes() + 64);
+    sub_config.setTopology({std::move(group)}, {{0, {"draft"}}});
+    sub_config.use_mla   = false;
+    sub_config.is_sparse = false;
+
+    EXPECT_ANY_THROW((void)rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg));
+}
+
+TEST_F(BlockPoolTest, MTPLayoutRejectsStrideSmallerThanSpec) {
+    auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/1, /*block_num=*/4);
+    auto& sub_config = *cache_cfg.mtp_sub_configs[0];
+    const auto source = sub_config.topology().groupById(0);
+    ASSERT_GT(source.spec->block_size_bytes(), 0u);
+
+    auto group = makeMtpLayoutGroup(source,
+                                    "draft",
+                                    {0},
+                                    source.spec->block_size_bytes() - 1,
+                                    source.spec->scale_block_size_bytes());
+    sub_config.setTopology({std::move(group)}, {{0, {"draft"}}});
+
+    EXPECT_ANY_THROW((void)rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg));
 }
 
 // Allocation Test
