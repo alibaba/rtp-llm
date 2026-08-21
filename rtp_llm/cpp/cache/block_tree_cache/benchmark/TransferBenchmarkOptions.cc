@@ -39,6 +39,13 @@ TransferOptions TransferOptions::parse(int& argc, char**& argv) {
             opts.transfer_descriptor_batch_size = parseUnsigned(key, next);
         else if (key == "copy-strategy")
             opts.copy_strategy = next();
+        else if (key == "cuda-batch-serialize") {
+            const size_t value = parseUnsigned(key, next);
+            if (value > 1) {
+                throw std::runtime_error("--cuda-batch-serialize must be 0 or 1");
+            }
+            opts.cuda_batch_serialize = value == 1;
+        }
         else if (key == "min-measured-seconds")
             opts.min_measured_seconds = parseUnsigned(key, next);
         else if (key == "host-memory")
@@ -76,13 +83,15 @@ void TransferOptions::printHelp() {
         << "  --transfer-worker-count=N    Lower transfer workers (default: 1)\n"
         << "  --transfer-descriptor-batch-size=N  Descriptors per engine submit (0 = concurrency)\n"
         << "  --copy-strategy=STRATEGY     auto | batch | staged-sm (default: auto)\n"
+        << "  --cuda-batch-serialize=0|1   Serialize CUDA batch API submission per device (default: 1)\n"
         << "  --min-measured-seconds=N     Measured phase duration floor; pilot run scales op count (default: 30)\n"
         << "  --host-memory=TYPE           pinned | pageable (default: pinned)\n"
         << "  --disk-path=PATH             Disk directory for disk transfers\n"
         << "  --disk-io-mode=MODE          direct | buffered (default: direct)\n"
         << "  --disk-access-pattern=PAT    sequential | random (default: sequential)\n"
         << "  --working-set-blocks=N       Transfer pool size (0 = auto: concurrency*4, waves rotate)\n"
-        << "  --device-disk-staging-block-count=N  Device<->Disk staging buffers, caps in-flight ops (default: 4)\n"
+        << "  --device-disk-staging-block-count=N  Device<->Disk staging buffers, passed through unchanged "
+           "(default: 4)\n"
         << "  --help                       Show this help\n";
 }
 

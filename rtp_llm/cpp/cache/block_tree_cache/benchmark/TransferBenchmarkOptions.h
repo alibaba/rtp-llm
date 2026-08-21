@@ -35,6 +35,12 @@ struct TransferOptions {
     // fallback or mixed execution.
     std::string copy_strategy{"auto"};  // "auto", "batch" or "staged-sm"
 
+    // Safety switch for the CUDA batch path. When enabled, only the CUDA batch
+    // API submission is serialized per device; stream completion remains
+    // concurrent. Enabled by default because concurrent submissions can crash
+    // or hang in the deployed CUDA stack.
+    bool cuda_batch_serialize{true};
+
     // Measured-phase duration floor (seconds). A pilot run scales the
     // operation count so the measured phase lasts at least this long.
     size_t min_measured_seconds{30};
@@ -52,9 +58,9 @@ struct TransferOptions {
     // page cache; workers rotate blocks round-robin over the pool.
     size_t working_set_blocks{0};
 
-    // Device<->Disk staging buffer count. This pool caps in-flight
-    // device-disk ops (throughput ~= pool size / per-op hold time), so it
-    // should be >= transfer_concurrency for path-capability measurements.
+    // Device<->Disk staging buffer count. The benchmark passes this value
+    // through unchanged so staging capacity can be measured independently
+    // from transfer concurrency.
     // Default 4 matches the production BlockTreeCacheConfig default.
     size_t device_disk_staging_block_count{4};
 
