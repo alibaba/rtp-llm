@@ -17,9 +17,13 @@ import time
 import traceback
 from typing import TYPE_CHECKING, List, Optional
 
+from rtp_llm.config.grammar_tokenizer_info import (
+    build_model_grammar_tokenizer_info_json,
+)
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.dash_sc.inference.grammar_validator import GrammarValidator
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,
@@ -36,6 +40,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
+from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
 if TYPE_CHECKING:
@@ -240,12 +245,11 @@ def _derive_echo_prefix_ids(
 ) -> List[int]:
     """Encode ``generate_env_config.think_start_tag`` once to produce the prefill token ids.
 
-    Disabled (returns ``[]``) when ``THINK_MODE`` env is off or ``think_start_tag`` is empty;
-    stays aligned with the engine's thinking switch so dash_sc and the engine turn on/off
-    together. Fail-open: any error returns ``[]`` and logs a warning.
+    DashSC resolves an omitted request mode to adaptive independently of
+    ``THINK_MODE``, so the startup metadata must not be gated by that OpenAI
+    default. An empty ``think_start_tag`` disables the prefix. Fail-open
+    tokenizer errors return ``[]`` and log a warning.
     """
-    if not bool(generate_env_config.think_mode):
-        return []
     tag = normalize_think_tag(generate_env_config.think_start_tag or "")
     if not tag:
         return []
@@ -607,6 +611,29 @@ class DashScApp:
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
                 )
+                # Admission-time grammar validation only makes sense on an LM task
+                # (xgrammar is the only grammar engine; the removed backend selector
+                # is gone).  Other task types leave the validator off and the engine
+                # keeps its old mid-stream rejection behaviour.
+                grammar_config = self.py_env_configs.grammar_config
+                grammar_validator = None
+                if model_config.task_type == TaskType.LANGUAGE_MODEL:
+                    try:
+                        grammar_validator = GrammarValidator(
+                            build_model_grammar_tokenizer_info_json(
+                                base_tok, model_config
+                            ),
+                            grammar_config,
+                            self.py_env_configs.grammar_admission_config,
+                        )
+                    except Exception as e:
+                        # xgrammar (a soft dependency) may be uninstalled or its
+                        # bindings unloadable; admission validation stays off and
+                        # the engine keeps its mid-stream rejection behaviour.
+                        logging.warning(
+                            "[DashScApp] grammar admission validator disabled: %s", e
+                        )
+                        grammar_validator = None
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -619,6 +646,7 @@ class DashScApp:
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
+                    grammar_validator=grammar_validator,
                 )
 
             loop = self._start_enqueue_loop()

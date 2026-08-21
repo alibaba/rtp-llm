@@ -23,7 +23,6 @@ flashinfer = [
 ]
 
 flashinfer_with_cache = [
-    "//rtp_llm:flashinfer-python",
     "//rtp_llm:flashinfer-cubin",
     "//rtp_llm:flashinfer-jit-cache",
     "//rtp_llm:nvidia-cutlass-dsl",
@@ -74,10 +73,10 @@ py_library(
             "//rtp_llm:amdsmi",
             "//rtp_llm:triton",
         ],
-        "@//:using_cuda12": [
+        "@//:using_cuda13_arm": [
             "//rtp_llm:deep_gemm",
         ],
-        "@//:using_cuda13_arm": [
+        "@//:using_cuda12": [
             "//rtp_llm:deep_gemm",
         ],
         "@//:using_ppu": [

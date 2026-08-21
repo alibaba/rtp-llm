@@ -252,6 +252,20 @@ class MMSchedulerTest(TestCase):
         finally:
             sched.close()
 
+    def test_multiple_work_items_use_largest_timeout(self):
+        fake = _FakeMMPart(delay=0.15)
+        sched = MMScheduler(fake, batch_wait_ms=0)
+        try:
+            sched.submit_and_wait(
+                [
+                    _FakeWorkItem(timeout_ms=50),
+                    _FakeWorkItem(timeout_ms=1000),
+                ]
+            )
+            self.assertEqual(fake.calls, [2])
+        finally:
+            sched.close()
+
     def test_none_timeout_falls_back(self):
         """mm_timeout_ms=None must not crash submit_and_wait (falls back)."""
         fake = _FakeMMPart()

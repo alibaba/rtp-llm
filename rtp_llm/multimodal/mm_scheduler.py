@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional
 import torch
 import torch.profiler
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
@@ -144,7 +145,7 @@ class _EmbeddingRequest:
 
 
 # Fallback for hand-built work items without a positive request timeout.
-_DEFAULT_MM_TIMEOUT_MS = 120000
+_DEFAULT_MM_TIMEOUT_MS = VitConfig.DEFAULT_MM_TIMEOUT_MS
 
 # How often the idle executor re-checks _stopped. A new submission wakes the
 # blocked get() immediately, so this adds no request latency — it only bounds
@@ -261,14 +262,14 @@ class MMScheduler:
 
         # The scheduler owns only the embedding-stage timeout. Preprocessing keeps
         # its existing timeout semantics and does not consume this budget. Use the
-        # shortest positive timeout when a request contains multiple work items.
+        # largest positive timeout, matching MMWorkItem and the remote VIT proxy.
         timeout_values_ms = [
             wi.mm_timeout_ms
             for wi in work_items
             if wi.mm_timeout_ms is not None and wi.mm_timeout_ms > 0
         ]
         timeout_ms = (
-            min(timeout_values_ms) if timeout_values_ms else _DEFAULT_MM_TIMEOUT_MS
+            max(timeout_values_ms) if timeout_values_ms else _DEFAULT_MM_TIMEOUT_MS
         )
         timeout_s = timeout_ms / 1000.0
 

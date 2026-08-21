@@ -32,6 +32,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
+    batch_kv_cache_resource->markCacheKeysInitialized();
 }
 
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
@@ -66,6 +67,7 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
+    batch_kv_cache_resource->markCacheKeysInitialized();
 }
 
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {

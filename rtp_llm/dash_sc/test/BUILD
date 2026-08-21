@@ -7,6 +7,15 @@ py_test(
 )
 
 py_test(
+    name = "grammar_validator_test",
+    srcs = ["inference/grammar_validator_test.py"],
+    main = "inference/grammar_validator_test.py",
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
     name = "think_test",
     srcs = ["think_test.py"],
     main = "think_test.py",

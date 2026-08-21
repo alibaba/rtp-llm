@@ -3,9 +3,7 @@
 #include "torch/all.h"
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -61,6 +59,14 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
+    if (all_streams.front()->outputVocabSize() > 0) {
+        auto* top_k_values = sampler_inputs.top_k.data_ptr<int32_t>();
+        for (size_t index = 0; index < sampler_inputs.batch_size; ++index) {
+            if (top_k_values[index] > 0) {
+                top_k_values[index] = std::min<int32_t>(top_k_values[index], static_cast<int32_t>(vocab_size));
+            }
+        }
+    }
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -136,8 +142,12 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
+    // Pin token_ids so Sampler::forward can non_blocking=true the H2D copy.
+    // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
+    // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
+    // at bs=128 / step=65552).
     sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, torch::kInt32);
+        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
@@ -177,7 +187,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
-            sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
+            sequence_lengths[batch_idx]   = stream->seqLength() + (score_batch ? i : propose_step);
             num_beams_in[batch_idx]       = stream->currentNumBeams();
             num_beams_out[batch_idx]      = stream->nextNumBeams();
             top_k[batch_idx]              = stream->generateConfig()->top_k;

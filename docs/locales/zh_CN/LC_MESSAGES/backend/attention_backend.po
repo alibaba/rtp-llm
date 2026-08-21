@@ -144,7 +144,7 @@ msgid "NV ✅<br> AMD ✅"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "--disable_flashinfer_native"
+msgid "--disable_flashinfer_native<br>--disable_flashinfer_hybrid_prefill"
 msgstr ""
 
 #: ../../backend/attention_backend.md

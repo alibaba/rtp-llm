@@ -27,6 +27,20 @@ enum class ReturnAllProbsMode {
     ORIGINAL = 2
 };
 
+enum class ThinkingMode {
+    UNSPECIFIED = 0,
+    DISABLED    = 1,
+    ADAPTIVE    = 2,
+    ENABLED     = 3,
+};
+
+inline ThinkingMode normalizeThinkingMode(int value) {
+    if (value < static_cast<int>(ThinkingMode::UNSPECIFIED) || value > static_cast<int>(ThinkingMode::ENABLED)) {
+        return ThinkingMode::UNSPECIFIED;
+    }
+    return static_cast<ThinkingMode>(value);
+}
+
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
     int global_request_id  = -1;
@@ -94,6 +108,7 @@ public:
     bool pd_separation         = false;
 
     bool               in_think_mode       = false;
+    ThinkingMode       thinking_mode       = ThinkingMode::UNSPECIFIED;
     int                max_thinking_tokens = 0;
     std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
@@ -106,8 +121,7 @@ public:
     bool               enable_memory_cache = true;
     bool               enable_remote_cache = true;
     std::string        trace_id;
-    bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
-    std::optional<int> batch_group_timeout;
+    std::optional<int> group_timeout;
     std::string        unique_key;
 
     // 生成式推荐：组合 token 粒度去重与曝光过滤
@@ -125,8 +139,12 @@ public:
     // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
     int cross_seq_diverge_start_combo = 0;
 
-    bool top1() {
+    bool top1() const {
         return top_k == 1;
+    }
+
+    bool stochastic() const {
+        return do_sample && !top1();
     }
 
     std::vector<RoleAddr> role_addrs;
@@ -185,13 +203,14 @@ public:
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
                      << ", grammar_terminate_without_stop_token: " << grammar_terminate_without_stop_token
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
-                     << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", in_think_mode: " << in_think_mode << ", thinking_mode: " << static_cast<int>(thinking_mode)
+                     << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
+                     << ", enable_remote_cache: " << enable_remote_cache
                      << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
                      << ", enable_cross_sequence_ban: " << enable_cross_sequence_ban
@@ -300,6 +319,9 @@ public:
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
+        int thinking_mode_int = static_cast<int>(thinking_mode);
+        json.Jsonize("thinking_mode", thinking_mode_int, thinking_mode_int);
+        thinking_mode = normalizeThinkingMode(thinking_mode_int);
         JSONIZE(max_thinking_tokens);
         JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
@@ -310,9 +332,8 @@ public:
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
-        JSONIZE(force_batch);
         JSONIZE(aux_info);
-        JSONIZE_OPTIONAL(batch_group_timeout);
+        JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);
         JSONIZE(combo_token_size);
         JSONIZE(banned_combo_token_ids);

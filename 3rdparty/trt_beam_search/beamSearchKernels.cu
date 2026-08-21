@@ -154,13 +154,16 @@ __global__ void addCumLogProbsKernel(
     int const bid = blockIdx.x; // Index of request in batch
     runtime::SizeType32 const slot = batchSlots ? batchSlots[bid] : bid;
     float const diversityRate{diversityRates == nullptr ? kBeamSearchDiversity : diversityRates[slot]};
-    T* pLocalLogProbs = pStage1LogProbs + bid * nBMIn * nBMOut * 2;
+    T* pLocalLogProbs = pStage1LogProbs + bid * nBMIn * nBMOut;
 
-    for (int i = threadIdx.x; i < nBMIn * nBMOut * 2; i += blockDim.x)
+    for (int i = threadIdx.x; i < nBMIn * nBMOut; i += blockDim.x)
     {
-        int const iBMIn = i / (nBMOut * 2);
+        int const iBMIn = i / nBMOut;
         if (finished && finished[slot * nBMIn + iBMIn].isFinished())
         {
+            // TODO(known-broken): i is a candidate-slot index, endIds[slot] is a vocab
+            // token id — this compares across index spaces (pre-existing). Unreachable
+            // in production while `finished` stays unwired.
             pLocalLogProbs[i] += endIds && (i == endIds[slot]) ? T(1.0f) : T(0.0f);
         }
         else
@@ -196,63 +199,28 @@ template void launchAddCumLogProbs<half>(
 __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage2Id, size_t const nBS,
     size_t const nBMIn, size_t const nBMOut, size_t const nV)
 {
-    // Use topK output `pStage1Id` and `pStage1Id` to get the index of a new token in `logProbs` for each beam.
+    // Use topK output `pStage1Id` and `pStage2Id` to get the index of a new token in `logProbs` for each beam.
+    // Layouts: pStage1Id is [nBS, nBMIn, nBMOut] flat (per-beam candidates, index-ordered);
+    // pStage2Id is [nBS, nBMOut] flat, holding the flat stage-1 indices that survived the
+    // merged top-k.
     //
-    // clang-format off
-    //
-    // Example for normal beam search:
-    // nBS = 3, nBM = 2, nV = 5, use logProbs with integer values here for simplicity.
-    // ┏┏ 46 35 47 18 67 ┓┓      ┏┏ 67 47 46 35 ┓┓ ┏┏ 4 2 0 1 ┓┓
-    // ┃┗ 76 23 74 73 17 ┛┃      ┃┗ 76 74 73 23 ┛┃ ┃┗ 0 2 3 1 ┛┃
-    // ┃┏ 67 49 98 88 74 ┓┃  A   ┃┏ 98 88 74 67 ┓┃ ┃┏ 2 3 4 0 ┓┃  C   ┏ 76 74 73 67 ┓ ┏ 4 5 6 0 ┓  D   ┏ 5 7 8 4 ┓
-    // ┃┗ 12 70 77 22 88 ┛┃ ---> ┃┗ 88 77 70 22 ┛┃ ┃┗ 4 2 1 3 ┛┃ ---> ┃ 98 88 88 77 ┃ ┃ 0 1 4 5 ┃ ---> ┃ 2 3 9 7 ┃
-    // ┃┏ 55 15 72  3 84 ┓┃      ┃┏ 74 72 55 15 ┓┃ ┃┏ 4 2 0 1 ┓┃      ┗ 98 93 84 77 ┛ ┗ 4 5 0 6 ┛      ┗ 9 6 4 5 ┛
-    // ┗┗ 77 93 14 60 98 ┛┛      ┗┗ 98 93 77 60 ┛┛ ┗┗ 4 1 0 3 ┛┛
-    //       logProbs              stage1LogProbs     stage1Id         stage2LogProbs   stage2Id     output-stage2Id
-    //
-    // For `stage2LogProbs[2][3] == 77`,
-    //     original batch index in logProbs:    blockIdx.x                  -> 2    (a)
-    //     original beam index in logProbs:     stage2Id[2][3] / (nBM * 2)  -> 1    (b)
-    //     row index in stage1Probs:            a * nBM + b                 -> 5    (c)
-    //     column index in stage1*:             stage2Id[2][3] % (nBM * 2)  -> 2    (d)
-    //     column index in logProbs:            stage1Id[c][d]              -> 0    (e)
-    //     pad for previous tokens:             b * nV                      -> 5    (f)
-    //     final output:                        e + f                       -> 5
-    //
-    // ========================================================================================================
-    // Example for VBWS:
-    // nBS = 2, nBMIn = 3, nBMOut = 5, nBM = 7, nV = 11, use logProbs with integer values here for simplicity.
-    // ┏┏ 46 35 47 18 67 76 23 74 73 17 67 ┓┓      ┏┏ 76 74 73 67 67 47 46 35 23 18 ┓┓ ┏┏  5  7  8  4 10  2  0  1  6  3 ┓┓
-    // ┃┃ 49 98 88 74 12 70 77 22 88 55 15 ┃┃      ┃┃ 98 88 88 77 74 70 55 49 22 15 ┃┃ ┃┃  1  2  8  6  3  5  9  0  7 10 ┃┃
-    // ┃┗ 72  3 84 77 93 14 60 98 65  4 20 ┛┃  A   ┃┗ 98 93 84 77 72 65 60 20 14  4 ┛┃ ┃┗  7  4  2  3  0  8  6 10  5  9 ┛┃  C
-    // ┃┏ 16 34 71 38 19 91  5 81 97 43 79 ┓┃ ---> ┃┏ 97 91 81 79 71 43 38 34 19 16 ┓┃ ┃┏  8  5  7 10  2  9  3  1  4  0 ┓┃ --->
-    // ┃┃  2 22 77 37 57 33 57 41 27 73 88 ┃┃      ┃┃ 88 77 73 57 57 41 37 33 27 22 ┃┃ ┃┃ 10  2  9  4  6  7  3  5  8  1 ┃┃
-    // ┗┗ 77 16 23 22 82 89  6 77 67 15 31 ┛┛      ┗┗ 89 82 77 77 67 31 23 22 16 15 ┛┛ ┗┗  5  4  0  7  8 10  2  3  1  9 ┛┛
-    //                logProbs                                stage1LogProbs                         stage1Id
-    //
-    //  C    ┏ 98 98 93 88 88 84 77 77 76 74 ┓ ┏ 10 20 21 11 12 22 13 23  0  1 ┓  D   ┏ 12 29 26 13 19 24 17 25  5  7 ┓
-    // --->  ┗ 97 91 89 88 82 81 79 77 77 77 ┛ ┗  0  1 20 10 21  2  3 11 22 23 ┛ ---> ┗  8  5 27 21 26  7 10 13 22 29 ┛
-    //                 stage2LogProbs                        stage2Id                          output-stage2Id
-    //
-    // For `stage2LogProbs[1][4] == 82`,
-    //     original batch index in logProbs:    blockIdx.x                      ->  1   (a)
-    //     original beam index in logProbs:     stage2Id[1][4] / (nBMOut * 2)   ->  2   (b)
-    //     row index in stage1LogProbs:         a * nBMIn + b                   ->  5   (c)
-    //     column index in stage1*:             stage2Id[1][4] % (nBMOut * 2)   ->  1   (d)
-    //     column index in logProbs:            stage1Id[c][d]                  ->  4   (e)
-    //     pad for previous tokens:             b * nV                          -> 22   (f)
-    //     final output:                        e + f                           -> 26   output-stage2Id[1][4]
-    //
-    // clang-format on
+    // For output slot j of batch a = blockIdx.x:
+    //   stage2Id = pStage2Id[a * nBMOut + j]        flat candidate index into stage-1
+    //   b = stage2Id / nBMOut                       beam the candidate came from
+    //   d = stage2Id % nBMOut                       slot inside that beam's candidates
+    //   c = a * nBMIn + b                           row in pStage1Id
+    //   e = pStage1Id[c * nBMOut + d]               token id within the vocab
+    //   f = b * nV                                  padding for previous tokens
+    //   output: pStage2Id[a * nBMOut + j] = e + f   final index in logProbs
     int const a = blockIdx.x; // Index of request in batch
-    for (int j = threadIdx.x; j < nBMOut * 2; j += blockDim.x)
+    for (int j = threadIdx.x; j < nBMOut; j += blockDim.x)
     {
-        int const index = a * (nBMOut * 2) + j;
+        int const index = a * nBMOut + j;
         int const stage2Id = pStage2Id[index];
-        int const b = stage2Id / (nBMOut * 2);
+        int const b = stage2Id / nBMOut;
         int const c = a * nBMIn + b;
-        int const d = stage2Id % (nBMOut * 2);
-        int const e = pStage1Id[c * (nBMOut * 2) + d];
+        int const d = stage2Id % nBMOut;
+        int const e = pStage1Id[c * nBMOut + d];
         int const f = b * nV;
         pStage2Id[index] = e + f;
     }

@@ -47,6 +47,8 @@ public:
                  int                    reserve_step,
                  bool                   enable_reuse_cache),
                 (const, override));
+    MOCK_METHOD(size_t, availableBlocksNum, (), (const, override));
+    MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
 
 protected:
     MOCK_METHOD(bool, doInit, (), (override));

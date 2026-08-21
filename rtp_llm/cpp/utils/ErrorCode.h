@@ -31,8 +31,10 @@ enum class ErrorCode {
     MM_EMPTY_ENGINE_ERROR  = 904,
     MM_NOT_SUPPORTED_ERROR = 905,
     MM_DOWNLOAD_FAILED     = 906,
+    MM_REMOTE_RPC_FAILED   = 907,
 
-    // Error codes starting from 8000 can be retried
+    // Codes starting from 8000 are historically retry-oriented. Individual
+    // domains may explicitly classify lower codes through their retry policy.
     CANCELLED              = 8100,
     OUT_OF_VOCAB_RANGE     = 8101,
     OUTPUT_QUEUE_FULL      = 8102,
@@ -90,6 +92,10 @@ enum class ErrorCode {
     // load balance error
     GET_PART_NODE_STATUS_FAILED = 8400,
     GET_ALL_NODE_STATUS_FAILED  = 8401,
+
+    // AutoTPM Cancel: victim of priority preemption.
+    // Maps to HTTP 429 / gRPC RESOURCE_EXHAUSTED upstream.
+    PRIORITY_PREEMPTED = 8429,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
@@ -228,10 +234,16 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "MM_EMPTY_ENGINE_ERROR";
         case ErrorCode::MM_NOT_SUPPORTED_ERROR:
             return "MM_NOT_SUPPORTED_ERROR";
+        case ErrorCode::MM_DOWNLOAD_FAILED:
+            return "MM_DOWNLOAD_FAILED";
+        case ErrorCode::MM_REMOTE_RPC_FAILED:
+            return "MM_REMOTE_RPC_FAILED";
         case ErrorCode::GET_PART_NODE_STATUS_FAILED:
             return "GET_PART_NODE_STATUS_FAILED";
         case ErrorCode::GET_ALL_NODE_STATUS_FAILED:
             return "GET_ALL_NODE_STATUS_FAILED";
+        case ErrorCode::PRIORITY_PREEMPTED:
+            return "PRIORITY_PREEMPTED";
         default:
             return "Error: Unrecognized ErrorCode";
     }

@@ -362,6 +362,36 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
     EXPECT_EQ(proc->committedOutputLen().value(), 1);
 }
 
+// Adversarial user schema: an infinite "$ref" self-reference compiles, but the
+// resulting grammar accepts nothing. The decode mask must then disallow every
+// token (rather than silently degrading to allow-all) and the first committed
+// token must be reported as rejected instead of corrupting matcher state.
+TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceMasksEverythingAndRejectsCommit) {
+    auto backend = makeBackend(/*terminate_without_stop_token=*/false);
+    ASSERT_TRUE(backend);
+    auto proc = makeProcessorFromKey(backend,
+                                     {"json", R"json({
+  "$ref": "#/definitions/Self",
+  "definitions": {
+    "Self": {"$ref": "#/definitions/Self"}
+  }
+})json"});
+    ASSERT_TRUE(proc.proc);
+
+    auto logits = torch::zeros({1, 128}, torch::kFloat32);
+    ASSERT_FALSE(proc->process(makeSamplerInputs(logits), 0, 1).has_value());
+    auto values = logitsVec(logits);
+    for (int token_id = 0; token_id < 128; ++token_id) {
+        expectTokenMasked(values, token_id);
+    }
+
+    auto error = proc->updateStatus(torch::tensor({static_cast<int32_t>('{')}, torch::kInt32).reshape({1, 1}), 1);
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN);
+    EXPECT_EQ(proc->committedOutputLen().value(), 0);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
+}
+
 // regex "ab": legal sequence is 'a' then 'b'. A fully-legal draft chain should
 // return cap == propose_step with each row constraining to the expected token.
 TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
@@ -653,6 +683,43 @@ TEST(GrammarLogitsProcessorTest, ClearBitmaskTokenRangeClearsFullWordsAndEdges) 
     EXPECT_FALSE(rowAllows(bm, words, 0, 64));
     EXPECT_FALSE(rowAllows(bm, words, 0, 69));
     EXPECT_TRUE(rowAllows(bm, words, 0, 70));
+}
+
+// The grammar vocab (128) may be a strict prefix of the model vocab (160). Every
+// verify row must mask the [grammar_vocab, model_vocab) tail, including the rows
+// produced after a draft token was provisionally accepted, so a draft token that
+// xgrammar never saw can never be accepted by the packed bitmask.
+TEST(GrammarLogitsProcessorTest, SpecVerifyMasksModelVocabTailBeyondGrammarVocab) {
+    auto backend = makeBackend(/*terminate_without_stop_token=*/false);
+    ASSERT_TRUE(backend);
+    auto proc = makeProcessor(backend, "ab");
+    ASSERT_TRUE(proc.proc);
+
+    const int            propose_step = 1;
+    const size_t         model_vocab  = 160;
+    const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(model_vocab);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = model_vocab;
+
+    EXPECT_EQ(expectCapOk(proc->prepareSpeculative(req)), propose_step);
+
+    EXPECT_TRUE(rowAllows(bm, words, 0, kA));
+    EXPECT_FALSE(rowAllows(bm, words, 0, 128));
+    EXPECT_FALSE(rowAllows(bm, words, 0, 159));
+
+    EXPECT_TRUE(rowAllows(bm, words, 1, kB));
+    EXPECT_FALSE(rowAllows(bm, words, 1, 128));
+    EXPECT_FALSE(rowAllows(bm, words, 1, 159));
+
+    EXPECT_EQ(proc->committedOutputLen().value(), 0);
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), 0);
 }
 
 TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesEndAndFinalGrammar) {

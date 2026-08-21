@@ -43,7 +43,14 @@
                     "reuse_len": 0,
                     "local_reuse_len": 0,
                     "remote_reuse_len": 0,
-                    "memory_reuse_len": 0
+                    "memory_reuse_len": 0,
+                    "speculative_draft_rounds": 905,
+                    "speculative_accepted_tokens_per_pos": [
+                        5,
+                        0,
+                        0,
+                        0
+                    ]
                 }
             }
         },
@@ -127,7 +134,14 @@
                     "decode_remote_reuse_len": 0,
                     "decode_memory_reuse_len": 0,
                     "role_addrs": [],
-                    "aux_string": ""
+                    "aux_string": "",
+                    "speculative_draft_rounds": 861,
+                    "speculative_accepted_tokens_per_pos": [
+                        6,
+                        0,
+                        0,
+                        0
+                    ]
                 },
                 "extra_outputs": null
             }

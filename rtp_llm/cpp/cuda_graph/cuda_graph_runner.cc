@@ -153,13 +153,15 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
 // | Model Type                     | is_prefill_cuda_graph_mode_ | num_tokens_per_bs_                   | 是否已经支持   |
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
 // | Draft Model (prefill)          | true                        | gen_num_per_cycle + 1                | yes          |
-// | Target Model (score, prefill)  | false                       | gen_num_per_cycle + 1                | yes          |
+// | Target Model (verify)          | false                       | gen_num_per_cycle + 1                | yes          |
 // | Draft Model (decode)           | false                       | 1                                    | yes          |
 // | Embedding Model (prefill)      | true                        | max_seq_len                          | yes          |
 // | Normal Model (decode)          | false                       | 1                                    | yes          |
 // +--------------------------------+-----------------------------+--------------------------------------+--------------+
 // Notes:
 // - Speculative sampling: model_id == 0 (target), model_id == 1 (draft)
+// - Target verify uses context-style attention inputs but selects/replays CUDA
+//   graphs by decode batch size.
 // clang-format on
 
 // Helper function for optimized tensor copy using async operations with current CUDA stream
@@ -196,11 +198,27 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     const int token_num   = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs.input_ids, token_num * sizeof(int));
+
+    // check size and dtype. The copy below is a raw byte memcpy into the captured
+    // buffer, so the row width must match exactly: a DSpARK draft graph rows are
+    // len(target_layer_ids) * hidden_size wide while a plain MTP graph is
+    // hc_mult * hidden_size, and a numel-only check would silently accept a
+    // reshaped view of the wrong layout.
     if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0) {
-        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.numel() <= py_model_inputs.input_hiddens.numel(),
-                                "input_hiddens numel mismatch: %zu > %zu",
-                                inputs.input_hiddens.numel(),
-                                py_model_inputs.input_hiddens.numel());
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.is_contiguous(),
+                                "input_hiddens must be contiguous for the raw byte copy into the graph buffer");
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dim() == 2 && py_model_inputs.input_hiddens.dim() == 2,
+                                "input_hiddens must be rank 2, got input dim=%ld capture dim=%ld",
+                                inputs.input_hiddens.dim(),
+                                py_model_inputs.input_hiddens.dim());
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.size(1) == py_model_inputs.input_hiddens.size(1),
+                                "input_hiddens row width mismatch: input=%ld capture=%ld",
+                                inputs.input_hiddens.size(1),
+                                py_model_inputs.input_hiddens.size(1));
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.size(0) <= py_model_inputs.input_hiddens.size(0),
+                                "input_hiddens row count exceeds graph capacity: input=%ld capture=%ld",
+                                inputs.input_hiddens.size(0),
+                                py_model_inputs.input_hiddens.size(0));
         RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dtype() == py_model_inputs.input_hiddens.dtype(),
                                 "input_hiddens dtype mismatch: %s != %s",
                                 inputs.input_hiddens.dtype().name(),
@@ -306,49 +324,58 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     };
 
+    const int selected_graph_batch_size =
+        is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
+
     // Clear stale device ranges in one launch before copying the live portions.
 #if USING_CUDA
-    CudaGraphPrepareFillParams fill_params;
-    if (!has_tagged_cache) {
-        addCudaGraphPrepareFillRegion(fill_params,
-                                      py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
-                                      0,
-                                      py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.numel(),
-                                      0);
-    } else {
-        for (auto& [tag, dst_inputs] : py_model_inputs_.attention_inputs_by_tag) {
-            (void)tag;
+    {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
+        CudaGraphPrepareFillParams fill_params;
+        if (!has_tagged_cache) {
             addCudaGraphPrepareFillRegion(fill_params,
-                                          dst_inputs.kv_cache_kernel_block_id_device,
+                                          py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
                                           0,
-                                          dst_inputs.kv_cache_kernel_block_id_device.numel(),
+                                          py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.numel(),
                                           0);
+        } else {
+            for (auto& [tag, dst_inputs] : py_model_inputs_.attention_inputs_by_tag) {
+                (void)tag;
+                addCudaGraphPrepareFillRegion(fill_params,
+                                              dst_inputs.kv_cache_kernel_block_id_device,
+                                              0,
+                                              dst_inputs.kv_cache_kernel_block_id_device.numel(),
+                                              0);
+            }
         }
+        if (is_prefill_cuda_graph_mode_) {
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.prefix_lengths_device,
+                                          state.current_batch_size,
+                                          max_bs_,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.input_lengths_device,
+                                          state.current_batch_size,
+                                          max_bs_,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.cu_seqlens_device,
+                                          state.current_batch_size + 1,
+                                          max_bs_ + 1,
+                                          state.current_seq_len);
+            addCudaGraphPrepareFillRegionFromDevice(fill_params,
+                                                    py_model_inputs_.attention_inputs.cu_kv_seqlens_device,
+                                                    state.current_batch_size + 1,
+                                                    max_bs_ + 1,
+                                                    inputs.attention_inputs.cu_kv_seqlens_device,
+                                                    state.current_batch_size);
+        }
+        // Target-verify padding (input_lengths / prefix_lengths / cu_*) is cleared by
+        // the shared tail block below, which covers both the host mirrors and the
+        // device buffers in one place.
+        invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
-    if (is_prefill_cuda_graph_mode_) {
-        addCudaGraphPrepareFillRegion(fill_params,
-                                      py_model_inputs_.attention_inputs.prefix_lengths_device,
-                                      state.current_batch_size,
-                                      max_bs_,
-                                      0);
-        addCudaGraphPrepareFillRegion(fill_params,
-                                      py_model_inputs_.attention_inputs.input_lengths_device,
-                                      state.current_batch_size,
-                                      max_bs_,
-                                      0);
-        addCudaGraphPrepareFillRegion(fill_params,
-                                      py_model_inputs_.attention_inputs.cu_seqlens_device,
-                                      state.current_batch_size + 1,
-                                      max_bs_ + 1,
-                                      state.current_seq_len);
-        addCudaGraphPrepareFillRegionFromDevice(fill_params,
-                                                py_model_inputs_.attention_inputs.cu_kv_seqlens_device,
-                                                state.current_batch_size + 1,
-                                                max_bs_ + 1,
-                                                inputs.attention_inputs.cu_kv_seqlens_device,
-                                                state.current_batch_size);
-    }
-    invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
 #else
     if (!has_tagged_cache) {
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
@@ -364,6 +391,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // (see OpDefs.h). They are NOT consumed by any GPU attention kernel during CUDA graph replay;
     // attention kernels only use kv_cache_kernel_block_id_{host,device}. Cache store operations
     // run outside the CUDA graph and read from the original (non-graph) inputs directly.
+
+    // input_ids / input_hiddens are handled by prepareInputData. They MUST NOT be touched here
+    // because the async-prepare path (PyWrappedModel::prepareAttentionInputs) calls this with
+    // undefined empty tensors for those slots, which would crash on element_size().
 
     tryAddD2DCopy(inputs.attention_inputs.cu_seqlens_device,
                   py_model_inputs_.attention_inputs.cu_seqlens_device,
@@ -439,93 +470,119 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 
     // Launch ALL D2D copies (contiguous + strided) in two fused kernels
-    fusedCopy(d2d_copies);
-    fusedStridedCopy(strided_d2d_copies);
+    {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
+        fusedCopy(d2d_copies);
+        fusedStridedCopy(strided_d2d_copies);
+    }
 
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
     // so that the GPU can start the kernel launch as soon as possible.
 
-    // H2H copies (common to both modes)
-    //
-    // When the incoming metadata is CUDA-resident (the MTP decode path
-    // publishes sequence/input lengths on CUDA even in the default host
-    // pipeline) while the capture mirrors are host pinned, optimizedCopyAsync
-    // becomes an async D2H. callPrepareCudaGraph below consumes those host
-    // mirrors synchronously on the CPU (host fill_params / fa2 replan), so the
-    // copies must land first. Main's host pipeline used synchronous host
-    // memcpy here and never observed stale values.
-    auto copyToHostMirror = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst, size_t size) {
-        optimizedCopyAsync(src, dst, size);
-        if (src.defined() && src.numel() > 0 && src.is_cuda() && dst.defined() && !dst.is_cuda()) {
-            pending_host_mirror_d2h = true;
-        }
-    };
+    {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(host_mirror_copy)");
 
-    copyToHostMirror(inputs.attention_inputs.cu_seqlens,
-                     py_model_inputs_.attention_inputs.cu_seqlens,
-                     (state.current_batch_size + 1) * sizeof(int));
+        // H2H copies (common to both modes)
+        //
+        // When the incoming metadata is CUDA-resident (the MTP decode path
+        // publishes sequence/input lengths on CUDA even in the default host
+        // pipeline) while the capture mirrors are host pinned, optimizedCopyAsync
+        // becomes an async D2H. callPrepareCudaGraph below consumes those host
+        // mirrors synchronously on the CPU (host fill_params / fa2 replan), so the
+        // copies must land first. Main's host pipeline used synchronous host
+        // memcpy here and never observed stale values.
+        auto copyToHostMirror = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst, size_t size) {
+            optimizedCopyAsync(src, dst, size);
+            if (src.defined() && src.numel() > 0 && src.is_cuda() && dst.defined() && !dst.is_cuda()) {
+                pending_host_mirror_d2h = true;
+            }
+        };
 
-    copyToHostMirror(inputs.attention_inputs.input_lengths,
-                     py_model_inputs_.attention_inputs.input_lengths,
-                     state.current_batch_size * sizeof(int));
+        copyToHostMirror(inputs.attention_inputs.cu_seqlens,
+                         py_model_inputs_.attention_inputs.cu_seqlens,
+                         (state.current_batch_size + 1) * sizeof(int));
 
-    copyToHostMirror(inputs.attention_inputs.prefix_lengths,
-                     py_model_inputs_.attention_inputs.prefix_lengths,
-                     state.current_batch_size * sizeof(int));
-
-    if (!has_tagged_cache) {
-        // Common H2H strided copies for kv_cache block tables (both decode & prefill)
-        stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id,
-                        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id);
-    }
-
-    const int selected_graph_batch_size =
-        is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
-
-    if (!is_prefill_cuda_graph_mode_) {
-        copyToHostMirror(inputs.attention_inputs.sequence_lengths,
-                         py_model_inputs_.attention_inputs.sequence_lengths,
+        copyToHostMirror(inputs.attention_inputs.input_lengths,
+                         py_model_inputs_.attention_inputs.input_lengths,
                          state.current_batch_size * sizeof(int));
-        if (state.current_batch_size < selected_graph_batch_size) {
-            py_model_inputs_.attention_inputs.sequence_lengths
-                .slice(0, state.current_batch_size, selected_graph_batch_size)
-                .fill_(0);
+
+        copyToHostMirror(inputs.attention_inputs.prefix_lengths,
+                         py_model_inputs_.attention_inputs.prefix_lengths,
+                         state.current_batch_size * sizeof(int));
+
+        if (!has_tagged_cache) {
+            // Common H2H strided copies for kv_cache block tables (both decode & prefill)
+            stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id,
+                            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id);
         }
-    } else {
-        if (isEmbeddingStylePrefillCudaGraph()) {
-            auto* input_lengths      = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
-            auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
-            int   cumulative_padding = 0;
-            int   token_idx          = 0;
-            for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
-                const int input_length = input_lengths[batch_idx];
-                std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
-                token_idx += input_length;
-                cumulative_padding += state.current_real_graph_seq_len - input_length;
+
+        if (!is_prefill_cuda_graph_mode_) {
+            copyToHostMirror(inputs.attention_inputs.sequence_lengths,
+                             py_model_inputs_.attention_inputs.sequence_lengths,
+                             state.current_batch_size * sizeof(int));
+            // When the live inputs carry no sequence_lengths at all (target verify
+            // feeds the prefill attention path), nothing was copied above, so the
+            // whole captured range - not just the padding tail - would otherwise
+            // keep the capture-time max_seq_len values.
+            const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
+                                                  && inputs.attention_inputs.sequence_lengths.numel() > 0;
+            const int  fill_start                = has_live_sequence_lengths ? state.current_batch_size : 0;
+            if (fill_start < selected_graph_batch_size) {
+                py_model_inputs_.attention_inputs.sequence_lengths.slice(0, fill_start, selected_graph_batch_size)
+                    .fill_(0);
             }
         } else {
-            copyToHostMirror(inputs.attention_inputs.padding_offset,
-                             py_model_inputs_.attention_inputs.padding_offset,
-                             state.current_seq_len * sizeof(int));
+            if (isEmbeddingStylePrefillCudaGraph()) {
+                // This loop consumes input_lengths on the CPU. When the live tensor is
+                // CUDA-resident (e.g. tests or device-side metadata pipelines), reading its
+                // data_ptr on the host is invalid; use the host-pinned capture mirror filled
+                // by the async D2H copy above and wait for that copy to land first.
+                const bool live_input_lengths_on_cuda = inputs.attention_inputs.input_lengths.is_cuda();
+                if (live_input_lengths_on_cuda && pending_host_mirror_d2h) {
+                    RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_input_lengths_d2h)");
+                    cuda_graph::graphGetCurrentStream().synchronize();
+                    pending_host_mirror_d2h = false;
+                }
+                const auto& input_lengths_host = live_input_lengths_on_cuda ?
+                                                     py_model_inputs_.attention_inputs.input_lengths :
+                                                     inputs.attention_inputs.input_lengths;
+                auto* input_lengths      = input_lengths_host.data_ptr<int32_t>();
+                auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+                int   cumulative_padding = 0;
+                int   token_idx          = 0;
+                for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
+                    const int input_length = input_lengths[batch_idx];
+                    std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
+                    token_idx += input_length;
+                    cumulative_padding += state.current_real_graph_seq_len - input_length;
+                }
+            } else {
+                copyToHostMirror(inputs.attention_inputs.padding_offset,
+                                 py_model_inputs_.attention_inputs.padding_offset,
+                                 state.current_seq_len * sizeof(int));
+            }
+
+            if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
+                auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params
+                                           ->cuda_graph_prefill_batch_size.data_ptr<int>();
+                *batch_size_ptr = state.current_batch_size;
+            }
         }
 
-        if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
-            auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params
-                                       ->cuda_graph_prefill_batch_size.data_ptr<int>();
-            *batch_size_ptr = state.current_batch_size;
-        }
-    }
-
-    // Multi-group cache: H2H strided copies for group-local block tables.
-    if (has_tagged_cache) {
-        for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
-            auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
-            stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
+        // Multi-group cache: H2H strided copies for group-local block tables.
+        if (has_tagged_cache) {
+            for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
+                auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
+                stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
+            }
         }
     }
 
     // Prefill attention consumes cumulative Q/KV lengths. Target verify uses the
-    // same attention path even though it is replayed by the decode graph runner.
+    // same attention path even though it is replayed by the decode graph runner;
+    // it is covered by num_tokens_per_bs_ > 1 (a verify step always scores
+    // gen_num_per_cycle + 1 tokens per request), which is also the condition under
+    // which initCaptureAttentionInputs allocated prefix_lengths{,_device} at all.
     // Clear graph padding so rounded-up batch slots do not retain capture-time
     // max sequence lengths and trigger unnecessary attention work.
     if ((is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1)
@@ -554,7 +611,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             .fill_(last_valid_kv);
     }
 
-    // launch prepare_cuda_graph when attention inputs are ready
+    // launch prepare_cuda_graph when attention inputs are ready.
+    // GIL is required: this function may be invoked from an AsyncRunner worker thread
+    // (MtpExecutor::decodeStep) and from the engine main thread (PyWrappedModel::forward),
+    // neither of which holds the GIL on entry. pybind11's attr() and call operator construct
+    // a Python args tuple via PyTuple_New, which segfaults without the GIL.
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(prepare_cuda_graph)");
         if (pending_host_mirror_d2h) {
@@ -749,6 +810,9 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
+    if (!enable_cuda_graph_) {
+        return false;
+    }
     if (kv_cache_group_tags_.size() > 1) {
         if (inputs.attention_inputs_by_tag.size() != kv_cache_group_tags_.size()) {
             RTP_LLM_LOG_WARNING("Tagged kv cache size mismatch: inputs=%zu, captured=%zu, fallback to normal run.",
@@ -767,24 +831,30 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
-    // Check if this is speculative sampling:
-    // 1. prefix_lengths is not empty
-    // 2. all values in input_lengths are the same
-    // this is for 2.2.1
     if (is_target_verify_) {
-        if (!inputs.attention_inputs.is_target_verify) {
+        if (!inputs.attention_inputs.is_target_verify || !inputs.attention_inputs.is_prefill) {
             return false;
         }
-        if (!inputs.attention_inputs.is_prefill) {
-            RTP_LLM_LOG_WARNING("Target-verify CUDA graph requires prefill attention inputs, fallback to normal run.");
+        if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
             return false;
         }
-        // Target-verify must also respect captured decode range. Otherwise we
-        // may replay an uncaptured graph key.
-        return tryGetRealGraphDecodeBatchSize(inputs, state) && canReplaySelectedGraph(inputs, state);
+        const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
+        RTP_LLM_CHECK_WITH_INFO(state.seq_len_sum == expected_tokens,
+                                "target-verify decode graph expects %d tokens (%d batches * %d), got %d",
+                                expected_tokens,
+                                state.current_batch_size,
+                                num_tokens_per_bs_,
+                                state.seq_len_sum);
+        if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0
+            && inputs.input_hiddens.size(0) != expected_tokens) {
+            RTP_LLM_FAIL("target-verify decode graph expects %d input-hidden rows, got %ld",
+                         expected_tokens,
+                         inputs.input_hiddens.size(0));
+        }
+        return canReplaySelectedGraph(inputs, state);
     }
 
-    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
+    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_) {
         return false;
     }
 
@@ -794,10 +864,8 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         }
         // current_real_graph_seq_len is always *it from lower_bound within capture_range_
         RTP_LLM_LOG_DEBUG("prefill cuda graph replay seq_len key %d", state.current_real_graph_seq_len);
-    } else {
-        if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
-            return false;
-        }
+    } else if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
+        return false;
     }
     return canReplaySelectedGraph(inputs, state);
 }
@@ -826,7 +894,7 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -861,8 +929,10 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.kv_cache_kernel_block_id =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
 
-    // prefix_lengths [batch_size, int32] (for attention `prepare`)
-    if (num_tokens_per_bs_ > 1 && !is_prefill_cuda_graph_mode_) {
+    // Target verify keeps multi-token attention geometry while selecting
+    // graphs by batch.
+    // Plain one-token decode must leave prefix_lengths undefined.
+    if (is_target_verify_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
@@ -1001,8 +1071,15 @@ void CudaGraphRunner::initCapture() {
 
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
-        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
+        inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+        // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
+        // to hidden_size * hc_mult for regular (MTP) graphs and to
+        // len(target_layer_ids) * hidden_size for a DSpARK draft graph, so it must be used
+        // instead of recomputing hc_mult_ * hidden_size_ here.
+        RTP_LLM_CHECK_WITH_INFO(
+            input_hidden_size_ > 0, "CUDA graph input_hidden_size must be positive, got %zu", input_hidden_size_);
+        inputs.input_hiddens =
+            torch::zeros({max_num_token_, static_cast<int64_t>(input_hidden_size_)}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -1134,7 +1211,7 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     // HC-shaped MTP draft prefill executes a fixed-capacity Python path. Other
     // MTP models must slice to the current graph key so FlashInfer's batch

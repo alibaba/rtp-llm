@@ -54,6 +54,16 @@ cc_library(
 )
 
 cc_library(
+    name = "tensor_holder",
+    hdrs = [
+        "TensorHolder.h",
+    ],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "op_data",
     hdrs = [
         "OpData.h",
@@ -64,6 +74,7 @@ cc_library(
     deps = [
         ":type_convert",
         ":common_defines",
+        ":tensor_holder",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",
@@ -289,7 +300,6 @@ cc_library(
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-            "//3rdparty/flashinfer:flashinfer",
         ],
         "//conditions:default": [],
     }),
@@ -321,7 +331,6 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
-            "//3rdparty/flashinfer:flashinfer",
         ],
         "//conditions:default": [],
     }),

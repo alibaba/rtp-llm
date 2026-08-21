@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
 namespace rtp_llm {
@@ -73,13 +74,27 @@ private:
                 return mm_embedding_res;
             } catch (py::error_already_set& e) {
                 std::string error_msg = e.what();
-                if (error_msg.find("download failed") != std::string::npos) {
-                    return ErrorInfo(ErrorCode::MM_DOWNLOAD_FAILED, error_msg);
+                try {
+                    py::gil_scoped_acquire gil;
+                    py::object             exc = py::reinterpret_borrow<py::object>(e.value());
+                    if (exc && py::hasattr(exc, "exception_type")) {
+                        const auto exception_type = exc.attr("exception_type").cast<int>();
+                        const auto message = py::hasattr(exc, "message") ? exc.attr("message").cast<std::string>() :
+                                                                           py::str(exc).cast<std::string>();
+                        if (auto error_code = parseMultimodalErrorCode(exception_type)) {
+                            return ErrorInfo(*error_code, message);
+                        }
+                    }
+                } catch (...) {
+                    // Fall through to the legacy error mapping.
+                }
+                if (auto error_info = parseMultimodalErrorMessage(error_msg)) {
+                    return *error_info;
                 }
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error_msg);
             }
         } else {
-            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "no mm process engine!");
+            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "no mm process engine!");
         }
     }
 };

@@ -40,8 +40,8 @@ using DeviceGuard = c10::hip::HIPGuardMasqueradingAsCUDA;
 
 namespace rtp_llm {
 GreedyOutput     sampleGreedy(const GreedyParams& params);
+torch::Tensor    sampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput sampleBeamSearch(BeamSearchParams params);
-void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             rejectionSampling(const RejectionSamplingParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
@@ -592,12 +592,12 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
     return sampleGreedy(params);
 }
 
-BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
-    return sampleBeamSearch(std::move(params));
+torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
+    return sampleFromProbs(probabilities);
 }
 
-void execChainSpeculativeSampling(const SpeculativeSamplingParams& params) {
-    chainSpeculativeSampling(params);
+BeamSearchOutput execSampleBeamSearch(BeamSearchParams params) {
+    return sampleBeamSearch(std::move(params));
 }
 
 void execRejectionSampling(const RejectionSamplingParams& params) {

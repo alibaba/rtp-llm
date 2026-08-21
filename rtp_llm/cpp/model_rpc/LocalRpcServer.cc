@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
+#include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 
 using namespace std;
@@ -83,10 +84,9 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     return serializeErrorMsg(request_key, RequestInfo(), error_info);
 }
 
-grpc::Status LocalRpcServer::serializeErrorMsg(const string&      request_key,
-                                               const RequestInfo& request_info,
-                                               ErrorInfo          error_info) {
-    const auto& error_msg = error_info.ToString();
+grpc::Status
+LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
+    const auto& error_msg       = error_info.ToString();
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
@@ -138,7 +138,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+            // WriterInterface uses false to signal that its downstream consumer has closed or cancelled.
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
@@ -258,10 +259,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         inputs.push_back(input);
     }
 
-    // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
-    // Streams that failed checkInputLength carry an error reported via reportError() and surface
-    // it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto streams = engine_->batchEnqueue(inputs);
+    // enqueueMultiple contract: the returned stream vector is 1:1 with `inputs` (same size, same
+    // order). Streams that failed checkInputLength carry an error reported via reportError() and
+    // surface it through collectStreamOutput → nextOutput → ErrorInfo path below.
+    auto streams = engine_->enqueueMultiple(inputs).second;
 
     // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
     // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
@@ -325,7 +326,11 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     RTP_LLM_LOG_DEBUG("getWorkerStatusInfo took %ld us", request_after_ws_time_us - request_begin_time_us);
 
     const auto& engine_schedule_info = status_info.engine_schedule_info;
-    response->set_role(status_info.role);
+    // Field 1 is consumed as an opaque string by legacy Masters, whose role
+    // codes are "RoleType.PREFILL" etc. Keep that exact spelling while the
+    // typed field 20 is rolled out.
+    response->set_role("RoleType." + roleTypeToString(status_info.role));
+    response->set_role_type(static_cast<RoleTypePB>(status_info.role));
 
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();
@@ -336,7 +341,16 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_iterate_count(task.iterate_count);
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
-        task_info->set_is_waiting(task.is_waiting);
+        task_info->set_phase(static_cast<::TaskPhase>(task.phase));
+        task_info->set_is_waiting(task.phase != rtp_llm::TaskPhase::RUNNING);
+        task_info->set_batch_id(task.batch_id);
+        task_info->set_execution_time_ms(task.execution_time_ms);
+        task_info->set_priority_preemption_progress(
+            static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
+        if (task.error_code != 0) {
+            task_info->mutable_error_info()->set_error_code(task.error_code);
+            task_info->mutable_error_info()->set_error_message(task.error_message);
+        }
     }
 
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
@@ -348,40 +362,38 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_iterate_count(task.iterate_count);
         task_info->set_end_time_ms(task.end_time_ms);
         task_info->set_dp_rank(status_info.dp_rank);
-        task_info->set_is_waiting(task.is_waiting);
+        task_info->set_phase(static_cast<::TaskPhase>(task.phase));
+        task_info->set_is_waiting(task.phase != rtp_llm::TaskPhase::RUNNING);
+        task_info->set_batch_id(task.batch_id);
+        task_info->set_execution_time_ms(task.execution_time_ms);
+        task_info->set_priority_preemption_progress(
+            static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
+        if (task.error_code != 0) {
+            task_info->mutable_error_info()->set_error_code(task.error_code);
+            task_info->mutable_error_info()->set_error_message(task.error_message);
+        }
     }
+
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
     response->set_status_version(status_info.status_version);
     response->set_latest_finished_version(status_info.latest_finished_version);
     response->set_alive(status_info.alive);
     response->set_precision(status_info.precision);
+    response->set_dp_rank(status_info.dp_rank);
+    response->set_max_seq_len(maga_init_params_.model_config_.max_seq_len);
+    response->set_max_batch_tokens_size(maga_init_params_.runtime_config.fifo_scheduler_config.max_batch_tokens_size);
+    auto kv_info = engine_->getCacheStatusInfo(-1, false);
+    response->set_available_kv_cache(kv_info.available_kv_cache);
+    response->set_total_kv_cache(kv_info.total_kv_cache);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }
 
 WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_version) {
     WorkerStatusInfo status_info;
-    status_info.engine_schedule_info = getEngineScheduleInfo(latest_finished_version);
-    switch (maga_init_params_.pd_sep_config.role_type) {
-        case RoleType::PDFUSION:
-            status_info.role = "RoleType.PDFUSION";
-            break;
-        case RoleType::PREFILL:
-            status_info.role = "RoleType.PREFILL";
-            break;
-        case RoleType::DECODE:
-            status_info.role = "RoleType.DECODE";
-            break;
-        case RoleType::VIT:
-            status_info.role = "RoleType.VIT";
-            break;
-        case RoleType::FRONTEND:
-            status_info.role = "RoleType.FRONTEND";
-            break;
-        default:
-            status_info.role = "RoleType.UNKNOWN";
-    }
+    status_info.engine_schedule_info    = getEngineScheduleInfo(latest_finished_version);
+    status_info.role                    = maga_init_params_.pd_sep_config.role_type;
     status_info.dp_size                 = maga_init_params_.parallelism_config.dp_size;
     status_info.tp_size                 = maga_init_params_.parallelism_config.tp_size;
     status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;
@@ -440,17 +452,8 @@ size_t LocalRpcServer::onflightRequestNum() {
 }
 
 EngineScheduleInfo LocalRpcServer::getEngineScheduleInfo(int64_t latest_finished_version) {
-    EngineScheduleInfo                        info = meta_->getEngineScheduleInfo(latest_finished_version);
-    std::vector<EngineScheduleInfo::TaskInfo> running_task_info_list = engine_->getScheduler().runningTaskList();
-    for (auto& task_info : info.running_task_info_list) {
-        for (auto& running_task : running_task_info_list) {
-            if (task_info.request_id == running_task.request_id) {
-                task_info.is_waiting = false;
-            }
-        }
-    }
-    auto last_schedule_time = engine_->getLastScheduleTime();
-    // in case last_schedule_delta is negative
+    EngineScheduleInfo info               = meta_->getEngineScheduleInfo(latest_finished_version);
+    auto               last_schedule_time = engine_->getLastScheduleTime();
     info.last_schedule_delta =
         std::max((int64_t)0, autil::TimeUtility::currentTimeInMilliSeconds() - last_schedule_time);
     return info;

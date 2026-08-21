@@ -29,8 +29,12 @@ enum class CPRotateMethod {
 struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
-    bool           kv_cache_sharded = false;
-    int64_t        prefill_cp_size  = 0;
+    // When true + tp_size > 1, KV cache uses page-level round-robin sharding
+    // across the CP (== TP) group. Each rank physically holds only owned blocks
+    // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
+    bool kv_cache_sharded = false;
+    // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
+    int64_t prefill_cp_size = 0;
     bool           is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
@@ -71,6 +75,10 @@ struct ParallelismConfig {
     bool    enable_sp        = false;
     bool    use_ub_comm      = false;
 
+    // Mirror of py_env_configs.role_config.role_type, plumbed in
+    // engine_config.setup_engine_config so model construction (e.g.
+    // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
+    // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
@@ -132,6 +140,7 @@ struct FMHAConfig {
     bool enable_open_source_fmha             = true;
     bool enable_paged_open_source_fmha       = true;
     bool disable_flashinfer_native           = false;
+    bool disable_flashinfer_hybrid_prefill   = true;
     bool enable_xqa                          = true;
     bool use_aiter_pa                        = true;
     bool use_asm_pa                          = true;
@@ -180,6 +189,20 @@ struct KVCacheConfig {
     bool    enable_independent_group_eviction       = false;
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
+
+
+    // DSV4 fixed-allocation pool block count. 0 means the fixed regions
+    // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
+    // linear-step-derived block count.
+    uint32_t dsv4_fixed_pool_blocks = 0;
+
+    // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
+    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
+    uint32_t dsv4_hca_state_pool_blocks = 0;
+
+    // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
+    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
+    bool dsv4_fixed_pool_use_memory = false;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -285,7 +308,8 @@ enum SpeculativeType {
     SP_TYPE_MTP           = 2,  // Multi-token prediction (DeepSeek-V3)
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
-    SP_TYPE_DETERMINISTIC = 5   // Deterministic (Prompt-Lookup)
+    SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
+    SP_TYPE_DSPARK        = 6   // DSpARK block-diffusion draft
 };
 
 struct SpeculativeExecutionConfig {
@@ -299,7 +323,10 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
-    std::string     to_string() const;
+    // DSpARK noise/mask token used to build each fixed-width draft block.
+    // Filled from the draft checkpoint by ModelFactory.
+    int64_t     sp_dspark_mask_token_id = -1;
+    std::string to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -315,13 +342,13 @@ struct CacheStoreConfig {
     bool    cache_store_rdma_mode               = false;
     int     wrr_available_ratio                 = 80;
     int     rank_factor                         = 0;
-    int     thread_count                        = 16;
+    int     thread_count                        = 32;
     int     rdma_connect_timeout_ms             = 250;
     int     rdma_qp_count_per_connection        = 2;
     int     rdma_io_thread_count                = 4;
     int     rdma_worker_thread_count            = 2;
     int     messager_io_thread_count            = 2;
-    int     messager_worker_thread_count        = 16;
+    int     messager_worker_thread_count        = 32;
     int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
     int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
@@ -368,8 +395,9 @@ struct FIFOSchedulerConfig {
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio = "1";
-    bool        cp_force_single_prefill     = true;
-    int64_t     max_inited_kv_cache_streams = 0;
+    bool        cp_force_single_prefill        = true;
+    int64_t     max_inited_kv_cache_streams    = 0;
+    int64_t     max_batch_tokens_without_cache = 0;
     std::string to_string() const;
 };
 
@@ -392,6 +420,7 @@ struct RuntimeConfig {
     int64_t reserve_runtime_mem_mb = 0;
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
+    bool    model_warm_up          = true;
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
@@ -429,6 +458,13 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    // ========== Prefill Thread Pool Configuration ==========
+    // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
+    int64_t prefill_prepare_resource_pool_size = 0;
+    // Max wait time in stopStream() for Engine Loop to call finish_internal().
+    // When GenerateDone is set and stream has no error, stopStream() waits up to
+    // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
+    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
 
     std::string to_string() const;
 };

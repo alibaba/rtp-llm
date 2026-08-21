@@ -130,6 +130,42 @@ std::tuple<uint64_t, uint64_t> get_seed_and_offset(int increment_size, std::opti
     return {rng_engine_inputs.seed_.val, rng_engine_inputs.offset_.val};
 }
 
+void sampling_from_probs(torch::Tensor                probs,
+                         torch::Tensor                output,
+                         torch::Tensor                valid,
+                         std::optional<torch::Tensor> maybe_indices,
+                         bool                         deterministic,
+                         std::optional<torch::Tensor> maybe_seed_arr,
+                         uint64_t                     seed_val,
+                         std::optional<torch::Tensor> maybe_offset_arr,
+                         uint64_t                     offset_val,
+                         int64_t                      cuda_stream) {
+    check_sampling_inputs(probs, output, valid);
+
+    at::cuda::CUDAGuard device_guard(probs.device());
+    const auto          batch_size = static_cast<uint32_t>(output.size(0));
+    const auto          vocab_size = static_cast<uint32_t>(probs.size(1));
+    auto                indices    = prepare_optional_index(maybe_indices, batch_size, probs.device());
+    auto                seed = prepare_optional_param(maybe_seed_arr, batch_size, probs.device(), at::kLong, "seed");
+    auto offset = prepare_optional_param(maybe_offset_arr, batch_size, probs.device(), at::kLong, "offset");
+    auto stream = resolve_stream(cuda_stream);
+
+    cudaError_t status = flashinfer::sampling::SamplingFromProb<float, int32_t>(
+        static_cast<float*>(probs.data_ptr()),
+        static_cast<int32_t*>(output.data_ptr()),
+        static_cast<bool*>(valid.data_ptr()),
+        indices.defined() ? static_cast<int32_t*>(indices.data_ptr()) : nullptr,
+        batch_size,
+        vocab_size,
+        deterministic,
+        seed.defined() ? reinterpret_cast<uint64_t*>(seed.data_ptr<int64_t>()) : nullptr,
+        seed_val,
+        offset.defined() ? reinterpret_cast<uint64_t*>(offset.data_ptr<int64_t>()) : nullptr,
+        offset_val,
+        stream);
+    check_cuda_status(status, "SamplingFromProb");
+}
+
 void top_p_sampling_from_probs(torch::Tensor                probs,
                                torch::Tensor                output,
                                torch::Tensor                valid,

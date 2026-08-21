@@ -2,7 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 import safetensors
 import torch
@@ -46,7 +46,7 @@ class ModelLoader:
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
         force_cpu_load_weights: bool = False,
-        moe_pure_tp_preshard: bool = True,
+        moe_pure_tp_preshard: bool = False,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -58,6 +58,10 @@ class ModelLoader:
         self._model_weights_info: Optional[ModelWeightInfo] = (
             self._weights_info.create_model_weight_info(database)
         )
+        # Non-owning global tensors supplied by another live model. Descriptors
+        # with these names are excluded before checkpoint iteration and the
+        # resulting ModelWeights points directly at the owner's tensors.
+        self._global_weight_aliases: Dict[str, torch.Tensor] = {}
 
         # Get compute_dtype from model_config
         compute_dtype = model_config.compute_dtype
@@ -86,7 +90,25 @@ class ModelLoader:
 
     @timer_wrapper(description="load weights")
     @torch.inference_mode()
-    def load_weights(self, device: str):
+    def load_weights(
+        self,
+        device: str,
+        global_weight_aliases: Optional[Mapping[str, torch.Tensor]] = None,
+    ):
+        self._global_weight_aliases = dict(global_weight_aliases or {})
+        descriptor_names = {weight.name for weight in self._model_weights_info.weights}
+        unknown_aliases = set(self._global_weight_aliases) - descriptor_names
+        if unknown_aliases:
+            raise KeyError(
+                f"global weight aliases are not declared by this model: {sorted(unknown_aliases)}"
+            )
+        for name, tensor in self._global_weight_aliases.items():
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"global weight alias {name!r} is not a torch.Tensor")
+            if tensor.device != torch.device(device):
+                raise ValueError(
+                    f"global weight alias {name!r} is on {tensor.device}, expected {torch.device(device)}"
+                )
         if self._load_config.is_ft_style_weight:
             weights = self._load_from_ft_style(device)
         else:
@@ -206,7 +228,7 @@ class ModelLoader:
         direct_io = self._load_config.exported_device.support_dio_load
         # 清空现有的权重
         weights = [{} for _ in range(num_layers)]
-        global_weights = {}
+        global_weights = dict(self._global_weight_aliases)
         # 重新构建权重
         all_tensors = self._load_config.database.load_tensors_by_prefix(
             (layer_weight_prefix, global_weight_prefix), device, direct_io=direct_io
@@ -222,6 +244,8 @@ class ModelLoader:
                 weights[layer_id][name] = tensor[0].to(device)
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
+                if name in self._global_weight_aliases:
+                    continue
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
                 global_weights[name] = tensor[0].to(device)
         model_weights.weights = weights
@@ -553,6 +577,8 @@ class ModelLoader:
         return tensor_to_weight_map, weight_info_list
 
     def _maybe_skip_weight(self, weight: WeightModule):
+        if weight.name in self._global_weight_aliases:
+            return True
         if self._task_type == TaskType.LANGUAGE_MODEL:
             return False
         return weight.name in [W.lm_head]
@@ -630,9 +656,11 @@ class ModelLoader:
         logging.info("Cleaned up database resources to release host memory")
 
     def _create_model_weights(self, device):
-        return ModelWeights(
+        weights = ModelWeights(
             self._load_config.num_layers, device, self._load_config.compute_dtype
         )
+        weights.global_weights.update(self._global_weight_aliases)
+        return weights
 
     def _choose_weight_convert_device(self, current_device):
         if self._load_config.force_cpu_load_weights:
@@ -828,7 +856,7 @@ def get_model_loader(
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
     force_cpu_load_weights: bool = False,
-    moe_pure_tp_preshard: bool = True,
+    moe_pure_tp_preshard: bool = False,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(

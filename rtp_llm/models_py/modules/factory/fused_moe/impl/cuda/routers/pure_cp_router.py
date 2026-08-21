@@ -13,7 +13,7 @@ Shared expert handling is done at the layer level, not in this router.
 """
 
 from abc import abstractmethod
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -23,9 +23,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter,
 )
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
-    sgl_per_token_group_quant_fp8,
-)
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -33,6 +31,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
@@ -137,7 +136,7 @@ class PureCpRouterBase(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         return reduce_scatter(payload.fused_expert_output, group=Group.TP)
 

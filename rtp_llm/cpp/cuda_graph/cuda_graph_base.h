@@ -42,6 +42,9 @@ struct GraphParams {
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
     //     description_.attention_conf.rope_config in the model wrapper, not Python reflection.
     int position_id_len_factor = 0;
+    // Width of one input_hiddens row. This is deliberately independent from
+    // the model output hidden_size because auxiliary feature rows may be wider.
+    std::size_t input_hidden_size = 0;
 };
 
 class GraphBase {

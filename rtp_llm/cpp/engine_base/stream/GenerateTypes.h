@@ -87,12 +87,21 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
 
-    int     prefix_length = 0;
-    int64_t begin_time_us = 0;
+    int     prefix_length        = 0;
+    int64_t begin_time_us        = 0;
+    int64_t global_start_time_us = 0;
+
+    // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set. TPS metrics
+    // tagging only — never used for engine-side scheduling decisions.
+    int32_t priority = 0;
 
     // Batch grouping params
-    int     batch_group_size = 1;
-    int64_t batch_group_id   = -1;  // Batch group ID for force batch grouping, -1 means not set
+    int     group_size = 1;
+    int64_t group_id   = -1;
+
+    bool isGroup() const {
+        return group_id != -1;
+    }
 };
 
 struct AuxInfo {
@@ -118,6 +127,8 @@ struct AuxInfo {
     int32_t                      decode_local_reuse_len   = 0;
     int32_t                      decode_remote_reuse_len  = 0;
     int32_t                      decode_memory_reuse_len  = 0;
+    int32_t                      speculative_draft_rounds = 0;
+    std::vector<int32_t>         speculative_accepted_tokens_per_pos;
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
@@ -174,7 +185,7 @@ inline std::string StreamStateToString(StreamState state) {
     }
 }
 
-// 事件集合：外部通过 reportEvent() 投递事件，状态机在 moveToNext() 中统一消费。
+// 事件集合：外部通过 reportEvent() 投递事件，生命周期方法中统一消费。
 // 内部使用 bit flag 组合多个并发事件。
 // 所有事件均为永久事件：一旦设置即保留，不会被自动清除。
 class StreamEvents {

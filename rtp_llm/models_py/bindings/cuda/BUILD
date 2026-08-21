@@ -20,6 +20,8 @@ cc_library(
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
+        "@local_config_cuda//cuda:cublas_headers",
+        "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:nvml",
     ],
     copts = copts(),
@@ -159,6 +161,7 @@ cc_library(
     copts = cuda_copts(),
     deps = torch_deps() + [
         ":cuda_host_utils",
+        "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
@@ -166,6 +169,9 @@ cc_library(
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         "//rtp_llm/models_py/bindings/cuda/kernels:mha_paged_attn_plan",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings:op_defs",
@@ -174,6 +180,11 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/kernels:user_buffers",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
+        # topk_v3's cluster-launch kernels need cooperative_groups::this_cluster,
+        # which the PPU toolkit lacks; python indexer.py degrades via hasattr.
+        "@//:using_ppu": [],
+        "//conditions:default": ["//rtp_llm/models_py/bindings/cuda/kernels:topk_v3"],
+    }) + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
@@ -193,6 +204,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         ":cuda_bindings",
     ],
     visibility = ["//visibility:public"],

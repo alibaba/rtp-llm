@@ -40,7 +40,7 @@ public class ResourceMonitorReporter {
         log.info("ResourceMonitorReporter initialized and registered with KMonitor");
     }
 
-    @Scheduled(fixedRate = 1000)
+    @Scheduled(fixedRate = 2000L)
     private void reportWorkerPermitCapacity() {
         try {
             int capacity = dynamicWorkerManager.getTotalPermits();

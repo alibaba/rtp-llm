@@ -112,6 +112,13 @@ class SmokeResponse(BaseModel):
         super().__init__(logits=logits, hidden_states=hidden_states, *args, **kwargs)
 
 
+class SmokeErrorResponse(BaseModel):
+    error_code: int
+    error_code_str: Optional[str] = None
+    message: Optional[str] = None
+    aux_info: Optional[AuxInfo] = None
+
+
 class SmokeReponseList(BaseModel):
     response_batch: List[SmokeResponse] = []
 
@@ -185,6 +192,8 @@ class NormalComparer(BaseComparer):
                 )
 
         try:
+            if "error_code" in result_json:
+                return SmokeErrorResponse(**result_json)
             if "response_batch" in result_json:
                 smoke_response_list = SmokeReponseList()
                 for idx, response in enumerate(result_json["response_batch"]):
@@ -230,12 +239,41 @@ class NormalComparer(BaseComparer):
 
     def compare_result(
         self,
-        expect: Union[SmokeReponseList, SmokeResponse],
-        actual: Union[SmokeReponseList, SmokeResponse],
+        expect: Union[SmokeReponseList, SmokeResponse, SmokeErrorResponse],
+        actual: Union[SmokeReponseList, SmokeResponse, SmokeErrorResponse],
     ):
         assert type(expect) == type(
             actual
         ), f"type different: expect:{expect} vs actual:{actual}"
+        if isinstance(expect, SmokeErrorResponse):
+            assert isinstance(actual, SmokeErrorResponse)
+            diffs: List[str] = []
+            if expect.error_code != actual.error_code:
+                diffs.append(
+                    f"error_code:\n    expect: {expect.error_code}\n    actual:  {actual.error_code}"
+                )
+            if (
+                expect.error_code_str is not None
+                and expect.error_code_str != actual.error_code_str
+            ):
+                diffs.append(
+                    f"error_code_str:\n    expect: {expect.error_code_str}\n    actual:  {actual.error_code_str}"
+                )
+            if expect.message and expect.message not in (actual.message or ""):
+                diffs.append(
+                    f"message:\n    expect contains: {expect.message}\n    actual:          {actual.message}"
+                )
+            if expect.aux_info is not None:
+                if actual.aux_info is None:
+                    diffs.append("aux_info:\n    actual: None (missing)")
+                else:
+                    self._compare_aux_info(expect.aux_info, actual.aux_info, diffs)
+            if diffs:
+                raise SmokeException(
+                    QueryStatus.COMPARE_FAILED,
+                    self._format_all_diffs(diffs),
+                )
+            return
         if isinstance(expect, SmokeReponseList):
             assert isinstance(actual, SmokeReponseList)
             if len(actual.response_batch) != len(expect.response_batch):
@@ -348,7 +386,9 @@ class NormalComparer(BaseComparer):
             "prefix_len",
             "reuse_len",
             "output_len",
+            "step_output_len",
             "iter_count",
+            "pd_sep",
             "local_reuse_len",
             "remote_reuse_len",
             "memory_reuse_len",
@@ -557,10 +597,13 @@ class NormalComparer(BaseComparer):
                         diffs.append(f"{prefix}prompt_logits target_logprobs not close")
 
         # aux_info: skip comparison when expected auxinfo is null
-        if expect.aux_info is not None and actual.aux_info is not None:
-            self._compare_aux_info(
-                expect.aux_info, actual.aux_info, diffs, prefix=prefix
-            )
+        if expect.aux_info is not None:
+            if actual.aux_info is None:
+                diffs.append(f"{prefix}aux_info:\n    actual: None (missing)")
+            else:
+                self._compare_aux_info(
+                    expect.aux_info, actual.aux_info, diffs, prefix=prefix
+                )
 
     def _rewrite_images(self, images: Union[List[str], str]) -> Union[List[str], str]:
         # iter rewrite

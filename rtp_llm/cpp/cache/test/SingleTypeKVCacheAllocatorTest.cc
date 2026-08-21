@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
@@ -109,6 +110,43 @@ createBatchKVCacheResource(int batch_size, const CacheConfig& config, int block_
         resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
     return resource;
+}
+
+TEST(MallocResultTest, FailedResultDefaultsToInternalError) {
+    const MallocResult failed{false, 0};
+    EXPECT_FALSE(failed.success);
+    EXPECT_EQ(failed.status, MallocStatus::INTERNAL_ERROR);
+
+    const MallocResult succeeded{true, 0};
+    EXPECT_TRUE(succeeded.success);
+    EXPECT_EQ(succeeded.status, MallocStatus::NONE);
+}
+
+// initMalloc must classify the failure against the *failure-time* capacity snapshot: rolling
+// back first would make capacity look sufficient and downgrade a retryable race to an internal
+// error. The InSequence expectations pin that ordering (classify, then free).
+// getNeedBlocks/initMallocForCommonLen are protected template-method hooks; EXPECT_CALL reaches
+// their gmock_* helpers because this target is built with -fno-access-control (test_copts).
+TEST(KVCacheAllocatorTest, ClassifiesInitFailureBeforeRollback) {
+    auto config    = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/1);
+    auto allocator = std::make_shared<testing::StrictMock<MockKVCacheAllocator>>(config);
+
+    auto batch_resource     = createBatchKVCacheResource(/*batch_size=*/1, config);
+    auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/1);
+    MallocInfo malloc_info{batch_resource, complete_token_ids};
+
+    testing::InSequence sequence;
+    EXPECT_CALL(*allocator, getNeedBlocks(testing::_)).WillOnce(testing::Return(4));
+    EXPECT_CALL(*allocator, totalBlocksNum()).WillOnce(testing::Return(9));
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).WillOnce(testing::Return(MallocResult{false, 0}));
+    EXPECT_CALL(*allocator, getNeedBlocks(testing::_)).WillOnce(testing::Return(4));
+    EXPECT_CALL(*allocator, totalBlocksNum()).WillOnce(testing::Return(9));
+    EXPECT_CALL(*allocator, availableBlocksNum()).WillOnce(testing::Return(3));
+    EXPECT_CALL(*allocator, free(testing::_));
+
+    const auto result = allocator->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.status, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
 }
 
 static int estimateBatchPeakForSingleSequence(const KVCacheAllocator&        allocator,
@@ -230,6 +268,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
         MallocInfo malloc_info{batch_resource, complete_token_ids};
         auto       result = allocator_->malloc(malloc_info);
         EXPECT_FALSE(result.success);
+        // Gross demand exceeds total capacity, so no amount of waiting can help.
+        EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
         EXPECT_EQ(batch_resource->curBlocksNum(), 0);
         EXPECT_EQ(allocator_->availableBlocksNum(), available_before);
     }
@@ -248,6 +288,34 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     auto       r2 = allocator_->malloc(info_9);
     EXPECT_TRUE(r2.success);
     EXPECT_EQ(batch_resource_ok->curBlocksNum(), 9);
+}
+
+// The same request that a live holder makes un-satisfiable must come back RETRYABLE (stream stays
+// WAITING) rather than PERMANENT, and must actually succeed once the holder releases its blocks.
+TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocDistinguishesRetryableCapacityShortage) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/1);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+    allocator_->setReserveBlocksNum(2);
+
+    auto       holder_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    auto       holder_tokens   = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/1);
+    MallocInfo holder_info{holder_resource, holder_tokens};
+    ASSERT_TRUE(allocator_->malloc(holder_info).success);
+    ASSERT_EQ(allocator_->availableBlocksNum(), 5u);
+
+    auto       deferred_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    auto       deferred_tokens   = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/1);
+    MallocInfo deferred_info{deferred_resource, deferred_tokens};
+    auto       deferred_result = allocator_->malloc(deferred_info);
+    EXPECT_FALSE(deferred_result.success);
+    EXPECT_EQ(deferred_result.status, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(deferred_resource->curBlocksNum(), 0);
+
+    allocator_->free(FreeInfo{holder_resource, holder_tokens});
+    auto retry_result = allocator_->malloc(deferred_info);
+    EXPECT_TRUE(retry_result.success);
+    EXPECT_EQ(retry_result.status, MallocStatus::NONE);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {

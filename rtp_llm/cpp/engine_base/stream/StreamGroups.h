@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -12,6 +13,14 @@ namespace rtp_llm {
 
 struct StreamGroups {
 public:
+    struct TokenCounts {
+        int64_t context            = 0;
+        int64_t context_with_cache = 0;
+        int64_t generate           = 0;
+        int64_t total              = 0;
+    };
+    using TokenCountsByPriority = std::map<int32_t, TokenCounts>;
+
     StreamGroups(const std::list<GenerateStreamPtr>& streams) {
         for (auto& stream : streams) {
             auto cur_batch_size  = stream->currentBatchSize();
@@ -105,6 +114,26 @@ public:
     }
     size_t contextExecuteTokenSizeWithCache() const {
         return context_execute_token_size_with_cache_;
+    }
+
+    TokenCountsByPriority tokenCountsByPriority() const {
+        TokenCountsByPriority token_counts;
+        for (const auto& stream : context_streams_) {
+            auto& counts             = token_counts[stream->priority()];
+            auto  execute_token_size = stream->currentExecuteTokenSize();
+            counts.context += execute_token_size;
+            counts.context_with_cache += execute_token_size;
+            counts.total += execute_token_size;
+            if (stream->reuseLength() > 0) {
+                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            auto& counts = token_counts[stream->priority()];
+            counts.generate += stream->currentBatchSize();
+            counts.total += stream->currentExecuteTokenSize();
+        }
+        return token_counts;
     }
     size_t maxSeqLen() const {
         return max_seq_len_;
@@ -262,8 +291,7 @@ public:
                      << ", model_execute_token_size: " << model_execute_token_size_
                      << ", context_execute_token_size: " << context_execute_token_size_
                      << ", context_execute_token_size_with_cache: " << context_execute_token_size_with_cache_
-                     << ", max_seq_len: " << max_seq_len_
-                     << ", is_fake_stream: " << is_fake_stream_ << "}";
+                     << ", max_seq_len: " << max_seq_len_ << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
     }
 
@@ -282,26 +310,26 @@ public:
 private:
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
-    size_t                       total_sampler_batch_size_in_   = 0;
-    size_t                       total_sampler_batch_size_out_  = 0;
-    size_t                       total_decode_batch_size_       = 0;
-    size_t                       total_context_batch_size_      = 0;
-    size_t                       decode_block_update_copy_num_  = 0;
-    size_t                       context_block_update_copy_num_ = 0;
-    size_t                       max_blocks_num_                = 0;
-    size_t                       max_cache_keys_num_            = 0;
-    size_t                       model_execute_token_size_      = 0;
-    size_t                       context_execute_token_size_    = 0;
+    size_t                       total_sampler_batch_size_in_           = 0;
+    size_t                       total_sampler_batch_size_out_          = 0;
+    size_t                       total_decode_batch_size_               = 0;
+    size_t                       total_context_batch_size_              = 0;
+    size_t                       decode_block_update_copy_num_          = 0;
+    size_t                       context_block_update_copy_num_         = 0;
+    size_t                       max_blocks_num_                        = 0;
+    size_t                       max_cache_keys_num_                    = 0;
+    size_t                       model_execute_token_size_              = 0;
+    size_t                       context_execute_token_size_            = 0;
     size_t                       context_execute_token_size_with_cache_ = 0;
-    size_t                       max_seq_len_                   = 0;
-    size_t                       max_context_seq_len_           = 0;
-    size_t                       max_reuse_length_              = 0;
-    size_t                       cum_context_seq_len_           = 0;
-    size_t                       multimodal_features_len_       = 0;
-    size_t                       total_score_batch_size_        = 0;
-    bool                         has_multimodal_input_          = false;
-    bool                         gen_timeline_                  = false;
-    bool                         is_fake_stream_                = false;
+    size_t                       max_seq_len_                           = 0;
+    size_t                       max_context_seq_len_                   = 0;
+    size_t                       max_reuse_length_                      = 0;
+    size_t                       cum_context_seq_len_                   = 0;
+    size_t                       multimodal_features_len_               = 0;
+    size_t                       total_score_batch_size_                = 0;
+    bool                         has_multimodal_input_                  = false;
+    bool                         gen_timeline_                          = false;
+    bool                         is_fake_stream_                        = false;
     std::list<std::string>       adapter_names;
 };
 

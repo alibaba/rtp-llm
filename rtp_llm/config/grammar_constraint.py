@@ -111,7 +111,8 @@ class GrammarConstraint:
         if response_format.type == "json_schema":
             return cls("json_schema", response_format.json_schema.schema_)
         if response_format.type == "json_object":
-            return cls("json_schema", {"type": "object"})
+            # OpenAI-compatible json_object accepts any top-level JSON container.
+            return cls("json_schema", {"anyOf": [{"type": "object"}, {"type": "array"}]})
         if response_format.type == "regex":
             return cls("regex", response_format.pattern)
         if response_format.type == "ebnf":

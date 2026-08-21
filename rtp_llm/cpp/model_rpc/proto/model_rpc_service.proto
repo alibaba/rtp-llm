@@ -42,6 +42,14 @@ message TaggedBlockIdsPB {
     repeated int32 block_ids = 2;
 }
 
+enum RoleTypePB {
+    ROLE_TYPE_PDFUSION = 0;
+    ROLE_TYPE_PREFILL = 1;
+    ROLE_TYPE_DECODE = 2;
+    ROLE_TYPE_VIT = 3;
+    ROLE_TYPE_FRONTEND = 4;
+}
+
 message RoleAddrPB {
     enum RoleType {
         PDFUSION = 0;
@@ -54,9 +62,16 @@ message RoleAddrPB {
     string ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
+    string role_str = 5;
 }
 
 message GenerateConfigPB {
+    enum ThinkingModePB {
+        THINKING_MODE_UNSPECIFIED = 0;
+        THINKING_MODE_DISABLED = 1;
+        THINKING_MODE_ADAPTIVE = 2;
+        THINKING_MODE_ENABLED = 3;
+    }
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
     int32 num_return_sequences = 3;
@@ -114,8 +129,8 @@ message GenerateConfigPB {
     bool enable_device_cache = 52;
     bool enable_remote_cache = 53;
     string unique_key = 54;
-    google.protobuf.Int32Value force_batch = 55;
-    google.protobuf.Int32Value batch_group_timeout = 56;
+    reserved 55;
+    google.protobuf.Int32Value group_timeout = 56;
     string profile_trace_name = 57;
     // 生成式推荐：组合 token 粒度去重与曝光过滤
     int32 combo_token_size = 58;
@@ -136,6 +151,8 @@ message GenerateConfigPB {
     google.protobuf.StringValue regex = 70;
     google.protobuf.StringValue ebnf = 71;
     google.protobuf.StringValue structural_tag = 72;
+    ThinkingModePB thinking_mode = 73;
+    reserved 74;
 }
 
 message MMPreprocessConfigPB {
@@ -183,9 +200,13 @@ message GenerateInputPB {
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;
-    int32 batch_group_size = 7;
-    google.protobuf.Int64Value batch_group_id = 8;
+    int32 group_size = 7;
+    google.protobuf.Int64Value group_id = 8;
     RequestInfoPB request_info = 9;
+    // Auto-TPM QoS priority (task40): 1-100; 0 = not set (request carries no
+    // priority). Used as a metrics tag on engine-side TPS
+    // reporting; never affects engine scheduling.
+    int32 priority = 10;
 }
 
 message AuxInfoPB {
@@ -215,6 +236,8 @@ message AuxInfoPB {
     int32 prefill_memory_reuse_len = 25;
     int32 decode_memory_reuse_len = 26;
     map<int32, int32> multimodal_lengths = 27;
+    int32 speculative_draft_rounds = 28;
+    repeated int32 speculative_accepted_tokens_per_pos = 29;
 }
 
 message PromptLogitsOutputPB {
@@ -439,6 +462,19 @@ message UpdateEplbConfigRequestPB {
     int32 update_time = 2;
 }
 
+enum TaskPhase {
+    TASK_PHASE_PENDING = 0;
+    TASK_PHASE_RECEIVED = 1;
+    TASK_PHASE_KV_ALLOCATED = 2;
+    TASK_PHASE_RUNNING = 3;
+}
+
+enum PriorityPreemptionProgressPB {
+    PRIORITY_PREEMPTION_NONE = 0;
+    PRIORITY_PREEMPTION_CANCELING = 1;
+    PRIORITY_PREEMPTION_CANCELED = 2;
+}
+
 message TaskInfoPB {
     int64 request_id = 1;
     reserved 2;
@@ -450,6 +486,12 @@ message TaskInfoPB {
     int64 end_time_ms = 7;
     int64 dp_rank = 8;
     bool is_waiting = 9;
+    ErrorDetailsPB error_info = 10;
+    int64 batch_id = 11;
+    TaskPhase phase = 12;
+    int64 execution_time_ms = 13;
+    PriorityPreemptionProgressPB priority_preemption_progress = 14;
+    int32 priority = 15;
 }
 
 message UpdateWeightsRequestPB {
@@ -459,7 +501,10 @@ message UpdateWeightsRequestPB {
 }
 
 message WorkerStatusPB {
-    string role = 1;
+    string role = 1;              // 字符串角色名，如 "PREFILL"，向后兼容
+    // LocalRpcServer::GetWorkerStatus currently does not populate this field, so
+    // protobuf returns the default value 0. Keep it for wire compatibility, but
+    // do not use it for routing, admission control, or batch-size decisions.
     int32 available_concurrency = 2;
     repeated TaskInfoPB running_task_info = 3;
     repeated TaskInfoPB finished_task_list = 4;
@@ -473,6 +518,16 @@ message WorkerStatusPB {
     bool alive = 13;
     string precision = 14;
     int64 latest_finished_version = 15;
+    int64 dp_rank = 16;
+    int64 available_kv_cache = 17;
+    int64 total_kv_cache = 18;
+    reserved 19;
+    reserved "role_str";
+    RoleTypePB role_type = 20;
+    // Static limits used by the running Engine. FlexLB uses these values to
+    // avoid constructing a group that the Engine can never admit.
+    int64 max_seq_len = 21;
+    int64 max_batch_tokens_size = 22;
 }
 
 message EmbeddingInputPB {
@@ -692,6 +747,74 @@ message BatchGenerateOutputsPB {
     repeated BatchGenerateResultPB results = 1;
 }
 
+message EnqueueBatchExternalInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueBatchDpSlotPB {
+    int32 dp_rank = 1;
+    repeated EnqueueBatchExternalInputPB requests = 2;
+}
+
+message EnqueueBatchRequestPB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchDpSlotPB dp_slots = 2;
+    // Lease between successful enqueue and FetchResponse attachment. Zero uses
+    // the Prefill server default.
+    int64 fetch_attach_timeout_ms = 3;
+}
+
+message EnqueueGroupInputPB {
+    GenerateInputPB input = 1;
+}
+
+message EnqueueGroupRequestPB {
+    int64 batch_id = 1;
+    int32 dp_rank = 2;
+    repeated EnqueueGroupInputPB requests = 3;
+    int64 fetch_attach_timeout_ms = 4;
+}
+
+message EnqueueBatchSuccessPB {
+    int64 request_id = 1;
+}
+
+message EnqueueBatchErrorPB {
+    int64 request_id = 1;
+    ErrorDetailsPB error_info = 2;
+}
+
+message EnqueueBatchResponsePB {
+    int64 batch_id = 1;
+    repeated EnqueueBatchSuccessPB successes = 2;
+    repeated EnqueueBatchErrorPB errors = 3;
+}
+
+message FetchRequestPB {
+    int64 request_id = 1;
+}
+
+message CancelRequestPB {
+    int64 request_id = 1;
+}
+
+enum CancelStatusPB {
+    CANCEL_STATUS_UNSPECIFIED = 0;
+    // The original Prefill atomically installed the priority-preemption
+    // latch/intent and triggered current-or-future P-to-D cancellation. This
+    // is not a resource-release acknowledgement.
+    CANCEL_STATUS_ACCEPTED = 1;
+    CANCEL_STATUS_NOT_FOUND = 2;
+    // No active request was visible, so Prefill installed (or found) a
+    // short-lived request-id tombstone. A later Enqueue for the same id is
+    // rejected with 8429 before it can reach the Engine scheduler.
+    CANCEL_STATUS_TOMBSTONED = 3;
+}
+
+message CancelResponsePB {
+    CancelStatusPB status = 1;
+}
+
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
@@ -718,6 +841,15 @@ service RpcService {
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
+    rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
+    rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
+    rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    // AutoTPM priority-preemption Cancel targets the original Prefill role.
+    // Prefill triggers the existing Prefill->Decode stream cancellation;
+    // Decode does not implement this RPC. Completion is reported separately
+    // by Prefill WorkerStatus as priority_preemption_progress=CANCELED with
+    // error code 8429. The original Enqueue/Fetch path also returns 8429.
+    rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }
 
 // Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern

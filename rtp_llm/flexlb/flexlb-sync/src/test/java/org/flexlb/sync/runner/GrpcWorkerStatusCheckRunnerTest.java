@@ -1,21 +1,49 @@
 package org.flexlb.sync.runner;
 
+import io.grpc.Status;
+
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Tests for {@link GrpcWorkerStatusRunner}.
+ *
+ * <p>Key API changes since original implementation:
+ * <ul>
+ *   <li>Proto field {@code is_waiting} replaced by {@code TaskPhase phase}</li>
+ *   <li>{@code WorkerStatus.runningTaskList} replaces old {@code waitingTaskList + localTaskMap}</li>
+ *   <li>Constructor requires {@code FlexlbBatchScheduler + EndpointRegistry} (nullable)</li>
+ *   <li>Task list refresh only occurs when status version advances (not on equal version)</li>
+ * </ul>
+ */
 class GrpcWorkerStatusCheckRunnerTest {
 
     private final EngineGrpcService engineGrpcService = Mockito.mock(EngineGrpcService.class);
@@ -35,7 +63,8 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
 
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
-                .setRole("test-role")
+                .setRole(RoleType.PREFILL.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setAvailableConcurrency(10)
                 .setRunningQueryLen(5)
                 .setWaitingQueryLen(3)
@@ -47,21 +76,26 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setAlive(true)
                 .build();
 
-        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
-        // Act
+        // Act — pass null for FlexlbBatchScheduler and EndpointRegistry (not needed in unit test)
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20);
+                group, workerStatus, Map.of(ipPort, workerStatus),
+                engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
         runner.run();
 
-        // Assert
-        verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
+        // Assert — gRPC port is derived from HTTP port 8080 → 8081
+        verify(engineGrpcService).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
     }
 
     @Test
-    void should_refreshTaskLists_when_statusVersionIsNotUpdated() {
+    void should_not_update_task_list_when_status_version_is_unchanged() {
+        // When the gRPC response version equals the local version, the status update
+        // is skipped — including the runningTaskList refresh. This avoids unnecessary
+        // state churn when the engine hasn't changed.
         String modelName = "test-model";
         String ipPort = "127.0.0.1:8080";
         String site = "test-site";
@@ -72,27 +106,319 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setPort(8080);
         workerStatus.getStatusVersion().set(100L);
 
-        EngineRpcService.TaskInfoPB waitingTask = EngineRpcService.TaskInfoPB.newBuilder()
+        // New engines dual-write phase and the dsv4 is_waiting field.
+        EngineRpcService.TaskInfoPB taskInfo = EngineRpcService.TaskInfoPB.newBuilder()
                 .setRequestId(123L)
                 .setInputLength(100)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
                 .setIsWaiting(true)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole(RoleType.PREFILL.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                 .setStatusVersion(100L)
                 .setAlive(true)
-                .addRunningTaskInfo(waitingTask)
+                .addRunningTaskInfo(taskInfo)
                 .build();
 
-        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
-                group, workerStatus, engineHealthReporter, engineGrpcService, 20);
+                group, workerStatus, Map.of(ipPort, workerStatus),
+                engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
         runner.run();
 
-        assertEquals(1, workerStatus.getWaitingTaskList().size());
-        assertTrue(workerStatus.getWaitingTaskList().containsKey("123"));
+        // Version not advanced → runningTaskList should NOT be populated from response
+        assertNull(workerStatus.getRunningTaskList(),
+                "runningTaskList should not be updated when status version is unchanged");
+    }
+
+    @Test
+    void should_ignore_status_callback_from_expired_generation() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus expired = status(8080);
+        WorkerStatus current = status(8080);
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        statuses.put(ipPort, current);
+        EndpointRegistry registry = registry();
+        WorkerEndpoint currentEndpoint = registry.ensureEndpoint(RoleType.VIT, ipPort, current);
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.VIT.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                .setStatusVersion(100L)
+                .setAlive(true)
+                .build();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
+                expired, statuses, engineHealthReporter, engineGrpcService,
+                20L, null, registry, Runnable::run);
+        runner.run();
+
+        assertSame(currentEndpoint, registry.get(RoleType.VIT, ipPort));
+        assertSame(current, currentEndpoint.getStatus());
+        assertEquals(-1L, expired.getStatusVersion().get());
+        registry.close();
+    }
+
+    @Test
+    void should_remove_endpoint_after_consecutive_grpc_failures() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus status = status(8080);
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        statuses.put(ipPort, status);
+        EndpointRegistry registry = registry();
+        registry.ensureEndpoint(RoleType.VIT, ipPort, status);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
+                status, statuses, engineHealthReporter, engineGrpcService,
+                20L, null, registry, Runnable::run);
+
+        runner.run();
+        runner.run();
+        runner.run();
+
+        assertFalse(status.isAlive());
+        assertNull(registry.get(RoleType.VIT, ipPort));
+        registry.close();
+    }
+
+    @Test
+    void should_restore_endpoint_when_same_version_worker_recovers() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus status = status(8080);
+        status.getStatusVersion().set(100L);
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        statuses.put(ipPort, status);
+        EndpointRegistry registry = registry();
+        registry.ensureEndpoint(RoleType.VIT, ipPort, status);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
+                status, statuses, engineHealthReporter, engineGrpcService,
+                20L, null, registry, Runnable::run);
+
+        runner.run();
+        runner.run();
+        runner.run();
+        EngineRpcService.WorkerStatusPB recovered = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.VIT.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                .setStatusVersion(100L)
+                .setAlive(true)
+                .build();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(recovered));
+
+        runner.run();
+
+        assertTrue(status.isAlive());
+        assertSame(status, registry.get(RoleType.VIT, ipPort).getStatus());
+        registry.close();
+    }
+
+    private static EndpointRegistry registry() {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        return new EndpointRegistry(
+                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
+    }
+
+    private static WorkerStatus status(int port) {
+        WorkerStatus status = new WorkerStatus();
+        status.setRole(RoleType.VIT);
+        status.setIp("127.0.0.1");
+        status.setPort(port);
+        status.setGrpcPort(port + 1);
+        status.setAlive(true);
+        return status;
+    }
+
+    @Test
+    void should_useLongerTimeoutForVitStatusCheck() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+
+        EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.VIT.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                .setStatusVersion(1)
+                .setAlive(true)
+                .build();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(workerStatusPB));
+
+        GrpcWorkerStatusRunner runner = createRunner(RoleType.VIT, workerStatus, 20L, 1000L, true);
+        runner.run();
+
+        verify(engineGrpcService).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 1000L, RoleType.VIT);
+    }
+
+    @Test
+    void should_notShortenGlobalTimeoutForVitStatusCheck() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRole(RoleType.VIT.getCode())
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                        .setStatusVersion(1)
+                        .setAlive(true)
+                        .build()));
+
+        GrpcWorkerStatusRunner runner = createRunner(RoleType.VIT, workerStatus, 5000L, 1000L, true);
+        runner.run();
+
+        verify(engineGrpcService).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 5000L, RoleType.VIT);
+    }
+
+    @Test
+    void should_keepLastVitAliveStateWhenStatusCheckTimesOut() {
+        WorkerStatus workerStatus = aliveWorkerStatus();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(Status.DEADLINE_EXCEEDED.asRuntimeException()));
+
+        GrpcWorkerStatusRunner runner = createRunner(RoleType.VIT, workerStatus);
+        // Even after the consecutive-failure threshold, a retained VIT timeout
+        // must not mark the endpoint dead; ExpirationCleaner is the backstop.
+        runner.run();
+        runner.run();
+        runner.run();
+
+        assertTrue(workerStatus.isAlive());
+        verify(engineHealthReporter, times(3)).reportStatusCheckerFail(
+                "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, RoleType.VIT);
+        verify(engineHealthReporter, times(3)).reportStatusCheckerFail(
+                anyString(), any(BalanceStatusEnum.class), any(RoleType.class));
+    }
+
+    @Test
+    void should_markVitDeadWhenTimeoutRetentionIsDisabled() {
+        WorkerStatus workerStatus = aliveWorkerStatus();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(Status.DEADLINE_EXCEEDED.asRuntimeException()));
+
+        GrpcWorkerStatusRunner runner = createRunner(RoleType.VIT, workerStatus, 20L, 1000L, false);
+        runner.run();
+        runner.run();
+        runner.run();
+
+        assertFalse(workerStatus.isAlive());
+    }
+
+    @Test
+    void should_markPrefillDeadWhenStatusCheckTimesOut() {
+        WorkerStatus workerStatus = aliveWorkerStatus();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(Status.DEADLINE_EXCEEDED.asRuntimeException()));
+
+        GrpcWorkerStatusRunner runner = createRunner(RoleType.PREFILL, workerStatus);
+        runner.run();
+        runner.run();
+        runner.run();
+
+        assertFalse(workerStatus.isAlive());
+    }
+
+    @Test
+    void should_markVitDeadWhenStatusCheckFailsWithoutTimeout() {
+        WorkerStatus workerStatus = aliveWorkerStatus();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(new RuntimeException("connection refused")));
+
+        GrpcWorkerStatusRunner runner = createRunner(RoleType.VIT, workerStatus);
+        runner.run();
+        runner.run();
+        runner.run();
+
+        assertFalse(workerStatus.isAlive());
+    }
+
+    @Test
+    void should_applyExplicitDeadStatusFromVit() {
+        WorkerStatus workerStatus = aliveWorkerStatus();
+        EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.VIT.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                .setStatusVersion(1)
+                .setAlive(false)
+                .build();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(workerStatusPB));
+
+        createRunner(RoleType.VIT, workerStatus).run();
+
+        assertFalse(workerStatus.isAlive());
+    }
+
+    @Test
+    void should_notTrustDeadlineTokenInNonGrpcErrorMessage() {
+        WorkerStatus workerStatus = aliveWorkerStatus();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.failedFuture(
+                        new RuntimeException("worker said DEADLINE_EXCEEDED but connection failed")));
+
+        GrpcWorkerStatusRunner runner = createRunner(RoleType.VIT, workerStatus);
+        runner.run();
+        runner.run();
+        runner.run();
+
+        assertFalse(workerStatus.isAlive());
+    }
+
+    private WorkerStatus aliveWorkerStatus() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.setAlive(true);
+        return workerStatus;
+    }
+
+    private GrpcWorkerStatusRunner createRunner(RoleType roleType, WorkerStatus workerStatus) {
+        return createRunner(roleType, workerStatus, 20L, 1000L, true);
+    }
+
+    private GrpcWorkerStatusRunner createRunner(
+            RoleType roleType, WorkerStatus workerStatus,
+            long syncRequestTimeoutMs, long vitSyncRequestTimeoutMs, boolean retainVitAliveOnTimeout) {
+        return new GrpcWorkerStatusRunner(
+                "test-model",
+                "127.0.0.1:8080",
+                "test-site",
+                roleType,
+                "test-group",
+                workerStatus,
+                Map.of("127.0.0.1:8080", workerStatus),
+                engineHealthReporter,
+                engineGrpcService,
+                syncRequestTimeoutMs,
+                null,
+                null,
+                Runnable::run,
+                vitSyncRequestTimeoutMs,
+                retainVitAliveOnTimeout);
     }
 }

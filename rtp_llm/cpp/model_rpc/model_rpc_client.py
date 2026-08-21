@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import time
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
@@ -13,6 +14,7 @@ from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
+    FetchRequestPB,
     GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
@@ -48,17 +50,28 @@ class StreamState:
         self.cached_logits_dict = {}
 
 
+def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
+    finished = outputs_pb.flatten_output.finished
+    return bool(finished) and all(finished)
+
+
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
+    """Map the frontend role to the original RoleAddrPB field-1 enum.
+
+    Keep this explicit instead of depending on the numeric values of two
+    independently generated enums remaining aligned.
+    """
     if role_type == RoleType.PDFUSION:
         return RoleAddrPB.RoleType.PDFUSION
-    elif role_type == RoleType.PREFILL:
+    if role_type == RoleType.PREFILL:
         return RoleAddrPB.RoleType.PREFILL
-    elif role_type == RoleType.DECODE:
+    if role_type == RoleType.DECODE:
         return RoleAddrPB.RoleType.DECODE
-    elif role_type == RoleType.VIT:
+    if role_type == RoleType.VIT:
         return RoleAddrPB.RoleType.VIT
-    elif role_type == RoleType.FRONTEND:
+    if role_type == RoleType.FRONTEND:
         return RoleAddrPB.RoleType.FRONTEND
+    raise ValueError(f"unsupported role type: {role_type!r}")
 
 
 def _trans_jsonable_option(
@@ -93,9 +106,10 @@ def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
-    input_pb.batch_group_size = input_py.batch_group_size
-    if input_py.batch_group_id != -1:
-        input_pb.batch_group_id.value = input_py.batch_group_id
+    input_pb.start_time = int(time.time() * 1_000_000)
+    input_pb.group_size = input_py.group_size
+    if hasattr(input_py, "group_id") and input_py.group_id != -1:
+        input_pb.group_id.value = input_py.group_id
 
     request_info = getattr(input_py, "request_info", None)
     if request_info is not None:
@@ -137,6 +151,7 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.end_think_token_ids
     )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
+    generate_config_pb.thinking_mode = int(input_py.generate_config.thinking_mode)
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(
         input_py.generate_config.variable_num_beams
@@ -236,8 +251,7 @@ def trans_input(input_py: GenerateInput):
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
-    trans_option(generate_config_pb, input_py.generate_config, "batch_group_timeout")
-    trans_option(generate_config_pb, input_py.generate_config, "force_batch")
+    trans_option(generate_config_pb, input_py.generate_config, "group_timeout")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
@@ -257,7 +271,11 @@ def trans_input(input_py: GenerateInput):
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
-        role_addr_pb.role = trans_role_type(role_addr.role)
+        proto_role = trans_role_type(role_addr.role)
+        # Dual-write the original enum at field 1 and the string extension so
+        # both old and new engines decode role addresses during rolling upgrade.
+        role_addr_pb.role = proto_role
+        role_addr_pb.role_str = role_addr.role.name
         role_addr_pb.ip = role_addr.ip
         role_addr_pb.http_port = role_addr.http_port
         role_addr_pb.grpc_port = role_addr.grpc_port
@@ -430,6 +448,10 @@ def trans_output(
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
+                speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
+                speculative_accepted_tokens_per_pos=list(
+                    aux_info_pb.speculative_accepted_tokens_per_pos
+                ),
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )
@@ -604,18 +626,27 @@ class ModelRpcClient(object):
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
+        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
 
-        address_list = self._addresses
-
-        for role_addr in input_py.generate_config.role_addrs:
-            if (
-                (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                or role_addr.role == RoleType.PDFUSION
-                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ):
-                if role_addr.ip != "":
-                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                    break
+        if use_fetch_response:
+            address_list = [
+                role_addr.ip + ":" + str(role_addr.grpc_port)
+                for role_addr in input_py.generate_config.role_addrs
+                if role_addr.role == RoleType.PREFILL and role_addr.ip
+            ]
+        else:
+            address_list = self._addresses
+            for role_addr in input_py.generate_config.role_addrs:
+                if (
+                    (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                    or role_addr.role == RoleType.PDFUSION
+                    or (
+                        not self._decode_entrance and role_addr.role == RoleType.PREFILL
+                    )
+                ):
+                    if role_addr.ip != "":
+                        address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
+                        break
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")
@@ -626,17 +657,28 @@ class ModelRpcClient(object):
         logging.debug(
             f"request: [{input_py.request_id}] send to address: {target_address}"
         )
-
+        stub = None
+        stream_done = False
+        terminal_seen = False
         try:
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
             grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
-            response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
+            if use_fetch_response:
+                response_iterator = stub.FetchResponse(
+                    FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
+                )
+            else:
+                response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                output = trans_output(input_py, response, stream_state)
+                if use_fetch_response and _is_finished_response(response):
+                    terminal_seen = True
+                yield output
+            stream_done = True
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
@@ -647,7 +689,10 @@ class ModelRpcClient(object):
             )
             raise e
         finally:
-            if response_iterator:
+            should_cancel = not stream_done and not (
+                use_fetch_response and terminal_seen
+            )
+            if response_iterator and should_cancel:
                 response_iterator.cancel()
 
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
