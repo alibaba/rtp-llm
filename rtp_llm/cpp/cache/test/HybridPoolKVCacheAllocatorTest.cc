@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
@@ -146,10 +148,50 @@ public:
     void shutdown() noexcept override {}
 };
 
+class ManualStorageBackendExecutor: public StorageBackendExecutor {
+public:
+    bool start() override {
+        return true;
+    }
+    bool submit(Task task) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tasks_.push_back(std::move(task));
+        return true;
+    }
+    void shutdown() noexcept override {
+        while (runOne()) {}
+    }
+
+    bool runOne() {
+        Task task;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (tasks_.empty()) {
+                return false;
+            }
+            task = std::move(tasks_.front());
+            tasks_.pop_front();
+        }
+        task();
+        return true;
+    }
+
+    size_t pendingCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return tasks_.size();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::deque<Task>   tasks_;
+};
+
 class PolicyMemoryStorageBackend: public StorageBackend {
 public:
-    explicit PolicyMemoryStorageBackend(std::shared_ptr<MemoryStorageState> state):
-        StorageBackend(std::make_shared<InlineStorageBackendExecutor>()), state_(std::move(state)) {}
+    explicit PolicyMemoryStorageBackend(
+        std::shared_ptr<MemoryStorageState> state,
+        std::shared_ptr<StorageBackendExecutor> executor = std::make_shared<InlineStorageBackendExecutor>()):
+        StorageBackend(std::move(executor)), state_(std::move(state)) {}
     ~PolicyMemoryStorageBackend() override {
         shutdown();
     }
@@ -976,6 +1018,230 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     allocator->free(free_info);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadReserveRejectsPoolLocalShortfall) {
+    auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/8, /*swa_block_num=*/4);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(1);
+
+    const auto pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    auto swa_holds = pools[1]->malloc(pools[1]->freeBlocksNum());
+    ASSERT_TRUE(swa_holds.has_value());
+    pools[1]->incRef(*swa_holds, BlockRefType::STORAGE_BACKEND);
+    ASSERT_EQ(pools[1]->freeBlocksNum(), 0u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->mutableBlockIds(0, /*group_id=*/0).assign({NULL_BLOCK_IDX});
+    batch_res->mutableBlockIds(0, /*group_id=*/1).assign({NULL_BLOCK_IDX});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.reuse_cache = true;
+
+    // The old aggregate predicate saw the free LINEAR pool and admitted this
+    // load even though its required SWA target had no physical block.
+    ASSERT_GE(allocator->freeBlocksNum(), allocator->reserveBlocksNum() + 1);
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, allocator->reserveBlocksNum(), {{}, {0}}),
+              MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+
+    pools[1]->decRef(*swa_holds, BlockRefType::STORAGE_BACKEND);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadCountsHeldDeviceBlocksForPermanentCapacity) {
+    auto config    = makeTinyFullSwaMultiPoolHybridConfig(/*full_block_num=*/8, /*swa_block_num=*/3);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+
+    const auto pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    const size_t swa_total = pools[1]->totalBlocksNum();
+    ASSERT_GT(swa_total, 0u);
+    auto device_matches = pools[1]->malloc(swa_total);
+    ASSERT_TRUE(device_matches.has_value());
+    pools[1]->incRef(*device_matches, BlockRefType::REQUEST);
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->mutableBlockIds(0, /*group_id=*/1).assign(*device_matches);
+    resource->mutableBlockIds(0, /*group_id=*/1).add({NULL_BLOCK_IDX});
+    const size_t remote_position = swa_total;
+    auto token_ids = makeCompleteTokenIds(
+        /*batch_size=*/1, /*seq_length=*/static_cast<int>((swa_total + 1) * 4), /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.reuse_cache = true;
+    malloc_info.verbose     = false;
+
+    // The request already owns every physical SWA block through DEVICE
+    // matches. Its remote target is an additional block inside the same
+    // logical prefix, so retrying can never make the full footprint fit.
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(
+                  malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{remote_position}}),
+              MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+
+    allocator->free(FreeInfo{resource, token_ids});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadIgnoresConnectorDummyInHeldFootprint) {
+    auto config    = makeTinyFullSwaMultiPoolHybridConfig(/*full_block_num=*/8, /*swa_block_num=*/3);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+
+    const auto pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    ASSERT_EQ(pools[1]->totalBlocksNum(), 2u);
+    auto device_match = pools[1]->malloc();
+    ASSERT_TRUE(device_match.has_value());
+    pools[1]->incRef(*device_match, BlockRefType::REQUEST);
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->mutableBlockIds(0, /*group_id=*/1).assign({*device_match, 0, NULL_BLOCK_IDX});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.reuse_cache = true;
+    malloc_info.verbose     = false;
+
+    // One held DEVICE block plus one remote target exactly fits this pool.
+    // The connector dummy block 0 and the NULL target are not physical holds.
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(
+                  malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{2}}),
+              MallocStatus::NONE);
+
+    resource->mutableBlockIds(0, /*group_id=*/1).assign({*device_match});
+    allocator->free(FreeInfo{resource, token_ids});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, PreparedNoReuseDoesNotDoubleCountPartialGroupAllocation) {
+    auto config    = makeTinyFullSwaMultiPoolHybridConfig(/*full_block_num=*/2, /*swa_block_num=*/3);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+
+    const auto pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    ASSERT_EQ(pools[0]->totalBlocksNum(), 1u);
+    auto partial_full = pools[0]->malloc();
+    ASSERT_TRUE(partial_full.has_value());
+    pools[0]->incRef(*partial_full, BlockRefType::REQUEST);
+    auto swa_pins = pools[1]->malloc(pools[1]->freeBlocksNum());
+    ASSERT_TRUE(swa_pins.has_value());
+    pools[1]->incRef(*swa_pins, BlockRefType::STORAGE_BACKEND);
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->mutableBlockIds(0, /*group_id=*/0).assign({*partial_full});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.reuse_cache = false;
+    malloc_info.verbose     = false;
+
+    // With reuse disabled each planner already reports the full footprint.
+    // The partial group-0 allocation must not be added a second time; group 1
+    // is only temporarily unavailable and therefore remains RETRYABLE.
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, /*reserve_blocks=*/0, {{}, {}}),
+              MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+
+    pools[1]->decRef(*swa_pins, BlockRefType::STORAGE_BACKEND);
+    allocator->free(FreeInfo{resource, token_ids});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, PreparedNoReuseCountsRequiredSparseSWAHole) {
+    auto config    = makeTinyFullSwaMultiPoolHybridConfig(/*full_block_num=*/8, /*swa_block_num=*/4);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+
+    const auto pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    ASSERT_EQ(pools[1]->totalBlocksNum(), 3u);
+    auto swa_pin = pools[1]->malloc();
+    ASSERT_TRUE(swa_pin.has_value());
+    pools[1]->incRef(*swa_pin, BlockRefType::STORAGE_BACKEND);
+    ASSERT_EQ(pools[1]->freeBlocksNum(), 2u);
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->mutableBlockIds(0, /*group_id=*/1).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.reuse_cache = false;
+    malloc_info.verbose     = false;
+
+    // The no-reuse SWA policy normally materializes only the two active tail
+    // blocks. Remote loading additionally requires sparse position 0, so the
+    // two currently free blocks are insufficient for this prepared attempt.
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(
+                  malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{0}}),
+              MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+
+    pools[1]->decRef(*swa_pin, BlockRefType::STORAGE_BACKEND);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DeferredBackendMatchReportsSWAPoolShortfallAsRetryable) {
+    auto config    = makeTinyFullSwaMultiPoolHybridConfig(/*full_block_num=*/8, /*swa_block_num=*/4);
+    auto state     = std::make_shared<MemoryStorageState>();
+    auto executor  = std::make_shared<ManualStorageBackendExecutor>();
+    auto backend   = std::make_shared<PolicyMemoryStorageBackend>(state, executor);
+    auto allocator = makeAllocator(config);
+
+    KVCacheConfig remote_config;
+    remote_config.enable_remote_cache = true;
+    allocator->setBlockTreeCacheConfigForTest(remote_config);
+    allocator->setStorageBackendForTest(backend);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+
+    constexpr CacheKeyType key = 7001;
+    state->groups_by_key[key]  = {0, 1};
+
+    const auto pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    auto swa_holds = pools[1]->malloc(pools[1]->freeBlocksNum());
+    ASSERT_TRUE(swa_holds.has_value());
+    pools[1]->incRef(*swa_holds, BlockRefType::STORAGE_BACKEND);
+    ASSERT_EQ(pools[1]->freeBlocksNum(), 0u);
+    ASSERT_GT(pools[0]->freeBlocksNum(), 0u);
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config);
+    resource->setBatchCacheKeys(0, {key});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.enable_cache_lookup = true;
+    malloc_info.reuse_cache         = true;
+    malloc_info.verbose             = false;
+
+    auto result = allocator->malloc(malloc_info);
+    ASSERT_TRUE(result.success);
+    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_TRUE(load_context->needBackendMatch());
+    EXPECT_FALSE(load_context->done());
+    ASSERT_EQ(executor->pendingCount(), 1u);
+
+    ASSERT_TRUE(executor->runOne());
+    EXPECT_TRUE(load_context->done());
+    EXPECT_FALSE(load_context->success());
+    EXPECT_EQ(load_context->mallocStatus(), MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(resource->curBlocksNum(), 0u);
+    EXPECT_EQ(executor->pendingCount(), 0u);
+
+    pools[1]->decRef(*swa_holds, BlockRefType::STORAGE_BACKEND);
+    load_context.reset();
+    result.async_context.reset();
+
+    auto retry_result = allocator->malloc(malloc_info);
+    ASSERT_TRUE(retry_result.success);
+    auto retry_context = std::dynamic_pointer_cast<LoadAsyncContext>(retry_result.async_context);
+    ASSERT_NE(retry_context, nullptr);
+    ASSERT_EQ(executor->pendingCount(), 1u);
+    ASSERT_TRUE(executor->runOne());  // match and materialize
+    ASSERT_EQ(executor->pendingCount(), 1u);
+    ASSERT_TRUE(executor->runOne());  // read
+    retry_context->waitDone();
+    EXPECT_TRUE(retry_context->success());
+    EXPECT_EQ(retry_context->mallocStatus(), MallocStatus::NONE);
+    EXPECT_GT(resource->curBlocksNum(), 0u);
+    allocator->free(FreeInfo{resource, token_ids});
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveCheckIsBypassedWhenMallocInfoLacksContext) {
     // hasAvailableBlocksForReserve returns true when info has no resource/tokens.
     auto config    = makeTinyMultiPoolHybridConfig();
@@ -1060,6 +1326,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
 
     const auto result = allocator->malloc(malloc_info);
     EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
     EXPECT_EQ(result.async_context, nullptr);
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 0u);

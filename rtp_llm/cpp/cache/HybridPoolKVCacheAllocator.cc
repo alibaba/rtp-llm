@@ -481,9 +481,21 @@ size_t HybridPoolKVCacheAllocator::reserveBlocksForPool(size_t group_id) const {
 MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_info,
                                                               size_t            reserve_blocks,
                                                               InitCapacityMode  mode) const {
+    return evaluateInitCapacityImpl(malloc_info, reserve_blocks, mode, nullptr);
+}
+
+MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacityImpl(
+    const MallocInfo&                     malloc_info,
+    size_t                                reserve_blocks,
+    InitCapacityMode                      mode,
+    const std::vector<RequiredPositions>* required_positions) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return MallocStatus::NONE;
     }
+    RTP_LLM_CHECK_WITH_INFO(required_positions == nullptr || required_positions->size() == kv_cache_groups_.size(),
+                            "prepared load group count mismatch: required_positions=%zu groups=%zu",
+                            required_positions == nullptr ? 0 : required_positions->size(),
+                            kv_cache_groups_.size());
     const auto& cp_mapper          = cp_slot_mapper_;
     const int   batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
     const int   total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
@@ -501,40 +513,47 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
         total_reservable_blocks += group_block_pools_[group_id]->totalBlocksNum();
     }
 
-    MallocStatus status = MallocStatus::NONE;
+    MallocStatus            status = MallocStatus::NONE;
+    const RequiredPositions no_required_positions;
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
         const size_t group_index = static_cast<size_t>(group_id);
         const int    group_common_seq =
             cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
         const int group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
-        const int group_reuse_blocks_len =
-            reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, group_id) : 0;
+        const int group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, group_id);
+        const auto& group_required_positions =
+            required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
         const auto need = kv_cache_groups_[group_index]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
+            group_common_seq,
+            group_seq_len,
+            reserve_step,
+            group_reuse_blocks_len,
+            reuse_enabled,
+            group_required_positions);
         const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
-        if (need_blocks <= 0) {
-            continue;
-        }
+        const size_t planned_blocks = static_cast<size_t>(std::max(need_blocks, 0));
 
         const auto&  pool            = group_block_pools_[group_index];
         const size_t total_blocks    = pool->totalBlocksNum();
-        const size_t required_blocks = static_cast<size_t>(need_blocks);
+        const auto   demand          = initBlockDemand(malloc_info, planned_blocks, group_id);
         const size_t group_reserve_blocks =
             (!kv_cache_groups_[group_index]->isReservable() || config_.usesExplicitIndependentBlocks(group_index)
              || total_reservable_blocks == 0) ?
                 0 :
                 reserve_blocks * total_blocks / total_reservable_blocks;
 
-        if (required_blocks > total_blocks || group_reserve_blocks > total_blocks - required_blocks) {
+        if (demand.retained_blocks > total_blocks || planned_blocks > total_blocks - demand.retained_blocks
+            || group_reserve_blocks > total_blocks - demand.retained_blocks - planned_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc permanently rejected: request_id=%ld pool_name=%s "
-                                 "group=%d tag=%s need_blocks=%d total_blocks=%zu "
+                                 "group=%d tag=%s retained_blocks=%zu planned_blocks=%zu total_blocks=%zu "
                                  "reserve_blocks=%zu group_reserve_blocks=%zu",
                                  malloc_info.request_id,
                                  pool->poolName().c_str(),
                                  group_id,
                                  config_.tagForGroup(group_index).c_str(),
-                                 need_blocks,
+                                 demand.retained_blocks,
+                                 planned_blocks,
                                  total_blocks,
                                  reserve_blocks,
                                  group_reserve_blocks);
@@ -546,7 +565,7 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
             continue;
         }
 
-        const size_t required_free_blocks = required_blocks + group_reserve_blocks;
+        const size_t required_free_blocks = demand.additional_blocks + group_reserve_blocks;
         size_t       free_blocks          = pool->freeBlocksNum();
         if (free_blocks < required_free_blocks
             && required_free_blocks <= static_cast<size_t>(std::numeric_limits<int>::max())) {
@@ -556,12 +575,12 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
         if (free_blocks < required_free_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc rejected by reserve blocks: request_id=%ld pool_name=%s "
-                                 "group=%d need_blocks=%d total_blocks=%zu free_blocks=%zu "
+                                 "group=%d need_blocks=%zu total_blocks=%zu free_blocks=%zu "
                                  "reserve_blocks=%zu group_reserve_blocks=%zu",
                                  malloc_info.request_id,
                                  pool->poolName().c_str(),
                                  group_id,
-                                 need_blocks,
+                                 demand.additional_blocks,
                                  total_blocks,
                                  free_blocks,
                                  reserve_blocks,
@@ -578,6 +597,22 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
                                                               size_t            reserve_blocks) const {
     return evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityMode::TOTAL_AND_AVAILABLE)
            == MallocStatus::NONE;
+}
+
+MallocStatus HybridPoolKVCacheAllocator::evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
+                                                                      size_t                  reserve_blocks,
+                                                                      const PreparedKVCache& prepared,
+                                                                      bool has_load_context) const {
+    if (reserve_blocks == 0 && !has_load_context) {
+        return MallocStatus::NONE;
+    }
+    if (!has_load_context) {
+        return evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityMode::TOTAL_AND_AVAILABLE);
+    }
+    return evaluateInitCapacityImpl(malloc_info,
+                                    reserve_blocks,
+                                    InitCapacityMode::TOTAL_AND_AVAILABLE,
+                                    &prepared.required_positions);
 }
 
 // Per-pool KV-exhaustion record. This is the primary field-debug tool for

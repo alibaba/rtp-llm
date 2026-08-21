@@ -57,8 +57,19 @@ private:
     // aggregate base-class classification is not sufficient here.
     MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;
+    MallocStatus evaluateInitCapacityImpl(const MallocInfo&                    malloc_info,
+                                          size_t                               reserve_blocks,
+                                          InitCapacityMode                     mode,
+                                          const std::vector<RequiredPositions>* required_positions) const;
 
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
+protected:
+    MallocStatus evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
+                                              size_t                  reserve_blocks,
+                                              const PreparedKVCache& prepared,
+                                              bool                   has_load_context) const override;
+
+private:
     void logMallocFailure(const MallocInfo& malloc_info,
                           const char*       phase,
                           int               failed_batch,

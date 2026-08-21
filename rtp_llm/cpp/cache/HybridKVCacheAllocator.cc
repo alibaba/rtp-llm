@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
 
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -190,6 +191,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         result.match_cost_time_us = match_cost_time_us;
         result.match_end_time_us  = match_end_time_us;
         result.load_attempted     = load_attempted;
+        if (prepared.materialize_status != MallocStatus::NONE) {
+            result.status = prepared.materialize_status;
+        }
         return result;
     };
 
@@ -199,7 +203,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         load_context->setMatchCallback([self = std::move(self), malloc_info, deferred_prepared](
                                            LoadAsyncContext& context, size_t matched_blocks) mutable {
             auto invocation_prepared = std::move(deferred_prepared);
-            return self->finishDeferredMalloc(malloc_info, *invocation_prepared, context, matched_blocks);
+            const bool success =
+                self->finishDeferredMalloc(malloc_info, *invocation_prepared, context, matched_blocks);
+            return LoadMatchResult{success, invocation_prepared->materialize_status};
         });
         MallocResult result{true,
                             static_cast<int>(deferred_prepared->matched_device_blocks) * reuse_unit_tokens,
@@ -228,7 +234,6 @@ bool HybridKVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_i
     const auto& cp_mapper   = cp_slot_mapper_;
     const int   cp_scale    = cp_mapper && cp_mapper->isSharded() ? cp_mapper->cpSize() : 1;
     prepared.required_positions.assign(static_cast<size_t>(kv_resource.groupNums()), {});
-    prepared.pending_targets = 0;
 
     if (matched_blocks > 0) {
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
@@ -239,11 +244,7 @@ bool HybridKVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_i
         }
     }
     auto add_target = [&](size_t path, size_t group_id) {
-        if (prepared.required_positions[group_id]
-                .insert(loadTargetPosition(path, group_id, cp_mapper, cp_scale))
-                .second) {
-            ++prepared.pending_targets;
-        }
+        prepared.required_positions[group_id].insert(loadTargetPosition(path, group_id, cp_mapper, cp_scale));
     };
     if (context != nullptr) {
         for (size_t i = 0; i < context->loadDescs().size(); ++i) {
@@ -264,7 +265,9 @@ bool HybridKVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_i
 
     const int seq_len        = malloc_info.complete_token_ids->seqLength();
     const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
-    if (!hasAvailableBlocksForReserve(malloc_info, reserveBlocksNum(), prepared, context != nullptr)) {
+    prepared.materialize_status =
+        evaluatePreparedInitCapacity(malloc_info, reserveBlocksNum(), prepared, context != nullptr);
+    if (prepared.materialize_status != MallocStatus::NONE) {
         return false;
     }
     for (int group_id = 0; group_id < kv_resource.groupNums(); ++group_id) {
@@ -328,8 +331,20 @@ bool HybridKVCacheAllocator::finishDeferredMalloc(const MallocInfo& malloc_info,
                                                   LoadAsyncContext& context,
                                                   size_t            matched_blocks) {
     bool success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
-    success      = success && !context.isRequestCanceled() && incrMalloc(malloc_info).success && context.commit();
+    if (success && !context.isRequestCanceled()) {
+        const auto incr_result = incrMalloc(malloc_info);
+        success                = incr_result.success;
+        if (!success) {
+            prepared.materialize_status = incr_result.status;
+        }
+    } else {
+        success = false;
+    }
+    success = success && context.commit();
     if (!success) {
+        if (prepared.materialize_status == MallocStatus::NONE) {
+            prepared.materialize_status = MallocStatus::INTERNAL_ERROR;
+        }
         free(FreeInfo{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids});
         return false;
     }
@@ -888,19 +903,65 @@ void HybridKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                         reserveBlocksNum());
 }
 
-bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo&      malloc_info,
-                                                          size_t                 reserve_blocks,
-                                                          const PreparedKVCache& prepared,
-                                                          bool                   has_load_context) const {
-    if (reserve_blocks == 0) {
-        return true;
+MallocStatus HybridKVCacheAllocator::evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
+                                                                  size_t                  reserve_blocks,
+                                                                  const PreparedKVCache& prepared,
+                                                                  bool                   has_load_context) const {
+    if (reserve_blocks == 0 && !has_load_context) {
+        return MallocStatus::NONE;
     }
     if (!has_load_context) {
-        return hasAvailableBlocksForReserve(malloc_info, reserve_blocks);
+        if (hasAvailableBlocksForReserve(malloc_info, reserve_blocks)) {
+            return MallocStatus::NONE;
+        }
+        return evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityMode::TOTAL_ONLY)
+                       == MallocStatus::PERMANENT_RESOURCE_EXHAUSTED ?
+                   MallocStatus::PERMANENT_RESOURCE_EXHAUSTED :
+                   MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
     }
-    const int    need_blocks = getNeedBlocks(malloc_info);
-    const size_t required    = static_cast<size_t>(need_blocks) + prepared.pending_targets + reserve_blocks;
-    return freeBlocksNum() >= required;
+    RTP_LLM_CHECK_WITH_INFO(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids
+                                && prepared.required_positions.size() == kv_cache_groups_.size(),
+                            "prepared shared-pool capacity input mismatch");
+    const int    batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
+    const int    total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
+    const int    raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+    const int    raw_seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int    reserve_step       = malloc_info.complete_token_ids->getReserveStep();
+    size_t       planned_blocks     = 0;
+    for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
+        const int group_common_seq =
+            cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, raw_common_seq_len);
+        const int group_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, raw_seq_len);
+        const auto need = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
+            group_common_seq,
+            group_seq_len,
+            reserve_step,
+            malloc_info.batch_kv_cache_resource->blocksNum(0, group_id),
+            malloc_info.reuse_cache,
+            prepared.required_positions[static_cast<size_t>(group_id)]);
+        planned_blocks += static_cast<size_t>(std::max(need.common_blocks, 0));
+        planned_blocks += static_cast<size_t>(batch_size) * static_cast<size_t>(std::max(need.extra_blocks, 0));
+    }
+    const auto   demand       = initBlockDemand(malloc_info, planned_blocks);
+    const size_t total_blocks = totalBlocksNum();
+    if (demand.retained_blocks > total_blocks || planned_blocks > total_blocks - demand.retained_blocks
+        || reserve_blocks > total_blocks - demand.retained_blocks - planned_blocks) {
+        return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
+    }
+    const size_t required_free_blocks = demand.additional_blocks + reserve_blocks;
+    size_t       free_blocks          = freeBlocksNum();
+    if (free_blocks < required_free_blocks
+        && required_free_blocks <= static_cast<size_t>(std::numeric_limits<int>::max())) {
+        for (const auto& group : kv_cache_groups_) {
+            (void)group->ensureFreeBlocks(static_cast<int>(required_free_blocks));
+            free_blocks = freeBlocksNum();
+            if (free_blocks >= required_free_blocks) {
+                break;
+            }
+        }
+    }
+    return free_blocks >= required_free_blocks ? MallocStatus::NONE :
+                                                 MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
 }
 
 void HybridKVCacheAllocator::rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size) {

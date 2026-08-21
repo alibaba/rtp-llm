@@ -46,7 +46,7 @@ protected:
         std::vector<RequiredPositions>    required_positions;
         std::vector<BlockIndicesType>     referenced_blocks;
         std::vector<size_t>               original_sizes;
-        size_t                            pending_targets = 0;
+        MallocStatus                      materialize_status = MallocStatus::NONE;
     };
 
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
@@ -81,10 +81,10 @@ protected:
 
     std::vector<BlockRefTransition>
     freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
-    bool hasAvailableBlocksForReserve(const MallocInfo&       malloc_info,
-                                      size_t                  reserve_blocks,
-                                      const PreparedKVCache& prepared,
-                                      bool                   has_load_context) const;
+    virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
+                                                      size_t                  reserve_blocks,
+                                                      const PreparedKVCache& prepared,
+                                                      bool                   has_load_context) const;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
     virtual void logMallocFailure(const MallocInfo& malloc_info,
                                   const char*       phase,
