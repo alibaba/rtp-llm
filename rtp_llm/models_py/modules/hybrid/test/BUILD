@@ -91,3 +91,14 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
+
+py_test (
+   name = "indexer_target_verify_test",
+   srcs = ["indexer_target_verify_test.py"],
+   deps = py_test_deps + [
+        "//rtp_llm:testlib",
+   ],
+   env = test_envs,
+   tags = ["open_skip", "H20"],
+   exec_properties = {'gpu':'H20'},
+)
