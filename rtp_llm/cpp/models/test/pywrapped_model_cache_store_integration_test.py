@@ -150,31 +150,53 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     )
                 )
 
-    def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
+    def test_context_parallel_publishes_original_lengths_to_every_tag(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "cp_actual_lengths")
 
         # CP turns the six-token request into a four-token rank-local chunk for
-        # attention, while CacheStore must still publish three two-token blocks.
+        # attention. Every tagged writer must still plan from all six tokens,
+        # while retaining its own physical block table and stride.
         self.assertEqual(model.seen_input_lengths, [[4]])
-        record = _record_for_request(result, 301)
-        self.assertEqual(len(record["blocks"]), 3)
-        base = result["base_addresses"]["default"]
+        self.assertEqual(len(result["records"]), 2)
+        blocks = _blocks_by_key(result)
+        full_blocks = {
+            key: block for key, block in blocks.items() if "_tag_full" in key
+        }
+        linear_blocks = {
+            key: block for key, block in blocks.items() if "_tag_linear" in key
+        }
+        self.assertEqual(len(full_blocks), 3)
+        self.assertEqual(len(linear_blocks), 6)
         self.assertEqual(
-            sorted(block["address"] - base for block in record["blocks"]),
+            sorted(
+                block["address"] - result["base_addresses"]["full"]
+                for block in full_blocks.values()
+            ),
             [16, 32, 48],
         )
         self.assertEqual(
             sorted(
-                token_key
-                for token_key in (3102, 3104, 3106)
-                if any(
-                    f"_token_id_str_{token_key}_" in block["key"]
-                    for block in record["blocks"]
-                )
+                block["address"] - result["base_addresses"]["linear"]
+                for block in linear_blocks.values()
             ),
-            [3102, 3104, 3106],
+            [72, 96, 120, 144, 168, 192],
         )
+        self.assertEqual({block["length"] for block in full_blocks.values()}, {16})
+        self.assertEqual(
+            {block["length"] for block in linear_blocks.values()}, {24}
+        )
+        for token_key in range(3101, 3107):
+            self.assertTrue(
+                any(
+                    f"_token_id_str_{token_key}_" in key
+                    for key in linear_blocks
+                )
+            )
+        for token_key in (3102, 3104, 3106):
+            self.assertTrue(
+                any(f"_token_id_str_{token_key}_" in key for key in full_blocks)
+            )
 
     def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:
         model = CacheStoreForwardModel()
