@@ -8,6 +8,10 @@ from typing import Any, Optional
 
 import torch
 
+from rtp_llm.models.kimi_k3.mla_cache_tp import (
+    kimi_k3_mla_cache_layout,
+    mla_cache_tp_enabled,
+)
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache
 
@@ -24,6 +28,7 @@ class MlaKVCacheWriteOp:
         self,
         kv_cache_dtype: KvCacheDataType,
         clear_page_on_boundary: bool = False,
+        parallelism_config: Any = None,
     ) -> None:
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
@@ -34,6 +39,7 @@ class MlaKVCacheWriteOp:
         # the current stream on every transient MLA implementation build.
         self.scale = torch.ones((), dtype=torch.float32, device="cuda")
         self.clear_page_on_boundary = clear_page_on_boundary
+        self.parallelism_config = parallelism_config
 
     def forward(
         self,
@@ -52,6 +58,17 @@ class MlaKVCacheWriteOp:
             kv_cache: MLA KV cache with compressed layout
         """
         if kv_cache is not None:
+            if mla_cache_tp_enabled(self.parallelism_config):
+                layout = kimi_k3_mla_cache_layout(self.parallelism_config)
+                append_ckv_t, key_pe = layout.shard_components(
+                    append_ckv_t, key_pe
+                )
+                if kv_cache.kv_cache_base.shape[-1] != layout.local_width:
+                    raise RuntimeError(
+                        "K3 MLA cache TP physical width mismatch: "
+                        f"cache={kv_cache.kv_cache_base.shape[-1]} "
+                        f"expected={layout.local_width}"
+                    )
             slot_mapping = (
                 slot_mapping_override
                 if slot_mapping_override is not None
