@@ -961,6 +961,9 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         ll_num_max_token=ll_num_max_token,
     )
 
-    # Set local ip if not already set (e.g. for world_info / distributed_server)
-    if not py_env_configs.server_config.ip:
+    # Prefer the host-network address supplied by Hippo.
+    hippo_slave_ip = os.environ.get("HIPPO_SLAVE_IP")
+    if hippo_slave_ip:
+        py_env_configs.server_config.ip = hippo_slave_ip
+    elif not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())

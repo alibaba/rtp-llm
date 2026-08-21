@@ -1,6 +1,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/bf214ca22625e311a2c4c0dfbf7af19128f4919c/vllm/distributed/device_communicators/symm_mem.py
 import logging
 import math
+import os
 from typing import Optional, Sequence, Union
 
 import torch
@@ -33,6 +34,45 @@ try:
 except ImportError:
     torch_symm_mem = None
     torch_symm_mem_available = False
+
+
+_configured_backend: Optional[str] = None
+
+
+def _configure_backend_from_env() -> None:
+    """Configure torch symmetric memory before its first allocation."""
+
+    global _configured_backend
+    requested = os.environ.get("KIMI_K3_SYMM_MEM_BACKEND")
+    if (
+        not requested
+        or _configured_backend is not None
+        or not torch_symm_mem_available
+    ):
+        return
+
+    backend = requested.upper()
+    supported_backends = {"CUDA", "NCCL", "NVSHMEM"}
+    if backend not in supported_backends:
+        raise ValueError(
+            "KIMI_K3_SYMM_MEM_BACKEND must be one of "
+            f"{sorted(supported_backends)}, got {requested!r}"
+        )
+    if backend == "NVSHMEM" and not torch_symm_mem.is_nvshmem_available():
+        raise RuntimeError(
+            "KIMI_K3_SYMM_MEM_BACKEND=NVSHMEM was requested, but this "
+            "PyTorch build or system does not provide NVSHMEM"
+        )
+
+    previous_backend = torch_symm_mem.get_backend(torch.device("cuda"))
+    if str(previous_backend).upper() != backend:
+        torch_symm_mem.set_backend(backend)
+    _configured_backend = backend
+    logging.info(
+        "torch symmetric-memory backend=%s (was %s)",
+        backend,
+        previous_backend,
+    )
 
 
 class TorchSymmMemCommunicator:
@@ -251,6 +291,18 @@ def init_symm_mem_communicator(
 ) -> Optional[TorchSymmMemCommunicator]:
     """Initialize TorchSymmMemCommunicator for TP group."""
     global _symm_mem_comm
+    _configure_backend_from_env()
+    # NVSHMEM is selected for Kimi K3 MegaMoE's cross-node symmetric-memory
+    # buffers.  The generic TP communicator below is an independent all-reduce
+    # optimization and eagerly rendezvouses a large workspace; initializing it
+    # with NVSHMEM can block process-group construction before the model-owned
+    # MegaMoE communicator is created.  Keep the generic optimization disabled
+    # for this backend and let K3 own the NVSHMEM allocations.
+    if _configured_backend == "NVSHMEM":
+        logging.info(
+            "Skipping generic TorchSymmMemCommunicator for NVSHMEM backend"
+        )
+        return None
     try:
         symm_mem_comm = TorchSymmMemCommunicator(tp_group, torch.cuda.current_device())
         if symm_mem_comm.disabled:

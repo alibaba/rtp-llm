@@ -23,7 +23,11 @@ from rtp_llm.models_py.modules.kimi_k3.mega_se_buf import (
     get_or_create_kimi_k3_mega_moe_se_buf,
     get_or_create_kimi_k3_mega_moe_se_storages,
 )
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe import (
+    KimiK3LatentMoE,
+    _configure_symm_mem_backend,
+    _validate_full_world_mega_topology,
+)
 from rtp_llm.ops import ParallelismConfig
 
 if TYPE_CHECKING:
@@ -117,19 +121,13 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             raise RuntimeError(
                 "K3 DeepGEMM MegaMoE SE requires torch.distributed initialization"
             )
+        _configure_symm_mem_backend()
         world_size = int(dist.get_world_size())
-        if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
-        ):
-            raise RuntimeError(
-                "K3 DeepGEMM MegaMoE SE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
-                f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
-                f"local_experts={self.local_expert_count}"
-            )
+        _validate_full_world_mega_topology(
+            ep_size=self.ep_size,
+            world_size=world_size,
+            local_expert_count=self.local_expert_count,
+        )
         if self.top_k > 32:
             raise RuntimeError(
                 f"K3 DeepGEMM MegaMoE SE requires topk <= 32, got {self.top_k}"

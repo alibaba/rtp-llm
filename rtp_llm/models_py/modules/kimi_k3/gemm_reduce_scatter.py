@@ -81,8 +81,16 @@ def configure_gemm_reduce_scatter(
             )
         return existing.enabled
 
+    world_size = int(group.size())
     backend = gemm_reduce_scatter_backend()
     requested = enabled and backend not in ("nccl", "off")
+    if requested and world_size not in _SUPPORTED_WORLD_SIZES:
+        logging.warning(
+            "[K3_GEMM_REDUCE_SCATTER] DeepGEMM does not support TP%d; "
+            "falling back to Torch GEMM + NCCL ReduceScatter",
+            world_size,
+        )
+        requested = False
     deep_gemm = None
     local_ready = requested
     failure_reason = ""
@@ -124,15 +132,9 @@ def configure_gemm_reduce_scatter(
                 message,
             )
 
-    world_size = int(group.size())
     use_deepgemm = requested and group_ready
     workspace = None
     if use_deepgemm:
-        if world_size not in _SUPPORTED_WORLD_SIZES:
-            raise RuntimeError(
-                "DeepGEMM GEMM/RS supports "
-                f"TP{_SUPPORTED_WORLD_SIZES}, got TP{world_size}"
-            )
         if max_m <= 0 or max_m % world_size:
             raise ValueError(
                 f"GEMM/RS max_m must be positive and divisible by TP{world_size}, "

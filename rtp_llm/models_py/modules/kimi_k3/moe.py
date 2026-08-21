@@ -23,6 +23,94 @@ if TYPE_CHECKING:
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
+_SYMM_MEM_BACKEND_CONFIGURED: Optional[str] = None
+
+# Reuse one pair of device buffers for every K3 MoE layer.  The offloaded
+# pinned scale tensors stay owned by their modules, while each layer copies
+# its scales into these fixed addresses before launching MegaMoE.  Besides
+# bounding HBM usage, fixed destinations make the copies CUDA-graph capturable.
+_MEGA_SCALE_STAGING: Dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_or_create_mega_scale_staging(
+    l1_scale: torch.Tensor,
+    l2_scale: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    key = (
+        device.type,
+        device.index,
+        l1_scale.dtype,
+        tuple(l1_scale.shape),
+        l2_scale.dtype,
+        tuple(l2_scale.shape),
+    )
+    buffers = _MEGA_SCALE_STAGING.get(key)
+    if buffers is None:
+        buffers = (
+            torch.empty_like(l1_scale, device=device),
+            torch.empty_like(l2_scale, device=device),
+        )
+        _MEGA_SCALE_STAGING[key] = buffers
+    return buffers
+
+
+def _configure_symm_mem_backend() -> None:
+    """Select the symmetric-memory backend before MegaMoE allocates buffers."""
+
+    global _SYMM_MEM_BACKEND_CONFIGURED
+    requested = os.environ.get("KIMI_K3_SYMM_MEM_BACKEND")
+    if not requested:
+        return
+
+    backend = requested.upper()
+    supported_backends = {"CUDA", "NVSHMEM", "NCCL"}
+    if backend not in supported_backends:
+        raise ValueError(
+            "KIMI_K3_SYMM_MEM_BACKEND must be one of "
+            f"{sorted(supported_backends)}, got {requested!r}"
+        )
+    if _SYMM_MEM_BACKEND_CONFIGURED is not None:
+        if _SYMM_MEM_BACKEND_CONFIGURED != backend:
+            raise RuntimeError(
+                "K3 symmetric-memory backend was already configured as "
+                f"{_SYMM_MEM_BACKEND_CONFIGURED}, cannot change it to {backend}"
+            )
+        return
+
+    import torch.distributed._symmetric_memory as symm_mem
+
+    if backend == "NVSHMEM" and not symm_mem.is_nvshmem_available():
+        raise RuntimeError(
+            "KIMI_K3_SYMM_MEM_BACKEND=NVSHMEM was requested, but this "
+            "PyTorch build or system does not provide NVSHMEM"
+        )
+    previous_backend = symm_mem.get_backend(torch.device("cuda"))
+    if str(previous_backend).upper() != backend:
+        symm_mem.set_backend(backend)
+    _SYMM_MEM_BACKEND_CONFIGURED = backend
+    logging.info(
+        "[KimiK3 DeepGEMM MegaMoE] symmetric-memory backend=%s (was %s)",
+        backend,
+        previous_backend,
+    )
+
+
+def _validate_full_world_mega_topology(
+    *, ep_size: int, world_size: int, local_expert_count: int
+) -> None:
+    """Validate K3's one-rank-per-EP-partition full-world MegaMoE layout."""
+
+    if ep_size != world_size:
+        raise RuntimeError(
+            "K3 DeepGEMM MegaMoE requires EP to span the full distributed "
+            f"world; got EP={ep_size}, world={world_size}"
+        )
+    if local_expert_count <= 0:
+        raise RuntimeError(
+            "K3 DeepGEMM MegaMoE requires at least one local expert, got "
+            f"{local_expert_count}"
+        )
 
 
 def _transient_full_native_column_weight(
@@ -232,19 +320,13 @@ class KimiK3LatentMoE(nn.Module):
             raise RuntimeError(
                 "K3 DeepGEMM MegaMoE requires torch.distributed initialization"
             )
+        _configure_symm_mem_backend()
         world_size = int(dist.get_world_size())
-        if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
-        ):
-            raise RuntimeError(
-                "K3 DeepGEMM MegaMoE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
-                f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
-                f"local_experts={self.local_expert_count}"
-            )
+        _validate_full_world_mega_topology(
+            ep_size=self.ep_size,
+            world_size=world_size,
+            local_expert_count=self.local_expert_count,
+        )
 
         mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
         required_parameters = {
@@ -294,8 +376,12 @@ class KimiK3LatentMoE(nn.Module):
         )
         w13[:, :intermediate].copy_(self._packed_fp4_view(st_w1_w))
         w13[:, intermediate:].copy_(self._packed_fp4_view(st_w3_w))
-        s13_raw[:, :intermediate].copy_(self._ue8m0_view(st_w1_s))
-        s13_raw[:, intermediate:].copy_(self._ue8m0_view(st_w3_s))
+        s13_raw[:, :intermediate].copy_(
+            self._ue8m0_view(st_w1_s), non_blocking=True
+        )
+        s13_raw[:, intermediate:].copy_(
+            self._ue8m0_view(st_w3_s), non_blocking=True
+        )
         del st_w1_w, st_w1_s, st_w3_w, st_w3_s
         s13 = prepare_fp4_weight_scale_for_deepgemm(
             s13_raw,
@@ -324,7 +410,7 @@ class KimiK3LatentMoE(nn.Module):
             device=device,
         )
         w2.copy_(self._packed_fp4_view(st_w2_w))
-        s2_raw.copy_(self._ue8m0_view(st_w2_s))
+        s2_raw.copy_(self._ue8m0_view(st_w2_s), non_blocking=True)
         del st_w2_w, st_w2_s
         s2 = prepare_fp4_weight_scale_for_deepgemm(
             s2_raw,
@@ -348,6 +434,39 @@ class KimiK3LatentMoE(nn.Module):
             activation="situ",
         )
         del w13, s13, w2, s2
+        self._mega_scale_cpu_offload = (
+            os.environ.get("KIMI_K3_MOE_SCALE_CPU_OFFLOAD", "0") == "1"
+        )
+        if self._mega_scale_cpu_offload:
+            # Direct CUDA-to-pageable-CPU copies can stall indefinitely on
+            # GB200/ARM after many large weight transforms.  Keep the scale
+            # tensors in pinned host memory so the transfer follows CUDA's
+            # asynchronous D2H path, then synchronize before releasing the
+            # transformed GPU tensors.
+            mega_l1_sf_cpu = torch.empty_like(
+                self._mega_l1_sf, device="cpu", pin_memory=True
+            )
+            mega_l2_sf_cpu = torch.empty_like(
+                self._mega_l2_sf, device="cpu", pin_memory=True
+            )
+            mega_l1_sf_cpu.copy_(self._mega_l1_sf, non_blocking=True)
+            mega_l2_sf_cpu.copy_(self._mega_l2_sf, non_blocking=True)
+            torch.cuda.current_stream(device).synchronize()
+            self._mega_l1_sf = mega_l1_sf_cpu
+            self._mega_l2_sf = mega_l2_sf_cpu
+            (
+                self._mega_l1_sf_staging,
+                self._mega_l2_sf_staging,
+            ) = _get_or_create_mega_scale_staging(
+                self._mega_l1_sf,
+                self._mega_l2_sf,
+                device,
+            )
+            logging.info(
+                "[KimiK3 DeepGEMM MegaMoE] layer=%d keeps transformed FP4 "
+                "scales on CPU",
+                self.layer_idx,
+            )
 
         # The transform inputs keep their expandable allocator segments live
         # until this point.  Cleaning immediately after dropping them prevents
@@ -428,10 +547,22 @@ class KimiK3LatentMoE(nn.Module):
         # against a peer that has not finished publishing its next input.
         self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         output = self._mega_y[:token_count]
+        mega_l1_sf = self._mega_l1_sf
+        mega_l2_sf = self._mega_l2_sf
+        scale_cpu_offload = getattr(self, "_mega_scale_cpu_offload", False)
+        if scale_cpu_offload:
+            mega_l1_sf = self._mega_l1_sf_staging
+            mega_l2_sf = self._mega_l2_sf_staging
+            mega_l1_sf.copy_(
+                self._mega_l1_sf, non_blocking=True
+            )
+            mega_l2_sf.copy_(
+                self._mega_l2_sf, non_blocking=True
+            )
         deep_gemm.fp8_fp4_mega_moe(
             output,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
+            (self._mega_l1_w, mega_l1_sf),
+            (self._mega_l2_w, mega_l2_sf),
             self._mega_buf,
             recipe=(1, 1, 32),
             activation="situ",

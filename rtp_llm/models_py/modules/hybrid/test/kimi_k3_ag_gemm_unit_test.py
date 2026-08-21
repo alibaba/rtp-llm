@@ -11,6 +11,7 @@ import rtp_llm.models_py.modules.kimi_k3.all_gather_gemm as kimi_k3_ag_gemm
 import rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter as kimi_k3_gemm_reduce_scatter
 import rtp_llm.models_py.modules.kimi_k3.kda.module as kimi_k3_kda
 import rtp_llm.models_py.modules.kimi_k3.mla as kimi_k3_mla
+import rtp_llm.models_py.modules.kimi_k3.moe as kimi_k3_moe
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.model_desc.kimi_k3 import (
     KimiK3DecoderLayer,
@@ -63,6 +64,47 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             expert_ids,
             expert_weights * module.routed_scaling_factor,
         )
+
+    def test_decode_sp_shard_accepts_replicated_kda_output(self) -> None:
+        tensor = torch.arange(9 * 4).reshape(9, 4)
+        layout = sequence_parallel.token_shard_layout(9, 8, 4)
+
+        actual = kimi_k3._decode_sp_shard(
+            tensor,
+            layout,
+            name="attention output",
+        )
+
+        self.assertEqual(tuple(actual.shape), (2, 4))
+        torch.testing.assert_close(actual[0], tensor[8], rtol=0, atol=0)
+        self.assertEqual(torch.count_nonzero(actual[1]).item(), 0)
+
+    def test_decode_sp_shard_preserves_mla_local_output(self) -> None:
+        tensor = torch.arange(2 * 4).reshape(2, 4)
+        layout = sequence_parallel.token_shard_layout(9, 8, 4)
+
+        actual = kimi_k3._decode_sp_shard(
+            tensor,
+            layout,
+            name="attention output",
+        )
+
+        self.assertIs(actual, tensor)
+
+    def test_full_world_mega_topology_accepts_ep16(self) -> None:
+        kimi_k3_moe._validate_full_world_mega_topology(
+            ep_size=16,
+            world_size=16,
+            local_expert_count=56,
+        )
+
+    def test_full_world_mega_topology_rejects_replicated_ep(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "full distributed world"):
+            kimi_k3_moe._validate_full_world_mega_topology(
+                ep_size=8,
+                world_size=16,
+                local_expert_count=112,
+            )
 
     @staticmethod
     def _packed_kda_stub(tp_size: int) -> KimiK3KDA:
@@ -442,6 +484,32 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         self.assertTrue(enabled)
         reserve.assert_called_once_with(group, 4096 * 16 * 2)
 
+    def test_configure_all_gather_gemm_tp16_without_nvshmem_falls_back(
+        self,
+    ) -> None:
+        group = Mock()
+        group.size.return_value = 16
+        device = torch.device("cuda", 0)
+        with (
+            patch.dict(kimi_k3_ag_gemm._STATES, {}, clear=True),
+            patch.dict(kimi_k3_ag_gemm.os.environ, {}, clear=True),
+            patch.object(
+                kimi_k3_ag_gemm,
+                "reserve_fused_all_gather_matmul_workspace",
+            ) as reserve,
+        ):
+            enabled = kimi_k3_ag_gemm.configure_all_gather_gemm(
+                group,
+                device,
+                enabled=True,
+                max_m=32768,
+                k=16,
+                dtype=torch.bfloat16,
+            )
+
+        self.assertFalse(enabled)
+        reserve.assert_not_called()
+
     def test_gemm_reduce_scatter_policy_starts_at_32k_physical_m(self) -> None:
         self.assertFalse(
             kimi_k3_gemm_reduce_scatter.should_use_gemm_reduce_scatter(32767)
@@ -452,6 +520,28 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "physical_m"):
             kimi_k3_gemm_reduce_scatter.should_use_gemm_reduce_scatter(-1)
+
+    def test_configure_gemm_reduce_scatter_tp16_falls_back(self) -> None:
+        group = Mock()
+        group.size.return_value = 16
+        device = torch.device("cuda", 0)
+        with (
+            patch.dict(kimi_k3_gemm_reduce_scatter._STATES, {}, clear=True),
+            patch.dict(
+                kimi_k3_gemm_reduce_scatter.os.environ,
+                {"KIMI_K3_GEMM_REDUCE_SCATTER_BACKEND": "deepgemm"},
+                clear=True,
+            ),
+        ):
+            enabled = kimi_k3_gemm_reduce_scatter.configure_gemm_reduce_scatter(
+                group,
+                device,
+                enabled=True,
+                max_m=32768,
+                n=16,
+            )
+
+        self.assertFalse(enabled)
 
     def test_gemm_reduce_scatter_dispatches_from_current_physical_m(self) -> None:
         if not torch.cuda.is_available():

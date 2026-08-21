@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -25,6 +26,19 @@ from rtp_llm.models_py.modules.kimi_k3._collective_gemm import (
 )
 
 DEFAULT_ALL_GATHER_GEMM_MIN_TOKENS = DEFAULT_COLLECTIVE_GEMM_MIN_M
+_BACKEND_ENV = "KIMI_K3_ALL_GATHER_GEMM_BACKEND"
+
+
+def all_gather_gemm_backend() -> str:
+    """Return the process-lifetime backend selected for K3 Prefill AG/GEMM."""
+
+    backend = os.environ.get(_BACKEND_ENV, "auto").strip().lower()
+    if backend not in ("auto", "symm_mem", "nccl", "off"):
+        raise ValueError(
+            f"{_BACKEND_ENV} must be auto, symm_mem, nccl, or off; "
+            f"got {backend!r}"
+        )
+    return backend
 
 
 @dataclass
@@ -78,7 +92,26 @@ def configure_all_gather_gemm(
         return existing.enabled
 
     world_size = int(group.size())
-    use_fused = enabled and should_use_all_gather_gemm(max_m)
+    backend = all_gather_gemm_backend()
+    use_fused = (
+        enabled
+        and backend not in ("nccl", "off")
+        and should_use_all_gather_gemm(max_m)
+    )
+    symm_backend = os.environ.get("KIMI_K3_SYMM_MEM_BACKEND", "").upper()
+    if use_fused and world_size > 8 and symm_backend != "NVSHMEM":
+        message = (
+            f"cross-node TP{world_size} fused AllGather/GEMM requires "
+            "KIMI_K3_SYMM_MEM_BACKEND=NVSHMEM"
+        )
+        if backend == "symm_mem":
+            raise RuntimeError(message)
+        logging.warning(
+            "[K3_ALL_GATHER_GEMM] %s; falling back to NCCL AllGather + "
+            "Torch GEMM",
+            message,
+        )
+        use_fused = False
     workspace_bytes = 0
     if use_fused:
         if dtype != torch.bfloat16:
@@ -94,7 +127,19 @@ def configure_all_gather_gemm(
             raise ValueError(f"AllGather/GEMM K must be positive, got {k}")
         itemsize = torch.empty((), dtype=dtype).element_size()
         workspace_bytes = max_m // world_size * k * itemsize
-        reserve_fused_all_gather_matmul_workspace(group, workspace_bytes)
+        try:
+            reserve_fused_all_gather_matmul_workspace(group, workspace_bytes)
+        except Exception as exc:
+            if backend == "symm_mem":
+                raise
+            logging.warning(
+                "[K3_ALL_GATHER_GEMM] symmetric-memory workspace setup "
+                "failed; falling back to NCCL AllGather + Torch GEMM: %s",
+                exc,
+            )
+            use_fused = False
+            workspace_bytes = 0
+    if use_fused:
         logging.info(
             "[K3_ALL_GATHER_GEMM] enabled Torch symmetric-memory AG-GEMM: "
             "TP%d max_m=%d k=%d runtime_min_m=%d workspace=%.3f GiB",
@@ -200,6 +245,7 @@ def all_gather_gemm(
 
 __all__ = [
     "DEFAULT_ALL_GATHER_GEMM_MIN_TOKENS",
+    "all_gather_gemm_backend",
     "all_gather_gemm",
     "configure_all_gather_gemm",
     "should_use_all_gather_gemm",

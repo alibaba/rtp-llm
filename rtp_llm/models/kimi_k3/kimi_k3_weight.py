@@ -62,13 +62,37 @@ def _merge_conv1d(ts: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat(ts, dim=0)
 
 
-def _merge_kda_qkvg_fa_beta(ts: List[torch.Tensor]) -> torch.Tensor:
-    """Build the global K3 fused projection before heterogeneous TP split."""
+def _merge_kda_qkvg_fa_beta(
+    ts: List[torch.Tensor], *, tp_size: int, tp_rank: int
+) -> torch.Tensor:
+    """Build the rank-local K3 fused projection without a global temporary."""
 
     if len(ts) != 6:
         raise ValueError(f"K3 KDA fused projection expects six tensors, got {len(ts)}")
+    if tp_size <= 0 or not 0 <= tp_rank < tp_size:
+        raise ValueError(f"invalid TP placement size={tp_size} rank={tp_rank}")
     q, k, v, g, f_a, beta = ts
-    return torch.cat((q.T, k.T, v.T, g.T, f_a.T, beta.T), dim=1).contiguous()
+
+    def _local_projection(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.shape[0] % tp_size:
+            raise ValueError(
+                "K3 KDA projection width must be divisible by TP: "
+                f"shape={tuple(tensor.shape)} tp={tp_size}"
+            )
+        local_width = tensor.shape[0] // tp_size
+        return tensor.narrow(0, tp_rank * local_width, local_width).T
+
+    return torch.cat(
+        (
+            _local_projection(q),
+            _local_projection(k),
+            _local_projection(v),
+            _local_projection(g),
+            f_a.T,
+            beta.T,
+        ),
+        dim=1,
+    ).contiguous()
 
 
 def _merge_mla_input_projections(
@@ -483,8 +507,13 @@ class KimiK3Weight(ModelDeployWeightInfo):
                         self._layer_ckpt("self_attn.b_proj.weight"), identity
                     ),
                 ],
-                _merge_kda_qkvg_fa_beta,
+                functools.partial(
+                    _merge_kda_qkvg_fa_beta,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                ),
                 cfg,
+                already_tp_sharded=True,
             ),
             LinearAttnAtomicWeight(
                 W.linear_attn_conv1d_w,

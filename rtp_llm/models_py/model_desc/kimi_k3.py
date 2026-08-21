@@ -34,7 +34,6 @@ from rtp_llm.models_py.distributed.collective_torch import (
 from rtp_llm.models_py.distributed.sequence_parallel import (
     TokenShardLayout,
     shard_tokens,
-    shard_tokens_with_padding,
     token_shard_layout,
 )
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
@@ -135,6 +134,27 @@ class KimiK3DecoderOutput:
 
     hidden_states: torch.Tensor
     block_residual: torch.Tensor
+
+
+def _decode_sp_shard(
+    tensor: torch.Tensor,
+    layout: TokenShardLayout,
+    *,
+    name: str,
+) -> torch.Tensor:
+    """Normalize a replicated or already-sharded Decode tensor to one TP shard."""
+
+    if tensor.ndim == 0:
+        raise RuntimeError(f"K3 Decode token-SP {name} must have a token dimension")
+    if tensor.shape[0] == layout.logical_tokens:
+        return shard_tokens(tensor, layout)
+    if tensor.shape[0] == layout.local_tokens:
+        return tensor
+    raise RuntimeError(
+        f"K3 Decode token-SP {name} has incompatible token rows: "
+        f"shape={tuple(tensor.shape)}, logical={layout.logical_tokens}, "
+        f"local={layout.local_tokens}"
+    )
 
 
 class KimiK3FinalNorm(nn.Module):
@@ -319,25 +339,28 @@ class KimiK3DecoderLayer(nn.Module):
                 prefill_sp_layout=prefill_sp_layout,
             )
         if decode_sp:
-            if prefix_sum is not None:
-                prefix_sum, local_valid_tokens = shard_tokens_with_padding(
-                    prefix_sum,
-                    logical_tokens,
-                    tp_size,
-                    tp_rank,
-                )
-            active_block_residual, block_valid_tokens = shard_tokens_with_padding(
-                active_block_residual,
-                logical_tokens,
-                tp_size,
-                tp_rank,
+            decode_sp_layout = token_shard_layout(logical_tokens, tp_size, tp_rank)
+            # KDA Decode intentionally uses a numerically stable TP all-reduce
+            # and therefore returns replicated rows. MLA uses reduce-scatter
+            # and already returns local rows. Normalize both backends before
+            # combining their output with the sharded residual bank.
+            attention_output = _decode_sp_shard(
+                attention_output,
+                decode_sp_layout,
+                name="attention output",
             )
-            if local_valid_tokens is None:
-                local_valid_tokens = block_valid_tokens
-            elif local_valid_tokens != block_valid_tokens:
-                raise RuntimeError(
-                    "K3 Decode token-SP residual shards disagree on valid rows"
+            if prefix_sum is not None:
+                prefix_sum = _decode_sp_shard(
+                    prefix_sum,
+                    decode_sp_layout,
+                    name="prefix residual",
                 )
+            active_block_residual = _decode_sp_shard(
+                active_block_residual,
+                decode_sp_layout,
+                name="block residual",
+            )
+            local_valid_tokens = decode_sp_layout.local_valid_tokens
         attention_delta: Optional[torch.Tensor] = None
         if prefix_sum is None:
             prefix_sum = attention_output
@@ -834,13 +857,11 @@ class KimiK3Model(GptModelBase):
             )
             self._decode_sp_startup_logged = True
         cu_seqlens = resolve_cu_seqlens(attention_inputs, input_ids)
-        if sp_active:
-            ep_size = int(self.parallelism_config.ep_size)
-            if ep_size != tp_size:
-                raise RuntimeError(
-                    "Kimi K3 Sequence Parallel currently requires TP == EP; "
-                    f"got TP={tp_size}, EP={ep_size}"
-                )
+        # Token sequence parallelism is scoped to each attention TP group,
+        # while MegaMoE dispatch is scoped to the EP group.  With attention
+        # DP, EP therefore spans all TP groups (for example TP4/DP2/EP8), so
+        # TP and EP are not required to be equal.  MegaMoE validates its own
+        # world-sized EP topology when the module is initialized.
         hidden_states = self._embed(input_ids, inputs.multimodal_inputs)
         if prefill_sp:
             assert prefill_sp_layout is not None
