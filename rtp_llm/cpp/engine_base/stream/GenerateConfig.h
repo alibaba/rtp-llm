@@ -97,6 +97,9 @@ public:
     ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
+    // Internal warmup/benchmark requests set this to keep their slow first-run
+    // latencies out of stream and engine-step metrics.
+    bool                          skip_metrics             = false;
     std::vector<std::vector<int>> stop_words_list;
     std::vector<std::string>      stop_words_str;
     bool                          print_stop_words = false;
@@ -329,6 +332,7 @@ public:
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
         JSONIZE(aux_info);
+        JSONIZE(skip_metrics);
         JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);
         JSONIZE(combo_token_size);

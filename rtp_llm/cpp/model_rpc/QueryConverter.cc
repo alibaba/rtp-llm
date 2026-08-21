@@ -129,6 +129,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_softmax_probs  = config_proto->return_softmax_probs();
     generate_config->can_use_pd_separation = config_proto->can_use_pd_separation();
     generate_config->gen_timeline          = config_proto->gen_timeline();
+    generate_config->skip_metrics          = config_proto->skip_metrics();
     generate_config->profile_step          = config_proto->profile_step();
     generate_config->profile_trace_name    = config_proto->profile_trace_name();
     generate_config->ignore_eos            = config_proto->ignore_eos();

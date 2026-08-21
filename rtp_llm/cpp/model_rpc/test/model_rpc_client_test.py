@@ -271,6 +271,17 @@ class ModelRpcClientTest(TestCase):
                 self.assertEqual(config.model_dump(), config_before_rpc)
                 self.assertEqual(input_pb.generate_config.thinking_mode, proto_mode)
 
+    def test_trans_input_writes_skip_metrics(self):
+        input_pb = trans_input(
+            self._make_generate_input(GenerateConfig(skip_metrics=True))
+        )
+        self.assertTrue(input_pb.generate_config.skip_metrics)
+
+        default_pb = trans_input(
+            self._make_generate_input(GenerateConfig())
+        ).generate_config
+        self.assertFalse(default_pb.skip_metrics)
+
     def test_trans_input_writes_typed_grammar_fields_consistently(self):
         grammar_fields = ("json_schema", "regex", "ebnf", "structural_tag")
         cases = [

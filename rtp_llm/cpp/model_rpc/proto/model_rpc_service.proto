@@ -153,6 +153,9 @@ message GenerateConfigPB {
     google.protobuf.StringValue structural_tag = 72;
     ThinkingModePB thinking_mode = 73;
     reserved 74;
+    // Internal warmup/benchmark requests opt out of stream and engine-step
+    // metrics so their slow first-run latencies do not pollute dashboards.
+    bool skip_metrics = 75;
 }
 
 message MMPreprocessConfigPB {

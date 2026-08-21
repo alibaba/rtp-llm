@@ -647,9 +647,17 @@ absl::Status NormalEngine::step() {
     // process() to drive the collective tpSync even with empty streams —
     // without this gate the gauge gets diluted to ~0 by idle iterations.
     if (parallelism_config.tp_rank == 0 && !streams.empty()) {
-        RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
-        auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
-        reportMetrics({step_latency});
+        // Internal warmup requests opt out of metrics; a batch made up solely
+        // of them (plus padding fake streams) must not feed the step gauge, or
+        // slow startup warmup steps pollute latency dashboards.
+        const bool all_skip_metrics = std::all_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& stream) {
+            return stream->isFakeStream() || stream->generateConfig()->skip_metrics;
+        });
+        if (!all_skip_metrics) {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
+            auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
+            reportMetrics({step_latency});
+        }
     }
 
     return status;

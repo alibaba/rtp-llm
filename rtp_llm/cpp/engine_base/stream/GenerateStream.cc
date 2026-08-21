@@ -1266,6 +1266,11 @@ void GenerateStream::reportMetricOnce() {
 }
 
 void GenerateStream::reportMetric() {
+    if (generate_input_->generate_config->skip_metrics) {
+        // Internal warmup/benchmark requests opt out so their slow first-run
+        // latencies do not pollute latency dashboards.
+        return;
+    }
     reportStreamMetrics();
     reportCacheReuseMetrics();
 }

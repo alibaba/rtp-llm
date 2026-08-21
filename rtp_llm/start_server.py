@@ -977,6 +977,10 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
                     enable_memory_cache=False,
                     enable_remote_cache=False,
                     aux_info=True,
+                    # Warmup steps are slow on first-run shapes; keep them out
+                    # of stream/engine metrics so startup does not show up as
+                    # TTFT/TPOT spikes on dashboards.
+                    skip_metrics=True,
                     timeout_ms=timeout_ms,
                 )
                 generate_input = GenerateInput(
