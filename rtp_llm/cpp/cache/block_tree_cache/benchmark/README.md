@@ -528,7 +528,7 @@ curl -sI "http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/$PREFIX/index.html" 
 | 旧 perf/core/disk working set 占满 `/tmp` | buffered case 空间不足、结果受磁盘余量影响或中途失败 | 开跑前只清理明确属于旧 benchmark 的目录/core/perf 文件；每个 repetition 完成 drain 后由 driver 删除自己的 disk 目录 |
 | 修改 `benchmark_cases.py` 后未重建 driver | 新 case 参数不生效 | 重新构建 `block_tree_cache_benchmark_driver` |
 | 修改 C++ runner 后未重建 binary | 行为与源码不一致 | 重新构建 `block_tree_cache_gpu_benchmark` |
-| device↔disk case 报 `staging pool exhausted` | staging lease 数小于 transfer wave width | 已修复为自动取 `max(配置, wave width)`；旧 binary 需重新构建 |
+| device↔disk case 报 `staging pool exhausted` | 显式 staging 容量不足以承载当前提交形态 | benchmark 不会静默放大配置；调整 `--device-disk-staging-block-count`、batch 或并发度，并核对结果中的 staging count/capacity |
 | case 失败但 result.json 无任何指标 | warmup/pilot 阶段失败被静默丢弃 | 已修复为写入 `warmup.*` / `pilot.*` first_error；旧 binary 需重新构建 |
 | tree 结果 `pressure_ready=false` | warmup 后未达到预期压力形态 | 查看 `warmup.*` / `pool.*` 快照解释容量或时长；它是观察项，不会单独使 repetition 无效 |
 | 某张 perf 火焰图样本很少 | 短 case 或大量 off-CPU 等待导致 on-CPU samples 不足 | 在报告标明样本数并避免强热点归因；必要时延长独立 profiling process，不伪装成 suite repetition |
