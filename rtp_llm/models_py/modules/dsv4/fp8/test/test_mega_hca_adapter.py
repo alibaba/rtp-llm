@@ -336,6 +336,22 @@ class MegaHCARuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must be int64"):
             runtime.hca_slot_mappings(metadata, 2)
 
+    def test_rope_tables_reuse_the_shared_runtime_cache(self) -> None:
+        runtime = MegaCSARuntime()
+        freqs_cis = torch.polar(
+            torch.ones(4, 32), torch.arange(128, dtype=torch.float32).view(4, 32)
+        )
+
+        first_cos, first_sin = runtime.rope_tables(freqs_cis)
+        second_cos, second_sin = runtime.rope_tables(freqs_cis)
+
+        self.assertEqual(first_cos.data_ptr(), second_cos.data_ptr())
+        self.assertEqual(first_sin.data_ptr(), second_sin.data_ptr())
+        self.assertTrue(first_cos.is_contiguous())
+        self.assertTrue(first_sin.is_contiguous())
+        torch.testing.assert_close(first_cos, freqs_cis.real)
+        torch.testing.assert_close(first_sin, freqs_cis.imag)
+
 
 if __name__ == "__main__":
     unittest.main()
