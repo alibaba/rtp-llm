@@ -154,6 +154,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         model = CacheStoreForwardModel()
         result = run_scenario(model, "cp_actual_lengths")
 
+        # CP turns the six-token request into a four-token rank-local chunk for
+        # attention. Every tagged writer must still plan from all six tokens,
+        # while retaining its own physical block table and stride.
         self.assertEqual(model.seen_input_lengths, [[4]])
         self.assertEqual(len(result["records"]), 2)
         blocks = _blocks_by_key(result)
