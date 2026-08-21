@@ -26,10 +26,12 @@ Run:
 from __future__ import annotations
 
 import math
+import os
 import unittest
 from unittest import mock
 
 import torch
+from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     build_cp_byte_sliced_slot_compaction,
@@ -40,6 +42,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_and_gather_k_cache_slots_cp_byte_sliced,
     dequantize_packed_k_cache_flat,
     gather_k_cache_packed,
+    try_restore_dequantize_scatter_packed_k_cache_flat,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache,
@@ -213,6 +216,41 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         dequantize_packed_k_cache_flat(out, packed[0])
         return out
 
+    def _pack_rows(self, values: torch.Tensor, block_size: int = 16) -> torch.Tensor:
+        """Quantize BF16 rows and return valid compact ``[N, 584]`` slots."""
+        num_tokens = int(values.shape[0])
+        data_blocks = (num_tokens + block_size - 1) // block_size
+        k_cache = self._alloc_cache(data_blocks + 1, block_size)
+        slot_mapping = (
+            torch.arange(num_tokens, dtype=torch.int64, device=self.device)
+            + block_size
+        )
+        quantize_and_insert_k_cache(values, k_cache, slot_mapping)
+
+        packed = torch.empty(
+            1,
+            num_tokens,
+            HEAD_BYTES,
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        seq_lens = torch.tensor(
+            [num_tokens], dtype=torch.int32, device=self.device
+        )
+        block_table = torch.arange(
+            1, data_blocks + 1, dtype=torch.int32, device=self.device
+        ).unsqueeze(0)
+        gather_k_cache_packed(
+            out=packed,
+            k_cache=k_cache,
+            seq_lens=seq_lens,
+            gather_lens=None,
+            block_table=block_table,
+            block_size=block_size,
+            offset=0,
+        )
+        return packed[0].contiguous()
+
     def _assert_nope_within_ue8m0_bound(
         self, original: torch.Tensor, recovered: torch.Tensor
     ):
@@ -284,6 +322,200 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                     compressed_kv, block_size=block_size
                 )
                 self.assertTrue(torch.equal(direct, packed))
+
+    def test_fused_restore_dequant_scatter_is_bit_exact(self):
+        cases = [
+            ("empty_b4", [0, 0, 0, 0], 1, torch.int32),
+            ("b1", [5], 0, torch.int32),
+            ("b2", [17, 3], 2, torch.int32),
+            ("b4_zero_uneven", [0, 3, 1, 4], 1, torch.int32),
+            ("b8_zero_uneven", [2, 0, 5, 1, 0, 7, 3, 4], 3, torch.int32),
+            ("b64", [i % 5 for i in range(64)], 2, torch.int32),
+        ]
+        for name, lengths, offset, lengths_dtype in cases:
+            with self.subTest(case=name):
+                total = sum(lengths)
+                source_rows = torch.randn(
+                    total + 7,
+                    HEAD_DIM,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
+                packed = self._pack_rows(source_rows)
+                gathered_order = torch.randperm(
+                    int(packed.shape[0]), device=self.device
+                )
+                gathered = packed.index_select(0, gathered_order).contiguous()
+                restore_indices = torch.randperm(
+                    int(gathered.shape[0]), device=self.device
+                )[:total].to(torch.int64)
+                restored_packed = gathered.index_select(0, restore_indices)
+                restored = torch.empty(
+                    total,
+                    HEAD_DIM,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
+                dequantize_packed_k_cache_flat(restored, restored_packed)
+
+                workspace_len = offset + max(lengths, default=0) + 2
+                expected = torch.full(
+                    (len(lengths), workspace_len, HEAD_DIM),
+                    -123,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
+                start = 0
+                for request_id, length in enumerate(lengths):
+                    expected[
+                        request_id, offset : offset + length
+                    ].copy_(restored[start : start + length])
+                    start += length
+
+                actual = torch.full_like(expected, -123)
+                seq_lens = torch.tensor(
+                    lengths, dtype=lengths_dtype, device=self.device
+                )
+                self.assertTrue(
+                    try_restore_dequantize_scatter_packed_k_cache_flat(
+                        actual,
+                        gathered,
+                        restore_indices,
+                        seq_lens,
+                        offset,
+                    )
+                )
+                torch.cuda.synchronize()
+                self.assertTrue(
+                    torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+                )
+
+    def test_fused_restore_dequant_scatter_side_stream_and_gate(self):
+        lengths = [0, 3, 1, 4]
+        total = sum(lengths)
+        packed = self._pack_rows(
+            torch.randn(
+                total + 3,
+                HEAD_DIM,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+        )
+        restore_indices = torch.tensor(
+            [8, 2, 5, 0, 10, 3, 7, 1], dtype=torch.int64, device=self.device
+        )
+        seq_lens = torch.tensor(lengths, dtype=torch.int32, device=self.device)
+        expected_flat = torch.empty(
+            total, HEAD_DIM, dtype=torch.bfloat16, device=self.device
+        )
+        dequantize_packed_k_cache_flat(
+            expected_flat, packed.index_select(0, restore_indices)
+        )
+        expected = torch.full(
+            (4, 7, HEAD_DIM), -17, dtype=torch.bfloat16, device=self.device
+        )
+        start = 0
+        for request_id, length in enumerate(lengths):
+            expected[request_id, 1 : 1 + length].copy_(
+                expected_flat[start : start + length]
+            )
+            start += length
+
+        actual = torch.full_like(expected, -17)
+        current_stream = torch.cuda.current_stream(self.device)
+        side_stream = torch.cuda.Stream(device=self.device)
+        side_stream.wait_stream(current_stream)
+        with torch.cuda.stream(side_stream):
+            self.assertTrue(
+                try_restore_dequantize_scatter_packed_k_cache_flat(
+                    actual, packed, restore_indices, seq_lens, 1
+                )
+            )
+            done = torch.cuda.Event()
+            done.record(side_stream)
+        current_stream.wait_event(done)
+        self.assertTrue(
+            torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+        )
+
+        disabled_out = torch.full_like(expected, -17)
+        with mock.patch.dict(
+            os.environ, {"DSV4_CP_POOL_RESTORE_TRITON": "0"}
+        ):
+            self.assertFalse(
+                try_restore_dequantize_scatter_packed_k_cache_flat(
+                    disabled_out, packed, restore_indices, seq_lens, 1
+                )
+            )
+        self.assertTrue(torch.all(disabled_out == -17))
+
+        int64_out = torch.full_like(expected, -17)
+        self.assertFalse(
+            try_restore_dequantize_scatter_packed_k_cache_flat(
+                int64_out, packed, restore_indices, seq_lens.to(torch.int64), 1
+            )
+        )
+        self.assertTrue(torch.all(int64_out == -17))
+
+    def test_fused_restore_dequant_scatter_hot_path_is_one_kernel(self):
+        lengths = [2, 1, 3, 2]
+        total = sum(lengths)
+        packed = self._pack_rows(
+            torch.randn(
+                total + 4,
+                HEAD_DIM,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+        )
+        restore_indices = torch.tensor(
+            [5, 1, 9, 0, 3, 7, 2, 10], dtype=torch.int64, device=self.device
+        )
+        seq_lens = torch.tensor(lengths, dtype=torch.int32, device=self.device)
+        out = torch.full(
+            (4, 6, HEAD_DIM), -9, dtype=torch.bfloat16, device=self.device
+        )
+
+        def run() -> None:
+            self.assertTrue(
+                try_restore_dequantize_scatter_packed_k_cache_flat(
+                    out,
+                    packed,
+                    restore_indices,
+                    seq_lens,
+                    1,
+                )
+            )
+
+        run()
+        run()
+        torch.cuda.synchronize()
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            run()
+        torch.cuda.synchronize()
+
+        events = list(prof.key_averages())
+        fused = [
+            event
+            for event in events
+            if "_restore_dequantize_scatter_packed_k_cache_flat_kernel"
+            in event.key
+        ]
+        self.assertEqual(sum(event.count for event in fused), 1)
+        keys = {event.key for event in events}
+        for forbidden in (
+            "aten::index",
+            "aten::to",
+            "aten::arange",
+            "aten::repeat_interleave",
+            "aten::zeros",
+            "aten::cumsum",
+            "aten::index_select",
+            "aten::sub",
+            "aten::add",
+            "aten::index_put_",
+        ):
+            self.assertNotIn(forbidden, keys)
 
     def test_magnitude_range(self):
         """Per-token NoPE quant scale must adapt to token magnitude.

@@ -71,15 +71,28 @@ def build_and_propagate_prefill_meta_fp8(
     position_ids = _flat_optional(position_ids)
     req_id_per_token = _flat_optional(req_id_per_token)
 
+    representatives: Dict[int, Any] = {}
+    for layer in v4.layers:
+        attn = getattr(layer, "attn", None)
+        if attn is not None:
+            representatives.setdefault(int(attn.compress_ratio), attn)
+
+    # SWA-only owns the superset metadata (common + SWA Group-1 + Group-2),
+    # so build it first whenever the model has one. Compressed-only models use
+    # their first ratio as the common source; later ratios still reuse the
+    # ratio-independent tensors and SWA write metadata.
+    ordered_ratios = list(representatives)
+    if 0 in representatives:
+        ordered_ratios.remove(0)
+        ordered_ratios.insert(0, 0)
+
     meta_by_ratio: Dict[int, "PrefillMeta"] = {}
+    reusable_common: Optional["PrefillMeta"] = None
+    reusable_freqs_by_rope_kind: Dict[bool, "PrefillMeta"] = {}
     with record_function_range("dsv4.fp8.prefill_meta.build_all_ratios"):
-        for layer in v4.layers:
-            attn = getattr(layer, "attn", None)
-            if attn is None:
-                continue
-            r = int(attn.compress_ratio)
-            if r in meta_by_ratio:
-                continue
+        for r in ordered_ratios:
+            attn = representatives[r]
+            compressed_rope = r != 0
             from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
 
             with bind_attn_cache(attn, kv_cache, block_tables_by_type):
@@ -95,7 +108,14 @@ def build_and_propagate_prefill_meta_fp8(
                         position_ids=position_ids,
                         req_id_per_token=req_id_per_token,
                         max_seqlen_q=max_seqlen_q,
+                        reuse_common_meta=reusable_common,
+                        reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
+                            compressed_rope
+                        ),
                     )._replace(workspace=workspace)
+            if reusable_common is None:
+                reusable_common = meta_by_ratio[r]
+            reusable_freqs_by_rope_kind.setdefault(compressed_rope, meta_by_ratio[r])
 
     with record_function_range("dsv4.fp8.prefill_meta.propagate"):
         for layer in v4.layers:

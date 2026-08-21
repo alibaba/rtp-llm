@@ -38,7 +38,9 @@ from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.cp import (
     CPContext,
     build_kv_allgather_restore_indices,
+    cp_actual_owned_kv_len,
     cp_actual_owned_kv_lens,
+    cp_padded_local_kv_len,
     cp_padded_local_kv_lens,
 )
 
@@ -84,6 +86,7 @@ def build_indexer_cp_chunk_plan(
     block_size: int,
     device: torch.device,
     owner_block_size: Optional[int] = None,
+    total_kv_len: Optional[int] = None,
 ) -> IndexerCPChunkPlan:
     """Build per-chunk indexer assembler plan (CPU; no NCCL)."""
     if cp_ctx.cp_size <= 0:
@@ -94,17 +97,41 @@ def build_indexer_cp_chunk_plan(
     if owner_bs <= 0:
         raise ValueError(f"owner_block_size must be > 0, got {owner_bs}")
     per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
-    local_lens = cp_padded_local_kv_lens(per_req, cp_ctx.cp_size, owner_bs).contiguous()
-    actual_lens = cp_actual_owned_kv_lens(
-        per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
-    ).contiguous()
-    # Host scalars size the rank-local all_gather buffers.  Keep these syncs in
-    # plan construction; the per-chunk gather/restore path below should remain
-    # device work plus the single NCCL Work.wait().
-    total_local = int(local_lens.sum().item())
-    total_actual = int(actual_lens.sum().item())
+    if int(per_req.numel()) == 1 and total_kv_len is not None:
+        total_local = cp_padded_local_kv_len(
+            int(total_kv_len), cp_ctx.cp_size, owner_bs
+        )
+        total_actual = cp_actual_owned_kv_len(
+            int(total_kv_len),
+            cp_ctx.cp_size,
+            owner_bs,
+            cp_ctx.cp_rank,
+        )
+        local_lens = torch.full(
+            (1,), total_local, dtype=torch.int64, device=device
+        )
+        actual_lens = torch.full(
+            (1,), total_actual, dtype=torch.int64, device=device
+        )
+    else:
+        local_lens = cp_padded_local_kv_lens(
+            per_req, cp_ctx.cp_size, owner_bs
+        ).contiguous()
+        actual_lens = cp_actual_owned_kv_lens(
+            per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
+        ).contiguous()
+        # Host scalars size the rank-local all_gather buffers. Consolidate the
+        # multi-request fallback into one synchronization.
+        total_local, total_actual = (
+            int(v) for v in torch.stack([local_lens.sum(), actual_lens.sum()]).tolist()
+        )
     restore = build_kv_allgather_restore_indices(
-        per_req, cp_ctx.cp_size, owner_bs, device
+        per_req,
+        cp_ctx.cp_size,
+        owner_bs,
+        device,
+        total_kv_len=total_kv_len,
+        total_local_kv=total_local,
     )
     return IndexerCPChunkPlan(
         cp_ctx=cp_ctx,

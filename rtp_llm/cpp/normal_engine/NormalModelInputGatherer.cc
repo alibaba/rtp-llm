@@ -476,9 +476,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
-    if (config_.enable_model_inputs_log) {
-        model_input.prefix_lengths_host_for_log = prefix_lengths_host;
-    }
+    // Keep the CPU source alongside the CUDA publication. CP Python metadata
+    // consumes these scalar prefixes without synchronizing a device tensor.
+    model_input.prefix_lengths_host_for_log = prefix_lengths_host;
     model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }

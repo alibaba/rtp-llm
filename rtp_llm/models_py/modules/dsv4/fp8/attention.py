@@ -840,6 +840,10 @@ class PrefillMeta(NamedTuple):
     # by ``build_and_propagate_prefill_meta_fp8`` from the forward's local
     # ``PrefillWorkspace``; non-None for every production prefill call.
     workspace: Optional[PrefillWorkspace] = None
+    # Identity of the ungathered per-layer RoPE table that produced
+    # ``freqs_cis``. ratio0 uses base RoPE while ratio4/128 use compressed
+    # RoPE, so cross-ratio frequency reuse is valid only when this id matches.
+    freqs_cis_source_id: int = 0
 
 
 class PrefillQKV(NamedTuple):
@@ -3504,10 +3508,14 @@ class AttentionFP8(nn.Module):
                 torch.empty((0,), device=device, dtype=torch.long),
                 torch.empty((0,), device=device, dtype=torch.long),
             )
-        req_full = torch.repeat_interleave(
-            torch.arange(int(lengths_l.numel()), device=device, dtype=torch.long),
-            lengths_l,
-        )
+        if int(lengths_l.numel()) == 1:
+            req_full = torch.zeros(total, device=device, dtype=torch.long)
+        else:
+            req_full = torch.repeat_interleave(
+                torch.arange(int(lengths_l.numel()), device=device, dtype=torch.long),
+                lengths_l,
+                output_size=total,
+            )
         cu_starts = torch.zeros_like(lengths_l)
         cu_starts[1:] = torch.cumsum(lengths_l[:-1], dim=0)
         local_pos = torch.arange(
@@ -3862,6 +3870,68 @@ class AttentionFP8(nn.Module):
             if self.indexer.compressor.freqs_cis is None:
                 self.indexer.compressor.freqs_cis = self.freqs_cis
 
+    def _validate_reusable_prefill_common(
+        self,
+        common: "PrefillMeta",
+        *,
+        seqlen: int,
+        seqlen_full: int,
+        rd: int,
+        device: torch.device,
+        cp_ctx: Optional[CPContext],
+        sp_int: int,
+        win: int,
+        sp_per_req: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        input_lengths: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+        position_ids: torch.Tensor,
+        req_id_per_token: torch.Tensor,
+    ) -> None:
+        """Host-only guards for cross-ratio common metadata reuse.
+
+        The broadcast builder passes the exact same flattened request tensors
+        to every representative. Checking storage/view metadata catches an
+        accidental cross-request or transformed-tensor reuse without launching
+        comparison kernels or synchronizing CUDA.
+        """
+
+        assert common.use_varlen
+        assert common.seqlen == seqlen
+        assert common.seqlen_full == seqlen_full
+        assert common.rd == rd
+        assert common.device == device
+        assert common.cp_ctx is cp_ctx
+        assert common.sp_int == sp_int
+        assert common.batch_size == int(cu_seqlens.numel() - 1)
+        assert common.swa_meta is not None
+        assert common.topk_idxs.shape[-1] == win
+        assert common.row_seqlens_full.shape == (1,)
+        assert common.row_seqlens_full.dtype == torch.long
+        assert common.row_seqlens_full.device == device
+
+        def _same_storage_view(lhs: torch.Tensor, rhs: Optional[torch.Tensor]) -> bool:
+            return rhs is not None and (
+                lhs.dtype == rhs.dtype
+                and lhs.device == rhs.device
+                and lhs.shape == rhs.shape
+                and lhs.stride() == rhs.stride()
+                and lhs.storage_offset() == rhs.storage_offset()
+                and lhs.data_ptr() == rhs.data_ptr()
+            )
+
+        for name, current, cached in (
+            ("sp_per_req", sp_per_req, common.sp_per_req),
+            ("cu_seqlens", cu_seqlens, common.cu_seqlens),
+            ("input_lengths", input_lengths, common.input_lengths),
+            ("prefix_lengths", prefix_lengths, common.prefix_lengths),
+            ("position_ids", position_ids, common.position_ids),
+            ("req_id_per_token", req_id_per_token, common.req_id_per_token),
+        ):
+            assert _same_storage_view(current, cached), (
+                f"cannot reuse prefill common metadata: {name} storage/view changed"
+            )
+
     def _build_shared_prefill_meta(
         self,
         x: torch.Tensor,
@@ -3874,6 +3944,8 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        reuse_common_meta: Optional["PrefillMeta"] = None,
+        reuse_freqs_meta: Optional["PrefillMeta"] = None,
     ) -> "PrefillMeta":
         """Build the layer-invariant (within compress_ratio bucket) part
         of per-call prefill metadata. All host-side prep work that
@@ -3886,6 +3958,15 @@ class AttentionFP8(nn.Module):
         normal call path) or a pre-synced int (used by upper-layer
         broadcast meta builders that already paid the sync once for
         the whole batch). When a tensor is passed we sync once here.
+
+        ``reuse_common_meta`` is supplied only by the upper-layer broadcast
+        builder. It reuses the first ratio's top-k/continuation tensors and
+        SWA Group-1 write metadata while this call still builds its own
+        ratio-specific CSA/HCA metadata. ``reuse_freqs_meta`` is separate:
+        ratio0 uses base RoPE while ratio4/128 share compressed RoPE, so only
+        a metadata object produced from the identical source table may supply
+        the gathered frequencies. Omitting either input preserves the full or
+        partial standalone fallback.
         """
         seqlen = int(x.shape[0])
         rd = self.rope_head_dim
@@ -3957,59 +4038,129 @@ class AttentionFP8(nn.Module):
             sp_per_req.numel() == batch_size
         ), f"sp_per_req must be [B={batch_size}], got {sp_per_req.shape}"
 
-        position_ids_eff = position_ids
-        cu_seqlens_for_k = cu_seqlens
-        if cp_on:
-            assert cp_ctx is not None
-            position_ids_eff = _flat_1d(
-                cp_ctx.global_positions.to(device=device, dtype=torch.long)
-            )
-            if cp_ctx.cu_seqlens_global is not None:
-                cu_seqlens_for_k = _flat_1d(
-                    cp_ctx.cu_seqlens_global.to(device=device, dtype=torch.int32)
+        can_reuse_freqs = (
+            reuse_freqs_meta is not None
+            and reuse_freqs_meta.freqs_cis_source_id == id(self.freqs_cis)
+        )
+        position_ids_eff: Optional[torch.Tensor] = None
+        if reuse_common_meta is None or not can_reuse_freqs:
+            position_ids_eff = position_ids
+            if cp_on:
+                assert cp_ctx is not None
+                position_ids_eff = _flat_1d(
+                    cp_ctx.global_positions.to(device=device, dtype=torch.long)
                 )
-        # Per-token absolute-position RoPE gather. For B==1 contiguous this is
-        # bit-equal to the retired scalar slice; for B>1 it is the only correct
-        # option since requests interleave on the flat token axis.
-        with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
-            freqs_cis = self.freqs_cis.index_select(
-                0,
-                position_ids_eff.to(device=self.freqs_cis.device, dtype=torch.long),
-            )
-            from rtp_llm.models_py.modules.dsv4.fp8 import _swa_ops_triton as _swa_ops
-
-            topk_idxs, topk_length_kv_full = (
-                _swa_ops.compute_window_topk_and_length_varlen(
-                    win,
-                    cu_seqlens_for_k,
-                    position_ids_eff,
-                    prefix_lengths,
-                    req_id_per_token,
+        if reuse_common_meta is None:
+            # Per-token absolute-position RoPE gather. For B==1 contiguous this
+            # is bit-equal to the retired scalar slice; for B>1 it is the only
+            # correct option since requests interleave on the flat token axis.
+            with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
+                assert position_ids_eff is not None
+                freqs_cis = self.freqs_cis.index_select(
+                    0,
+                    position_ids_eff.to(
+                        device=self.freqs_cis.device, dtype=torch.long
+                    ),
                 )
-            )
-            any_cont = bool((prefix_lengths > 0).any().item())
+                from rtp_llm.models_py.modules.dsv4.fp8 import (
+                    _swa_ops_triton as _swa_ops,
+                )
 
-        with record_function_range("dsv4.fp8.meta.swa_varlen"):
-            swa_meta = self._build_swa_prefill_meta_varlen(
+                cu_seqlens_for_k = cu_seqlens
+                if cp_on:
+                    assert cp_ctx is not None
+                    if cp_ctx.cu_seqlens_global is not None:
+                        cu_seqlens_for_k = _flat_1d(
+                            cp_ctx.cu_seqlens_global.to(
+                                device=device, dtype=torch.int32
+                            )
+                        )
+                topk_idxs, topk_length_kv_full = (
+                    _swa_ops.compute_window_topk_and_length_varlen(
+                        win,
+                        cu_seqlens_for_k,
+                        position_ids_eff,
+                        prefix_lengths,
+                        req_id_per_token,
+                    )
+                )
+                any_cont = bool((prefix_lengths > 0).any().item())
+
+            with record_function_range("dsv4.fp8.meta.swa_varlen"):
+                swa_meta = self._build_swa_prefill_meta_varlen(
+                    seqlen=seqlen,
+                    device=device,
+                    any_cont=any_cont,
+                    batch_size=batch_size,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
+                    topk_length_kv_full=topk_length_kv_full,
+                )
+            row_seqlens_full = torch.tensor(
+                [seqlen_full], device=device, dtype=torch.long
+            )
+        else:
+            assert self.compress_ratio != 0, (
+                "SWA-only metadata must be the common source, not a reuse target"
+            )
+            self._validate_reusable_prefill_common(
+                reuse_common_meta,
                 seqlen=seqlen,
+                seqlen_full=seqlen_full,
+                rd=rd,
                 device=device,
-                any_cont=any_cont,
-                batch_size=batch_size,
+                cp_ctx=cp_ctx,
+                sp_int=sp_int,
+                win=win,
+                sp_per_req=sp_per_req,
                 cu_seqlens=cu_seqlens,
                 input_lengths=input_lengths,
                 prefix_lengths=prefix_lengths,
                 position_ids=position_ids,
                 req_id_per_token=req_id_per_token,
-                topk_length_kv_full=topk_length_kv_full,
+            )
+            if can_reuse_freqs:
+                assert reuse_freqs_meta is not None
+                freqs_cis = reuse_freqs_meta.freqs_cis
+            else:
+                assert position_ids_eff is not None
+                with record_function_range("dsv4.fp8.meta.varlen.freqs"):
+                    freqs_cis = self.freqs_cis.index_select(
+                        0,
+                        position_ids_eff.to(
+                            device=self.freqs_cis.device, dtype=torch.long
+                        ),
+                    )
+            topk_idxs = reuse_common_meta.topk_idxs
+            any_cont = reuse_common_meta.any_cont
+            row_seqlens_full = reuse_common_meta.row_seqlens_full
+            source_swa = reuse_common_meta.swa_meta
+            assert source_swa is not None
+            swa_meta = SwaPrefillMeta(
+                slot_mapping=source_swa.slot_mapping,
+                query_start_loc=source_swa.query_start_loc,
+                combined_seq_lens=source_swa.combined_seq_lens,
+                topk_length_kv_full=source_swa.topk_length_kv_full,
+                combined_gather_lens=None,
+                combined_gather_len_max=0,
+                M=0,
+                cache_seq_lens=None,
+                cache_gather_lens=None,
+                prefix_len_max=0,
+                combined_indices=None,
+                combined_lens=None,
+                slot_in_flat=None,
+                cache_slot_mapping=None,
+                slot_compaction=source_swa.slot_compaction,
+                cache_compaction=None,
             )
 
         # Bind freqs_cis to this layer's compressor / indexer chain
         # (idempotent — safe to call from both standalone and meta-broadcast paths).
         self._ensure_freqs_cis_bound()
-
-        # row_seqlens_full: [1] long tensor. Reused by SWA pool read/write
-        # helpers (BF16 path) — they refuse a None for the per-row seqlens.
-        row_seqlens_full = torch.tensor([seqlen_full], device=device, dtype=torch.long)
 
         # ``use_varlen`` stays explicit because lower builders share one
         # metadata contract.
@@ -4074,6 +4225,7 @@ class AttentionFP8(nn.Module):
             swa_meta=swa_meta,
             csa_meta=csa_meta,
             hca_meta=hca_meta,
+            freqs_cis_source_id=id(self.freqs_cis),
         )
 
     # ------------------------------------------------------------------
@@ -4466,9 +4618,45 @@ class AttentionFP8(nn.Module):
             P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
             gather_len_per_req = S_i32 + P_per_req  # [B]
 
-            # Single .item() sync — stack two scalars then one D2H tolist().
-            maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
-            N_max, gather_len_max = (int(v) for v in maxes.tolist())
+            host_input_lengths = getattr(
+                cp_ctx_local, "input_lengths_global_host", None
+            )
+            host_prefix_lengths = getattr(cp_ctx_local, "prefix_lengths_host", None)
+            if (
+                cp_active
+                and host_input_lengths is not None
+                and host_prefix_lengths is not None
+                and len(host_input_lengths) == B
+                and len(host_prefix_lengths) == B
+            ):
+                seq_total_host = [
+                    int(prefix) + int(length)
+                    for prefix, length in zip(
+                        host_prefix_lengths, host_input_lengths
+                    )
+                ]
+                n_per_req_host = [total // ratio for total in seq_total_host]
+                gather_per_req_host = [
+                    int(length) + min(int(prefix), win - 1)
+                    for prefix, length in zip(
+                        host_prefix_lengths, host_input_lengths
+                    )
+                ]
+                N_max = max(n_per_req_host, default=0)
+                gather_len_max = max(gather_per_req_host, default=0)
+                total_compressed_kv = sum(n_per_req_host)
+            else:
+                # One D2H synchronization for every host scalar needed below.
+                stats = torch.stack(
+                    [
+                        N_per_req.max(),
+                        gather_len_per_req.max(),
+                        N_per_req.sum(),
+                    ]
+                )
+                N_max, gather_len_max, total_compressed_kv = (
+                    int(v) for v in stats.tolist()
+                )
             N = N_max
             M = N_max + gather_len_max
 
@@ -4562,6 +4750,9 @@ class AttentionFP8(nn.Module):
             per_req_total_kv_lens=per_req_total_kv_lens,
             block_size=cmp_eb if cmp_eb > 0 else None,
             owner_block_size=cmp_owner_block_size,
+            total_kv_len=(
+                total_compressed_kv if per_req_total_kv_lens is not None else None
+            ),
         )
 
         # Layer-invariant gate for the raw-q-merge alternative path. Compute

@@ -309,4 +309,28 @@ def _mhc_pre_norm_fn_bwd_mul(
 
 
 def round_to_tf32(x: torch.Tensor) -> torch.Tensor:
-    return (x.view(torch.int32) + 0x1000).view(torch.float32)
+    cacheable = not torch.is_grad_enabled() and not x.requires_grad
+    cache_key = None
+    if cacheable:
+        try:
+            version = int(x._version)
+        except RuntimeError:
+            # Weights materialized under inference_mode have no version counter.
+            # Serving weights are immutable after materialization; replacement is
+            # still detected by the tensor identity below.
+            version = None
+        cache_key = (
+            version,
+            int(x.data_ptr()),
+            tuple(x.shape),
+            tuple(x.stride()),
+            x.device,
+        )
+        cached = getattr(x, "_tile_kernels_tf32_round_cache", None)
+        if cached is not None and cached[0] == cache_key:
+            return cached[1]
+
+    rounded = (x.view(torch.int32) + 0x1000).view(torch.float32)
+    if cacheable:
+        x._tile_kernels_tf32_round_cache = (cache_key, rounded)
+    return rounded
