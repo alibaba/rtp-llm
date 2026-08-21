@@ -1,0 +1,12 @@
+{
+    "test_cases": [
+        {
+          "case_tag": "Qwen3-Coder-480B-A35B-Instruct-FP8-ptpc-Quark",
+          "server_params": "FORCE_CPU_LOAD_WEIGHTS=1 USE_ASM_PA=0 USE_AITER_PA=1 SEQ_SIZE_PER_BLOCK=16 DEVICE_RESERVE_MEMORY_BYTES=-2048000000 RESERVER_RUNTIME_MEM_MB=102400 MAX_SEQ_LEN=10000 CONCURRENCY_LIMIT=1024 WORLD_SIZE=8 DP_SIZE=1 TP_SIZE=8 WARM_UP=0 ACT_TYPE=bf16 TOKENIZER_PATH=/mnt/raid1/pretrained_model/rtp_ci/Qwen3-Coder-480B-A35B-Instruct-FP8-ptpc-quark CHECKPOINT_PATH=/mnt/raid1/pretrained_model/rtp_ci/Qwen3-Coder-480B-A35B-Instruct-FP8-ptpc-quark  MODEL_TYPE=qwen_3_moe FT_SERVER_TEST=1",
+          "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+          "prompt": "Explain the benefits of renewable energy", 
+          "timeout": 1000,
+          "expected_response": " sources and how they can help combat climate change.\nRenewable energy sources offer numerous benefits and play a crucial role in combating climate change. Here’s a detailed look at their advantages and their impact on global warming:\n\n### Benefits of Renewable Energy Sources\n\n"
+        }
+    ]
+}
