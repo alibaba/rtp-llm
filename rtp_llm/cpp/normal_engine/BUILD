@@ -22,6 +22,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/length_predictor:length_predictor",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt_constructor",
         "//rtp_llm/cpp/models:eplb",

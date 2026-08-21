@@ -10,9 +10,11 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
+#include "rtp_llm/cpp/length_predictor/LengthPredictorState.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <iterator>
@@ -401,6 +403,22 @@ public:
 
     size_t outputTokenLen() const {
         return seqLength() - inputLength();
+    }
+
+    LengthPredictorState& lengthPredictorState() {
+        return length_predictor_state_;
+    }
+
+    // Latest fused remaining-length estimate as a countdown; negative when the
+    // predictor is disabled or has not produced an anchor yet. The predictor's
+    // worker publishes predicted_total asynchronously (1-2 steps behind).
+    float predictedRemainingLen() const {
+        const double total = length_predictor_state_.predicted_total.load(std::memory_order_relaxed);
+        if (total < 0) {
+            return -1.0f;
+        }
+        const double generated = static_cast<double>(seqLength() - inputLength());
+        return static_cast<float>(std::max(total - generated, 0.0));
     }
 
     void setReturnLastHiddenStates(bool flag) {
@@ -843,6 +861,7 @@ protected:
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
+    LengthPredictorState                     length_predictor_state_;
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> consumer_cv_;
