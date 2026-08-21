@@ -11,6 +11,7 @@ falls back to the r27 dual-wave path for that step.
 
 import logging
 import os
+import threading
 import time
 
 import torch
@@ -46,11 +47,56 @@ LAG = 256
 STG_BLOCKS = int(os.environ.get("RTP_KV_OFFLOAD_STAGING_BLOCKS", "32"))
 IDXNB = int(os.environ.get("V32_IDX_POOL_BLOCKS", "4096"))
 SINGLE_WAVE = os.environ.get("V32_SINGLE_WAVE", "1") == "1"
+LOSSY = os.environ.get("V32_LOSSY", "0") == "1"
+LOSSY_PREFETCH = int(os.environ.get("V32_LOSSY_PREFETCH", "8"))
+_MIRROR_BLOCKS = os.environ.get("V32_MIRROR_BLOCKS", "1") == "1" and hasattr(
+    _ctx, "ctx_mirror_blocks_d2h"
+)
 _MARGIN = 2
+HOST_BUCKET = int(os.environ.get("V32_HOST_BUCKET", "8192"))
+PREWARM_TOKENS = int(os.environ.get("V32_PREWARM_TOKENS", "73728"))
+PREWARM_LAYERS = int(os.environ.get("V32_PREWARM_LAYERS", "61"))
 
+_hostpool = {}  # bucketed rows -> [pinned tensors]; pinning costs ~1.5 GB/s
+_hostpool_lock = threading.Lock()
+
+
+def _alloc_host(cap_tokens):
+    rows = -(-cap_tokens // HOST_BUCKET) * HOST_BUCKET
+    with _hostpool_lock:
+        free = _hostpool.get(rows)
+        if free:
+            return free.pop()
+    return torch.empty((rows, 576), dtype=torch.bfloat16, device="cpu", pin_memory=True)
+
+
+def _free_host(t):
+    if t is None:
+        return
+    with _hostpool_lock:
+        _hostpool.setdefault(t.shape[0], []).append(t)
+
+
+def _prewarm_host():
+    held = [_alloc_host(PREWARM_TOKENS) for _ in range(PREWARM_LAYERS)]
+    for t in held:
+        _free_host(t)
+    logging.warning(
+        f"[v32_capacity] prewarmed {len(held)} host mirrors of "
+        f"{held[0].shape[0] if held else 0} tokens"
+    )
+
+
+if PREWARM_TOKENS > 0:
+    threading.Thread(target=_prewarm_host, daemon=True).start()
+
+STEP_TRACE = int(os.environ.get("V32_STEP_TRACE", "0"))
+_trace = {"t": None, "d": []}
+_plancache = {"step": -1, "min_seq": -1, "b": -1, "plan": []}
 _store = {}
 _t1cache = {}  # per-request: kvlen tensor / schedule metadata / cu_seqlens
 _ibt_cache = {}  # capacity -> dense arange block table (dual-wave fallback)
+_lossy_meta = {}  # key -> (jpos cpu i32, sb cpu i32): staging layout, layer-invariant
 _step = 0
 _stream = None
 _stepcache = {"step": -1}
@@ -80,7 +126,18 @@ def offloaded_rows_hint(device):
     return _last_offloaded["rows"]
 
 
-_prof = {"book": 0.0, "mirror": 0.0, "score": 0.0, "serve": 0.0, "n": 0}
+_prof = {
+    "book": 0.0,
+    "mirror": 0.0,
+    "score": 0.0,
+    "serve": 0.0,
+    "proc": 0.0,
+    "alloc": 0.0,
+    "lreg": 0.0,
+    "adopt": 0.0,
+    "hostalloc": 0.0,
+    "n": 0,
+}
 
 
 def _side_stream():
@@ -232,6 +289,40 @@ def pre_topk(iop, q_fp8, weights, kv_cache, fmha_params, attention_inputs):
     layer_id = int(kv_cache.layer_id)
     if layer_id == 0:
         _step += 1
+        if STEP_TRACE:
+            now = time.perf_counter()
+            if _trace["t"] is not None and int(kvlen_d.max()) > 16384:
+                p = _trace.get("p") or (0.0,) * 6
+                cur = (
+                    _prof["mirror"],
+                    _prof["serve"],
+                    _prof["proc"],
+                    _prof["alloc"],
+                    _prof["adopt"],
+                    _prof["hostalloc"],
+                )
+                _trace["d"].append(
+                    f"{(now - _trace['t']) * 1000:.0f}("
+                    + "/".join(f"{(cur[k] - p[k]) * 1e3:.0f}" for k in range(6))
+                    + ")"
+                )
+                _trace["p"] = cur
+                if len(_trace["d"]) >= STEP_TRACE:
+                    logging.warning(
+                        "[v32_steptrace] total(mirror/serve/proc/alloc/adopt/hostalloc) "
+                        + " ".join(_trace["d"])
+                    )
+                    _trace["d"] = []
+            else:
+                _trace["p"] = (
+                    _prof["mirror"],
+                    _prof["serve"],
+                    _prof["proc"],
+                    _prof["alloc"],
+                    _prof["adopt"],
+                    _prof["hostalloc"],
+                )
+            _trace["t"] = now
         if _step % 1000 == 0:
             _purge()
         _bookkeep(kbt, kvlen_d)
@@ -308,11 +399,13 @@ def _entry(key, layer_id, cap_tokens, device):
     st = _store.get((key, layer_id))
     if st is None:
         ad = None
+        t_ad = time.perf_counter()
         if _ctx is not None and hasattr(_ctx, "ctx_adopt"):
             try:
                 ad = _ctx.ctx_adopt(key, layer_id)
             except Exception:
                 ad = None
+        _prof["adopt"] += time.perf_counter() - t_ad
         if ad is not None:
             kv, ip, durable = ad
             st = {
@@ -332,17 +425,13 @@ def _entry(key, layer_id, cap_tokens, device):
                     f"durable={int(durable)} cap={tuple(kv.shape)}"
                 )
         else:
-            cap_blocks = (cap_tokens + BS - 1) // BS
+            t_h = time.perf_counter()
+            kv_host = _alloc_host(cap_tokens)
+            _prof["hostalloc"] += time.perf_counter() - t_h
             st = {
-                "kv": torch.empty(
-                    (cap_tokens, 576),
-                    dtype=torch.bfloat16,
-                    device="cpu",
-                    pin_memory=True,
-                ),
-                "idxp": torch.zeros(
-                    (cap_blocks, BS, 132), dtype=torch.uint8, device=device
-                ),
+                "kv": kv_host,
+                "idxp": None,  # dual-wave only: built on demand, see _idxp()
+                "idxnb": (cap_tokens + BS - 1) // BS,
                 "n": 0,
                 "seen": _step,
                 "ev": torch.cuda.Event(),
@@ -357,22 +446,51 @@ def _entry(key, layer_id, cap_tokens, device):
 def _grow(st, key, layer_id, cap_tokens):
     if st["kv"].shape[0] < cap_tokens:
         t = st["kv"]
-        n2 = torch.empty(
-            (cap_tokens + 8192, 576), dtype=t.dtype, device="cpu", pin_memory=True
-        )
+        n2 = _alloc_host(cap_tokens + 8192)
         n2[: t.shape[0]] = t
         st["kv"] = n2
+        if not st.get("adopted"):
+            _free_host(t)
         if st["reg"]:
             _ctx.ctx_update_host(key, layer_id, st["kv"])
     nb = (cap_tokens + 8192) // BS
-    if st["idxp"].shape[0] < (cap_tokens + BS - 1) // BS:
+    need = (cap_tokens + BS - 1) // BS
+    st["idxnb"] = max(st.get("idxnb", 0), need)
+    if st["idxp"] is not None and st["idxp"].shape[0] < need:
         t = st["idxp"]
         n2 = torch.zeros((nb, BS, 132), dtype=torch.uint8, device=t.device)
         n2[: t.shape[0]] = t
         st["idxp"] = n2
 
 
-def _mirror_chunk(st, main_pool, idx_pool_u8, bt_row, upto):
+_blkcache = {"key": None, "b0": -1, "blk": None}
+
+
+def _blk_ids_host(key, bt_row, b0, b1):
+    """Host copy of physical block ids [b0,b1); cached across the 61 layers."""
+    c = _blkcache
+    if (
+        c["key"] == key
+        and c["b0"] == b0
+        and c["blk"] is not None
+        and c["blk"].numel() == b1 - b0
+    ):
+        return c["blk"]
+    blk = bt_row[b0:b1].to(torch.int32).cpu()
+    c["key"], c["b0"], c["blk"] = key, b0, blk
+    return blk
+
+
+def _idxp(st, device):
+    """Private indexer store, materialized only when the dual-wave path needs it."""
+    if st["idxp"] is None:
+        st["idxp"] = torch.zeros(
+            (st.get("idxnb", 128), BS, 132), dtype=torch.uint8, device=device
+        )
+    return st["idxp"]
+
+
+def _mirror_chunk(st, main_pool, idx_pool_u8, bt_row, upto, key=None):
     lo, hi = st["n"], min(st["n"] + CHUNK, upto)
     if hi <= lo:
         return
@@ -382,6 +500,29 @@ def _mirror_chunk(st, main_pool, idx_pool_u8, bt_row, upto):
         )
         st["bad"] = True
         return
+    if lo % BS == 0 and hi // BS > lo // BS and _MIRROR_BLOCKS:
+        b0, b1 = lo // BS, hi // BS
+        blk = _blk_ids_host(key, bt_row, b0, b1)
+        if int(blk.min()) > 0:
+            if st["idxp"] is not None:
+                s = _side_stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
+                    st["idxp"][b0:b1] = idx_pool_u8[bt_row[b0:b1].long()].view(
+                        -1, BS, 132
+                    )
+                    st["ev_idx"].record(s)
+                torch.cuda.current_stream().wait_event(st["ev_idx"])
+            _ctx.ctx_mirror_blocks_d2h(
+                main_pool.reshape(-1, main_pool.shape[-1]),
+                blk,
+                st["kv"],
+                b0 * BS,
+                BS,
+                b1 * BS >= upto,  # flush only the chunk that completes the history
+            )
+            st["n"] = b1 * BS
+            return
     pos = torch.arange(lo, hi, device=bt_row.device)
     phys = bt_row[(pos // BS).long()].long()
     keep = phys > 0
@@ -390,6 +531,8 @@ def _mirror_chunk(st, main_pool, idx_pool_u8, bt_row, upto):
         st["bad"] = True
         return
     offs = (pos % BS).long()
+    if st["idxp"] is None:
+        st["idxp"] = _idxp(st, bt_row.device)
     s = _side_stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
@@ -423,7 +566,87 @@ def _mirror_chunk(st, main_pool, idx_pool_u8, bt_row, upto):
     st["n"] = hi
 
 
+def _dual_wave_sel(
+    iop, q_fp8, weights, st, key, layer_id, idx_pool_u8, kbt, i, kvlen, nb
+):
+    """Per-row dual-wave scoring on the private side store; returns sel [1, 2048].
+
+    Returns None when the private store holds no history: the single-wave global
+    pool has been serving this row, so there is nothing to score against here.
+    """
+    if st["idxp"] is None:
+        return None
+    device = q_fp8.device
+    _ctx.ctx_append_tok(key, layer_id, st["idxp"], idx_pool_u8, kbt, i, kvlen - 1)
+    tc = _t1cache.get(key)
+    if tc is None:
+        tc = {
+            "kvt": torch.empty(1, dtype=torch.int32, device=device),
+            "cu": torch.tensor([0, 1], dtype=torch.int32, device=device),
+            "step": -1,
+        }
+        _t1cache[key] = tc
+    if tc["step"] != _step:
+        tc["kvt"].fill_(kvlen)
+        tc["meta"] = _dg.get_paged_mqa_logits_metadata(tc["kvt"], BS, _dg.get_num_sms())
+        tc["step"] = _step
+    cap = st["idxp"].shape[0]
+    ibt = _ibt_cache.get(cap)
+    if ibt is None:
+        ibt = torch.arange(cap, dtype=torch.int32, device=device).unsqueeze(0)
+        _ibt_cache[cap] = ibt
+    logits = _dg.fp8_paged_mqa_logits(
+        q_fp8[i : i + 1].unsqueeze(1),
+        st["idxp"].unsqueeze(2),
+        weights.view(-1, iop.index_n_heads)[i : i + 1],
+        tc["kvt"],
+        ibt[:, :nb],
+        tc["meta"],
+        nb * BS,
+        clean_logits=False,
+    )
+    return _ftk(logits, tc["kvt"], tc["cu"], 2048)
+
+
 def process_layer(iop, q_fp8, weights, kv_cache, kbt, kvlen_d, kernel_topk, min_seq):
+    t_all = time.perf_counter()
+    try:
+        _process_layer(
+            iop, q_fp8, weights, kv_cache, kbt, kvlen_d, kernel_topk, min_seq
+        )
+    finally:
+        _prof["proc"] += time.perf_counter() - t_all
+
+
+def _row_plan(kvlens, khead, min_seq, b_now):
+    """Rows to serve this step, with their layer-invariant metadata.
+
+    The kernel block table and kvlens belong to the request, not the layer, so
+    this is computed once per step instead of once per layer (61x).
+    """
+    c = _plancache
+    if c["step"] == _step and c["min_seq"] == min_seq and c["b"] == b_now:
+        return c["plan"]
+    plan = []
+    for i in range(min(len(kvlens), b_now)):
+        kvlen = int(kvlens[i])
+        if kvlen < min_seq:
+            continue
+        nb = (kvlen + BS - 1) // BS
+        key = int(khead[i][0])
+        if key <= 0 or nb < 2:
+            continue
+        offloaded = (
+            nb > (2 + STG_BLOCKS)
+            and int(khead[i][1 + STG_BLOCKS]) == 0
+            and int(khead[i][1]) > 0
+        )
+        plan.append((i, kvlen, nb, key, offloaded))
+    c.update(step=_step, min_seq=min_seq, b=b_now, plan=plan)
+    return plan
+
+
+def _process_layer(iop, q_fp8, weights, kv_cache, kbt, kvlen_d, kernel_topk, min_seq):
     if _ctx is None:
         return
     layer_id = int(kv_cache.layer_id)
@@ -437,48 +660,100 @@ def process_layer(iop, q_fp8, weights, kv_cache, kbt, kvlen_d, kernel_topk, min_
     if khead is None or not kvlens:
         return
     single = _sw["step"] == _step and _sw["single"]
-    roi = [
-        i
-        for i in range(len(kvlens))
-        if kvlens[i] >= min_seq
-        and int(khead[i][0]) > 0
-        and (int(kvlens[i]) + BS - 1) // BS >= 2
-    ]
-    if not roi:
+    B_now = min(kbt.shape[0], q_fp8.shape[0], weights.shape[0], kvlen_d.shape[0])
+    plan = _row_plan(kvlens, khead, min_seq, B_now)
+    if not plan:
         return
     _prof["book"] += time.perf_counter() - t0
 
     served = []
-    B_now = min(kbt.shape[0], q_fp8.shape[0], weights.shape[0], kvlen_d.shape[0])
-    for i in roi:
-        if i >= B_now or i >= len(kvlens):  # stale roi vs shrunk batch
-            continue
-        kvlen = int(kvlens[i])
-        nb = (kvlen + BS - 1) // BS
-        key = int(khead[i][0])
-        offloaded = (
-            nb > (2 + STG_BLOCKS)
-            and int(khead[i][1 + STG_BLOCKS]) == 0
-            and int(khead[i][1]) > 0
-        )
+    for i, kvlen, nb, key, offloaded in plan:
+        t_a = time.perf_counter()
         st = _entry(key, layer_id, kvlen + 8192, main_pool.device)
         fresh = _stepcache.get("fresh_step") == _step
         if fresh and "lk" in st and kvlen != st["lk"] + (_step - st["ls"]):
-            del _store[(key, layer_id)]  # block0 recycled: stale host mirror
+            _store.pop((key, layer_id), None)  # block0 recycled: stale host mirror
+            if LOSSY and hasattr(_ctx, "ctx_lossy_release"):
+                _ctx.ctx_lossy_release(key)
+                _lossy_meta.pop(key, None)
+            if not st.get("adopted"):
+                _free_host(st["kv"])
             st = _entry(key, layer_id, kvlen + 8192, main_pool.device)
         if fresh:
             st["lk"], st["ls"] = kvlen, _step
         _grow(st, key, layer_id, kvlen + 1024)
+        _prof["alloc"] += time.perf_counter() - t_a
         row = kbt[i]
         hist = kvlen - 1
         t1 = time.perf_counter()
         if not offloaded or (hist - st["n"]) >= LAG:
-            _mirror_chunk(st, main_pool, idx_pool_u8, row, hist)
+            _mirror_chunk(st, main_pool, idx_pool_u8, row, hist, key)
         _prof["mirror"] += time.perf_counter() - t1
         if not offloaded:
             continue
         if st.get("bad") or st["n"] < hist - LAG:
             _stats["errors"] += 1
+            continue
+        if LOSSY and hasattr(_ctx, "ctx_lossy_serve"):
+            if not st.get("lreg"):
+                t_r = time.perf_counter()
+                meta = _lossy_meta.get(key)
+                if meta is None:
+                    jpos = (
+                        torch.nonzero(row[1 : 1 + STG_BLOCKS] > 0).reshape(-1) + 1
+                    ).to(torch.int32)
+                    sb = row.index_select(0, jpos.long()).to(torch.int32)
+                    meta = (jpos.cpu(), sb.cpu())
+                    _lossy_meta[key] = meta
+                if meta[0].numel() == 0:
+                    _stats["errors"] += 1
+                    continue
+                _ctx.ctx_lossy_register(
+                    key, layer_id, meta[0], meta[1], nb + 128, row.get_device()
+                )
+                st["lreg"] = True
+                _prof["lreg"] += time.perf_counter() - t_r
+            t1 = time.perf_counter()
+            if not single:
+                if _dg is None or int(iop.index_topk) != 2048:
+                    _stats["errors"] += 1
+                    continue
+                sel = _dual_wave_sel(
+                    iop,
+                    q_fp8,
+                    weights,
+                    st,
+                    key,
+                    layer_id,
+                    idx_pool_u8,
+                    kbt,
+                    i,
+                    kvlen,
+                    nb,
+                )
+                if sel is None:
+                    _stats["errors"] += 1
+                    continue
+                ktr = kernel_topk[i].reshape(-1)
+                n_ = min(int(ktr.shape[0]), int(sel.numel()))
+                ktr[:n_].copy_(sel.reshape(-1)[:n_])
+                if ktr.shape[0] > n_:
+                    ktr[n_:].fill_(-1)
+            _ctx.ctx_lossy_serve(
+                key,
+                layer_id,
+                st["kv"],
+                kbt,
+                kernel_topk,
+                i,
+                main_pool.reshape(-1, main_pool.shape[-1]),
+                kvlen,
+                _step,
+                LOSSY_PREFETCH,
+            )
+            served.append(i)
+            _stats["serves"] += 1
+            _prof["serve"] += time.perf_counter() - t1
             continue
         if not st["reg"]:
             jpos = torch.nonzero(row[1 : 1 + STG_BLOCKS] > 0).reshape(-1) + 1
@@ -511,43 +786,12 @@ def process_layer(iop, q_fp8, weights, kv_cache, kbt, kvlen_d, kernel_topk, min_
             )
         elif _dg is not None and int(iop.index_topk) == 2048:
             # dual wave (r27): per-row native fused scorer on the private side store
-            _ctx.ctx_append_tok(
-                key, layer_id, st["idxp"], idx_pool_u8, kbt, i, kvlen - 1
+            sel = _dual_wave_sel(
+                iop, q_fp8, weights, st, key, layer_id, idx_pool_u8, kbt, i, kvlen, nb
             )
-            tc = _t1cache.get(key)
-            if tc is None:
-                tc = {
-                    "kvt": torch.empty(1, dtype=torch.int32, device=main_pool.device),
-                    "cu": torch.tensor(
-                        [0, 1], dtype=torch.int32, device=main_pool.device
-                    ),
-                    "step": -1,
-                }
-                _t1cache[key] = tc
-            if tc["step"] != _step:
-                tc["kvt"].fill_(kvlen)
-                tc["meta"] = _dg.get_paged_mqa_logits_metadata(
-                    tc["kvt"], BS, _dg.get_num_sms()
-                )
-                tc["step"] = _step
-            cap = st["idxp"].shape[0]
-            ibt = _ibt_cache.get(cap)
-            if ibt is None:
-                ibt = torch.arange(
-                    cap, dtype=torch.int32, device=main_pool.device
-                ).unsqueeze(0)
-                _ibt_cache[cap] = ibt
-            logits = _dg.fp8_paged_mqa_logits(
-                q_fp8[i : i + 1].unsqueeze(1),
-                st["idxp"].unsqueeze(2),
-                weights.view(-1, iop.index_n_heads)[i : i + 1],
-                tc["kvt"],
-                ibt[:, :nb],
-                tc["meta"],
-                nb * BS,
-                clean_logits=False,
-            )
-            sel = _ftk(logits, tc["kvt"], tc["cu"], 2048)
+            if sel is None:
+                _stats["errors"] += 1
+                continue
             _ctx.ctx_serve_wb(
                 key,
                 layer_id,
@@ -566,7 +810,7 @@ def process_layer(iop, q_fp8, weights, kv_cache, kbt, kvlen_d, kernel_topk, min_
                 layer_id,
                 q_fp8,
                 weights,
-                st["idxp"],
+                _idxp(st, main_pool.device),
                 kbt,
                 kernel_topk,
                 i,
@@ -590,6 +834,15 @@ def process_layer(iop, q_fp8, weights, kv_cache, kbt, kvlen_d, kernel_topk, min_
             logging.warning(
                 f"[v32_capacity] prof(s)={ {k: round(v,2) for k,v in _prof.items()} } stats={_stats}"
             )
+            if LOSSY and hasattr(_ctx, "ctx_lossy_counters"):
+                t_, p_, m_, s_ = _ctx.ctx_lossy_counters()
+                tot = t_ + p_ + m_
+                if tot:
+                    logging.warning(
+                        f"[v32_lossy] warm-pool hit ratio={(t_ + p_) / tot:.4f} "
+                        f"(tail={t_} pool={p_} miss={m_} serves={s_} "
+                        f"tail%={t_ / tot:.4f} pool%={p_ / tot:.4f})"
+                    )
 
 
 def _purge():
@@ -600,10 +853,15 @@ def _purge():
                 _ctx.ctx_release(k[0])
                 if hasattr(_ctx, "ctx_admission_release"):
                     _ctx.ctx_admission_release(k[0])
+                if hasattr(_ctx, "ctx_lossy_release"):
+                    _ctx.ctx_lossy_release(k[0])
         except Exception:
             pass
         _t1cache.pop(k[0], None)
-        del _store[k]
+        _lossy_meta.pop(k[0], None)
+        st = _store.pop(k)
+        if not st.get("adopted"):
+            _free_host(st["kv"])
     for k in [k for k, e in _ireq.items() if _step - e["seen"] > 1500]:
         _free_req(k)
 
