@@ -230,19 +230,23 @@ class W4A8Int4MoEMethod(FusedMoEMethodBase):
         layer.register_buffer("w2_scale", s2)
 
     def _repack_compressed(self, layer):
-        M = layer.moe_inter_tp
         for e in range(layer.num_local_experts):
             up_w, up_s = self._pending_gate_up(layer, e, "up_proj")
             gate_w, gate_s = self._pending_gate_up(layer, e, "gate_proj")
             down_w, down_s = self._pending_down(layer, e)
 
-            qw, qs = repack_compressed_int4_to_cutlass(up_w, up_s, self.group_size)
-            layer.w13.data[e, :M].copy_(qw)
-            layer.w13_scale.data[e, :, :M].copy_(qs)
-
-            qw, qs = repack_compressed_int4_to_cutlass(gate_w, gate_s, self.group_size)
-            layer.w13.data[e, M : 2 * M].copy_(qw)
-            layer.w13_scale.data[e, :, M : 2 * M].copy_(qs)
+            # Match the legacy W.moe_w1 conversion exactly: form the complete
+            # [up | gate] matrix first, then run the Cutlass layout transform
+            # once.  reorder_tensor() encodes a matrix-wide layout, so
+            # separately reordering the two projections and concatenating the
+            # results does not produce the layout expected by the kernel.
+            fused_w = torch.cat((up_w, gate_w), dim=0)
+            fused_s = torch.cat((up_s, gate_s), dim=0)
+            qw, qs = repack_compressed_int4_to_cutlass(
+                fused_w, fused_s, self.group_size
+            )
+            layer.w13.data[e].copy_(qw)
+            layer.w13_scale.data[e].copy_(qs)
 
             qw, qs = repack_compressed_int4_to_cutlass(down_w, down_s, self.group_size)
             layer.w2.data[e].copy_(qw)
