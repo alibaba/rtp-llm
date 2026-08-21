@@ -646,6 +646,14 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         }
         {
             py::gil_scoped_acquire acquire;
+            if (!weight_manager_ || weight_manager_.is_none()) {
+                const std::string error_msg =
+                    "UpdateWeights is unavailable because no weight manager is configured";
+                RTP_LLM_LOG_WARNING("Reject update weights request from %s: %s",
+                                    context->peer().c_str(),
+                                    error_msg.c_str());
+                return {grpc::StatusCode::UNIMPLEMENTED, error_msg};
+            }
             py::dict               req;
             req["name"]   = request->name();
             req["desc"]   = request->desc();
@@ -654,10 +662,8 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         }
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
-        PyObject *type, *value, *traceback;
-        PyErr_Fetch(&type, &value, &traceback);
-        std::string err_msg = value ? PyUnicode_AsUTF8(value) : "Unknown Python error";
-        return {grpc::StatusCode::INTERNAL, "exception from python: " + err_msg};
+        py::gil_scoped_acquire acquire;
+        return {grpc::StatusCode::INTERNAL, "exception from python: " + std::string(e.what())};
     } catch (const std::exception& e) {
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }

@@ -99,11 +99,41 @@ class IndexerOp(nn.Module):
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk
         self.rope_head_dim = rope_head_dim
-        self.cos_sin_cache = cos_sin_cache
+        self.register_buffer("cos_sin_cache", None, persistent=False)
+        if cos_sin_cache is not None:
+            self.bind_rope_cache(cos_sin_cache)
         self.blocksize = blocksize
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+
+    def bind_rope_cache(self, cos_sin_cache: torch.Tensor) -> None:
+        """Bind the canonical FP32 RoPE cache tracked by the owning model."""
+        if not isinstance(cos_sin_cache, torch.Tensor):
+            raise TypeError("IndexerOp cos_sin_cache must be a torch.Tensor")
+        if cos_sin_cache.dtype != torch.float32:
+            raise TypeError(
+                "IndexerOp cos_sin_cache must use torch.float32, got "
+                f"{cos_sin_cache.dtype}"
+            )
+        self.cos_sin_cache = cos_sin_cache
+
+    def _apply(self, fn, recurse: bool = True):
+        source_cos_sin_cache = self.cos_sin_cache
+        result = super()._apply(fn, recurse)
+        if (
+            source_cos_sin_cache is not None
+            and self.cos_sin_cache is not None
+            and self.cos_sin_cache.dtype != torch.float32
+        ):
+            # RoPE kernels require an FP32 cache. Module.to(dtype=...) should
+            # still migrate its device, but must not silently lower precision
+            # or round the original FP32 values through the requested dtype.
+            self.cos_sin_cache = source_cos_sin_cache.to(
+                device=self.cos_sin_cache.device,
+                dtype=torch.float32,
+            )
+        return result
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -127,13 +157,14 @@ class IndexerOp(nn.Module):
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
         # Apply RoPE (same as vllm indexer rope)
-        if self.cos_sin_cache is not None:
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=positions,
                 interleave=not self.is_neox_style,
             )
@@ -171,13 +202,14 @@ class IndexerOp(nn.Module):
         q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        if self.cos_sin_cache is not None and full_rope_pos_ids is not None:
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache is not None and full_rope_pos_ids is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=full_rope_pos_ids,
                 interleave=not self.is_neox_style,
             )
@@ -206,13 +238,14 @@ class IndexerOp(nn.Module):
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
         # Apply RoPE (same as vllm indexer rope)
-        if self.cos_sin_cache is not None:
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=k_pe.unsqueeze(1),
                 k=k_pe.unsqueeze(1),
                 q_rope=k_pe.unsqueeze(1),
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=positions,
                 interleave=not self.is_neox_style,
             )
@@ -603,9 +636,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

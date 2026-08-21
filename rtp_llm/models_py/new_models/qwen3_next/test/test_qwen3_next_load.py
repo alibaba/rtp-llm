@@ -1,0 +1,932 @@
+import json
+import os
+import tempfile
+import types
+import unittest
+from unittest import mock
+
+import torch
+from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+from rtp_llm.models_py.new_models.qwen3_next.language import (
+    Qwen3NextForCausalLM,
+    Qwen3NextGatedDeltaNet,
+    Qwen3NextMetadata,
+    Qwen3NextMTPForCausalLM,
+    Qwen35MoeMTPForCausalLM,
+    _build_qwen3_next_metadata,
+    _write_linear_cache_store,
+    reorder_ba,
+    reorder_qkvz,
+    reorder_qkvz_scale,
+)
+from rtp_llm.models_py.quant_methods import QuantizationConfig
+from rtp_llm.models_py.registry import get_model_class
+from rtp_llm.ops import DataType, HybridAttentionType
+from rtp_llm.ops.compute_ops import PyAttentionInputs
+from safetensors.torch import save_file
+
+
+def _parallelism(
+    tp_size=1,
+    tp_rank=0,
+    ep_size=1,
+    ep_rank=0,
+    attn_tp_size=None,
+    attn_tp_rank=None,
+    ffn_tp_size=None,
+    ffn_tp_rank=None,
+):
+    attn_tp_size = tp_size if attn_tp_size is None else attn_tp_size
+    attn_tp_rank = tp_rank if attn_tp_rank is None else attn_tp_rank
+    ffn_tp_size = tp_size if ffn_tp_size is None else ffn_tp_size
+    ffn_tp_rank = tp_rank if ffn_tp_rank is None else ffn_tp_rank
+    return types.SimpleNamespace(
+        tp_size=tp_size,
+        tp_rank=tp_rank,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+        dp_size=1,
+        dp_rank=0,
+        world_size=max(tp_size, ep_size),
+        local_rank=tp_rank,
+        get_attn_tp_size=lambda: attn_tp_size,
+        get_attn_tp_rank=lambda: attn_tp_rank,
+        get_ffn_tp_size=lambda: ffn_tp_size,
+        get_ffn_tp_rank=lambda: ffn_tp_rank,
+        prefill_cp_config=types.SimpleNamespace(
+            is_enabled=lambda: False,
+            is_prefill_enabled=lambda: False,
+        ),
+        ffn_disaggregate_config=types.SimpleNamespace(enable_ffn_disaggregate=False),
+    )
+
+
+def _moe_config():
+    return types.SimpleNamespace(
+        fake_balance_expert=False,
+        ll_num_max_token=1,
+        masked_max_token_num=1,
+        moe_strategy=0,
+        use_mori_ep=False,
+        use_deepep_moe=False,
+        use_deepep_low_latency=False,
+        use_all_gather=True,
+    )
+
+
+def _config(layer_type=HybridAttentionType.NONE, tie=True):
+    config = ModelConfig()
+    config.model_type = "qwen3_next"
+    config.num_layers = 1
+    config.vocab_size = 8
+    config.hidden_size = 4
+    config.inter_size = 4
+    config.expert_num = 2
+    config.moe_inter_size = 4
+    config.moe_k = 1
+    config.moe_style = 2
+    config.moe_layer_index = []
+    config.has_moe_norm = True
+    config.attn_config.head_num = 2
+    config.attn_config.kv_head_num = 1
+    config.attn_config.size_per_head = 2
+    config.layernorm_eps = 1e-6
+    config.partial_rotary_factor = 1.0
+    config.enable_fp32_lm_head = False
+    config.tie_word_embeddings = tie
+    config.data_type = "fp32"
+    config.quant_config = None
+    config.activation_type = "SiGLU"
+    config.hybrid_attention_config.enable_hybrid_attention = True
+    config.hybrid_attention_config.hybrid_attention_types = [layer_type]
+    linear = config.linear_attention_config
+    linear.linear_conv_kernel_dim = 2
+    linear.linear_key_head_dim = 2
+    linear.linear_num_key_heads = 2
+    linear.linear_num_value_heads = 2
+    linear.linear_value_head_dim = 2
+    linear.ssm_state_dtype = DataType.TYPE_FP32
+    linear.conv_state_dtype = DataType.TYPE_FP32
+    return config
+
+
+def _load_config(
+    tp_size=1,
+    tp_rank=0,
+    ep_size=1,
+    ep_rank=0,
+    attn_tp_size=None,
+    attn_tp_rank=None,
+    ffn_tp_size=None,
+    ffn_tp_rank=None,
+    quant_config=None,
+):
+    attn_tp_size = tp_size if attn_tp_size is None else attn_tp_size
+    attn_tp_rank = tp_rank if attn_tp_rank is None else attn_tp_rank
+    ffn_tp_size = tp_size if ffn_tp_size is None else ffn_tp_size
+    ffn_tp_rank = tp_rank if ffn_tp_rank is None else ffn_tp_rank
+    parallelism = _parallelism(
+        tp_size,
+        tp_rank,
+        ep_size,
+        ep_rank,
+        attn_tp_size,
+        attn_tp_rank,
+        ffn_tp_size,
+        ffn_tp_rank,
+    )
+    return NewLoaderConfig(
+        tp_size=tp_size,
+        tp_rank=tp_rank,
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+        attn_tp_size=attn_tp_size,
+        attn_tp_rank=attn_tp_rank,
+        ffn_tp_size=ffn_tp_size,
+        ffn_tp_rank=ffn_tp_rank,
+        compute_dtype=torch.float32,
+        device="cpu",
+        quant_config=quant_config or QuantizationConfig("none"),
+        parallelism_config=parallelism,
+        moe_config=_moe_config(),
+    )
+
+
+def _dense_weights(include_lm_head=False):
+    weights = {
+        "model.embed_tokens.weight": torch.arange(32, dtype=torch.float32).reshape(
+            8, 4
+        ),
+        "model.layers.0.input_layernorm.weight": torch.ones(4),
+        # Q and gate are interleaved per head: [head, q/gate, head_dim, hidden].
+        "model.layers.0.self_attn.q_proj.weight": torch.arange(
+            32, dtype=torch.float32
+        ).reshape(8, 4),
+        "model.layers.0.self_attn.k_proj.weight": torch.ones(2, 4),
+        "model.layers.0.self_attn.v_proj.weight": torch.ones(2, 4),
+        "model.layers.0.self_attn.q_norm.weight": torch.ones(2),
+        "model.layers.0.self_attn.k_norm.weight": torch.ones(2),
+        "model.layers.0.self_attn.o_proj.weight": torch.eye(4),
+        "model.layers.0.post_attention_layernorm.weight": torch.ones(4),
+        "model.layers.0.mlp.gate_proj.weight": torch.ones(4, 4),
+        "model.layers.0.mlp.up_proj.weight": torch.full((4, 4), 2.0),
+        "model.layers.0.mlp.down_proj.weight": torch.eye(4),
+        "model.norm.weight": torch.ones(4),
+    }
+    if include_lm_head:
+        weights["lm_head.weight"] = torch.full((8, 4), 3.0)
+    return weights
+
+
+def _moe_weights():
+    weights = _dense_weights()
+    for name in (
+        "model.layers.0.mlp.gate_proj.weight",
+        "model.layers.0.mlp.up_proj.weight",
+        "model.layers.0.mlp.down_proj.weight",
+    ):
+        del weights[name]
+    weights.update(
+        {
+            "model.layers.0.mlp.gate.weight": torch.ones(2, 4),
+            "model.layers.0.mlp.shared_expert.gate_proj.weight": torch.ones(4, 4),
+            "model.layers.0.mlp.shared_expert.up_proj.weight": torch.full((4, 4), 2.0),
+            "model.layers.0.mlp.shared_expert.down_proj.weight": torch.eye(4),
+            "model.layers.0.mlp.shared_expert_gate.weight": torch.ones(1, 4),
+        }
+    )
+    for expert_id in range(2):
+        prefix = f"model.layers.0.mlp.experts.{expert_id}"
+        weights[f"{prefix}.gate_proj.weight"] = torch.full((4, 4), float(expert_id + 1))
+        weights[f"{prefix}.up_proj.weight"] = torch.full((4, 4), float(expert_id + 2))
+        weights[f"{prefix}.down_proj.weight"] = torch.eye(4)
+    return weights
+
+
+def _mtp_config(model_type="qwen35_moe_mtp"):
+    config = _config(tie=False)
+    config.model_type = model_type
+    config.is_mtp = True
+    config.moe_layer_index = [0]
+    config.hybrid_attention_config.hybrid_attention_types = [HybridAttentionType.NONE]
+    return config
+
+
+def _mtp_weights(embedding_prefix="model.language_model."):
+    weights = {}
+    for name, tensor in _moe_weights().items():
+        if name == "model.embed_tokens.weight":
+            weights[f"{embedding_prefix}embed_tokens.weight"] = tensor
+        elif name.startswith("model."):
+            weights[f"mtp.{name[len('model.'):]}"] = tensor
+        else:
+            weights[name] = tensor
+    weights.update(
+        {
+            "lm_head.weight": torch.full((8, 4), 3.0),
+            "mtp.pre_fc_norm_embedding.weight": torch.ones(4),
+            "mtp.pre_fc_norm_hidden.weight": torch.ones(4),
+            "mtp.fc.weight": torch.arange(32, dtype=torch.float32).reshape(4, 8),
+        }
+    )
+    return weights
+
+
+class Qwen3NextLoadTest(unittest.TestCase):
+    def test_production_model_type_alias_uses_qwen3_next_newloader(self):
+        self.assertIs(get_model_class("qwen35_moe"), Qwen3NextForCausalLM)
+
+    def test_mtp_model_type_aliases_use_typed_draft_models(self):
+        self.assertIs(get_model_class("qwen3_next_mtp"), Qwen3NextMTPForCausalLM)
+        self.assertIs(get_model_class("qwen35_moe_mtp"), Qwen35MoeMTPForCausalLM)
+
+    def test_mtp_filter_is_exact_and_rank_invariant(self):
+        accepted = (
+            "mtp.layers.0.self_attn.q_proj.weight",
+            "mtp.pre_fc_norm_embedding.weight",
+            "model.embed_tokens.weight",
+            "model.language_model.embed_tokens.weight",
+            "lm_head.weight",
+        )
+        rejected = (
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.language_model.layers.0.mlp.gate.weight",
+            "model.visual.embed_tokens.weight",
+            "model.embed_tokens.weight_scale",
+            "lm_head.bias",
+            "mtp.",
+        )
+        for name in accepted:
+            with self.subTest(name=name):
+                self.assertTrue(Qwen3NextMTPForCausalLM._is_mtp_checkpoint_weight(name))
+        for name in rejected:
+            with self.subTest(name=name):
+                self.assertFalse(
+                    Qwen3NextMTPForCausalLM._is_mtp_checkpoint_weight(name)
+                )
+
+    def test_real_mtp_tree_loads_draft_only_weights(self):
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        model.load_weights(_mtp_weights())
+        NewModelLoader._validate_loaded_weights(model)
+
+        self.assertEqual(len(model.layers), 1)
+        self.assertNotIn("linear_attn", model.layers[0]._modules)
+        self.assertIsNotNone(model.layers[0].mlp.select_topk)
+        torch.testing.assert_close(
+            model.pre_fc_norm_embedding.weight, torch.full((4,), 2.0)
+        )
+        torch.testing.assert_close(
+            model.pre_fc_norm_hidden.weight, torch.full((4,), 2.0)
+        )
+        torch.testing.assert_close(
+            model.fc.weight,
+            torch.arange(32, dtype=torch.float32).reshape(4, 8),
+        )
+        torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+
+    def test_mtp_forward_rejects_missing_and_mismatched_hidden_states(self):
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        model.load_weights(_mtp_weights())
+        input_ids = torch.tensor([0, 1], dtype=torch.int64)
+        attention_inputs = types.SimpleNamespace()
+
+        for input_hiddens, message in (
+            (None, "requires input_hiddens"),
+            (torch.zeros(1, 4), "must match token embeddings"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                model.forward(
+                    types.SimpleNamespace(
+                        input_ids=input_ids,
+                        input_hiddens=input_hiddens,
+                        attention_inputs=attention_inputs,
+                    )
+                )
+
+    def test_mtp_forward_projects_normalized_embedding_and_hidden_state(self):
+        class PassLayer(torch.nn.Module):
+            layer_type = HybridAttentionType.NONE
+
+            def forward(self, hidden_states, residual, fmha_impl, **kwargs):
+                return hidden_states, residual
+
+        class PassNorm(torch.nn.Module):
+            def forward(self, hidden_states, residual):
+                return hidden_states, residual
+
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        model.load_weights(_mtp_weights())
+        input_ids = torch.tensor([0, 1], dtype=torch.int64)
+        input_hiddens = torch.arange(8, dtype=torch.float32).reshape(2, 4) + 1
+        input_embeds = model.embed_tokens(input_ids)
+        expected = model.fc(
+            torch.cat(
+                [
+                    model.pre_fc_norm_embedding(input_embeds),
+                    model.pre_fc_norm_hidden(input_hiddens),
+                ],
+                dim=-1,
+            )
+        )
+        model.layers = torch.nn.ModuleList([PassLayer()])
+        model.norm = PassNorm()
+        model.kv_cache = None
+        fmha_impl = types.SimpleNamespace(fmha_params="mtp-fmha")
+        inputs = types.SimpleNamespace(
+            input_ids=input_ids,
+            input_hiddens=input_hiddens,
+            attention_inputs=types.SimpleNamespace(),
+        )
+
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_next.language."
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
+        ), mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_next.language."
+            "select_attention_inputs_for_layer",
+            return_value=inputs.attention_inputs,
+        ):
+            outputs = model.forward(inputs, fmha_impl=fmha_impl)
+
+        torch.testing.assert_close(outputs.hidden_states, expected)
+
+    def test_new_loader_preselects_mtp_shard_before_materialization(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            main_name = "model-00001-of-00002.safetensors"
+            draft_name = "model-00002-of-00002.safetensors"
+            main_path = os.path.join(model_path, main_name)
+            draft_path = os.path.join(model_path, draft_name)
+            with open(main_path, "wb") as handle:
+                handle.write(b"not a safetensors file")
+            draft_weights = _mtp_weights()
+            save_file(draft_weights, draft_path)
+            weight_map = {"model.visual.unused": main_name}
+            weight_map.update({name: draft_name for name in draft_weights})
+            with open(
+                os.path.join(model_path, "model.safetensors.index.json"), "w"
+            ) as handle:
+                json.dump({"weight_map": weight_map}, handle)
+
+            with mock.patch(
+                "rtp_llm.models_py.layers.moe_experts.BaseMoEExperts."
+                "_maybe_build_fused_moe"
+            ):
+                model = NewModelLoader(
+                    _mtp_config(), _load_config(), model_path=model_path
+                ).load()
+
+        NewModelLoader._validate_loaded_weights(model)
+        self.assertEqual(len(model.layers), 1)
+
+    def test_qwen3_next_mtp_embedding_prefix_loads(self):
+        model = Qwen3NextMTPForCausalLM(_mtp_config("qwen3_next_mtp"), _load_config())
+        model.load_weights(_mtp_weights("model."))
+        NewModelLoader._validate_loaded_weights(model)
+
+    def test_mtp_unknown_checkpoint_tensor_fails(self):
+        model = Qwen35MoeMTPForCausalLM(_mtp_config(), _load_config())
+        weights = _mtp_weights()
+        weights["mtp.layers.0.self_attn.q_projj.weight"] = torch.ones(4, 4)
+        with self.assertRaisesRegex(RuntimeError, "q_projj"):
+            model.load_weights(weights)
+
+    def test_core_and_mtp_configs_cannot_cross_model_boundaries(self):
+        with self.assertRaisesRegex(ValueError, "MTP.*is_mtp=False"):
+            Qwen3NextMTPForCausalLM(_config(), _load_config())
+        config = _mtp_config()
+        with self.assertRaisesRegex(ValueError, "core.*is_mtp=True"):
+            Qwen3NextForCausalLM(config, _load_config())
+
+    def test_mtp_rejects_unsupported_layer_topology(self):
+        multi_layer = _mtp_config()
+        multi_layer.num_layers = 2
+        multi_layer.moe_layer_index = [0, 1]
+        multi_layer.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.NONE,
+            HybridAttentionType.NONE,
+        ]
+        with self.assertRaisesRegex(ValueError, "exactly one layer"):
+            Qwen3NextMTPForCausalLM(multi_layer, _load_config())
+
+        linear_attention = _mtp_config()
+        linear_attention.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.LINEAR
+        ]
+        with self.assertRaisesRegex(ValueError, "standard-attention"):
+            Qwen3NextMTPForCausalLM(linear_attention, _load_config())
+
+        dense_layer = _mtp_config()
+        dense_layer.moe_layer_index = []
+        with self.assertRaisesRegex(ValueError, "MoE layer index"):
+            Qwen3NextMTPForCausalLM(dense_layer, _load_config())
+
+    def test_qwen35_language_model_prefix_maps_to_runtime_root(self):
+        self.assertEqual(
+            Qwen3NextForCausalLM.WEIGHTS_MAPPER.map_name(
+                "model.language_model.layers.0.mlp.experts.0.gate_up_proj.weight"
+            ),
+            "layers.0.mlp.experts.0.gate_up_proj.weight",
+        )
+
+    def test_attention_metadata_has_explicit_runtime_type(self):
+        attention_inputs = PyAttentionInputs()
+        attention_inputs.is_prefill = False
+        attention_inputs.is_target_verify = False
+        inputs = types.SimpleNamespace(attention_inputs=attention_inputs)
+        metadata = _build_qwen3_next_metadata(inputs, torch.zeros(1, 4))
+        self.assertIsInstance(metadata, Qwen3NextMetadata)
+        self.assertIsNone(metadata.get_prefill_conv1d_meta())
+
+    def test_attention_metadata_selects_primary_tagged_input(self):
+        attention_inputs = PyAttentionInputs()
+        attention_inputs.is_prefill = False
+        attention_inputs.is_target_verify = True
+        inputs = types.SimpleNamespace(
+            attention_inputs={"linear": attention_inputs}
+        )
+        metadata = _build_qwen3_next_metadata(inputs, torch.zeros(1, 4))
+        self.assertTrue(metadata.is_target_verify)
+
+    def test_public_loader_streams_pytorch_checkpoint_and_runs_postprocess(self):
+        config = _config(tie=False)
+        config.logit_scale = 2.0
+        weights = _dense_weights(include_lm_head=True)
+        with tempfile.TemporaryDirectory() as model_path:
+            torch.save(weights, os.path.join(model_path, "model.pt"))
+            model = NewModelLoader(
+                config,
+                _load_config(),
+                model_path=model_path,
+            ).load()
+
+        self.assertFalse(model.training)
+        torch.testing.assert_close(
+            model.lm_head.weight,
+            torch.full_like(model.lm_head.weight, 6.0),
+        )
+        torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+
+    def test_public_loader_skips_declared_non_core_checkpoint_tensors(self):
+        config = _config(tie=False)
+        weights = _dense_weights(include_lm_head=True)
+        weights["mtp.layers.0.proj.weight"] = torch.ones(1)
+        weights["model.visual.patch_embed.weight"] = torch.ones(1)
+        with tempfile.TemporaryDirectory() as model_path:
+            torch.save(weights, os.path.join(model_path, "model.pt"))
+            model = NewModelLoader(
+                config,
+                _load_config(),
+                model_path=model_path,
+            ).load()
+
+        NewModelLoader._validate_loaded_weights(model)
+
+    def test_typed_model_loads_q_gate_and_ties_lm_head(self):
+        model = Qwen3NextForCausalLM(_config(), _load_config())
+        weights = _dense_weights()
+        model.load_weights(weights)
+        NewModelLoader._validate_loaded_weights(model)
+
+        q_gate = weights["model.layers.0.self_attn.q_proj.weight"].reshape(2, 2, 2, 4)
+        expected_q = q_gate[:, 0].reshape(4, 4)
+        expected_gate = q_gate[:, 1].reshape(4, 4)
+        torch.testing.assert_close(
+            model.layers[0].self_attn.qkv_proj.weight[:4], expected_q
+        )
+        torch.testing.assert_close(model.layers[0].self_attn.gate.weight, expected_gate)
+        torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
+        torch.testing.assert_close(model.norm.weight, torch.full((4,), 2.0))
+
+    def test_model_prefixed_lm_head_is_not_replaced_when_tied(self):
+        model = Qwen3NextForCausalLM(_config(), _load_config())
+        weights = _dense_weights()
+        expected = torch.full((8, 4), 7.0)
+        weights["model.lm_head.weight"] = expected
+        model.load_weights(weights)
+        NewModelLoader._validate_loaded_weights(model)
+
+        torch.testing.assert_close(model.lm_head.weight, expected)
+        self.assertFalse(torch.equal(model.lm_head.weight, model.embed_tokens.weight))
+
+    def test_real_moe_model_tree_loads_router_shared_and_routed_experts(self):
+        config = _config()
+        config.moe_layer_index = [0]
+        model = Qwen3NextForCausalLM(config, _load_config())
+        model.load_weights(_moe_weights())
+        NewModelLoader._validate_loaded_weights(model)
+
+        moe = model.layers[0].mlp
+        self.assertEqual(moe.experts._loaded_count, 6)
+        self.assertIsNotNone(moe.select_topk)
+        torch.testing.assert_close(moe.shared_expert_gate.weight, torch.ones(1, 4))
+        torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
+
+    def test_untied_missing_lm_head_fails_integrity(self):
+        model = Qwen3NextForCausalLM(_config(tie=False), _load_config())
+        model.load_weights(_dense_weights())
+        with self.assertRaisesRegex(RuntimeError, "ParallelLMHead.*weight"):
+            NewModelLoader._validate_loaded_weights(model)
+
+    def test_unknown_checkpoint_tensor_fails(self):
+        model = Qwen3NextForCausalLM(_config(), _load_config())
+        weights = _dense_weights()
+        weights["model.layers.0.self_attn.q_projj.weight"] = torch.ones(4, 4)
+        with self.assertRaisesRegex(RuntimeError, "q_projj"):
+            model.load_weights(weights)
+
+    def test_raw_hf_dict_is_rejected_before_model_construction(self):
+        with self.assertRaisesRegex(TypeError, "typed ModelConfig"):
+            Qwen3NextForCausalLM({}, _load_config())
+
+    def test_hybrid_layer_count_must_match_model(self):
+        config = _config()
+        config.hybrid_attention_config.hybrid_attention_types = []
+        with self.assertRaisesRegex(ValueError, "exactly one entry per layer"):
+            Qwen3NextForCausalLM(config, _load_config())
+
+    def test_unsupported_parallel_topologies_fail_before_loading(self):
+        with self.assertRaisesRegex(ValueError, "Context parallelism"):
+            Qwen3NextForCausalLM(
+                _config(),
+                _load_config(
+                    tp_size=2,
+                    attn_tp_size=1,
+                    attn_tp_rank=0,
+                ),
+            )
+        with self.assertRaisesRegex(ValueError, "Independent FFN TP"):
+            Qwen3NextForCausalLM(
+                _config(),
+                _load_config(
+                    tp_size=2,
+                    ffn_tp_size=1,
+                    ffn_tp_rank=0,
+                ),
+            )
+
+    def test_invalid_ep_partition_and_mtp_fail_before_loading(self):
+        config = _config()
+        config.expert_num = 3
+        with self.assertRaisesRegex(ValueError, "divisible by ep_size"):
+            Qwen3NextForCausalLM(config, _load_config(ep_size=2))
+
+        config = _config()
+        config.is_mtp = True
+        with self.assertRaisesRegex(ValueError, "core.*is_mtp=True"):
+            Qwen3NextForCausalLM(config, _load_config())
+
+    def test_q_gate_per_channel_scale_accepts_vector_layout(self):
+        cfg = {"num_heads": 2, "head_dim": 2, "quant_config": None}
+        transformed = dict(
+            Qwen3NextForCausalLM._split_q_gate_yield(
+                "model.layers.0.self_attn.q_proj.weight_scale",
+                torch.arange(1, 9, dtype=torch.float32),
+                cfg,
+            )
+        )
+        torch.testing.assert_close(
+            transformed["model.layers.0.self_attn.qkv_proj.q_proj.weight_scale"],
+            torch.tensor([[1.0], [2.0], [5.0], [6.0]]),
+        )
+        torch.testing.assert_close(
+            transformed["model.layers.0.self_attn.gate.weight_scale"],
+            torch.tensor([[3.0], [4.0], [7.0], [8.0]]),
+        )
+
+    def test_q_gate_block_scale_requires_head_alignment(self):
+        cfg = {
+            "num_heads": 2,
+            "head_dim": 64,
+            "quant_config": types.SimpleNamespace(weight_block_size=[128, 128]),
+        }
+        with self.assertRaisesRegex(ValueError, "must align"):
+            list(
+                Qwen3NextForCausalLM._split_q_gate_yield(
+                    "model.layers.0.self_attn.q_proj.weight_scale_inv",
+                    torch.ones(2, 1),
+                    cfg,
+                )
+            )
+
+    def test_q_gate_block_scale_preserves_per_head_interleave(self):
+        cfg = {
+            "num_heads": 2,
+            "head_dim": 128,
+            "quant_config": types.SimpleNamespace(weight_block_size=[128, 128]),
+        }
+        scale = torch.arange(8, dtype=torch.float32).reshape(4, 2).add(1)
+        transformed = dict(
+            Qwen3NextForCausalLM._split_q_gate_yield(
+                "model.layers.0.self_attn.q_proj.weight_scale_inv",
+                scale,
+                cfg,
+            )
+        )
+        torch.testing.assert_close(
+            transformed["model.layers.0.self_attn.qkv_proj.q_proj.weight_scale_inv"],
+            scale[[0, 2]],
+        )
+        torch.testing.assert_close(
+            transformed["model.layers.0.self_attn.gate.weight_scale_inv"],
+            scale[[1, 3]],
+        )
+
+
+class Qwen3NextLinearAttentionLoadTest(unittest.TestCase):
+    def test_cache_store_uses_writer_only_for_active_plan(self):
+        writer = mock.Mock()
+        plan = object()
+        kv_cache = object()
+        attn_inputs = types.SimpleNamespace(
+            cache_store_inputs=plan,
+            cache_store_writer=writer,
+        )
+
+        _write_linear_cache_store(attn_inputs, kv_cache)
+        writer.write.assert_called_once_with(plan, kv_cache)
+
+        attn_inputs.cache_store_inputs = None
+        _write_linear_cache_store(attn_inputs, kv_cache)
+        _write_linear_cache_store(attn_inputs, None)
+        writer.write.assert_called_once_with(plan, kv_cache)
+
+    def _layer(self, tp_rank):
+        config = _config(HybridAttentionType.LINEAR)
+        return Qwen3NextGatedDeltaNet(
+            linear_attn_config=config.linear_attention_config,
+            hidden_size=4,
+            rms_norm_eps=config.layernorm_eps,
+            attn_tp_size=2,
+            attn_tp_rank=tp_rank,
+            params_dtype=torch.float32,
+            quant_config=QuantizationConfig("none"),
+            prefix="layers.0.linear_attn",
+        )
+
+    def _weights(self):
+        return {
+            "in_proj_qkvz.weight": torch.arange(64, dtype=torch.float32).reshape(16, 4),
+            "in_proj_ba.weight": torch.arange(16, dtype=torch.float32).reshape(4, 4),
+            "conv1d.weight": torch.arange(24, dtype=torch.float32).reshape(12, 2),
+            "dt_bias": torch.tensor([1.0, 2.0]),
+            "A_log": torch.tensor([3.0, 4.0]),
+            "norm.weight": torch.tensor([5.0, 6.0]),
+            "out_proj.weight": torch.arange(16, dtype=torch.float32).reshape(4, 4),
+        }
+
+    def _split_projection_weights(self):
+        weights = self._weights()
+        del weights["in_proj_qkvz.weight"]
+        del weights["in_proj_ba.weight"]
+        weights.update(
+            {
+                "in_proj_qkv.weight": torch.arange(48, dtype=torch.float32).reshape(
+                    12, 4
+                ),
+                "in_proj_z.weight": torch.arange(16, dtype=torch.float32).reshape(4, 4),
+                "in_proj_b.weight": torch.arange(8, dtype=torch.float32).reshape(2, 4),
+                "in_proj_a.weight": torch.arange(8, 16, dtype=torch.float32).reshape(
+                    2, 4
+                ),
+            }
+        )
+        return weights
+
+    def test_tp_ranks_receive_qkvz_ba_and_out_slices(self):
+        config = _config(HybridAttentionType.LINEAR).linear_attention_config
+        weights = self._weights()
+        reordered = reorder_qkvz([weights["in_proj_qkvz.weight"]], config)
+        q, k, v, z = torch.split(reordered, [4, 4, 4, 4], dim=0)
+        ba = reorder_ba([weights["in_proj_ba.weight"]], config)
+        b, a = torch.split(ba, [2, 2], dim=0)
+
+        for rank in range(2):
+            layer = self._layer(rank)
+            layer.load_weights(weights)
+            NewModelLoader._validate_loaded_weights(layer)
+            expected_qkvz = torch.cat(
+                [
+                    q[rank * 2 : rank * 2 + 2],
+                    k[rank * 2 : rank * 2 + 2],
+                    v[rank * 2 : rank * 2 + 2],
+                    z[rank * 2 : rank * 2 + 2],
+                ],
+                dim=0,
+            )
+            expected_ba = torch.cat([b[rank : rank + 1], a[rank : rank + 1]], dim=0).t()
+            torch.testing.assert_close(layer.in_proj_qkvz.weight, expected_qkvz)
+            torch.testing.assert_close(layer.in_proj_ba_w, expected_ba)
+            torch.testing.assert_close(
+                layer.out_proj.weight,
+                weights["out_proj.weight"][:, rank * 2 : rank * 2 + 2],
+            )
+            torch.testing.assert_close(
+                layer.dt_bias, weights["dt_bias"][rank : rank + 1]
+            )
+            torch.testing.assert_close(layer.a_log, weights["A_log"][rank : rank + 1])
+
+    def test_split_qkvz_and_ba_match_qwen35_tp_layout(self):
+        weights = self._split_projection_weights()
+        q, k, v = torch.split(weights["in_proj_qkv.weight"], [4, 4, 4], dim=0)
+        z = weights["in_proj_z.weight"]
+        b = weights["in_proj_b.weight"]
+        a = weights["in_proj_a.weight"]
+
+        for rank in range(2):
+            layer = self._layer(rank)
+            layer.load_weights(weights)
+            NewModelLoader._validate_loaded_weights(layer)
+            expected_qkvz = torch.cat(
+                [
+                    q[rank * 2 : rank * 2 + 2],
+                    k[rank * 2 : rank * 2 + 2],
+                    v[rank * 2 : rank * 2 + 2],
+                    z[rank * 2 : rank * 2 + 2],
+                ],
+                dim=0,
+            )
+            expected_ba = torch.cat([b[rank : rank + 1], a[rank : rank + 1]], dim=0).t()
+            torch.testing.assert_close(layer.in_proj_qkvz.weight, expected_qkvz)
+            torch.testing.assert_close(layer.in_proj_ba_w, expected_ba)
+
+    def test_split_projection_completeness_and_layout_mixing_fail(self):
+        weights = self._split_projection_weights()
+        del weights["in_proj_z.weight"]
+        layer = self._layer(0)
+        layer.load_weights(weights)
+        with self.assertRaisesRegex(RuntimeError, "in_proj_qkvz.*weight"):
+            NewModelLoader._validate_loaded_weights(layer)
+
+        layer = self._layer(0)
+        layer.load_weights({"in_proj_qkv.weight": torch.ones(12, 4)})
+        with self.assertRaisesRegex(RuntimeError, "mix.*checkpoint layouts"):
+            layer.load_weights({"in_proj_qkvz.weight": torch.ones(16, 4)})
+
+        layer = self._layer(0)
+        layer.load_weights({"in_proj_b.weight": torch.ones(2, 4)})
+        with self.assertRaisesRegex(RuntimeError, "mix.*checkpoint layouts"):
+            layer.load_weights({"in_proj_ba.weight": torch.ones(4, 4)})
+
+    def test_unknown_linear_tensor_fails(self):
+        with self.assertRaisesRegex(RuntimeError, "Unsupported"):
+            self._layer(0).load_weights({"in_proj_qkvz.typo": torch.ones(1)})
+
+    def test_linear_attention_rejects_cpu_runtime_before_migration(self):
+        with self.assertRaisesRegex(RuntimeError, "CUDA or ROCm"):
+            self._layer(0).validate_runtime_device(torch.device("cpu"))
+
+    def test_linear_attention_uses_configured_rms_norm_epsilon(self):
+        config = _config(HybridAttentionType.LINEAR)
+        config.layernorm_eps = 3e-5
+        layer = Qwen3NextGatedDeltaNet(
+            linear_attn_config=config.linear_attention_config,
+            hidden_size=4,
+            rms_norm_eps=config.layernorm_eps,
+            attn_tp_size=2,
+            attn_tp_rank=0,
+            params_dtype=torch.float32,
+            quant_config=QuantizationConfig("none"),
+            prefix="layers.0.linear_attn",
+        )
+        self.assertEqual(layer.rms_norm_eps, 3e-5)
+        self.assertEqual(layer.norm_gated.eps, 3e-5)
+        self.assertIs(layer.norm_gated.weight, layer.norm_w)
+        self.assertIs(layer._modules["norm_gated"], layer.norm_gated)
+        layer.to(dtype=torch.float64)
+        self.assertIs(layer.norm_gated.weight, layer.norm_w)
+        self.assertIsInstance(layer.norm_w, torch.nn.Parameter)
+
+    def test_qkvz_per_channel_scale_accepts_vector_layout(self):
+        config = _config(HybridAttentionType.LINEAR)
+        layer = Qwen3NextGatedDeltaNet(
+            linear_attn_config=config.linear_attention_config,
+            hidden_size=4,
+            rms_norm_eps=config.layernorm_eps,
+            attn_tp_size=2,
+            attn_tp_rank=1,
+            params_dtype=torch.float32,
+            quant_config=QuantizationConfig("fp8_per_channel"),
+            prefix="layers.0.linear_attn",
+        )
+        scale = torch.arange(1, 17, dtype=torch.float32)
+        layer.load_weights({"in_proj_qkvz.weight_scale": scale})
+        reordered = reorder_qkvz([scale], config.linear_attention_config)
+        expected = layer._split_qkvz_rows(reordered, 1)
+        torch.testing.assert_close(layer.in_proj_qkvz.weight_scale, expected)
+
+    def test_fp8_block_scales_follow_qkvz_and_out_projection_tp_layouts(self):
+        config = _config(HybridAttentionType.LINEAR)
+        linear = config.linear_attention_config
+        linear.linear_key_head_dim = 128
+        linear.linear_value_head_dim = 128
+        quant = QuantizationConfig(
+            "fp8_block",
+            source_config=types.SimpleNamespace(weight_block_size=[128, 128]),
+        )
+        layer = Qwen3NextGatedDeltaNet(
+            linear_attn_config=linear,
+            hidden_size=256,
+            rms_norm_eps=config.layernorm_eps,
+            attn_tp_size=2,
+            attn_tp_rank=1,
+            params_dtype=torch.float32,
+            quant_config=quant,
+            prefix="layers.0.linear_attn",
+        )
+        qkvz_scale = torch.arange(16, dtype=torch.float32).reshape(8, 2).add(1)
+        out_scale = torch.arange(4, dtype=torch.float32).reshape(2, 2).add(1)
+        layer.load_weights(
+            {
+                "in_proj_qkvz.weight_scale_inv": qkvz_scale,
+                "out_proj.weight_scale_inv": out_scale,
+            }
+        )
+
+        reordered = reorder_qkvz_scale(qkvz_scale, linear, block_n=128)
+        expected_qkvz = layer._split_qkvz_rows(reordered, 128)
+        torch.testing.assert_close(
+            layer.in_proj_qkvz.weight_scale_inv,
+            expected_qkvz,
+        )
+        torch.testing.assert_close(
+            layer.out_proj.weight_scale_inv,
+            out_scale[:, 1:2],
+        )
+
+    def test_split_fp8_block_scales_follow_qwen35_tp_layout(self):
+        config = _config(HybridAttentionType.LINEAR)
+        linear = config.linear_attention_config
+        linear.linear_key_head_dim = 128
+        linear.linear_value_head_dim = 128
+        quant = QuantizationConfig(
+            "fp8_block",
+            source_config=types.SimpleNamespace(weight_block_size=[128, 128]),
+        )
+        qkv_scale = torch.arange(12, dtype=torch.float32).reshape(6, 2).add(1)
+        z_scale = torch.arange(4, dtype=torch.float32).reshape(2, 2).add(20)
+
+        for rank in range(2):
+            layer = Qwen3NextGatedDeltaNet(
+                linear_attn_config=linear,
+                hidden_size=256,
+                rms_norm_eps=config.layernorm_eps,
+                attn_tp_size=2,
+                attn_tp_rank=rank,
+                params_dtype=torch.float32,
+                quant_config=quant,
+                prefix="layers.0.linear_attn",
+            )
+            layer.load_weights(
+                {
+                    "in_proj_qkv.weight_scale_inv": qkv_scale,
+                    "in_proj_z.weight_scale_inv": z_scale,
+                }
+            )
+            q, k, v = torch.split(qkv_scale, [2, 2, 2], dim=0)
+            expected = torch.cat(
+                [
+                    q[rank : rank + 1],
+                    k[rank : rank + 1],
+                    v[rank : rank + 1],
+                    z_scale[rank : rank + 1],
+                ],
+                dim=0,
+            )
+            torch.testing.assert_close(layer.in_proj_qkvz.weight_scale_inv, expected)
+
+    def test_split_scalar_quant_scales_fail_explicitly(self):
+        layer = self._layer(0)
+        with self.assertRaisesRegex(ValueError, "scalar weight scales"):
+            layer.load_weights({"in_proj_qkv.weight_scale": torch.ones(1)})
+        with self.assertRaisesRegex(ValueError, "input_scale cannot be represented"):
+            layer.load_weights({"in_proj_qkv.input_scale": torch.ones(1)})
+
+    def test_single_tp_out_scale_allows_partial_final_block(self):
+        config = _config(HybridAttentionType.LINEAR)
+        linear = config.linear_attention_config
+        linear.linear_key_head_dim = 96
+        linear.linear_value_head_dim = 96
+        layer = Qwen3NextGatedDeltaNet(
+            linear_attn_config=linear,
+            hidden_size=192,
+            rms_norm_eps=config.layernorm_eps,
+            attn_tp_size=1,
+            attn_tp_rank=0,
+            params_dtype=torch.float32,
+            quant_config=QuantizationConfig("none"),
+            prefix="layers.0.linear_attn",
+        )
+        layer.out_proj.quant_config = types.SimpleNamespace(
+            weight_block_size=[128, 128]
+        )
+        scale = torch.arange(4, dtype=torch.float32).reshape(2, 2).add(1)
+        torch.testing.assert_close(layer._split_out_block_scale(scale), scale)
+
+
+if __name__ == "__main__":
+    unittest.main()

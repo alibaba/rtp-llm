@@ -38,32 +38,65 @@ def rocm_oss_suites():
                 name="rocm_dense_qwen3_8b_hipgraph_tp2",
                 task_info="data/model/qwen3/q_r_new_model_py.json",
                 smoke_args="--use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4,5,6,7,8' --tp_size 2 --world_size 2",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["MI308X-ROCM7"]
+            ),
+            smoke_test(
+                name="rocm_dense_llama_3b_newloader",
+                task_info="data/model/llama/q_r_3b.json",
+                smoke_args="--warm_up 1 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type BF16",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["MI308X-ROCM7"],
             ),
             # Simplified from Qwen3-32B-FP8-Dynamic → Qwen3-8B; result placeholder, needs rewrite_smoke regen on MI308X
             smoke_test(
                 name="rocm_dense_qwen3_8b_ptpc",
                 task_info="data/model/qwen3/ptpc_q_r_8b.json",
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["MI308X-ROCM7"],
             ),
             smoke_test(
                 name="rocm_dense_qwen3_8b_ptpc_fp8kv_asm_pa",
                 task_info="data/model/qwen3/ptpc_q_r_8b.json",
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 1 --fp8_kv_cache 1 --enable_cuda_graph 1 --warm_up 1 --act_type BF16 --reserver_runtime_mem_mb 70000 --test_block_num 1000",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["MI308X-ROCM7"],
             ),
             smoke_test(
                 name="rocm_dense_qwen3_8b_ptpc_fp8kv_no_asm_pa",
                 task_info="data/model/qwen3/ptpc_q_r_8b.json",
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 0 --fp8_kv_cache 1 --seq_size_per_block 16 --enable_cuda_graph 1 --warm_up 1 --act_type BF16 --reserver_runtime_mem_mb 70000 --test_block_num 1000",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["MI308X-ROCM7"],
             ),
             smoke_test(
                 name="rocm_dense_qwen3_8b_ptpc_no_asm_pa",
                 task_info="data/model/qwen3/ptpc_q_r_8b.json",
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_swizzleA 1 --use_asm_pa 0 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["MI308X-ROCM7"],
+            ),
+        ],
+    )
+
+    # ROCm VL (Qwen3-VL newloader, including fused MRoPE prefill/decode)
+    native.test_suite(
+        name = "smoke_rocm_vl",
+        tests = [
+            smoke_test(
+                name = "rocm_qwen3_vl_newloader",
+                task_info = "data/model/qwen_vl/q_r_3_rocm.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1 --use_asm_pa 1 --use_aiter_pa 1 --seq_size_per_block 16",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1",
+                },
+                envs = {
+                    "llm": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                    "vit": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                },
+                gpu_type = ["MI308X-ROCM7"],
+                data = native.glob(["data/model/llava/*.jpg"]),
             ),
         ],
     )
@@ -83,6 +116,20 @@ def rocm_oss_suites():
                 name="rocm_moe_qwen3_30b_tp2",
                 task_info="data/model/qwen3_moe/q_r_30b_amd_py_tp2.json",
                 smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 2 --world_size 2 --ep_size 1",
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
+                name="rocm_moe_qwen3_30b_newloader_basic",
+                task_info="data/model/qwen3_moe/q_r_30b_amd_py.json",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 1 --world_size 1 --ep_size 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["MI308X-ROCM7"],
+            ),
+            smoke_test(
+                name="rocm_moe_qwen3_30b_newloader_tp2",
+                task_info="data/model/qwen3_moe/q_r_30b_amd_py_tp2.json",
+                smoke_args="--quantization FP8_PER_CHANNEL_COMPRESSED --use_asm_pa 1 --act_type BF16 --reserver_runtime_mem_mb 51200 --tp_size 2 --world_size 2 --ep_size 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["MI308X-ROCM7"],
             ),
         ],

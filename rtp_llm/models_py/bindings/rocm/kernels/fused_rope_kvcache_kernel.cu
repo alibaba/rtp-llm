@@ -242,7 +242,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
             v      = add(v, v_bias);
         }
     }
-    int       position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
     const int pre_len     = cu_seqlens[batch_idx];
     const int input_len   = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
@@ -877,7 +877,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
             v      = add(v, v_bias);
         }
     }
-    int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
     const int pre_len   = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,

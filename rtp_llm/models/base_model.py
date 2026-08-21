@@ -42,6 +42,7 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import sp_0_pad8_size
+from rtp_llm.utils.new_loader import is_new_loader_enabled
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -90,6 +91,7 @@ class BaseModel(object):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        keep_mla_checkpoint_weights: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -118,6 +120,7 @@ class BaseModel(object):
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
+        self.keep_mla_checkpoint_weights = keep_mla_checkpoint_weights
         self.weight = None
         self.weight_manager = None
         # Keep the owner alive for the complete lifetime of any non-owning
@@ -169,6 +172,15 @@ class BaseModel(object):
         """Get device string from parallelism_config."""
         return f"cuda:{self.parallelism_config.local_rank}"
 
+    @staticmethod
+    def _configure_deep_gemm_remote_cache() -> None:
+        remote_jit_dir = os.environ.get("REMOTE_JIT_DIR")
+        logging.info("python model remote_jit_dir for deep_gemm: %s", remote_jit_dir)
+        if remote_jit_dir:
+            os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
+                remote_jit_dir, "deep_gemm_python"
+            )
+
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
         if (
@@ -176,6 +188,14 @@ class BaseModel(object):
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")
+
+        self._configure_deep_gemm_remote_cache()
+
+        if self._use_new_loader():
+            if skip_python_model:
+                raise ValueError("newloader requires the Python model runtime")
+            self._load_with_new_loader()
+            return
 
         self.custom_module = self._init_custom_module()
         self.model_weights_loader = self.create_model_loader()
@@ -300,6 +320,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
+        keep_mla_checkpoint_weights: bool = False,
         skip_python_model: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
@@ -318,6 +339,7 @@ class BaseModel(object):
             max_generate_batch_size: Maximum batch size for generation
             merge_lora: Whether to merge LoRA weights
             device_resource_config: DeviceResourceConfig for device resource configuration
+            keep_mla_checkpoint_weights: Keep superseded MLA checkpoint tensors for debugging
         """
         # All metadata is in model_config
         model = cls(
@@ -335,6 +357,7 @@ class BaseModel(object):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            keep_mla_checkpoint_weights=keep_mla_checkpoint_weights,
         )
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
@@ -471,6 +494,150 @@ class BaseModel(object):
     def _load_custom_module(self):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
+
+    def _use_new_loader(self) -> bool:
+        return is_new_loader_enabled(self.model_config)
+
+    def _new_loader_quant_type(self) -> str:
+        quant_config = self.model_config.quant_config
+        if quant_config is None:
+            return "none"
+        runtime_method = quant_config.get_runtime_method_key()
+        if not isinstance(runtime_method, str) or not runtime_method.strip():
+            raise ValueError(
+                f"Quantization config {type(quant_config).__name__} is not "
+                "supported by the registered newloader model"
+            )
+        return runtime_method.strip()
+
+    def _load_with_new_loader(self) -> None:
+        from rtp_llm.models_py.model_loader import (
+            NewLoaderConfig,
+            NewLoaderLoadMethod,
+            NewModelLoader,
+        )
+        from rtp_llm.models_py.quant_methods import QuantizationConfig
+
+        if self.force_cpu_load_weights:
+            raise ValueError(
+                "force_cpu_load_weights is not supported by this newloader slice"
+            )
+        if self.model_config.enable_output_vocab_pruning:
+            raise ValueError(
+                "output vocabulary pruning is not supported by this newloader "
+                "slice; disable newloader and use the legacy loader"
+            )
+        if self.model_config.eplb_config.enable_eplb():
+            raise ValueError(
+                "EPLB is not supported by this newloader slice; disable EPLB "
+                "or use the legacy loader"
+            )
+        if self.model_config.ptuning_path:
+            raise ValueError("p-tuning is not supported by this newloader slice")
+        if self.model_config.lora_infos:
+            raise ValueError("LoRA loading is not supported by this newloader slice")
+        if (
+            self.device_resource_config is not None
+            and self.device_resource_config.enable_layer_micro_batch != 0
+        ):
+            raise ValueError(
+                "layer micro-batch is not supported by this newloader slice"
+            )
+
+        parallelism = self.parallelism_config
+        attn_tp = (
+            parallelism.get_attn_tp_size(),
+            parallelism.get_attn_tp_rank(),
+        )
+        ffn_tp = (
+            parallelism.get_ffn_tp_size(),
+            parallelism.get_ffn_tp_rank(),
+        )
+        physical_tp = (parallelism.tp_size, parallelism.tp_rank)
+        cp_enabled = parallelism.prefill_cp_config.is_enabled()
+        if cp_enabled or attn_tp != physical_tp:
+            raise ValueError(
+                "Context parallelism is not supported by this newloader slice"
+            )
+        if ffn_tp != attn_tp:
+            raise ValueError(
+                "Independent FFN TP/sequence parallelism is not supported by the "
+                "registered newloader path"
+            )
+        if parallelism.ffn_disaggregate_config.enable_ffn_disaggregate:
+            raise ValueError(
+                "FFN disaggregation is not supported by the registered newloader path"
+            )
+
+        self.custom_module = self._init_custom_module()
+        if self.custom_module is not None:
+            raise ValueError(
+                "Custom downstream modules are not supported by this newloader slice"
+            )
+
+        configured_method = getattr(self.load_method, "value", self.load_method)
+        load_method = NewLoaderLoadMethod(str(configured_method).lower())
+        device = self._get_device_str()
+        load_config = NewLoaderConfig(
+            tp_size=physical_tp[0],
+            tp_rank=physical_tp[1],
+            attn_tp_size=attn_tp[0],
+            attn_tp_rank=attn_tp[1],
+            ffn_tp_size=ffn_tp[0],
+            ffn_tp_rank=ffn_tp[1],
+            lm_head_tp_size=physical_tp[0],
+            lm_head_tp_rank=physical_tp[1],
+            ep_size=self.parallelism_config.ep_size,
+            ep_rank=self.parallelism_config.ep_rank,
+            compute_dtype=self.model_config.compute_dtype,
+            device=device,
+            load_method=load_method,
+            quant_config=QuantizationConfig(
+                self._new_loader_quant_type(),
+                source_config=self.model_config.quant_config,
+                hw_kernel_config=self.hw_kernel_config,
+            ),
+            parallelism_config=self.parallelism_config,
+            moe_config=self.moe_config,
+            fmha_config=self.fmha_config,
+            device_resource_config=self.device_resource_config,
+            keep_mla_checkpoint_weights=self.keep_mla_checkpoint_weights,
+        )
+        loader = NewModelLoader(
+            model_config=self.model_config,
+            load_config=load_config,
+            model_path=self.model_config.ckpt_path,
+        )
+        self.device = device
+        self.py_model = loader.load()
+        self.weight = self._build_new_loader_weight_view(self.py_model)
+        self.py_model.weight = self.weight
+        self.model_weights_loader = loader
+        self.weight_manager = None
+        self.py_eplb = None
+        logging.info("NewModelLoader: model loaded successfully")
+
+    def _build_new_loader_weight_view(self, module: torch.nn.Module) -> ModelWeights:
+        export = getattr(module, "runtime_weight_view", None)
+        if not callable(export):
+            raise TypeError(
+                f"{type(module).__name__} must define runtime_weight_view()"
+            )
+        runtime_weights = export()
+        if not isinstance(runtime_weights, dict) or not runtime_weights:
+            raise TypeError("runtime_weight_view() must return a non-empty dict")
+        weights = ModelWeights(
+            self.model_config.num_layers,
+            self.device,
+            self.model_config.compute_dtype,
+        )
+        for name, tensor in runtime_weights.items():
+            if not isinstance(name, str) or not name:
+                raise TypeError("Runtime weight names must be non-empty strings")
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"Runtime weight {name!r} must be a torch.Tensor")
+            weights.set_global_weight(name, tensor)
+        return weights
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading
