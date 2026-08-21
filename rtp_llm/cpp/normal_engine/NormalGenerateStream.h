@@ -36,17 +36,6 @@ public:
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput() override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
-    // Thread-level output-wait wakeup: un-park any FetchResponse thread blocked in
-    // nextOutput()->waitNotEmpty() so it re-evaluates the loop condition
-    // (hasError / FINISHED) and unwinds. wakeup() is the queue's own
-    // destructor-grade wake (same primitive ~NormalGenerateStream relies on);
-    // it is idempotent, and buffered outputs already in the queue remain
-    // consumable via getAndPopFront() — only the blocking WAIT is terminated.
-    // Deliberately no output-sentinel push: a sentinel would be delivered to
-    // the client as a real GenerateOutputs frame.
-    void terminateOutputWait() override {
-        generate_outputs_queue_.wakeup();
-    }
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);

@@ -634,21 +634,11 @@ void GenerateStream::recordRunningTime() {
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
-    {
-        std::lock_guard<std::mutex> lock(*mutex_);
-        if (event == StreamEvents::CanRun) {
-            recordCanRunTime();
-        }
-        generate_status_->reportEvent(event, error_code, error_msg);
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (event == StreamEvents::CanRun) {
+        recordCanRunTime();
     }
-    if (event == StreamEvents::Error) {
-        // Error-latch wakeup: the error is latched (outside mutex_); a consumer parked in
-        // nextOutput()->waitNotEmpty() must re-evaluate hasError() now instead
-        // of sleeping until the stream is destroyed. Covers checkTimeout()'s
-        // GENERATE_TIMEOUT latch on the Fetch thread itself: the wakeup makes
-        // its own subsequent waitNotEmpty return immediately.
-        terminateOutputWait();
-    }
+    generate_status_->reportEvent(event, error_code, error_msg);
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
@@ -662,13 +652,8 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
-    {
-        std::lock_guard<std::mutex> lock(*mutex_);
-        generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
-    }
-    // Mirror reportEvent's Error branch — wake parked output
-    // consumers so they observe the latched error and unwind.
-    terminateOutputWait();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
 }
 
 void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
@@ -749,12 +734,6 @@ StreamState GenerateStream::moveToNext() {
             }
         }
         cv_->notify_one();
-        // Terminal-path wakeup: a consumer parked in nextOutput()'s
-        // waitNotEmpty() with an empty queue must observe FINISHED. Harmless
-        // when queued outputs remain: they stay consumable one getAndPopFront
-        // at a time; the queue's terminated latch only ends the WAIT, not the
-        // buffered data.
-        terminateOutputWait();
     }
     return state;
 }

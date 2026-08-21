@@ -308,25 +308,9 @@ void PrefillGenerateContext::markRequestEnd() {
         }
         auto          stub = connect_status.value().stub.get();
         ClientContext client_context;
-        // Best-effort notification semantics: a remote worker that never
-        // answers must not block the finalizer/prefill thread pool forever.
-        // Failures are already warned and ignored below; the deadline only
-        // bounds each synchronous wait.
-        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
-        EmptyPB response;
-        auto    grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
+        EmptyPB       response;
+        auto          grpc_status = stub->RemoteFinish(&client_context, finish_request, &response);
         if (!grpc_status.ok()) {
-            if (grpc_status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                // Leak-fix verification log: the 5s markRequestEnd deadline
-                // fired, so this worker's cache_store request-end was not
-                // delivered within the bound (low frequency, not sampled).
-                RTP_LLM_LOG_WARNING("event=mark_request_end_deadline_exceeded request_id=%ld batch_id=%ld "
-                                    "worker=%s deadline_ms=5000: markRequestEnd RemoteFinish RPC hit its "
-                                    "5s deadline; request-end not delivered to this worker",
-                                    real_id,
-                                    task_identity_.batch_id,
-                                    prefill_worker.c_str());
-            }
             RTP_LLM_LOG_WARNING("request [%d], remote finish for ip %s failed, ignore markRequestEnd for it",
                                 real_id,
                                 prefill_worker.c_str());

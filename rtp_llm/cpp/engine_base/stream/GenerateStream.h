@@ -132,14 +132,6 @@ public:
     virtual bool                         hasOutput() {
         return false;
     }
-    // Thread-level output-wait wakeup: wake any consumer thread parked on this
-    // stream's output wait (e.g. NormalGenerateStream's nextOutput ->
-    // waitNotEmpty) so it re-evaluates its loop condition (hasError /
-    // FINISHED) instead of sleeping until the stream is destroyed. Called on
-    // error latch and on the terminal FINISHED transition. Base streams
-    // without a blocking output queue have nothing to wake; subclasses that
-    // own one override this (see NormalGenerateStream::terminateOutputWait).
-    virtual void terminateOutputWait() {}
 
     // Event-driven completion notification: fired exactly once when this
     // stream first reaches its terminal FINISHED state (errored streams
