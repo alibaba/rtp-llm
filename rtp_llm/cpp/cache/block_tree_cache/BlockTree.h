@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -27,6 +28,13 @@ struct BlockTreeInsertResult {
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
+};
+
+struct BlockTreeNodeRangeResult {
+    size_t visited{0};
+    size_t next_cursor{0};
+    size_t tree_size{0};
+    bool   cycle_complete{false};
 };
 
 class BlockTree {
@@ -58,6 +66,13 @@ public:
     size_t size() const {
         return node_pool_.size();
     }
+
+    // Diagnostic-only bounded walk over node_pool_[cursor, min(cycle_end_index, size())).
+    // The caller must hold BlockTreeCache::mutex_
+    BlockTreeNodeRangeResult visitNodeRangeLocked(size_t                                      cursor,
+                                                  size_t                                      cycle_end_index,
+                                                  size_t                                      max_nodes,
+                                                  const std::function<void(const TreeNode&)>& visitor) const;
 
 private:
     friend class BlockTreeEvictor;
