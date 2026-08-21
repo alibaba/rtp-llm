@@ -64,6 +64,32 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
             expert_weights * module.routed_scaling_factor,
         )
 
+    def test_decode_sp_shard_accepts_replicated_kda_output(self) -> None:
+        tensor = torch.arange(9 * 4).reshape(9, 4)
+        layout = sequence_parallel.token_shard_layout(9, 8, 4)
+
+        actual = kimi_k3._decode_sp_shard(
+            tensor,
+            layout,
+            name="attention output",
+        )
+
+        self.assertEqual(tuple(actual.shape), (2, 4))
+        torch.testing.assert_close(actual[0], tensor[8], rtol=0, atol=0)
+        self.assertEqual(torch.count_nonzero(actual[1]).item(), 0)
+
+    def test_decode_sp_shard_preserves_mla_local_output(self) -> None:
+        tensor = torch.arange(2 * 4).reshape(2, 4)
+        layout = sequence_parallel.token_shard_layout(9, 8, 4)
+
+        actual = kimi_k3._decode_sp_shard(
+            tensor,
+            layout,
+            name="attention output",
+        )
+
+        self.assertIs(actual, tensor)
+
     @staticmethod
     def _packed_kda_stub(tp_size: int) -> KimiK3KDA:
         total_heads = 8

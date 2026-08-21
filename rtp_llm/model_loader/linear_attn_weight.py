@@ -324,10 +324,12 @@ class LinearAttnAtomicWeight(AtomicWeight):
         process_fun: Callable[[List[torch.Tensor]], torch.Tensor],
         config: LinearAttnConfig,
         data_type: Optional[torch.dtype] = None,
+        already_tp_sharded: bool = False,
     ):
         super().__init__(name, weights, process_fun, data_type)
         self.config = config
         self.split_func_factory = _linear_attn_split_stratey
+        self.already_tp_sharded = already_tp_sharded
 
     def _split(
         self,
@@ -336,7 +338,7 @@ class LinearAttnAtomicWeight(AtomicWeight):
     ) -> Dict[str, torch.Tensor]:
         if isinstance(tensor, dict):
             tensor = tensor[self.name]
-        if load_config.tp_size <= 1:
+        if self.already_tp_sharded or load_config.tp_size <= 1:
             return {self.name: tensor}
         else:
             return {

@@ -217,10 +217,13 @@ def set_parallelism_config(
 
     # Resolve and validate parallelism configuration.
     # ep_size default is 0, which triggers automatic derivation.
-    # Three supported modes:
+    # Four supported modes:
     # 1. Single GPU: tp_size == 1, dp_size == 1, ep_size == 0 (default) → ep_size set to 1
     # 2. Pure TP:    ep_size explicitly set to 1, tp_size > 1, dp_size == 1
     # 3. EP mode:    ep_size == 0 (default), ep_size auto-derived as tp_size * dp_size
+    # 4. Replicated EP: explicit divisor of world size, gated by
+    #    RTP_LLM_REPLICATED_EP=1. Each contiguous EP subgroup owns a complete
+    #    expert set while attention parallelism may span multiple subgroups.
     if parallelism_config.ep_size == 1:
         assert (
             parallelism_config.tp_size >= 1
@@ -234,10 +237,30 @@ def set_parallelism_config(
             parallelism_config.tp_size * parallelism_config.dp_size
         )
     else:
-        assert (
-            parallelism_config.ep_size
-            == parallelism_config.tp_size * parallelism_config.dp_size
-        ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
+        world_parallel_size = (
+            parallelism_config.tp_size * parallelism_config.dp_size
+        )
+        replicated_ep = os.environ.get("RTP_LLM_REPLICATED_EP", "0") == "1"
+        if parallelism_config.ep_size != world_parallel_size:
+            assert replicated_ep, (
+                "ep_size smaller than tp_size * dp_size requires "
+                "RTP_LLM_REPLICATED_EP=1; got "
+                f"ep_size={parallelism_config.ep_size}, "
+                f"tp_size={parallelism_config.tp_size}, "
+                f"dp_size={parallelism_config.dp_size}"
+            )
+            assert world_parallel_size % parallelism_config.ep_size == 0, (
+                "replicated ep_size must divide tp_size * dp_size; got "
+                f"ep_size={parallelism_config.ep_size}, "
+                f"world_parallel_size={world_parallel_size}"
+            )
+            logging.info(
+                "RTP_LLM_REPLICATED_EP enabled: world=%d, ep_size=%d, "
+                "ep_groups=%d",
+                world_parallel_size,
+                parallelism_config.ep_size,
+                world_parallel_size // parallelism_config.ep_size,
+            )
 
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size
@@ -961,6 +984,9 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
         ll_num_max_token=ll_num_max_token,
     )
 
-    # Set local ip if not already set (e.g. for world_info / distributed_server)
-    if not py_env_configs.server_config.ip:
+    # Prefer the host-network address supplied by Hippo.
+    hippo_slave_ip = os.environ.get("HIPPO_SLAVE_IP")
+    if hippo_slave_ip:
+        py_env_configs.server_config.ip = hippo_slave_ip
+    elif not py_env_configs.server_config.ip:
         py_env_configs.server_config.ip = socket.gethostbyname(socket.gethostname())

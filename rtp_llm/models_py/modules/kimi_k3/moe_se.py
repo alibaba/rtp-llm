@@ -23,7 +23,10 @@ from rtp_llm.models_py.modules.kimi_k3.mega_se_buf import (
     get_or_create_kimi_k3_mega_moe_se_buf,
     get_or_create_kimi_k3_mega_moe_se_storages,
 )
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe import (
+    KimiK3LatentMoE,
+    _transient_full_row_weight,
+)
 from rtp_llm.ops import ParallelismConfig
 
 if TYPE_CHECKING:
@@ -408,10 +411,17 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
                 expert_ids[valid_token_count:] = 0
                 routing_weights[valid_token_count:] = 0
 
+        routed_down_weight = self.weights[K3W.MOE_ROUTED_DOWN]
+        if self.routed_aux_weight_shard:
+            routed_down_weight = _transient_full_row_weight(
+                routed_down_weight, self.ffn_tp_size
+            )
         routed_input = torch.matmul(
             hidden_states,
-            self.weights[K3W.MOE_ROUTED_DOWN],
+            routed_down_weight,
         )
+        if self.routed_aux_weight_shard:
+            del routed_down_weight
         routed_output, shared_output = self._mega_expert_sum_with_shared(
             routed_input,
             hidden_states,
@@ -421,10 +431,17 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
+        routed_up_weight = self.weights[K3W.MOE_ROUTED_UP]
+        if self.routed_aux_weight_shard:
+            routed_up_weight = _transient_full_row_weight(
+                routed_up_weight, self.ffn_tp_size
+            )
         routed_output = torch.matmul(
             routed_output,
-            self.weights[K3W.MOE_ROUTED_UP],
+            routed_up_weight,
         )
+        if self.routed_aux_weight_shard:
+            del routed_up_weight
         output = routed_output + shared_output
         if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
             output = output.clone()

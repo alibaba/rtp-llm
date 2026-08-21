@@ -62,13 +62,37 @@ def _merge_conv1d(ts: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat(ts, dim=0)
 
 
-def _merge_kda_qkvg_fa_beta(ts: List[torch.Tensor]) -> torch.Tensor:
-    """Build the global K3 fused projection before heterogeneous TP split."""
+def _merge_kda_qkvg_fa_beta(
+    ts: List[torch.Tensor], *, tp_size: int, tp_rank: int
+) -> torch.Tensor:
+    """Build the rank-local K3 fused projection without a global temporary."""
 
     if len(ts) != 6:
         raise ValueError(f"K3 KDA fused projection expects six tensors, got {len(ts)}")
+    if tp_size <= 0 or not 0 <= tp_rank < tp_size:
+        raise ValueError(f"invalid TP placement size={tp_size} rank={tp_rank}")
     q, k, v, g, f_a, beta = ts
-    return torch.cat((q.T, k.T, v.T, g.T, f_a.T, beta.T), dim=1).contiguous()
+
+    def _local_projection(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.shape[0] % tp_size:
+            raise ValueError(
+                "K3 KDA projection width must be divisible by TP: "
+                f"shape={tuple(tensor.shape)} tp={tp_size}"
+            )
+        local_width = tensor.shape[0] // tp_size
+        return tensor.narrow(0, tp_rank * local_width, local_width).T
+
+    return torch.cat(
+        (
+            _local_projection(q),
+            _local_projection(k),
+            _local_projection(v),
+            _local_projection(g),
+            f_a.T,
+            beta.T,
+        ),
+        dim=1,
+    ).contiguous()
 
 
 def _merge_mla_input_projections(
@@ -85,15 +109,32 @@ _SHARED_EXPERT_WEIGHT_SHARD_ENV = "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD"
 
 
 def shared_expert_weight_shard_enabled(role_type: RoleType) -> bool:
-    """Enable the transient shared-expert weight layout only for PREFILL."""
+    """Enable the transient shared-expert weight layout for PD workers."""
 
-    if role_type != RoleType.PREFILL:
+    if role_type not in (RoleType.PREFILL, RoleType.DECODE):
         return False
 
     raw = os.environ.get(_SHARED_EXPERT_WEIGHT_SHARD_ENV, "0").strip()
     if raw not in ("0", "1"):
         raise ValueError(
             f"{_SHARED_EXPERT_WEIGHT_SHARD_ENV} must be 0 or 1, got {raw!r}"
+        )
+    return raw == "1"
+
+
+_ROUTED_AUX_WEIGHT_SHARD_ENV = "KIMI_K3_ROUTED_AUX_WEIGHT_SHARD"
+
+
+def routed_aux_weight_shard_enabled(role_type: RoleType) -> bool:
+    """Shard replicated routed projections and router weights on PD workers."""
+
+    if role_type not in (RoleType.PREFILL, RoleType.DECODE):
+        return False
+
+    raw = os.environ.get(_ROUTED_AUX_WEIGHT_SHARD_ENV, "0").strip()
+    if raw not in ("0", "1"):
+        raise ValueError(
+            f"{_ROUTED_AUX_WEIGHT_SHARD_ENV} must be 0 or 1, got {raw!r}"
         )
     return raw == "1"
 
@@ -483,8 +524,13 @@ class KimiK3Weight(ModelDeployWeightInfo):
                         self._layer_ckpt("self_attn.b_proj.weight"), identity
                     ),
                 ],
-                _merge_kda_qkvg_fa_beta,
+                functools.partial(
+                    _merge_kda_qkvg_fa_beta,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                ),
                 cfg,
+                already_tp_sharded=True,
             ),
             LinearAttnAtomicWeight(
                 W.linear_attn_conv1d_w,
@@ -684,6 +730,8 @@ class KimiK3Weight(ModelDeployWeightInfo):
     def _moe_weights(self) -> List[WeightModule]:
         n = KimiK3WeightNames
         shard_shared_expert = shared_expert_weight_shard_enabled(self.role_type)
+        shard_routed_aux = routed_aux_weight_shard_enabled(self.role_type)
+        routed_aux_split = ffn_sp_0 if shard_routed_aux else sp_id
         gate_suffix = "block_sparse_moe.shared_experts.gate_proj.weight"
         up_suffix = "block_sparse_moe.shared_experts.up_proj.weight"
         if shard_shared_expert:
@@ -720,7 +768,9 @@ class KimiK3Weight(ModelDeployWeightInfo):
             shared_down_split = sp_id
 
         weights: List[WeightModule] = [
-            self._linear(n.MOE_GATE, "block_sparse_moe.gate.weight"),
+            self._linear(
+                n.MOE_GATE, "block_sparse_moe.gate.weight", split_func=routed_aux_split
+            ),
             self._custom(
                 n.MOE_CORRECTION_BIAS,
                 "block_sparse_moe.gate.e_score_correction_bias",
@@ -732,10 +782,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
             self._linear(
                 n.MOE_ROUTED_DOWN,
                 "block_sparse_moe.routed_expert_down_proj.weight",
+                split_func=routed_aux_split,
             ),
             self._linear(
                 n.MOE_ROUTED_UP,
                 "block_sparse_moe.routed_expert_up_proj.weight",
+                split_func=routed_aux_split,
             ),
             self._custom(
                 n.MOE_ROUTED_NORM,

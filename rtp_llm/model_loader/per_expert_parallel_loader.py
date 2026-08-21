@@ -103,6 +103,13 @@ class PerExpertParallelLoader(ParallelLoader):
             ) as timer:
                 # --- BEGIN CUSTOM LOGIC (differs from ParallelLoader) ---
                 for key in batch.keys:
+                    # fastsafetensors allocates receive/staging buffers outside
+                    # PyTorch's caching allocator. Return inactive PyTorch
+                    # blocks before every key so a small staging allocation
+                    # cannot OOM while reclaimable allocator cache is present.
+                    if torch.cuda.is_available():
+                        with torch.cuda.device(self.loader.device.index):
+                            torch.cuda.empty_cache()
                     if key in self.stacked_key_config:
                         yield from self._broadcast_per_expert(batch, key)
                     else:

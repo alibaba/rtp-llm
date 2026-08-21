@@ -25,6 +25,7 @@ class Group(Enum):
 
     DP = "DP"
     TP = "TP"
+    EP = "EP"
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -281,14 +282,44 @@ def _create_process_groups(
                     logging.info(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
-
-                _get_symm_mem().init_symm_mem_communicator(tp_group)
+                    _get_symm_mem().init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+
+    ep_size = parallelism_config.ep_size
+    if ep_size <= 0 or world_size % ep_size:
+        raise ValueError(
+            f"EP size must be a positive divisor of world size, got "
+            f"EP={ep_size}, world={world_size}"
+        )
+    if ep_size > 1 and world_size != ep_size:
+        # EP ranks are contiguous because ep_rank is world_rank % ep_size.
+        # This lets replicated EP groups stay within an NVLink/IMEX domain
+        # while attention TP can span multiple groups (for example TP16/EP8).
+        for ep_group_idx in range(world_size // ep_size):
+            first_rank = ep_group_idx * ep_size
+            ep_ranks = list(range(first_rank, first_rank + ep_size))
+            logging.info(
+                f"[rank: {world_rank}] Creating EP group {ep_group_idx} "
+                f"with ranks: {ep_ranks}"
+            )
+            ep_group = torch.distributed.new_group(
+                ranks=ep_ranks,
+                backend=backend,
+                timeout=timedelta(days=36500),
+            )
+            if world_rank in ep_ranks:
+                group_key = Group.EP.name + str(ep_group_idx)
+                _group_map[group_key] = ep_group
+                logging.info(
+                    f"[rank: {world_rank}] Stored EP group with key: "
+                    f"{group_key} {ep_group} with ranks: {ep_ranks}"
+                )
+            torch.distributed.barrier()
 
 
 def _register_process_groups_to_cpp():
@@ -377,10 +408,13 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
+        # BroadcastParams.root is a rank within the selected parallel group.
+        # torch.distributed.broadcast(src=...), however, expects a global rank.
+        global_root = torch.distributed.get_global_rank(pg, root)
         device_id = torch.cuda.current_device()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, root, group=pg)
+            torch.distributed.broadcast(gpu_t, src=global_root, group=pg)
             if was_cpu:
                 t.copy_(gpu_t)
 
@@ -596,7 +630,7 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     If not initialized and _parallelism_config is available, it will attempt to initialize.
 
     Args:
-        group: Group type (DP, TP, or DP_AND_TP)
+        group: Group type (DP, TP, EP, or DP_AND_TP)
 
     Returns:
         Process group for the specified group type
@@ -626,6 +660,7 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     group_key = group
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
+    ep_size = _parallelism_config.ep_size
     world_size = _parallelism_config.world_size
     if group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
@@ -633,8 +668,11 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
         dp_rank = torch.distributed.get_rank() // tp_size
         group_key = Group.TP.name + str(dp_rank)
+    elif group == Group.EP and ep_size > 1 and world_size != ep_size:
+        ep_group_idx = torch.distributed.get_rank() // ep_size
+        group_key = Group.EP.name + str(ep_group_idx)
     else:
-        # DP_AND_TP always uses Group.DP_AND_TP as key
+        # A full-world DP/TP/EP group aliases DP_AND_TP.
         group_key = Group.DP_AND_TP
 
     if group_key not in _group_map:

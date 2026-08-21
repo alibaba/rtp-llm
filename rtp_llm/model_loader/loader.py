@@ -27,6 +27,24 @@ from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
 
 
+_K3_MOE_SCALE_NAMES = frozenset(
+    {
+        "kimi_k3.moe.w1_scale",
+        "kimi_k3.moe.w2_scale",
+        "kimi_k3.moe.w3_scale",
+    }
+)
+
+
+def _maybe_offload_k3_moe_scale(name: str, tensor: torch.Tensor) -> torch.Tensor:
+    if (
+        os.environ.get("KIMI_K3_MOE_SCALE_CPU_OFFLOAD", "0") == "1"
+        and name in _K3_MOE_SCALE_NAMES
+    ):
+        return tensor.cpu()
+    return tensor
+
+
 class ModelLoader:
     WeightInfo = NamedTuple(
         "WeightInfo",
@@ -320,6 +338,7 @@ class ModelLoader:
                     load_config=self._load_config,
                 )
                 for name, tensor in tensors.items():
+                    tensor = _maybe_offload_k3_moe_scale(name, tensor)
                     if weight_info.layer_id is not None:
                         model_weights.set_layer_weight(
                             weight_info.layer_id, name, tensor
@@ -339,6 +358,7 @@ class ModelLoader:
                 load_config=self._load_config,
             )
             for name, tensor in tensors.items():
+                tensor = _maybe_offload_k3_moe_scale(name, tensor)
                 if weight_info.layer_id is not None:
                     model_weights.set_layer_weight(weight_info.layer_id, name, tensor)
                 else:
@@ -527,8 +547,54 @@ class ModelLoader:
         logging.info(f"load weight by device: {convert_device}")
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
-            if convert_device != device:
-                tensor = tensor.to(device)
+            keep_k3_moe_scale_on_cpu = (
+                os.environ.get("KIMI_K3_MOE_SCALE_CPU_OFFLOAD", "0") == "1"
+                and name
+                in {
+                    "kimi_k3.moe.w1_scale",
+                    "kimi_k3.moe.w2_scale",
+                    "kimi_k3.moe.w3_scale",
+                }
+            )
+            if keep_k3_moe_scale_on_cpu and convert_device == device:
+                raise RuntimeError(
+                    "KIMI_K3_MOE_SCALE_CPU_OFFLOAD=1 requires "
+                    "FORCE_CPU_LOAD_WEIGHTS=1"
+                )
+            stage_k3_weight_on_cpu = (
+                os.environ.get("KIMI_K3_WEIGHT_ANON_CPU_COPY", "0") == "1"
+            )
+            if (
+                stage_k3_weight_on_cpu
+                and convert_device != device
+                and not keep_k3_moe_scale_on_cpu
+            ):
+                tensor = tensor.clone(memory_format=torch.contiguous_format)
+            if convert_device != device and not keep_k3_moe_scale_on_cpu:
+                tensor_bytes = tensor.numel() * tensor.element_size()
+                try:
+                    tensor = tensor.to(device)
+                except Exception:
+                    free_bytes = total_bytes = allocated_bytes = reserved_bytes = -1
+                    if torch.cuda.is_available():
+                        with torch.cuda.device(device):
+                            free_bytes, total_bytes = torch.cuda.mem_get_info()
+                            allocated_bytes = torch.cuda.memory_allocated()
+                            reserved_bytes = torch.cuda.memory_reserved()
+                    logging.exception(
+                        "failed moving prepared weight to device: "
+                        f"layer={layer_id} name={name} shape={tuple(tensor.shape)} "
+                        f"dtype={tensor.dtype} size_mib={tensor_bytes / 1024**2:.2f} "
+                        f"free_mib={free_bytes / 1024**2:.2f} "
+                        f"total_mib={total_bytes / 1024**2:.2f} "
+                        f"allocated_mib={allocated_bytes / 1024**2:.2f} "
+                        f"reserved_mib={reserved_bytes / 1024**2:.2f}"
+                    )
+                    raise
+            if keep_k3_moe_scale_on_cpu and not tensor.is_pinned():
+                # K3 moves these large raw scales back to GPU one layer at a
+                # time.  Pin once here to avoid unstable pageable H2D copies.
+                tensor = tensor.pin_memory()
             if layer_id is not None:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:

@@ -124,11 +124,6 @@ class KdaFusedProjectionSplitTest(unittest.TestCase):
         manifest.model_config = SimpleNamespace(
             linear_attention_config=linear_attention_config
         )
-        fused_weight_info = next(
-            weight
-            for weight in manifest._kda_weights()
-            if weight.name == W.linear_attn_qkvg_fa_beta_w
-        )
 
         for tp_size in (1, 2, 4, 8):
             local_projection_width = projection_width // tp_size
@@ -141,6 +136,13 @@ class KdaFusedProjectionSplitTest(unittest.TestCase):
                 heads,
             )
             for tp_rank in range(tp_size):
+                manifest.tp_size = tp_size
+                manifest.tp_rank = tp_rank
+                fused_weight_info = next(
+                    weight
+                    for weight in manifest._kda_weights()
+                    if weight.name == W.linear_attn_qkvg_fa_beta_w
+                )
                 load_config = SimpleNamespace(
                     compute_dtype=torch.float32,
                     exported_device=_IdentityExportedDevice(),

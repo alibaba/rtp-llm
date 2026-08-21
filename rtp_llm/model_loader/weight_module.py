@@ -648,7 +648,21 @@ class AtomicWeight(WeightModule):
         # ``contiguous().clone()`` temporarily holds two full shard-sized
         # allocations whenever the TP split is non-contiguous, which can
         # exhaust device memory while loading large fastsafetensors models.
-        ts = self.__split_tensor(split_func, raw_tensor, load_config).clone(
+        split_tensor = self.__split_tensor(split_func, raw_tensor, load_config)
+        if split_tensor.is_cuda:
+            required_bytes = split_tensor.numel() * split_tensor.element_size()
+            free_bytes, _ = torch.cuda.mem_get_info(split_tensor.device)
+            if free_bytes < required_bytes:
+                logging.info(
+                    "releasing CUDA allocator cache before materializing "
+                    "weight shard: required=%.2f MiB free=%.2f MiB",
+                    required_bytes / (1024**2),
+                    free_bytes / (1024**2),
+                )
+                with torch.cuda.device(split_tensor.device):
+                    torch.cuda.empty_cache()
+
+        ts = split_tensor.clone(
             memory_format=torch.contiguous_format
         )
         return {self.name: ts}

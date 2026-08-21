@@ -11,9 +11,16 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
-from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_enabled
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models.kimi_k3.kimi_k3_weight import (
+    KimiK3WeightNames as K3W,
+    routed_aux_weight_shard_enabled,
+    shared_expert_weight_shard_enabled,
+)
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    get_process_group,
+)
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
@@ -23,6 +30,77 @@ if TYPE_CHECKING:
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
+_SYMM_MEM_BACKEND_CONFIGURED: Optional[str] = None
+
+# Reuse one pair of device buffers for every K3 MoE layer.  The offloaded
+# pinned scale tensors stay owned by their modules, while each layer copies
+# its scales into these fixed addresses before launching MegaMoE.  Besides
+# bounding HBM usage, fixed destinations make the copies CUDA-graph capturable.
+_MEGA_SCALE_STAGING: Dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_or_create_mega_scale_staging(
+    l1_scale: torch.Tensor,
+    l2_scale: torch.Tensor,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    key = (
+        device.type,
+        device.index,
+        l1_scale.dtype,
+        tuple(l1_scale.shape),
+        l2_scale.dtype,
+        tuple(l2_scale.shape),
+    )
+    buffers = _MEGA_SCALE_STAGING.get(key)
+    if buffers is None:
+        buffers = (
+            torch.empty_like(l1_scale, device=device),
+            torch.empty_like(l2_scale, device=device),
+        )
+        _MEGA_SCALE_STAGING[key] = buffers
+    return buffers
+
+
+def _configure_symm_mem_backend() -> None:
+    """Select the symmetric-memory backend before MegaMoE allocates buffers."""
+
+    global _SYMM_MEM_BACKEND_CONFIGURED
+    requested = os.environ.get("KIMI_K3_SYMM_MEM_BACKEND")
+    if not requested:
+        return
+
+    backend = requested.upper()
+    supported_backends = {"CUDA", "NVSHMEM", "NCCL"}
+    if backend not in supported_backends:
+        raise ValueError(
+            "KIMI_K3_SYMM_MEM_BACKEND must be one of "
+            f"{sorted(supported_backends)}, got {requested!r}"
+        )
+    if _SYMM_MEM_BACKEND_CONFIGURED is not None:
+        if _SYMM_MEM_BACKEND_CONFIGURED != backend:
+            raise RuntimeError(
+                "K3 symmetric-memory backend was already configured as "
+                f"{_SYMM_MEM_BACKEND_CONFIGURED}, cannot change it to {backend}"
+            )
+        return
+
+    import torch.distributed._symmetric_memory as symm_mem
+
+    if backend == "NVSHMEM" and not symm_mem.is_nvshmem_available():
+        raise RuntimeError(
+            "KIMI_K3_SYMM_MEM_BACKEND=NVSHMEM was requested, but this "
+            "PyTorch build or system does not provide NVSHMEM"
+        )
+    previous_backend = symm_mem.get_backend(torch.device("cuda"))
+    if str(previous_backend).upper() != backend:
+        symm_mem.set_backend(backend)
+    _SYMM_MEM_BACKEND_CONFIGURED = backend
+    logging.info(
+        "[KimiK3 DeepGEMM MegaMoE] symmetric-memory backend=%s (was %s)",
+        backend,
+        previous_backend,
+    )
 
 
 def _transient_full_native_column_weight(
@@ -82,6 +160,9 @@ class KimiK3LatentMoE(nn.Module):
         self.ffn_tp_size = int(parallelism_config.get_ffn_tp_size())
         self.ffn_tp_rank = int(parallelism_config.get_ffn_tp_rank())
         self.shared_expert_weight_shard = shared_expert_weight_shard_enabled(
+            parallelism_config.role_type
+        )
+        self.routed_aux_weight_shard = routed_aux_weight_shard_enabled(
             parallelism_config.role_type
         )
         self.shared_intermediate_size = int(config.inter_size)
@@ -232,17 +313,16 @@ class KimiK3LatentMoE(nn.Module):
             raise RuntimeError(
                 "K3 DeepGEMM MegaMoE requires torch.distributed initialization"
             )
+        _configure_symm_mem_backend()
         world_size = int(dist.get_world_size())
-        if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
-        ):
+        mega_group = get_process_group(Group.EP)
+        mega_group_size = int(dist.get_world_size(mega_group))
+        if mega_group_size != self.ep_size or self.local_expert_count != 112:
             raise RuntimeError(
-                "K3 DeepGEMM MegaMoE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
+                "K3 DeepGEMM MegaMoE requires one rank per EP subgroup "
+                "and 112 local experts; got "
                 f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
+                f"mega_group={mega_group_size} "
                 f"local_experts={self.local_expert_count}"
             )
 
@@ -294,8 +374,12 @@ class KimiK3LatentMoE(nn.Module):
         )
         w13[:, :intermediate].copy_(self._packed_fp4_view(st_w1_w))
         w13[:, intermediate:].copy_(self._packed_fp4_view(st_w3_w))
-        s13_raw[:, :intermediate].copy_(self._ue8m0_view(st_w1_s))
-        s13_raw[:, intermediate:].copy_(self._ue8m0_view(st_w3_s))
+        s13_raw[:, :intermediate].copy_(
+            self._ue8m0_view(st_w1_s), non_blocking=True
+        )
+        s13_raw[:, intermediate:].copy_(
+            self._ue8m0_view(st_w3_s), non_blocking=True
+        )
         del st_w1_w, st_w1_s, st_w3_w, st_w3_s
         s13 = prepare_fp4_weight_scale_for_deepgemm(
             s13_raw,
@@ -324,7 +408,7 @@ class KimiK3LatentMoE(nn.Module):
             device=device,
         )
         w2.copy_(self._packed_fp4_view(st_w2_w))
-        s2_raw.copy_(self._ue8m0_view(st_w2_s))
+        s2_raw.copy_(self._ue8m0_view(st_w2_s), non_blocking=True)
         del st_w2_w, st_w2_s
         s2 = prepare_fp4_weight_scale_for_deepgemm(
             s2_raw,
@@ -348,13 +432,46 @@ class KimiK3LatentMoE(nn.Module):
             activation="situ",
         )
         del w13, s13, w2, s2
+        self._mega_scale_cpu_offload = (
+            os.environ.get("KIMI_K3_MOE_SCALE_CPU_OFFLOAD", "0") == "1"
+        )
+        if self._mega_scale_cpu_offload:
+            # Direct CUDA-to-pageable-CPU copies can stall indefinitely on
+            # GB200/ARM after many large weight transforms.  Keep the scale
+            # tensors in pinned host memory so the transfer follows CUDA's
+            # asynchronous D2H path, then synchronize before releasing the
+            # transformed GPU tensors.
+            mega_l1_sf_cpu = torch.empty_like(
+                self._mega_l1_sf, device="cpu", pin_memory=True
+            )
+            mega_l2_sf_cpu = torch.empty_like(
+                self._mega_l2_sf, device="cpu", pin_memory=True
+            )
+            mega_l1_sf_cpu.copy_(self._mega_l1_sf, non_blocking=True)
+            mega_l2_sf_cpu.copy_(self._mega_l2_sf, non_blocking=True)
+            torch.cuda.current_stream(device).synchronize()
+            self._mega_l1_sf = mega_l1_sf_cpu
+            self._mega_l2_sf = mega_l2_sf_cpu
+            (
+                self._mega_l1_sf_staging,
+                self._mega_l2_sf_staging,
+            ) = _get_or_create_mega_scale_staging(
+                self._mega_l1_sf,
+                self._mega_l2_sf,
+                device,
+            )
+            logging.info(
+                "[KimiK3 DeepGEMM MegaMoE] layer=%d keeps transformed FP4 "
+                "scales on CPU",
+                self.layer_idx,
+            )
 
         # The transform inputs keep their expandable allocator segments live
         # until this point.  Cleaning immediately after dropping them prevents
         # one partially occupied segment from accumulating for every MoE layer.
         torch.cuda.empty_cache()
 
-        self._mega_group = dist.group.WORLD
+        self._mega_group = mega_group
         self._mega_buf = _get_or_create_mega_buf(
             group=self._mega_group,
             num_experts=self.expert_num,
@@ -428,10 +545,22 @@ class KimiK3LatentMoE(nn.Module):
         # against a peer that has not finished publishing its next input.
         self._maybe_pre_kernel_barrier(routed_input.device, token_count)
         output = self._mega_y[:token_count]
+        mega_l1_sf = self._mega_l1_sf
+        mega_l2_sf = self._mega_l2_sf
+        scale_cpu_offload = getattr(self, "_mega_scale_cpu_offload", False)
+        if scale_cpu_offload:
+            mega_l1_sf = self._mega_l1_sf_staging
+            mega_l2_sf = self._mega_l2_sf_staging
+            mega_l1_sf.copy_(
+                self._mega_l1_sf, non_blocking=True
+            )
+            mega_l2_sf.copy_(
+                self._mega_l2_sf, non_blocking=True
+            )
         deep_gemm.fp8_fp4_mega_moe(
             output,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
+            (self._mega_l1_w, mega_l1_sf),
+            (self._mega_l2_w, mega_l2_sf),
             self._mega_buf,
             recipe=(1, 1, 32),
             activation="situ",
@@ -483,6 +612,10 @@ class KimiK3LatentMoE(nn.Module):
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         correction_bias = self.weights[K3W.MOE_CORRECTION_BIAS].float()
         router_weight = self.weights[K3W.MOE_GATE]
+        if self.routed_aux_weight_shard:
+            router_weight = _transient_full_row_weight(
+                router_weight, self.ffn_tp_size
+            )
         if (
             self._bf16_fp32_router_enabled
             and hidden_states.is_cuda
@@ -496,6 +629,8 @@ class KimiK3LatentMoE(nn.Module):
             router_logits = torch.matmul(
                 hidden_states.float(), router_weight.float()
             )
+        if self.routed_aux_weight_shard:
+            del router_weight
         if self._group_topk.fused_sigmoid_supported(
             router_logits,
             correction_bias,
@@ -643,7 +778,14 @@ class KimiK3LatentMoE(nn.Module):
                 # zero weights and the output clear below keep them inert.
                 expert_ids[valid_token_count:] = 0
                 routing_weights[valid_token_count:] = 0
-        routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
+        routed_down_weight = self.weights[K3W.MOE_ROUTED_DOWN]
+        if self.routed_aux_weight_shard:
+            routed_down_weight = _transient_full_row_weight(
+                routed_down_weight, self.ffn_tp_size
+            )
+        routed_input = torch.matmul(hidden_states, routed_down_weight)
+        if self.routed_aux_weight_shard:
+            del routed_down_weight
         routed_output = self._mega_expert_sum(
             routed_input,
             expert_ids,
@@ -652,7 +794,14 @@ class KimiK3LatentMoE(nn.Module):
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())
-        routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
+        routed_up_weight = self.weights[K3W.MOE_ROUTED_UP]
+        if self.routed_aux_weight_shard:
+            routed_up_weight = _transient_full_row_weight(
+                routed_up_weight, self.ffn_tp_size
+            )
+        routed_output = torch.matmul(routed_output, routed_up_weight)
+        if self.routed_aux_weight_shard:
+            del routed_up_weight
         shared_output = self._shared_expert_forward(hidden_states)
         output = routed_output + shared_output
         if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:

@@ -1016,6 +1016,18 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
+        // The PD RPC thread serializes these tensors after NeedRemoteGenerate is
+        // published. Keep CUDA access on the engine thread: otherwise its D2H
+        // copies can race the next tpSyncModelInputs H2D on rank 0 and deadlock
+        // the remaining TP ranks in the broadcast.
+        if (stream->queryPdSep()) {
+            propose_all_probs =
+                propose_all_probs.is_cuda() ? propose_all_probs.cpu() : propose_all_probs;
+            if (last_hidden_states.defined() && last_hidden_states.is_cuda()) {
+                last_hidden_states = last_hidden_states.cpu();
+            }
+        }
+
         spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
 
         batch_idx_in += cur_batch_size;
