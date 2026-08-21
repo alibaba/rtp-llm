@@ -846,6 +846,64 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         torch.testing.assert_close(layer._w4a8_up_packed[0], gate_up[0, 8:])
         torch.testing.assert_close(layer._w4a8_down_packed[0], down[0])
 
+    def test_compressed_w4a8_fuses_up_gate_before_cutlass_repack(self):
+        quant = QuantizationConfig(
+            "W4A8_INT4_PER_CHANNEL_COMPRESSED",
+            source_config=types.SimpleNamespace(group_size=lambda: 4),
+        )
+        layer = _make_experts(
+            num_experts=1,
+            hidden_size=8,
+            moe_intermediate_size=8,
+            quant_config=quant,
+        )
+        gate = torch.full((8, 4), 11, dtype=torch.int8)
+        up = torch.full((8, 4), 22, dtype=torch.int8)
+        down = torch.full((8, 4), 33, dtype=torch.int8)
+        gate_scale = torch.full((8, 2), 1.0, dtype=torch.bfloat16)
+        up_scale = torch.full((8, 2), 2.0, dtype=torch.bfloat16)
+        down_scale = torch.full((8, 2), 3.0, dtype=torch.bfloat16)
+        layer.load_weights(
+            {
+                "0.gate_proj.weight_packed": gate,
+                "0.up_proj.weight_packed": up,
+                "0.down_proj.weight_packed": down,
+                "0.gate_proj.weight_scale": gate_scale,
+                "0.up_proj.weight_scale": up_scale,
+                "0.down_proj.weight_scale": down_scale,
+            }
+        )
+
+        calls = []
+
+        def fake_repack(weight, scale, group_size):
+            calls.append((weight.clone(), scale.clone(), group_size))
+            packed_scale = (
+                scale.t()
+                .contiguous()
+                .unsqueeze(-1)
+                .expand(-1, -1, 8)
+                .to(torch.float8_e4m3fn)
+                .contiguous()
+            )
+            return weight.clone(), packed_scale
+
+        with mock.patch(
+            "rtp_llm.models_py.quant_methods.w4a8_moe."
+            "repack_compressed_int4_to_cutlass",
+            side_effect=fake_repack,
+        ):
+            layer.quant_method.process_weights_after_loading(layer)
+
+        self.assertEqual(len(calls), 2)
+        fused_weight, fused_scale, group_size = calls[0]
+        self.assertEqual(group_size, 4)
+        torch.testing.assert_close(fused_weight[:8], up)
+        torch.testing.assert_close(fused_weight[8:], gate)
+        torch.testing.assert_close(fused_scale[:8], up_scale)
+        torch.testing.assert_close(fused_scale[8:], gate_scale)
+        torch.testing.assert_close(layer.w13[0], torch.cat((up, gate), dim=0))
+
     def test_w4a8_weight_shape_metadata_is_validated_and_consumed(self):
         quant = QuantizationConfig(
             "W4A8_INT4_PER_CHANNEL_COMPRESSED",
