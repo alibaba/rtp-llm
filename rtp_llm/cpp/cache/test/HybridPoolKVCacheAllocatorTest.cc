@@ -1530,7 +1530,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DeferredBackendMatchReportsSWAPoolShortfa
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
     resource->setBatchCacheKeys(0, {key});
-    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    // Keep one completed block reusable; the final block remains writable and
+    // therefore is not eligible for backend matching.
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.enable_cache_lookup = true;
     malloc_info.reuse_cache         = true;
@@ -1665,7 +1667,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesEvictedDeviceReuseReferencesOnReserveReject) {
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesRequestRefsAndPreservesCachedTree) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
     auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/100);
     ASSERT_TRUE(allocator->init());
@@ -1697,11 +1699,12 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesEvictedDeviceRe
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 0u);
-    EXPECT_FALSE(pools[0]->isAllocated(linear_cached));
-    EXPECT_FALSE(pools[1]->isAllocated(full_cached));
-    EXPECT_EQ(pools[0]->freeBlocksNum(), counters_before[0].free_blocks + 1);
-    EXPECT_EQ(pools[1]->freeBlocksNum(), counters_before[1].free_blocks + 1);
-    EXPECT_TRUE(allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100}).empty());
+    expectPoolCountersEq(allocator, counters_before);
+    EXPECT_TRUE(pools[0]->isAllocated(linear_cached));
+    EXPECT_TRUE(pools[1]->isAllocated(full_cached));
+    EXPECT_EQ(pools[0]->refCount(linear_cached), 1u);
+    EXPECT_EQ(pools[1]->refCount(full_cached), 1u);
+    EXPECT_FALSE(allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100}).empty());
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedGroupBlocks) {

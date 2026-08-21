@@ -1328,7 +1328,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PreparedLoadReclaimsSharedPoolTreeCandida
     const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{100, 101, 102, 103});
     ASSERT_TRUE(seeded.success);
     ASSERT_EQ(allocator->freeBlocksNum(), 1u);
-    ASSERT_GT(allocator->activeTreeCachedBlocksNum(), 0u);
+    ASSERT_GT(allocator->blockTreeCacheOwner()->getStats().device_heap_total_size, 0u);
 
     auto resource  = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{200});
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
