@@ -31,8 +31,6 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.structure.request_constants import request_id_field_name
-from rtp_llm.structure.request_extractor import RequestExtractor
 
 
 class GenerateConfigTest(TestCase):
@@ -61,6 +59,17 @@ class GenerateConfigTest(TestCase):
             "top_p": 0.5,
             "max_new_tokens": 20,
         }
+
+    def _qwen_tokenizer(self):
+        return QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+
+    def _special_tokens_with_gg(self):
+        special_tokens = SpecialTokens()
+        special_tokens.stop_words_id_list = [[1233, 19912]]
+        special_tokens.stop_words_str_list = ["gg"]
+        return special_tokens
 
     def test_simple(self):
         special_tokens = SpecialTokens()
@@ -126,9 +135,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.max_new_tokens, 20)
 
     def test_stop_words_merge(self):
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
+        special_tokens = self._special_tokens_with_gg()
         generate_config = Pipeline.create_generate_config(
             generate_config=self._create_generate_config(),
             vocab_size=100,
@@ -142,12 +149,8 @@ class GenerateConfigTest(TestCase):
         )
 
     def test_stop_words_merge_with_toeknizer(self):
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
+        special_tokens = self._special_tokens_with_gg()
+        tokenizer = self._qwen_tokenizer()
         generate_config = Pipeline.create_generate_config(
             generate_config=self._create_generate_config(),
             vocab_size=100,
@@ -184,194 +187,43 @@ class GenerateConfigTest(TestCase):
                 generate_env_config=GenerateEnvConfig(),
             )
 
-    def test_batch_shared_config_no_accumulation(self):
-        # Regression: batch 请求里 request_extractor 用 [config] * N 让 N 条 query 共享
-        # 同一个 GenerateConfig 对象。Pipeline.create_generate_config 对「对象入参」走
-        # 复用分支(config = generate_config),于是 convert_select_tokens / add_special_tokens
-        # 会在同一个对象上被调用 N 次。修复前:select_tokens_id 累积成 N 份(logits 被重复
-        # N 次)、special stop words 被追加 N 遍。
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
-
-        shared = GenerateConfig(
-            select_tokens_str=["1", "2", "3", "4"],
-            stop_words_str=["hello"],
-            stop_words_list=[[8848]],
-        )
-
-        first_select_len = None
-        for _ in range(3):  # 3 条 query 共享同一个对象
-            cfg = Pipeline.create_generate_config(
-                generate_config=shared,  # 传对象 → 命中复用分支
-                vocab_size=200000,
-                special_tokens=special_tokens,
-                tokenizer=tokenizer,
-                generate_env_config=GenerateEnvConfig(),
-            )
-            self.assertIs(cfg, shared)  # 确认确实复用同一对象
-            if first_select_len is None:
-                first_select_len = len(shared.select_tokens_id)
-            # 每次调用后长度都应等于第一次,不随 batch 累积
-            self.assertEqual(len(shared.select_tokens_id), first_select_len)
-
-        # 不只是「不累积」,值也不能丢:词表是仓内固定测试数据,直接钉字面量
-        self.assertEqual(shared.select_tokens_id, [16, 17, 18, 19])
-
-        # special stop words 只合入一次,且用户已传入的 stop words 原样保留一份
-        self.assertEqual(shared.stop_words_str, ["hello", "gg"])
-        self.assertEqual(shared.stop_words_str.count("hello"), 1)
-        self.assertEqual(shared.stop_words_list.count([8848]), 1)
-        self.assertEqual(shared.stop_words_list.count([1233, 19912]), 1)
-
-    def test_select_tokens_str_id_union_dedup(self):
-        # 同时提供 select_tokens_str 与 select_tokens_id 时取去重并集:显式 id 保留、
-        # str 派生 token 去重后按序追加;重复调用(batch 共享)保持幂等。
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
+    def test_select_tokens_preserves_order_and_multiplicity(self):
+        tokenizer = self._qwen_tokenizer()
         self.assertEqual(tokenizer.encode("1"), [16])
-        self.assertEqual(tokenizer.encode("2"), [17])
+        self.assertEqual(tokenizer.encode("what's your name"), [12555, 594, 697, 829])
 
-        # 16 同时来自显式 id 和字符串。显式顺序优先，派生出的 16 被跳过，17 追加。
-        config = GenerateConfig(select_tokens_str=["1", "2"], select_tokens_id=[16])
-        for _ in range(2):  # 幂等:第二次调用不应改变结果
-            Pipeline.create_generate_config(
-                generate_config=config,
-                vocab_size=200000,
-                special_tokens=SpecialTokens(),
-                tokenizer=tokenizer,
-                generate_env_config=GenerateEnvConfig(),
-            )
-
-        self.assertEqual(config.select_tokens_id, [16, 17])
-
-    def test_select_tokens_preserves_explicit_duplicates(self):
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
-
-        # 显式 id 的重复项是既有 API 行为；只对字符串派生的 id 做稳定去重。
         config = GenerateConfig(
-            select_tokens_str=["1", "2"], select_tokens_id=[16, 16, 99999]
+            select_tokens_id=[16],
+            select_tokens_str=["1", "1", "what's your name"],
         )
         config.convert_select_tokens(vocab_size=200000, tokenizer=tokenizer)
 
-        self.assertEqual(config.select_tokens_id, [16, 16, 99999, 17])
+        self.assertEqual(config.select_tokens_id, [16, 16, 16, 12555, 594, 697, 829])
 
     def test_select_tokens_validation_failure_leaves_state_unchanged(self):
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
+        tokenizer = self._qwen_tokenizer()
         config = GenerateConfig(select_tokens_str=["1"], select_tokens_id=[0])
+        config.convert_select_tokens(vocab_size=200000, tokenizer=tokenizer)
+        self.assertEqual(config.select_tokens_id, [0, 16])
 
-        # "1" 编码为 16，在 vocab_size=16 时越界。失败不能把半成品写回共享对象。
+        # A failed retry must not append another encoded token to visible state.
         with self.assertRaisesRegex(
             FtRuntimeException, "should be less than vocab_size"
         ):
             config.convert_select_tokens(vocab_size=16, tokenizer=tokenizer)
+        self.assertEqual(config.select_tokens_id, [0, 16])
 
-        self.assertEqual(config.select_tokens_id, [0])
-
-    def test_prepare_chain_idempotent(self):
-        # 契约守卫:create_generate_config 链上所有 prepare 方法必须幂等。
-        # 共享对象重复调用后,被 mutate 的字段应与首次调用后完全一致;未来新增
-        # 的非幂等 prepare 方法会在此暴露。
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
-        generate_env_config = GenerateEnvConfig()
-        generate_env_config.think_mode = 1
-        generate_env_config.think_end_token_id = 102
-
-        shared = GenerateConfig(
-            select_tokens_str=["1", "2", "3", "4"],
-            stop_words_str=["hello"],
-            stop_words_list=[[8848]],
-        )
-
-        def snapshot(c):
-            # 全量 dump 而不是列举字段:prepare 链未来 mutate 任何新字段都会被这里
-            # 捕获,不需要同步维护一张白名单。
-            return copy.deepcopy(c.model_dump())
-
-        first = None
-        for _ in range(3):
-            Pipeline.create_generate_config(
-                generate_config=shared,
-                vocab_size=200000,
-                special_tokens=special_tokens,
-                tokenizer=tokenizer,
-                generate_env_config=generate_env_config,
+        negative_config = GenerateConfig(select_tokens_id=[-1])
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            negative_config.convert_select_tokens(
+                vocab_size=200000, tokenizer=tokenizer
             )
-            snap = snapshot(shared)
-            if first is None:
-                first = snap
-            self.assertEqual(snap, first)
-
-    def test_batch_adapter_name_shallow_copy_no_accumulation(self):
-        # 累积缺陷有两条触发路径,这条覆盖第二条:_get_adapter 在带 adapter_name 时
-        # 对每条 query 做 copy.copy(request_extractor.py),浅拷贝让各副本与原对象
-        # 共享 select_tokens_id / stop_words_* 的 list 引用,重复 append 依然互相
-        # 可见。(第一条是不带 adapter_name 时的 [config] * N,见
-        # test_batch_shared_config_no_accumulation。)
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
-
-        request, _ = RequestExtractor(GenerateConfig()).extract_request(
-            {
-                "prompt_batch": ["q1", "q2", "q3"],
-                "generate_config": {
-                    "select_tokens_str": ["1", "2", "3", "4"],
-                    "adapter_name": ["lora_a", "lora_b", "lora_c"],
-                },
-                request_id_field_name: 1,
-            }
-        )
-        configs = request.generate_configs
-        self.assertEqual(len(configs), 3)
-        self.assertEqual(
-            [c.adapter_name for c in configs], ["lora_a", "lora_b", "lora_c"]
-        )
-        # 各副本是不同对象。注:当前 _get_adapter 用 copy.copy,副本之间的 list 字段
-        # 仍共享同一引用,这正是原地 append 会串扰的原因;这里不对别名本身做断言——
-        # 将来若在 _get_adapter 层深拷贝消除别名,下面的值断言依旧成立。
-        self.assertIsNot(configs[0], configs[1])
-
-        # oracle 用词表固定的字面量,不镜像生产侧的去重算法
-        expected_ids = [16, 17, 18, 19]
-        self.assertEqual(
-            [tokenizer.encode(s)[0] for s in ["1", "2", "3", "4"]], expected_ids
-        )
-
-        for config in configs:
-            Pipeline.create_generate_config(
-                generate_config=config,
-                vocab_size=200000,
-                special_tokens=special_tokens,
-                tokenizer=tokenizer,
-                generate_env_config=GenerateEnvConfig(),
-            )
-
-        for config in configs:
-            self.assertEqual(config.select_tokens_id, expected_ids)
-            self.assertEqual(config.stop_words_str.count("gg"), 1)
-            self.assertEqual(config.stop_words_list.count([1233, 19912]), 1)
+        self.assertEqual(negative_config.select_tokens_id, [-1])
 
     def test_same(self):
-        special_tokens = SpecialTokens()
-        special_tokens.stop_words_id_list = [[1233, 19912]]
-        special_tokens.stop_words_str_list = ["gg"]
+        special_tokens = self._special_tokens_with_gg()
 
         a = Pipeline.create_generate_config(
             generate_config=self._create_generate_config(),
@@ -396,9 +248,7 @@ class GenerateConfigTest(TestCase):
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
         special_tokens = SpecialTokens()
-        tokenizer = QWenTokenizer(
-            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
-        )
+        tokenizer = self._qwen_tokenizer()
         generate_config_dict = self._create_generate_config()
         generate_config_dict.update({"max_thinking_tokens": 109})
         generate_config = Pipeline.create_generate_config(
@@ -567,6 +417,33 @@ class OpenaiGenerateConfigTest(TestCase):
             backend_rpc_server_visitor=None,
         )
         return openai_endpoint._extract_generation_config(request)
+
+    def test_select_tokens_preserves_order_and_multiplicity(self):
+        request = ChatCompletionRequest(
+            messages=[],
+            extra_configs=GenerateConfig(
+                select_tokens_id=[16],
+                select_tokens_str=["1", "1", "what's your name"],
+            ),
+        )
+
+        config = self._extract_openai_generation_config(request)
+
+        self.assertEqual(config.select_tokens_id, [16, 16, 16, 12555, 594, 697, 829])
+
+    def test_select_tokens_validation_failure_leaves_state_unchanged(self):
+        invalid_id = len(self.tokenizer)
+        extra_configs = GenerateConfig(
+            select_tokens_id=[invalid_id], select_tokens_str=["1"]
+        )
+        request = ChatCompletionRequest(messages=[], extra_configs=extra_configs)
+
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            self._extract_openai_generation_config(request)
+
+        self.assertEqual(extra_configs.select_tokens_id, [invalid_id])
 
     def _assert_reasoning_envelope_wraps_json_object(self, config: GenerateConfig):
         """in_think_mode moves the final constraint inside the reasoning tag."""

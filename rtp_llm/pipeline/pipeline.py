@@ -116,14 +116,8 @@ class Pipeline(object):
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
         else:
+            # 认为是从frontend_worker传递进来的，不需要再处理一遍
             config = generate_config
-        # 幂等契约:batch 会让多条 query 共享同一 config 对象(_get_adapter 的
-        # [config] * N)并重复走到这里,以下四个 prepare 方法必须幂等,新增亦然。
-        # 契约仅限本函数:共享对象在 pipeline_async 里还会被 parse_and_fill_banned_combo
-        # 按各自的 prompt 原地追加 banned_combo_token_ids,那是数据相关的 mutation,
-        # 幂等去重收敛不了(第 2 条 query 会继承第 1 条 prompt 解析出的结果)。
-        # TODO: 根治应在 _get_adapter 层重建 per-query 的 list 字段而非共享引用,
-        # 把「不共享可变状态」恢复成结构性不变量。
         config.add_special_tokens(special_tokens)
         config.convert_select_tokens(vocab_size, tokenizer)
         config.add_thinking_params(tokenizer, generate_env_config)

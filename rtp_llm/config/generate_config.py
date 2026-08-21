@@ -569,23 +569,10 @@ class GenerateConfig(BaseModel):
         return config
 
     def convert_select_tokens(self, vocab_size, tokenizer):
-        # 契约:显式传入的 select_tokens_id 原样保留(含其中的重复项),select_tokens_str
-        # 派生的 id 相对已有列表去重后按序追加在末尾;消费端(NormalGenerateStream 的
-        # index_select)按此顺序逐列取 logits。
-        # 先在局部算好再整体赋值,不对 self.select_tokens_id 做原地 append:batch 请求
-        # 里 N 条 query 共享同一个 config 对象(见 request_extractor 的 [config] * N 与
-        # copy.copy),原地累加会让第 N 条拿到 N 份;整体赋值天然幂等,且 vocab 校验失败
-        # 时不会在共享 list 上留下半截写入。
-        # TODO: C++ 前端 Tokenizer::convertSelectTokens 是「不去重 + insert 到列表头」,
-        # 顺序和重叠语义均与本实现不同,同一请求经两条前端可能拿到不同的 logits 列。
-        # 要对齐需同时修改 C++ OpenaiEndpoint 的调用点,不在本次 Python batch 修复内。
+        # Validate the complete result before replacing caller-visible state.
         merged = list(self.select_tokens_id)
-        seen = set(merged)
         for token_str in self.select_tokens_str:
-            for token_id in tokenizer.encode(token_str):
-                if token_id not in seen:
-                    seen.add(token_id)
-                    merged.append(token_id)
+            merged += tokenizer.encode(token_str)
         if not all(token_id < vocab_size and token_id >= 0 for token_id in merged):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
@@ -594,16 +581,9 @@ class GenerateConfig(BaseModel):
         self.select_tokens_id = merged
 
     def add_special_tokens(self, special_tokens: Any):
-        # 去重 append(而非 +=)保证幂等:batch 共享同一 config 对象时不重复追加,
-        # 同时保留用户已传入的 stop words。假设传入的 stop_word_* 不含 batch 维度。
-        # 此处无 convert_select_tokens 那样的校验步骤,原地去重 append 已足够幂等,
-        # 不必照搬它「局部构建 + 末尾整体赋值」的写法。
-        for ids in special_tokens.stop_words_id_list:
-            if ids not in self.stop_words_list:
-                self.stop_words_list.append(ids)
-        for word in special_tokens.stop_words_str_list:
-            if word not in self.stop_words_str:
-                self.stop_words_str.append(word)
+        # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
+        self.stop_words_list += special_tokens.stop_words_id_list
+        self.stop_words_str += special_tokens.stop_words_str_list
 
     def finalize_response_format(
         self,
