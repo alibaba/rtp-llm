@@ -25,6 +25,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",
+        "//rtp_llm/cpp/utils:rdma_device_health_types",
         "//rtp_llm/models_py/bindings/core:types",
     ],
     copts = copts(),

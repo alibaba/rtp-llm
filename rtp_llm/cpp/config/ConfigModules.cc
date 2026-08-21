@@ -333,6 +333,15 @@ std::string VitConfig::to_string() const {
 }
 
 // CacheStoreConfig
+RdmaDeviceHealthMonitorConfig CacheStoreConfig::makeRdmaDeviceHealthMonitorConfig(bool rdma_mode) const {
+    RdmaDeviceHealthMonitorConfig monitor_config;
+    monitor_config.enabled             = rdma_mode && rdma_device_health_check_enabled;
+    monitor_config.fault_handler       = rdma_device_health_fault_handler;
+    monitor_config.probe_interval_ms   = rdma_device_health_probe_interval_ms;
+    monitor_config.fault_confirm_count = rdma_device_health_fault_confirm_count;
+    return monitor_config;
+}
+
 std::string CacheStoreConfig::to_string() const {
     std::ostringstream oss;
     oss << "cache_store_rdma_mode: " << cache_store_rdma_mode << "\n"
@@ -354,7 +363,12 @@ std::string CacheStoreConfig::to_string() const {
         << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
         << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
         << "cache_store_tcp_anet_rpc_thread_num: " << cache_store_tcp_anet_rpc_thread_num << "\n"
-        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n";
+        << "cache_store_tcp_anet_rpc_queue_num: " << cache_store_tcp_anet_rpc_queue_num << "\n"
+        << "rdma_device_health_check_enabled: " << rdma_device_health_check_enabled << "\n"
+        << "rdma_device_health_fault_handler: " << rdmaDeviceHealthFaultHandlerName(rdma_device_health_fault_handler)
+        << "\n"
+        << "rdma_device_health_probe_interval_ms: " << rdma_device_health_probe_interval_ms << "\n"
+        << "rdma_device_health_fault_confirm_count: " << rdma_device_health_fault_confirm_count << "\n";
     return oss.str();
 }
 

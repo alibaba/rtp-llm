@@ -5,6 +5,7 @@
 #include <map>
 #include <vector>
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/RdmaDeviceHealthTypes.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -363,6 +364,18 @@ struct CacheStoreConfig {
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
     int     cache_store_tcp_anet_rpc_thread_num          = 3;
     int     cache_store_tcp_anet_rpc_queue_num           = 100;
+
+    // 本地 RDMA 设备健康探测：仅 cache_store_rdma_mode=true 且 messager 侧支持探测时生效。
+    // 默认关闭，需通过 --cache_store_rdma_device_health_check_enabled 显式开启；
+    // 回滚即不带该参数启动。边界与默认值统一引用 utils/RdmaDeviceHealthTypes.h 的常量。
+    bool                         rdma_device_health_check_enabled       = false;
+    RdmaDeviceHealthFaultHandler rdma_device_health_fault_handler       = RdmaDeviceHealthFaultHandler::LOG;
+    uint32_t                     rdma_device_health_probe_interval_ms   = kDefaultRdmaDeviceHealthProbeIntervalMs;
+    uint32_t                     rdma_device_health_fault_confirm_count = kDefaultRdmaDeviceHealthFaultConfirmCount;
+
+    // 把配置投影成传输层消费的监控参数。探测只在 RDMA 传输模式下有意义，
+    // 因此 enabled 由 rdma_mode 与本配置的开关共同决定；数值合法性由 messager 侧启动探测时校验。
+    RdmaDeviceHealthMonitorConfig makeRdmaDeviceHealthMonitorConfig(bool rdma_mode) const;
 
     std::string to_string() const;
 };

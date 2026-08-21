@@ -15,6 +15,16 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# RDMA device health struct-only contract, shared by the config and transport layers
+cc_library(
+    name = "rdma_device_health_types",
+    hdrs = [
+        "RdmaDeviceHealthTypes.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # New modular targets
 cc_library(
     name = "core_utils",
