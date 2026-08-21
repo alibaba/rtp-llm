@@ -1,13 +1,7 @@
 from __future__ import annotations
-
-import typing
-
 import torch
-
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
-                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
-
-
+import typing
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheCapacityPolicyDesc', 'CacheCpPolicyDesc', 'CacheEvictPolicy', 'CacheGroupType', 'CacheMemoryPlacement', 'CacheMemoryPolicyDesc', 'CacheReusePolicy', 'CacheReusePolicyDesc', 'CacheStoreConfig', 'CacheTailPolicyDesc', 'ConcurrencyConfig', 'CpBlockMappingMode', 'CpBlockSliceMode', 'CpPrefillSliceLayout', 'DISABLED', 'DashScGrpcConfig', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KVCacheSpecDesc', 'KVCacheSpecType', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig', 'MMPreprocessConfig', 'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'MultimodalInput', 'NcclCommConfig', 'NormType', 'OpaqueBlockEntryCountMode', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 class ActivationType:
     """
     Members:
@@ -82,28 +76,34 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 class AttentionConfigs:
+    compress_rope_theta: float
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
+    gen_num_per_cycle: int
     head_num: int
     indexer_head_dim: int
     indexer_head_num: int
     indexer_topk: int
     is_causal: bool
     is_sparse: bool
+    kernel_tokens_per_block: int
     kv_cache_dtype: KvCacheDataType
     kv_head_num: int
     kv_lora_rank: int
+    layer_compress_ratios: list[int]
     max_seq_len: int
     need_rope_kv_cache: bool
     nope_head_dim: int
+    o_groups: int
+    o_lora_rank: int
     q_lora_rank: int
     q_scaling: float
     rope_config: RopeConfig
     rope_head_dim: int
     size_per_head: int
+    sliding_window: int
     softmax_extra_scale: float
     tokens_per_block: int
-    kernel_tokens_per_block: int
     use_logn_attn: bool
     use_mla: bool
     v_head_dim: int
@@ -169,28 +169,223 @@ class CPRotateMethod:
     @property
     def value(self) -> int:
         ...
+class CacheCapacityPolicyDesc:
+    charge_to_paged_budget: bool | None
+    explicit_block_num: int | None
+    reservable: bool | None
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+class CacheCpPolicyDesc:
+    align_payload: bool | None
+    mapping: CpBlockMappingMode | None
+    prefill_slice_layout: CpPrefillSliceLayout | None
+    scale_seq_size: bool | None
+    slice: CpBlockSliceMode | None
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+class CacheEvictPolicy:
+    """
+    Members:
+    
+      CHAIN
+    
+      INDEPENDENT
+    
+      NONE
+    """
+    CHAIN: typing.ClassVar[CacheEvictPolicy]  # value = <CacheEvictPolicy.CHAIN: 0>
+    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]  # value = <CacheEvictPolicy.INDEPENDENT: 1>
+    NONE: typing.ClassVar[CacheEvictPolicy]  # value = <CacheEvictPolicy.NONE: 2>
+    __members__: typing.ClassVar[dict[str, CacheEvictPolicy]]  # value = {'CHAIN': <CacheEvictPolicy.CHAIN: 0>, 'INDEPENDENT': <CacheEvictPolicy.INDEPENDENT: 1>, 'NONE': <CacheEvictPolicy.NONE: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class CacheGroupType:
+    """
+    Members:
+    
+      LINEAR
+    
+      FULL
+    
+      SWA
+    """
+    FULL: typing.ClassVar[CacheGroupType]  # value = <CacheGroupType.FULL: 1>
+    LINEAR: typing.ClassVar[CacheGroupType]  # value = <CacheGroupType.LINEAR: 0>
+    SWA: typing.ClassVar[CacheGroupType]  # value = <CacheGroupType.SWA: 2>
+    __members__: typing.ClassVar[dict[str, CacheGroupType]]  # value = {'LINEAR': <CacheGroupType.LINEAR: 0>, 'FULL': <CacheGroupType.FULL: 1>, 'SWA': <CacheGroupType.SWA: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class CacheMemoryPlacement:
+    """
+    Members:
+    
+      DEVICE
+    
+      HOST
+    
+      HOST_PINNED
+    """
+    DEVICE: typing.ClassVar[CacheMemoryPlacement]  # value = <CacheMemoryPlacement.DEVICE: 0>
+    HOST: typing.ClassVar[CacheMemoryPlacement]  # value = <CacheMemoryPlacement.HOST: 1>
+    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]  # value = <CacheMemoryPlacement.HOST_PINNED: 2>
+    __members__: typing.ClassVar[dict[str, CacheMemoryPlacement]]  # value = {'DEVICE': <CacheMemoryPlacement.DEVICE: 0>, 'HOST': <CacheMemoryPlacement.HOST: 1>, 'HOST_PINNED': <CacheMemoryPlacement.HOST_PINNED: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class CacheMemoryPolicyDesc:
+    placement: CacheMemoryPlacement | None
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+class CacheReusePolicy:
+    """
+    Members:
+    
+      REUSABLE
+    
+      NON_REUSABLE
+    """
+    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]  # value = <CacheReusePolicy.NON_REUSABLE: 1>
+    REUSABLE: typing.ClassVar[CacheReusePolicy]  # value = <CacheReusePolicy.REUSABLE: 0>
+    __members__: typing.ClassVar[dict[str, CacheReusePolicy]]  # value = {'REUSABLE': <CacheReusePolicy.REUSABLE: 0>, 'NON_REUSABLE': <CacheReusePolicy.NON_REUSABLE: 1>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class CacheReusePolicyDesc:
+    enable_prefix_reuse: bool | None
+    evict_policy: CacheEvictPolicy | None
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
 class CacheStoreConfig:
     cache_store_rdma_mode: bool
-    wrr_available_ratio: int
-    rank_factor: int
-    thread_count: int
-    rdma_connect_timeout_ms: int
-    rdma_qp_count_per_connection: int
-    rdma_io_thread_count: int
-    rdma_worker_thread_count: int
+    cache_store_tcp_anet_rpc_queue_num: int
+    cache_store_tcp_anet_rpc_thread_num: int
     messager_io_thread_count: int
     messager_worker_thread_count: int
-    rdma_transfer_wait_timeout_ms: int
-    rdma_max_block_pairs_per_connection: int
-    p2p_read_steal_before_deadline_ms: int
-    p2p_read_return_before_deadline_ms: int
-    p2p_transfer_not_done_resource_hold_ms: int
-    p2p_resource_store_timeout_check_interval_ms: int
-    p2p_layer_cache_buffer_store_timeout_ms: int
     p2p_cancel_broadcast_timeout_ms: int
-    cache_store_tcp_anet_rpc_thread_num: int
-    cache_store_tcp_anet_rpc_queue_num: int
-
+    p2p_layer_cache_buffer_store_timeout_ms: int
+    p2p_read_return_before_deadline_ms: int
+    p2p_read_steal_before_deadline_ms: int
+    p2p_resource_store_timeout_check_interval_ms: int
+    p2p_transfer_not_done_resource_hold_ms: int
+    rank_factor: int
+    rdma_connect_timeout_ms: int
+    rdma_io_thread_count: int
+    rdma_max_block_pairs_per_connection: int
+    rdma_qp_count_per_connection: int
+    rdma_transfer_wait_timeout_ms: int
+    rdma_worker_thread_count: int
+    thread_count: int
+    wrr_available_ratio: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -198,6 +393,15 @@ class CacheStoreConfig:
     def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
+        ...
+class CacheTailPolicyDesc:
+    active_tail_blocks: int | None
+    validate_tail_blocks: bool | None
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
         ...
 class ConcurrencyConfig:
     concurrency_limit: int
@@ -207,6 +411,146 @@ class ConcurrencyConfig:
     def __init__(self) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
+        ...
+class CpBlockMappingMode:
+    """
+    Members:
+    
+      NONE
+    
+      BLOCK_ROUND_ROBIN
+    
+      COMPACT_LAST_RANK
+    """
+    BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]  # value = <CpBlockMappingMode.BLOCK_ROUND_ROBIN: 1>
+    COMPACT_LAST_RANK: typing.ClassVar[CpBlockMappingMode]  # value = <CpBlockMappingMode.COMPACT_LAST_RANK: 2>
+    NONE: typing.ClassVar[CpBlockMappingMode]  # value = <CpBlockMappingMode.NONE: 0>
+    __members__: typing.ClassVar[dict[str, CpBlockMappingMode]]  # value = {'NONE': <CpBlockMappingMode.NONE: 0>, 'BLOCK_ROUND_ROBIN': <CpBlockMappingMode.BLOCK_ROUND_ROBIN: 1>, 'COMPACT_LAST_RANK': <CpBlockMappingMode.COMPACT_LAST_RANK: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class CpBlockSliceMode:
+    """
+    Members:
+    
+      NONE
+    
+      EQUAL_BYTES
+    
+      PAYLOAD_BYTES
+    """
+    EQUAL_BYTES: typing.ClassVar[CpBlockSliceMode]  # value = <CpBlockSliceMode.EQUAL_BYTES: 1>
+    NONE: typing.ClassVar[CpBlockSliceMode]  # value = <CpBlockSliceMode.NONE: 0>
+    PAYLOAD_BYTES: typing.ClassVar[CpBlockSliceMode]  # value = <CpBlockSliceMode.PAYLOAD_BYTES: 2>
+    __members__: typing.ClassVar[dict[str, CpBlockSliceMode]]  # value = {'NONE': <CpBlockSliceMode.NONE: 0>, 'EQUAL_BYTES': <CpBlockSliceMode.EQUAL_BYTES: 1>, 'PAYLOAD_BYTES': <CpBlockSliceMode.PAYLOAD_BYTES: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class CpPrefillSliceLayout:
+    """
+    Members:
+    
+      NONE
+    
+      PAYLOAD
+    
+      BLOCK_STRIDE
+    """
+    BLOCK_STRIDE: typing.ClassVar[CpPrefillSliceLayout]  # value = <CpPrefillSliceLayout.BLOCK_STRIDE: 2>
+    NONE: typing.ClassVar[CpPrefillSliceLayout]  # value = <CpPrefillSliceLayout.NONE: 0>
+    PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]  # value = <CpPrefillSliceLayout.PAYLOAD: 1>
+    __members__: typing.ClassVar[dict[str, CpPrefillSliceLayout]]  # value = {'NONE': <CpPrefillSliceLayout.NONE: 0>, 'PAYLOAD': <CpPrefillSliceLayout.PAYLOAD: 1>, 'BLOCK_STRIDE': <CpPrefillSliceLayout.BLOCK_STRIDE: 2>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class DashScGrpcConfig:
+    max_server_workers: int
+    def __getstate__(self) -> tuple:
+        ...
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, json_str: str) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def from_json(self, arg0: str) -> None:
+        ...
+    def get_client_config(self) -> dict[str, int]:
+        ...
+    def get_server_config(self) -> dict[str, int]:
         ...
     def to_string(self) -> str:
         ...
@@ -409,34 +753,13 @@ class FIFOSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
-
-
-class GrammarConfig:
-    constrained_json_disable_any_whitespace: bool
-    grammar_backend: str
-    num_workers: int
-    override_stop_tokens: list[int]
-    tokenizer_info_json: str
-
-    def __getstate__(self) -> tuple:
-        ...
-
-    def __init__(self) -> None:
-        ...
-
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-
-    def to_string(self) -> str:
-        ...
-
-
 class FMHAConfig:
     absorb_opt_len: int
     disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
-    enable_flashinfer_trtllm_gen: bool
+    enable_fa4_spec_decode: bool
     enable_flashinfer_trt_fmha_v2: bool
+    enable_flashinfer_trtllm_gen: bool
     enable_fmha: bool
     enable_open_source_fmha: bool
     enable_paged_flashinfer_trt_fmha_v2: bool
@@ -474,15 +797,15 @@ class FMHAType:
       AITER_PREFILL
     
       AITER_ASM_PREFILL
-
+    
       AITER_PAGED_PREFILL
-
+    
       AITER_DECODE
     
       AITER_ASM_DECODE
-
+    
       AITER_TRITON_DECODE
-
+    
       PY_FLASHINFER_PREFILL_PAGED
     
       PY_FLASHINFER_PREFILL_RAGGED
@@ -496,9 +819,9 @@ class FMHAType:
       FLASHINFER_MLA_DECODE
     
       SPARSE_FLASHMLA
-
+    
       CP_SPARSE_FLASHMLA
-
+    
       HEADWISE
     """
     AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
@@ -509,21 +832,21 @@ class FMHAType:
     AITER_TRITON_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_TRITON_DECODE: 12>
     CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 19>
     CP_SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_SPARSE_FLASHMLA: 20>
-    FLASHINFER_TRT_FMHA_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_TRT_FMHA_V2: 5>
     FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 17>
     FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 16>
+    FLASHINFER_TRT_FMHA_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_TRT_FMHA_V2: 5>
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
     HEADWISE: typing.ClassVar[FMHAType]  # value = <FMHAType.HEADWISE: 21>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
-    PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
     PAGED_FLASHINFER_TRT_FMHA_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_FLASHINFER_TRT_FMHA_V2: 4>
+    PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
     PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 15>
     PY_FLASHINFER_PREFILL_PAGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 13>
     PY_FLASHINFER_PREFILL_RAGGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 14>
     SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.SPARSE_FLASHMLA: 18>
     XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 6>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_FLASHINFER_TRT_FMHA_V2': <FMHAType.PAGED_FLASHINFER_TRT_FMHA_V2: 4>, 'FLASHINFER_TRT_FMHA_V2': <FMHAType.FLASHINFER_TRT_FMHA_V2: 5>, 'XQA': <FMHAType.XQA: 6>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 7>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 8>, 'AITER_PAGED_PREFILL': <FMHAType.AITER_PAGED_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'AITER_TRITON_DECODE': <FMHAType.AITER_TRITON_DECODE: 12>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 13>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 14>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 15>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 16>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 17>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 18>, 'CP_FLASH_INFER': <FMHAType.CP_FLASH_INFER: 19>, 'CP_SPARSE_FLASHMLA': <FMHAType.CP_SPARSE_FLASHMLA: 20>, 'HEADWISE': <FMHAType.HEADWISE: 21>}
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_FLASHINFER_TRT_FMHA_V2': <FMHAType.PAGED_FLASHINFER_TRT_FMHA_V2: 4>, 'FLASHINFER_TRT_FMHA_V2': <FMHAType.FLASHINFER_TRT_FMHA_V2: 5>, 'XQA': <FMHAType.XQA: 6>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 7>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 8>, 'AITER_PAGED_PREFILL': <FMHAType.AITER_PAGED_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'AITER_TRITON_DECODE': <FMHAType.AITER_TRITON_DECODE: 12>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 13>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 14>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 15>, 'CP_FLASH_INFER': <FMHAType.CP_FLASH_INFER: 19>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 16>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 17>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 18>, 'CP_SPARSE_FLASHMLA': <FMHAType.CP_SPARSE_FLASHMLA: 20>, 'HEADWISE': <FMHAType.HEADWISE: 21>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -571,16 +894,20 @@ class GrammarConfig:
     compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
     num_workers: int
+    terminate_without_stop_token: bool
     tokenizer_info_json: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
+        ...
+    def __repr__(self) -> str:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
         ...
 class GrpcConfig:
+    max_server_pollers: int
     def __getstate__(self) -> tuple:
         ...
     @typing.overload
@@ -605,14 +932,11 @@ class HWKernelConfig:
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
     deep_gemm_num_sm: int
-    deterministic_attn: bool
-    deterministic_gemm: bool
     disable_dpc_random: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
     enable_multi_block_mode: bool
     enable_native_cuda_graph: bool
-    enable_stable_scatter_add: bool
     ft_disable_custom_ar: bool
     num_native_cuda_graph: int
     prefill_capture_seq_lens: list[int]
@@ -680,31 +1004,36 @@ class HybridAttentionType:
     def value(self) -> int:
         ...
 class KVCacheConfig:
+    device_cache_min_free_blocks: int
+    dsv4_fixed_pool_blocks: int
+    dsv4_fixed_pool_use_memory: bool
+    dsv4_hca_state_pool_blocks: int
     enable_device_cache: bool
+    enable_gpu_prefix_tree: bool
+    enable_independent_group_eviction: bool
+    enable_legacy_memory_connector_fallback: bool
     enable_memory_cache: bool
+    enable_memory_cache_disk: bool
     enable_memory_cache_sm_copy: bool
     enable_prefix_tree_memory_cache: bool
-    enable_legacy_memory_connector_fallback: bool
-    enable_gpu_prefix_tree: bool
-    prefix_tree_memory_state_swa_pool_ratio: int
     enable_remote_cache: bool
-    dsv4_fixed_pool_blocks: int
-    dsv4_hca_state_pool_blocks: int
-    dsv4_fixed_pool_use_memory: bool
+    enable_tiered_memory_cache: bool
     fp8_kv_cache: int
+    kernel_seq_size_per_block: int
     kv_cache_mem_mb: int
     linear_step: int
+    load_cache_retry_times: int
     max_block_size_per_item: int
-    memory_cache_size_mb: int
-    memory_cache_sync_timeout_ms: int
-    enable_memory_cache_disk: bool
+    memory_cache_disk_buffered_io: bool
     memory_cache_disk_paths: str
     memory_cache_disk_size_mb: int
-    memory_cache_disk_buffered_io: bool
     memory_cache_disk_sync_timeout_ms: int
+    memory_cache_size_mb: int
+    memory_cache_sync_timeout_ms: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
+    prefix_tree_memory_state_swa_pool_ratio: int
     reco_asyncwrapper_queue_size: int
     reco_asyncwrapper_thread_num: int
     reco_client_config: str
@@ -728,15 +1057,6 @@ class KVCacheConfig:
     reserve_block_ratio: int
     reuse_cache: bool
     seq_size_per_block: int
-    kernel_seq_size_per_block: int
-    enable_tiered_memory_cache: bool
-    enable_gpu_prefix_tree: bool
-    enable_prefix_tree_memory_cache: bool
-    enable_legacy_memory_connector_fallback: bool
-    prefix_tree_memory_state_swa_pool_ratio: int
-    enable_independent_group_eviction: bool
-    device_cache_min_free_blocks: int
-    load_cache_retry_times: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
@@ -750,6 +1070,79 @@ class KVCacheConfig:
     def insertMultiTaskPromptTokens(self, arg0: str, arg1: list[int]) -> None:
         ...
     def to_string(self) -> str:
+        ...
+class KVCacheSpecDesc:
+    block_stride_alignment_min_entries: int
+    block_stride_bytes_alignment: int
+    block_stride_bytes_override: int
+    cache_type: KVCacheSpecType
+    capacity: CacheCapacityPolicyDesc | None
+    compression_ratio: int
+    cp: CacheCpPolicyDesc | None
+    dtype: DataType
+    entry_count_mode: OpaqueBlockEntryCountMode
+    entry_dtype: DataType
+    entry_elems: int
+    explicit_entry_count: int
+    group_type: CacheGroupType | None
+    is_state_cache: bool
+    memory: CacheMemoryPolicyDesc | None
+    reuse: CacheReusePolicyDesc | None
+    state_ring_include_gen_num_per_cycle: bool
+    state_ring_overlap: int
+    tag: str
+    tail: CacheTailPolicyDesc | None
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+class KVCacheSpecType:
+    """
+    Members:
+    
+      MHA
+    
+      MLA
+    
+      LINEAR
+    
+      OPAQUE_KV
+    
+      OPAQUE_STATE
+    """
+    LINEAR: typing.ClassVar[KVCacheSpecType]  # value = <KVCacheSpecType.LINEAR: 2>
+    MHA: typing.ClassVar[KVCacheSpecType]  # value = <KVCacheSpecType.MHA: 0>
+    MLA: typing.ClassVar[KVCacheSpecType]  # value = <KVCacheSpecType.MLA: 1>
+    OPAQUE_KV: typing.ClassVar[KVCacheSpecType]  # value = <KVCacheSpecType.OPAQUE_KV: 3>
+    OPAQUE_STATE: typing.ClassVar[KVCacheSpecType]  # value = <KVCacheSpecType.OPAQUE_STATE: 4>
+    __members__: typing.ClassVar[dict[str, KVCacheSpecType]]  # value = {'MHA': <KVCacheSpecType.MHA: 0>, 'MLA': <KVCacheSpecType.MLA: 1>, 'LINEAR': <KVCacheSpecType.LINEAR: 2>, 'OPAQUE_KV': <KVCacheSpecType.OPAQUE_KV: 3>, 'OPAQUE_STATE': <KVCacheSpecType.OPAQUE_STATE: 4>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
         ...
 class KvCacheDataType:
     """
@@ -829,15 +1222,14 @@ class LayerNormType:
     def value(self) -> int:
         ...
 class LinearAttentionConfig:
+    conv_state_dtype: DataType
     linear_conv_kernel_dim: int
     linear_key_head_dim: int
     linear_num_key_heads: int
     linear_num_value_heads: int
     linear_value_head_dim: int
     ssm_state_dtype: DataType
-    conv_state_dtype: DataType
-
-    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = DataType.TYPE_BF16, conv_state_dtype: DataType = DataType.TYPE_BF16) -> None:
+    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = ..., conv_state_dtype: DataType = ...) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -860,7 +1252,7 @@ class MMPreprocessConfig:
     width: int
     def __getstate__(self) -> tuple:
         ...
-    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: int = -1, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = ..., mm_timeout_ms: int = -1) -> None:
+    def __init__(self, width: int = -1, height: int = -1, min_pixels: int = -1, max_pixels: int = -1, fps: int = -1, min_frames: int = -1, max_frames: int = -1, crop_positions: list[float] = [], mm_timeout_ms: int = -1) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
         ...
@@ -920,108 +1312,6 @@ class MlaOpsType:
     @property
     def value(self) -> int:
         ...
-class KVCacheSpecType:
-    MHA: typing.ClassVar[KVCacheSpecType]
-    MLA: typing.ClassVar[KVCacheSpecType]
-    LINEAR: typing.ClassVar[KVCacheSpecType]
-    OPAQUE_KV: typing.ClassVar[KVCacheSpecType]
-    OPAQUE_STATE: typing.ClassVar[KVCacheSpecType]
-    @property
-    def name(self) -> str: ...
-    @property
-    def value(self) -> int: ...
-
-class CacheGroupType:
-    LINEAR: typing.ClassVar[CacheGroupType]
-    FULL: typing.ClassVar[CacheGroupType]
-    SWA: typing.ClassVar[CacheGroupType]
-
-class CacheReusePolicy:
-    REUSABLE: typing.ClassVar[CacheReusePolicy]
-    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]
-
-class CacheEvictPolicy:
-    CHAIN: typing.ClassVar[CacheEvictPolicy]
-    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
-    NONE: typing.ClassVar[CacheEvictPolicy]
-
-class CacheMemoryPlacement:
-    DEVICE: typing.ClassVar[CacheMemoryPlacement]
-    HOST: typing.ClassVar[CacheMemoryPlacement]
-    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
-
-class CpBlockMappingMode:
-    NONE: typing.ClassVar[CpBlockMappingMode]
-    BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
-    COMPACT_LAST_RANK: typing.ClassVar[CpBlockMappingMode]
-
-class CpBlockSliceMode:
-    NONE: typing.ClassVar[CpBlockSliceMode]
-    EQUAL_BYTES: typing.ClassVar[CpBlockSliceMode]
-    PAYLOAD_BYTES: typing.ClassVar[CpBlockSliceMode]
-
-class OpaqueBlockEntryCountMode:
-    EXPLICIT: typing.ClassVar[OpaqueBlockEntryCountMode]
-    KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]
-    STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]
-
-class CpPrefillSliceLayout:
-    NONE: typing.ClassVar[CpPrefillSliceLayout]
-    PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
-    BLOCK_STRIDE: typing.ClassVar[CpPrefillSliceLayout]
-
-class CacheReusePolicyDesc:
-    enable_prefix_reuse: typing.Any
-    evict_policy: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheCapacityPolicyDesc:
-    reservable: typing.Any
-    explicit_block_num: typing.Any
-    charge_to_paged_budget: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheMemoryPolicyDesc:
-    placement: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheTailPolicyDesc:
-    active_tail_blocks: typing.Any
-    validate_tail_blocks: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheCpPolicyDesc:
-    mapping: typing.Any
-    slice: typing.Any
-    scale_seq_size: typing.Any
-    align_payload: typing.Any
-    prefill_slice_layout: typing.Any
-    def __init__(self) -> None: ...
-
-class KVCacheSpecDesc:
-    tag: str
-    cache_type: KVCacheSpecType
-    dtype: DataType
-    is_state_cache: bool
-    entry_elems: int
-    entry_dtype: DataType
-    entry_count_mode: OpaqueBlockEntryCountMode
-    explicit_entry_count: int
-    compression_ratio: int
-    state_ring_overlap: int
-    state_ring_include_gen_num_per_cycle: bool
-    block_stride_bytes_override: int
-    block_stride_bytes_alignment: int
-    block_stride_alignment_min_entries: int
-    group_type: typing.Any
-    reuse: typing.Any
-    capacity: typing.Any
-    memory: typing.Any
-    tail: typing.Any
-    cp: typing.Any
-    def __init__(self) -> None: ...
-
-
 class ModelConfig:
     add_bias_linear: bool
     attn_config: AttentionConfigs
@@ -1030,23 +1320,26 @@ class ModelConfig:
     deepseek_rope_mscale: float
     embedding_size: int
     eplb_config: EPLBConfig
-    kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     expert_num: int
     extra_data_path: str
+    gen_num_per_cycle: int
     has_lm_head: bool
     has_moe_norm: bool
     has_positional_encoding: bool
     has_post_decoder_layernorm: bool
     has_pre_decoder_layernorm: bool
+    hc_eps: float
+    hc_mult: int
+    hc_sinkhorn_iters: int
     hidden_size: int
     hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int
+    kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     layernorm_eps: float
     linear_attention_config: LinearAttentionConfig
     local_extra_data_path: str
     logit_scale: float
-    lora_infos: dict[str, str]
     max_seq_len: int
     mm_model_config: MMModelConfig
     model_type: str
@@ -1056,10 +1349,6 @@ class ModelConfig:
     moe_normalize_expert_scale: bool
     moe_style: int
     moe_topk_group: int
-    hc_mult: int
-    hc_sinkhorn_iters: int
-    hc_eps: float
-    swiglu_limit: float
     num_hash_layers: int
     num_layers: int
     output_vocab_ids: list[int]
@@ -1076,6 +1365,7 @@ class ModelConfig:
     routed_scaling_factor: float
     scoring_func: int
     special_tokens: SpecialTokens
+    swiglu_limit: float
     tokenizer_path: str
     type_vocab_size: int
     use_attention_linear_bias: bool
@@ -1131,7 +1421,6 @@ class ModelConfig:
     def task_type(self, arg1: typing.Any) -> None:
         ...
 class ModelSpecificConfig:
-    max_lora_model_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1153,6 +1442,7 @@ class MoeConfig:
     use_deepep_low_latency: bool
     use_deepep_moe: bool
     use_deepep_p2p_low_latency: bool
+    use_mori_ep: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1171,6 +1461,8 @@ class MultimodalInput:
     def __init__(self, url: str, mm_type: int, tensor: torch.Tensor, mm_preprocess_config: ...) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def cache_key(self) -> str:
         ...
     def to_string(self) -> str:
         ...
@@ -1207,6 +1499,46 @@ class NormType:
     invalid_type: typing.ClassVar[NormType]  # value = <NormType.invalid_type: 4>
     layernorm: typing.ClassVar[NormType]  # value = <NormType.layernorm: 0>
     rmsnorm: typing.ClassVar[NormType]  # value = <NormType.rmsnorm: 1>
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
+class OpaqueBlockEntryCountMode:
+    """
+    Members:
+    
+      EXPLICIT
+    
+      KERNEL_BLOCK_COMPRESSED
+    
+      STATE_RING
+    """
+    EXPLICIT: typing.ClassVar[OpaqueBlockEntryCountMode]  # value = <OpaqueBlockEntryCountMode.EXPLICIT: 0>
+    KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]  # value = <OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED: 1>
+    STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]  # value = <OpaqueBlockEntryCountMode.STATE_RING: 2>
+    __members__: typing.ClassVar[dict[str, OpaqueBlockEntryCountMode]]  # value = {'EXPLICIT': <OpaqueBlockEntryCountMode.EXPLICIT: 0>, 'KERNEL_BLOCK_COMPRESSED': <OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED: 1>, 'STATE_RING': <OpaqueBlockEntryCountMode.STATE_RING: 2>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -1281,6 +1613,7 @@ class ParallelismConfig:
     role_type: RoleType
     tp_rank: int
     tp_size: int
+    use_ub_comm: bool
     world_rank: int
     world_size: int
     def __getstate__(self) -> tuple:
@@ -1368,15 +1701,13 @@ class QuantAlgo:
         ...
     def isModelOptFP4(self) -> bool:
         ...
-
-    def isQuarkMXFP4(self) -> bool:
-        ...
-
     def isOmniQuant(self) -> bool:
         ...
     def isPerTensorQuant(self) -> bool:
         ...
     def isQuant(self) -> bool:
+        ...
+    def isQuarkMXFP4(self) -> bool:
         ...
     def isSmoothQuant(self) -> bool:
         ...
@@ -1411,7 +1742,7 @@ class QuantMethod:
       W4A8INT4PTPC
     
       ModelOptFP4
-
+    
       QuarkMXFP4
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
@@ -1419,14 +1750,14 @@ class QuantMethod:
     FP8Quant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8Quant: 7>
     GptQ: typing.ClassVar[QuantMethod]  # value = <QuantMethod.GptQ: 2>
     ModelOptFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.ModelOptFP4: 10>
-    QuarkMXFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.QuarkMXFP4: 11>
     None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
     OmniQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.OmniQuant: 5>
     PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
+    QuarkMXFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.QuarkMXFP4: 11>
     SmoothQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.SmoothQuant: 4>
     W4A8INT4PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.W4A8INT4PTPC: 9>
     WeightOnlyPerCol: typing.ClassVar[QuantMethod]  # value = <QuantMethod.WeightOnlyPerCol: 1>
-    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>, 'W4A8INT4PTPC': <QuantMethod.W4A8INT4PTPC: 9>, 'ModelOptFP4': <QuantMethod.ModelOptFP4: 10>}
+    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>, 'W4A8INT4PTPC': <QuantMethod.W4A8INT4PTPC: 9>, 'ModelOptFP4': <QuantMethod.ModelOptFP4: 10>, 'QuarkMXFP4': <QuantMethod.QuarkMXFP4: 11>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -1600,12 +1931,12 @@ class RuntimeConfig:
     max_block_size_per_item: int
     max_generate_batch_size: int
     model_name: str
+    model_warm_up: bool
     reserve_runtime_mem_mb: int
     specify_gpu_arch: str
     use_batch_decode_scheduler: bool
     warm_up: bool
     warm_up_with_loss: bool
-    model_warm_up: bool
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:
@@ -1641,6 +1972,7 @@ class SpeculativeExecutionConfig:
     gen_num_per_cycle: int
     model_type: str
     quantization: str
+    sp_dspark_mask_token_id: int
     sp_max_token_match: int
     sp_min_token_match: int
     tree_decode_config: str
@@ -1673,14 +2005,17 @@ class SpeculativeType:
       EAGLE
     
       DETERMINISTIC
+    
+      DSPARK
     """
     DETERMINISTIC: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.DETERMINISTIC: 5>
+    DSPARK: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.DSPARK: 6>
     EAGLE: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.EAGLE: 4>
     EAGLE3: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.EAGLE3: 3>
     MTP: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.MTP: 2>
     NONE: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.NONE: 0>
     VANILLA: typing.ClassVar[SpeculativeType]  # value = <SpeculativeType.VANILLA: 1>
-    __members__: typing.ClassVar[dict[str, SpeculativeType]]  # value = {'NONE': <SpeculativeType.NONE: 0>, 'VANILLA': <SpeculativeType.VANILLA: 1>, 'MTP': <SpeculativeType.MTP: 2>, 'EAGLE3': <SpeculativeType.EAGLE3: 3>, 'EAGLE': <SpeculativeType.EAGLE: 4>, 'DETERMINISTIC': <SpeculativeType.DETERMINISTIC: 5>}
+    __members__: typing.ClassVar[dict[str, SpeculativeType]]  # value = {'NONE': <SpeculativeType.NONE: 0>, 'VANILLA': <SpeculativeType.VANILLA: 1>, 'MTP': <SpeculativeType.MTP: 2>, 'EAGLE3': <SpeculativeType.EAGLE3: 3>, 'EAGLE': <SpeculativeType.EAGLE: 4>, 'DETERMINISTIC': <SpeculativeType.DETERMINISTIC: 5>, 'DSPARK': <SpeculativeType.DSPARK: 6>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:

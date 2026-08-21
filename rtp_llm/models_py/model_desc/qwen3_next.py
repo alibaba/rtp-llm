@@ -565,15 +565,238 @@ class Qwen3NextAttention(CausalAttention):
             quant_config,
             hw_kernel_config=hw_kernel_config,
         )
-        # maybe fuse gate in qkv_proj later
-        self.gate = LinearFactory.create_linear_from_weights(
-            weights,
-            W.attn_gate_w,
-            W.attn_gate_s,
-            None,
-            quant_config,
-            hw_kernel_config=hw_kernel_config,
-        )
+        self._qkv_size = self.q_size + 2 * (attn_config.kv_head_num * self.head_dim)
+        self._gate_size = self.q_size
+        blocker = self._qkv_gate_fusion_blocker(weights, quant_config)
+        self._qkv_gate_fused = blocker is None
+        self.gate: Optional[nn.Module] = None
+        if self._qkv_gate_fused:
+            fused_weight, fused_scales = self._fuse_qkv_gate_weights(weights)
+            self.qkv_proj = LinearFactory.create_linear(
+                weight=fused_weight,
+                bias=None,
+                weight_scales=fused_scales,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+        else:
+            logging.info("Qwen3Next QKV+gate fusion disabled: %s", blocker)
+            self.gate = LinearFactory.create_linear_from_weights(
+                weights,
+                W.attn_gate_w,
+                W.attn_gate_s,
+                None,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+
+    def _qkv_gate_fusion_blocker(
+        self,
+        weights: Dict[str, torch.Tensor],
+        quant_config: Optional[object],
+    ) -> Optional[str]:
+        """Return why QKV+gate fusion cannot be applied, or None when it can."""
+        qkv_weight = weights[W.attn_qkv_w]
+        gate_weight = weights[W.attn_gate_w]
+        qkv_scales = weights.get(W.attn_qkv_s)
+        gate_scales = weights.get(W.attn_gate_s)
+
+        if qkv_weight.dim() != 2 or gate_weight.dim() != 2:
+            return f"qkv dim {qkv_weight.dim()} / gate dim {gate_weight.dim()} is not 2"
+        if qkv_weight.dtype != gate_weight.dtype:
+            return f"dtype mismatch: qkv {qkv_weight.dtype} vs gate {gate_weight.dtype}"
+        if qkv_weight.device != gate_weight.device:
+            return (
+                f"device mismatch: qkv {qkv_weight.device} vs gate {gate_weight.device}"
+            )
+        for key in (W.attn_qkv_b, W.attn_qkv_s2, W.attn_qkv_i_s):
+            if weights.get(key) is not None:
+                return f"unsupported auxiliary qkv tensor {key}"
+
+        if qkv_scales is None and gate_scales is None:
+            if qkv_weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+                return f"unquantized fusion needs a float dtype, got {qkv_weight.dtype}"
+            if (
+                qkv_weight.shape[0] != gate_weight.shape[0]
+                or qkv_weight.shape[1] != self._qkv_size
+                or gate_weight.shape[1] != self._gate_size
+            ):
+                return (
+                    f"unexpected [K, N] shapes qkv {tuple(qkv_weight.shape)} / gate "
+                    f"{tuple(gate_weight.shape)}, expected N {self._qkv_size}"
+                    f" / {self._gate_size}"
+                )
+            return None
+
+        if qkv_scales is None or gate_scales is None:
+            return "only one of qkv/gate carries scales"
+        method = quant_config.get_method() if quant_config is not None else None
+        if method != "FP8_PER_BLOCK":
+            return f"quant method {method} is not FP8_PER_BLOCK"
+        if torch.version.hip is not None:
+            return "quantized fusion is not implemented for ROCm"
+        if qkv_weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+            return f"FP8_PER_BLOCK weight has unexpected dtype {qkv_weight.dtype}"
+        if qkv_scales.dim() != 2 or gate_scales.dim() != 2:
+            return f"scale dim {qkv_scales.dim()} / {gate_scales.dim()} is not 2"
+        if qkv_scales.dtype != gate_scales.dtype:
+            return (
+                f"scale dtype mismatch: qkv {qkv_scales.dtype} vs "
+                f"gate {gate_scales.dtype}"
+            )
+        if qkv_scales.device != gate_scales.device:
+            return (
+                f"scale device mismatch: qkv {qkv_scales.device} vs "
+                f"gate {gate_scales.device}"
+            )
+
+        if qkv_scales.dtype == torch.int32:
+            # E8M0 keeps the loader's native [N, ceil(K / 512)] layout.
+            if (
+                qkv_weight.shape[0] != self._qkv_size
+                or gate_weight.shape[0] != self._gate_size
+                or qkv_weight.shape[1] != gate_weight.shape[1]
+            ):
+                return (
+                    f"unexpected [N, K] shapes qkv {tuple(qkv_weight.shape)} / gate "
+                    f"{tuple(gate_weight.shape)}, expected N {self._qkv_size}"
+                    f" / {self._gate_size}"
+                )
+            if (
+                qkv_scales.shape[0] != self._qkv_size
+                or gate_scales.shape[0] != self._gate_size
+                or qkv_scales.shape[1] != gate_scales.shape[1]
+                or qkv_scales.shape[1] != (qkv_weight.shape[1] + 511) // 512
+            ):
+                return (
+                    f"unexpected packed UE8M0 scale shapes qkv "
+                    f"{tuple(qkv_scales.shape)} / gate {tuple(gate_scales.shape)}"
+                )
+            # DeepGEMM TMA-aligns the MN dim of the packed UE8M0 scale, and the fused
+            # buffer keeps MN as the minor (stride-1) dim, so both halves must land on
+            # a 16B boundary.
+            alignment = 16 // qkv_scales.element_size()
+            if self._qkv_size % alignment or self._gate_size % alignment:
+                return (
+                    f"MN {self._qkv_size} / {self._gate_size} is not a multiple of "
+                    f"{alignment} required by TMA-aligned UE8M0 scales"
+                )
+            return None
+
+        if qkv_scales.dtype == torch.float32:
+            if (
+                qkv_weight.shape[0] != gate_weight.shape[0]
+                or qkv_weight.shape[1] != self._qkv_size
+                or gate_weight.shape[1] != self._gate_size
+            ):
+                return (
+                    f"unexpected [K, N] shapes qkv {tuple(qkv_weight.shape)} / gate "
+                    f"{tuple(gate_weight.shape)}, expected N {self._qkv_size}"
+                    f" / {self._gate_size}"
+                )
+            # The fused N blocks are the qkv blocks followed by the gate blocks, which
+            # only lines up with the fused weight when each N is 128-aligned.
+            if (
+                qkv_scales.shape[0] != gate_scales.shape[0]
+                or qkv_scales.shape[0] != (qkv_weight.shape[0] + 127) // 128
+                or qkv_scales.shape[1] * 128 != self._qkv_size
+                or gate_scales.shape[1] * 128 != self._gate_size
+            ):
+                return (
+                    f"unexpected block scale shapes qkv {tuple(qkv_scales.shape)} / "
+                    f"gate {tuple(gate_scales.shape)}"
+                )
+            return None
+
+        return f"unsupported FP8_PER_BLOCK scale dtype {qkv_scales.dtype}"
+
+    def _fuse_qkv_gate_weights(
+        self, weights: Dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Build the fused QKV+gate weight (and scales) for a single GEMM.
+        """
+        qkv_weight = weights[W.attn_qkv_w]
+        gate_weight = weights[W.attn_gate_w]
+        qkv_scales = weights.get(W.attn_qkv_s)
+        gate_scales = weights.get(W.attn_gate_s)
+
+        # E8M0 stays in its native [N, K] layout after weight loading.
+        if qkv_scales is not None and qkv_scales.dtype == torch.int32:
+            fused_weight = torch.cat([qkv_weight, gate_weight], dim=0).contiguous()
+            # The packed UE8M0 scale is deliberately MN-major (see the "weight scale
+            # need be non contiguous" note in per_block_fp8_quant_weight._postprocess)
+            # and DeepGEMM asserts sf.stride(-2) == 1, so concatenate in the transposed
+            # view to keep MN as the stride-1 dim instead of cat + contiguous.
+            fused_scales = torch.cat([qkv_scales.t(), gate_scales.t()], dim=1).t()
+            weights[W.attn_qkv_w] = fused_weight[: self._qkv_size]
+            weights[W.attn_gate_w] = fused_weight[self._qkv_size :]
+            weights[W.attn_qkv_s] = fused_scales[: self._qkv_size]
+            weights[W.attn_gate_s] = fused_scales[self._qkv_size :]
+            return fused_weight, fused_scales
+
+        # Regular FP8 is exposed as [K, N], but its storage remains [N, K].
+        if qkv_scales is not None:
+            hidden_size = qkv_weight.shape[0]
+            qkv_weight_real = qkv_weight.reshape(self._qkv_size, hidden_size)
+            gate_weight_real = gate_weight.reshape(self._gate_size, hidden_size)
+            fused_weight_real = torch.cat(
+                [qkv_weight_real, gate_weight_real], dim=0
+            ).contiguous()
+            fused_weight = fused_weight_real.reshape(
+                hidden_size, self._qkv_size + self._gate_size
+            )
+            weights[W.attn_qkv_w] = fused_weight_real[: self._qkv_size].reshape(
+                hidden_size, self._qkv_size
+            )
+            weights[W.attn_gate_w] = fused_weight_real[self._qkv_size :].reshape(
+                hidden_size, self._gate_size
+            )
+
+            scale_k = qkv_scales.shape[0]
+            qkv_scale_n = qkv_scales.shape[1]
+            gate_scale_n = gate_scales.shape[1]
+            qkv_scales_real = qkv_scales.reshape(qkv_scale_n, scale_k)
+            gate_scales_real = gate_scales.reshape(gate_scale_n, scale_k)
+            fused_scales_real = torch.cat(
+                [qkv_scales_real, gate_scales_real], dim=0
+            ).contiguous()
+            fused_scales = fused_scales_real.reshape(
+                scale_k, qkv_scale_n + gate_scale_n
+            )
+            weights[W.attn_qkv_s] = fused_scales_real[:qkv_scale_n].reshape(
+                scale_k, qkv_scale_n
+            )
+            weights[W.attn_gate_s] = fused_scales_real[qkv_scale_n:].reshape(
+                scale_k, gate_scale_n
+            )
+            return fused_weight, fused_scales
+
+        if torch.version.hip is not None:
+            fused_weight = torch.cat([qkv_weight.t(), gate_weight.t()], dim=0).t()
+        else:
+            hidden_size = qkv_weight.shape[0]
+            fused_weight = torch.empty(
+                hidden_size,
+                self._qkv_size + self._gate_size,
+                dtype=qkv_weight.dtype,
+                device=qkv_weight.device,
+            )
+            fused_weight[:, : self._qkv_size].copy_(qkv_weight)
+            fused_weight[:, self._qkv_size :].copy_(gate_weight)
+        weights[W.attn_qkv_w] = fused_weight[:, : self._qkv_size]
+        weights[W.attn_gate_w] = fused_weight[:, self._qkv_size :]
+        return fused_weight, None
+
+    def _project_qkv_gate(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._qkv_gate_fused:
+            return self.qkv_proj(hidden_states), self.gate(hidden_states)
+        fused = self.qkv_proj(hidden_states)
+        qkv, gate = torch.split(fused, [self._qkv_size, self._gate_size], dim=-1)
+        # FusedRopeKVCache*Op needs packed rows: it writes RoPE'd Q back via data_ptr().
+        return qkv.contiguous(), gate
 
     def forward(
         self,
@@ -583,9 +806,8 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
     ) -> torch.Tensor:
-        gate = self.gate(hidden_states)
-        attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
-        return attn_out
+        qkv, gate = self._project_qkv_gate(hidden_states)
+        return super().forward(hidden_states, fmha_impl, kv_cache, gate=gate, qkv=qkv)
 
 
 class Qwen3NextGatedDeltaNet(nn.Module):
