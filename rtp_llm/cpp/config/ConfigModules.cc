@@ -126,8 +126,8 @@ std::string KVCacheConfig::to_string() const {
         << "disk_cache_buffered_io: " << disk_cache_buffered_io << "\n"
         << "disk_cache_sync_timeout_ms: " << disk_cache_sync_timeout_ms << "\n"
         << "disk_cache_staging_block_count: " << disk_cache_staging_block_count << "\n"
-        << "memory_cache_max_descriptors_per_transfer_batch: "
-        << memory_cache_max_descriptors_per_transfer_batch << "\n"
+        << "memory_cache_max_descriptors_per_transfer_batch: " << memory_cache_max_descriptors_per_transfer_batch
+        << "\n"
         << "linear_step: " << linear_step << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
@@ -147,7 +147,8 @@ std::string KVCacheConfig::to_string() const {
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
-        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n";
+        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n"
+        << "block_tree_full_prefix_scan_interval_ms: " << block_tree_full_prefix_scan_interval_ms << "\n";
     return oss.str();
 }
 

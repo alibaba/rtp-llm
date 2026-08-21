@@ -231,6 +231,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Deprecated compatibility option. BlockTree cache settlement is always coordinated internally.",
     )
 
+    kv_cache_group.add_argument(
+        "--block_tree_full_prefix_scan_interval_ms",
+        env_name="BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS",
+        bind_to=(kv_cache_config, "block_tree_full_prefix_scan_interval_ms"),
+        type=int,
+        default=0,
+        help="BlockTreeCache FULL 前缀异常扫描周期，单位毫秒；0 表示关闭且不创建线程，非 0 时必须不小于 1000。"
+        "单轮扫描节点数和单 cycle 明细上限由 scanner 内部常量固定，不可配置。",
+    )
+
     # Remote connector configuration arguments
     kv_cache_group.add_argument(
         "--reco_enable_vipserver",

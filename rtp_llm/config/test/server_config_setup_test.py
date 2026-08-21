@@ -79,6 +79,7 @@ class GenerateConfigTest(TestCase):
             "ENABLE_HOST_CACHE_PINNED": "0",
             "HOST_CACHE_SIZE_MB": "2048",
             "HOST_CACHE_SYNC_TIMEOUT_MS": "6789",
+            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
         },
         clear=True,
     )
@@ -96,6 +97,7 @@ class GenerateConfigTest(TestCase):
         self.assertFalse(config.enable_host_cache_pinned)
         self.assertEqual(config.host_cache_size_mb, 2048)
         self.assertEqual(config.host_cache_sync_timeout_ms, 6789)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
 
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
@@ -107,6 +109,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.host_eviction_policy, "lru")
         self.assertEqual(config.disk_eviction_policy, "fifo")
         self.assertEqual(config.device_cache_min_free_blocks, 0)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
 
     def test_legacy_kv_cache_cli_aliases(self):
         config = setup_args(
@@ -188,9 +191,11 @@ class GenerateConfigTest(TestCase):
         config.dsv4_fixed_pool_blocks = 512
         config.dsv4_hca_state_pool_blocks = 256
         config.dsv4_fixed_pool_use_memory = True
+        config.memory_cache_max_descriptors_per_transfer_batch = 17
+        config.block_tree_full_prefix_scan_interval_ms = 5000
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 56)
+        self.assertEqual(len(state), 57)
         self.assertEqual(state[:2], ("KVCacheConfig", 1))
 
         restored = pickle.loads(pickle.dumps(config))
@@ -204,6 +209,8 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 512)
         self.assertEqual(restored.dsv4_hca_state_pool_blocks, 256)
         self.assertTrue(restored.dsv4_fixed_pool_use_memory)
+        self.assertEqual(restored.memory_cache_max_descriptors_per_transfer_batch, 17)
+        self.assertEqual(restored.block_tree_full_prefix_scan_interval_ms, 5000)
 
         config.enable_disk_cache = True
         restored_enabled = pickle.loads(pickle.dumps(config))
