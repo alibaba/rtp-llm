@@ -27,6 +27,25 @@ const ReusableGroupLocation* BlockTree::reusableGroupLocation(size_t group_id) c
     return location_it == reusable_group_locations_.end() ? nullptr : &location_it->second;
 }
 
+BlockTreeNodeRangeResult BlockTree::visitNodeRangeLocked(size_t                                      cursor,
+                                                         size_t                                      cycle_end_index,
+                                                         size_t                                      max_nodes,
+                                                         const std::function<void(const TreeNode&)>& visitor) const {
+    BlockTreeNodeRangeResult result;
+    result.tree_size = node_pool_.size();
+
+    const size_t end   = std::min(cycle_end_index, node_pool_.size());
+    size_t       index = cursor;
+    while (index < end && result.visited < max_nodes) {
+        visitor(*node_pool_[index]);
+        ++index;
+        ++result.visited;
+    }
+    result.next_cursor    = index;
+    result.cycle_complete = index >= end;
+    return result;
+}
+
 BlockTree::~BlockTree() {
     releaseNode(root_.get());
     for (const std::unique_ptr<TreeNode>& node : node_pool_) {
@@ -64,10 +83,10 @@ void BlockTree::releaseNode(TreeNode* node) {
 }
 
 TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
-    auto node        = std::make_unique<TreeNode>();
-    node->cache_key  = key;
-    node->parent     = parent;
-    node->index      = node_pool_.size();
+    auto node       = std::make_unique<TreeNode>();
+    node->cache_key = key;
+    node->parent    = parent;
+    node->index     = node_pool_.size();
     node->group_set_resources.resize(group_sets_.size());
     auto* raw = node.get();
     node_pool_.push_back(std::move(node));
@@ -204,8 +223,8 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 }
             }
 
-            current = child;
-            const auto& incoming_resources = resources[i];
+            current                                = child;
+            const auto&         incoming_resources = resources[i];
             std::vector<size_t> adopted_group_set_ids;
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
                 GroupSetResource&       existing      = current->group_set_resources[group_set_id];

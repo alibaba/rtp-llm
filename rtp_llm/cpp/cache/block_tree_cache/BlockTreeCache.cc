@@ -92,11 +92,29 @@ bool BlockTreeCache::init() {
                          group_set->hostPool() ? "enabled" : "null",
                          group_set->diskPool() ? "enabled" : "null");
     }
+    if (config_.full_prefix_scan_interval_ms > 0) {
+        FullPrefixScanOptions scan_options;
+        scan_options.interval_ms = config_.full_prefix_scan_interval_ms;
+        scan_options.world_rank  = config_.world_rank;
+        scan_options.local_rank  = config_.local_rank;
+        auto scanner             = std::make_unique<FullPrefixInvariantScanner>(*tree_, mutex_, scan_options);
+        if (scanner->start()) {
+            full_prefix_scanner_ = std::move(scanner);
+            RTP_LLM_LOG_INFO(
+                "FULL prefix invariant scanner enabled, interval_ms=%ld nodes_per_round=%zu max_details=%zu",
+                scan_options.interval_ms,
+                scan_options.nodes_per_round,
+                scan_options.max_details_per_cycle);
+        }
+    }
     initialized_ = true;
     return true;
 }
 
 BlockTreeCache::~BlockTreeCache() {
+    if (full_prefix_scanner_) {
+        full_prefix_scanner_->stop();
+    }
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     loader_.shutdown();
     if (storage_backend_) {

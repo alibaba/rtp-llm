@@ -163,15 +163,15 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio                   = 5;
-    int                                     max_block_size_per_item               = 16;
-    int64_t                                 host_cache_size_mb                    = 0;
-    int64_t                                 host_cache_sync_timeout_ms            = 10000;
-    std::string                             disk_cache_paths                      = "";
-    int64_t                                 disk_cache_size_mb                    = 0;
-    bool                                    disk_cache_buffered_io                = true;
-    int64_t                                 disk_cache_sync_timeout_ms            = 30000;
-    int64_t                                 disk_cache_staging_block_count        = 4;
+    int64_t                                 reserve_block_ratio                             = 5;
+    int                                     max_block_size_per_item                         = 16;
+    int64_t                                 host_cache_size_mb                              = 0;
+    int64_t                                 host_cache_sync_timeout_ms                      = 10000;
+    std::string                             disk_cache_paths                                = "";
+    int64_t                                 disk_cache_size_mb                              = 0;
+    bool                                    disk_cache_buffered_io                          = true;
+    int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
+    int64_t                                 disk_cache_staging_block_count                  = 4;
     int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 64;
     int                                     linear_step = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
@@ -215,6 +215,9 @@ struct KVCacheConfig {
     std::string kv_cache_event_instance_group        = "";
     std::string kv_cache_event_instance_id           = "";
     std::string kv_cache_event_host_ip_port          = "";
+    // BlockTreeCache FULL prefix invariant scanner; interval 0 disables the scanner thread.
+    // Batch size and detail cap are scanner-internal constants, not user-tunable.
+    int64_t block_tree_full_prefix_scan_interval_ms = 0;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
