@@ -1026,9 +1026,14 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
     // Cache the per-stream GPU propose tokens for the next decode step.
-    // PDFUSION path provides this; PD-disaggregate path leaves it undefined and
-    // readers fall back to the CPU `tokens` tensor.
-    sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
+    // PDFUSION refreshes this every step. PD-disaggregate initializes it at
+    // handoff, but later updates can omit a refresh.
+    // Some stream updates do not produce a next-step proposal. Keep the last
+    // valid GPU mirror instead of exposing the legacy -1 CPU sentinel to the
+    // next MTP gather.
+    if (update_info.draft_token_gpu.defined()) {
+        sp_output_buffer_->propose_tokens_gpu = update_info.draft_token_gpu;
+    }
 
     // for spec-decode linear attention, we need to adjust cache blocks
     if (accept_token_num > 1 && stream_cache_resource_) {

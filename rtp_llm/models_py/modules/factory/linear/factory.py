@@ -111,6 +111,16 @@ class LinearFactory:
         ]
 
         if not candidates:
+            quant_method = (
+                quant_config.get_method() if quant_config is not None else None
+            )
+            if quant_method == "W8A8_INT8_PER_CHANNEL_COMPRESSED":
+                raise ValueError(
+                    "W8A8_INT8_PER_CHANNEL_COMPRESSED weights were loaded, but "
+                    "no registered Linear compute backend can consume them; "
+                    "install or register a backend with W8A8 INT8 per-channel "
+                    "execution support"
+                )
             raise ValueError(
                 f"No suitable Linear strategy found for:"
                 f"weight.dtype={weight.dtype}, "

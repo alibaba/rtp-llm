@@ -6,8 +6,10 @@ from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
+    CompressedW8A8Int8PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     Fp8DynamicPerTensorQuantConfig,
+    MXFp4QuarkQuantConfig,
     W4a8Int4PerChannelQuantConfig,
 )
 from rtp_llm.device.device_type import DeviceType
@@ -28,7 +30,15 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
     CudaFp8PerBlockPureCPStrategy,
     CudaFp8PerBlockPureDPStrategy,
     CudaFp8PerTensorNoDPStrategy,
+    CudaNoQuantCppStrategy,
+    CudaNoQuantDpNormalStrategy,
     CudaW4a8Int4PerChannelNoDPStrategy,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy.ep import (
+    RocmEpNormalStrategy,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
+    ConditionChecker,
 )
 from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig
 
@@ -62,6 +72,13 @@ def create_model_config_with_w4a8_int4_per_channel_quant() -> ModelConfig:
     """Create ModelConfig with W4A8 INT4 per-channel quantization"""
     model_config = ModelConfig()
     model_config.quant_config = W4a8Int4PerChannelQuantConfig()
+    return model_config
+
+
+def create_model_config_with_w8a8_int8_per_channel_quant() -> ModelConfig:
+    """Create ModelConfig with compressed-tensors W8A8 INT8 quantization."""
+    model_config = ModelConfig()
+    model_config.quant_config = CompressedW8A8Int8PerChannelQuantConfig()
     return model_config
 
 
@@ -137,6 +154,77 @@ def create_moe_config_adapter(
         moe_config=moe_config,
         enable_cuda_graph=enable_cuda_graph,
     )
+
+
+class TestCudaNoQuantFallbackStrategies(unittest.TestCase):
+    """No-quant strategy conditions must reject quantized checkpoints."""
+
+    def _conditions_pass(
+        self, strategy: type, model_config: ModelConfig, moe_strategy: str
+    ) -> bool:
+        config = create_moe_config_adapter(
+            model_config=model_config,
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(moe_strategy=moe_strategy),
+        )
+        checker = ConditionChecker(f"{strategy.__name__}.check_conditions()")
+        strategy.check_conditions(checker, config)
+        return checker.all_passed()
+
+    def test_cpp_accepts_unquantized_checkpoint(self) -> None:
+        self.assertTrue(
+            self._conditions_pass(
+                CudaNoQuantCppStrategy,
+                create_model_config_without_quant(),
+                "no_auant_cpp",
+            )
+        )
+
+    def test_cpp_rejects_quantized_checkpoint(self) -> None:
+        self.assertFalse(
+            self._conditions_pass(
+                CudaNoQuantCppStrategy,
+                create_model_config_with_w8a8_int8_per_channel_quant(),
+                "no_auant_cpp",
+            )
+        )
+
+    def test_dp_normal_accepts_unquantized_checkpoint(self) -> None:
+        self.assertTrue(
+            self._conditions_pass(
+                CudaNoQuantDpNormalStrategy,
+                create_model_config_without_quant(),
+                "no_auant_dp_normal",
+            )
+        )
+
+    def test_dp_normal_rejects_quantized_checkpoint(self) -> None:
+        self.assertFalse(
+            self._conditions_pass(
+                CudaNoQuantDpNormalStrategy,
+                create_model_config_with_w8a8_int8_per_channel_quant(),
+                "no_auant_dp_normal",
+            )
+        )
+
+
+class TestRocmEpStrategyQuantFiltering(unittest.TestCase):
+    """Unsupported quant methods must leave ROCm EP candidate probing cleanly."""
+
+    def test_unsupported_quant_methods_return_false(self) -> None:
+        for quant_config in (
+            CompressedW8A8Int8PerChannelQuantConfig(),
+            MXFp4QuarkQuantConfig(),
+        ):
+            with self.subTest(quant_method=quant_config.get_method()):
+                model_config = ModelConfig()
+                model_config.quant_config = quant_config
+                config = create_moe_config_adapter(
+                    model_config=model_config,
+                    parallelism_config=create_parallelism_config(),
+                    moe_config=create_moe_config(),
+                )
+                self.assertFalse(RocmEpNormalStrategy().can_handle(config))
 
 
 class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):

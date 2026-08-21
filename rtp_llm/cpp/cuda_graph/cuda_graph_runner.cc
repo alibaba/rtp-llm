@@ -387,6 +387,16 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 #endif
 
+    if (!has_tagged_cache) {
+        // The host mirror must be cleared with the device block table. fillParams
+        // walks every graph-batch row and may dereference padding rows when a
+        // backend keeps input_lengths uniform for graph-stable cu_seqlens. Without
+        // this reset, a padding row can retain a previous replay's block ID and
+        // route a KV write into a live request's block. Block 0 is reserved and is
+        // therefore the safe destination for padding rows.
+        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(0);
+    }
+
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
     // (see OpDefs.h). They are NOT consumed by any GPU attention kernel during CUDA graph replay;
     // attention kernels only use kv_cache_kernel_block_id_{host,device}. Cache store operations

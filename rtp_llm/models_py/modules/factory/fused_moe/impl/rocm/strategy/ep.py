@@ -22,9 +22,27 @@ logger = logging.getLogger(__name__)
 class RocmEpNormalStrategy(MoeStrategy):
     """ROCm EP normal mode strategy"""
 
+    _SUPPORTED_QUANT_METHODS = {
+        None,
+        "FP8_PER_CHANNEL_COMPRESSED",
+        "FP8_PER_CHANNEL_QUARK",
+        "FP8_PER_BLOCK",
+        "modelopt_fp4",
+    }
+
+    @staticmethod
+    def _get_quant_method(config: MoEConfigAdapter) -> Any:
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
+            MoeConfigResolver,
+        )
+
+        return MoeConfigResolver().get_quant_method(config)
+
     def can_handle(self, config: MoEConfigAdapter) -> bool:
-        """Store config for use in get_attributes(), then delegate to base."""
+        """Filter unsupported quant methods before resolving EP dependencies."""
         self._config = config
+        if self._get_quant_method(config) not in self._SUPPORTED_QUANT_METHODS:
+            return False
         return super().can_handle(config)
 
     def _resolve_executor_and_quant(
@@ -40,15 +58,10 @@ class RocmEpNormalStrategy(MoeStrategy):
             RocmExpertsFp8PerBlock,
             RocmExpertsFp8PerChannel,
         )
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
-            MoeConfigResolver,
-        )
-
         config = getattr(self, "_config", None)
-        resolver = MoeConfigResolver()
-        quant_method = resolver.get_quant_method(config) if config else None
+        quant_method = self._get_quant_method(config) if config else None
 
-        if quant_method in ("FP4_PER_GROUP", "FP4_PER_GROUP_QUARK", "modelopt_fp4"):
+        if quant_method == "modelopt_fp4":
             executor_class = RocmExpertsFp4PerGroup
             quant_config = FusedMoEQuantConfig(
                 quant_dtype=torch.float4_e2m1fn_x2,
@@ -67,7 +80,7 @@ class RocmEpNormalStrategy(MoeStrategy):
                 per_out_ch_quant=True,
                 block_shape=None,
             )
-        elif quant_method in ("FP8_PER_BLOCK", "FP8_PER_BLOCK_QUARK"):
+        elif quant_method == "FP8_PER_BLOCK":
             executor_class = RocmExpertsFp8PerBlock
             quant_config = FusedMoEQuantConfig(
                 quant_dtype=get_rocm_fp8_dtype(),
@@ -75,9 +88,13 @@ class RocmEpNormalStrategy(MoeStrategy):
                 per_out_ch_quant=False,
                 block_shape=[128, 128],
             )
-        else:
+        elif quant_method is None:
             executor_class = RocmExpertsBf16
             quant_config = FusedMoEQuantConfig(quant_dtype=None)
+        else:
+            raise ValueError(
+                f"ROCm EP does not support quantization method {quant_method}"
+            )
 
         return executor_class, quant_config
 

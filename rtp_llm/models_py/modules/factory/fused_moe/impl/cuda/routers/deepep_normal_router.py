@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 
@@ -106,17 +106,9 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         )
         quant_method = MoeConfigResolver().get_quant_method(self.config)
         use_fp4 = quant_method == "modelopt_fp4"
-        if use_fp8:
-            a1_quant, a1_scale_quant = self._do_quant(a1)
-            assert a1_scale_quant is not None
-            tp_expert_a1 = torch.narrow(a1_quant, 0, slice_begin, slice_size)
-            tp_expert_a1_scale = torch.narrow(
-                a1_scale_quant, 0, slice_begin, slice_size
-            )
-            tp_expert_input = (tp_expert_a1, tp_expert_a1_scale)
-        else:
-            tp_expert_a1 = torch.narrow(a1, 0, slice_begin, slice_size)
-            tp_expert_input = tp_expert_a1
+        tp_expert_input = self._prepare_dispatch_input(
+            a1, slice_begin, slice_size, use_fp8
+        )
 
         # pre dispatch
         tp_expert_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size).to(
@@ -156,14 +148,16 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         expert_x_scale: Optional[torch.Tensor] = None
         expert_x: torch.Tensor
-        if use_fp8:
-            assert isinstance(output, tuple), "output should be a tuple"
+        if isinstance(output, tuple):
             expert_x, expert_x_scale = output
             # TODO: move it to the executor
-            if self.quant_config.is_per_act_token:
+            if use_fp8 and self.quant_config.is_per_act_token:
                 expert_x_scale = expert_x_scale[:, 0].contiguous()
         else:
-            assert isinstance(output, torch.Tensor), "output should be a tensor"
+            if use_fp8:
+                raise ValueError(
+                    "FP8 DeepEP dispatch must return (activation, scale)"
+                )
             expert_x = output
 
         expert_num_tokens = torch.tensor(
@@ -230,6 +224,29 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         # out_token should be a tensor with shape and dtype like a1
         return out_token
+
+    def _prepare_dispatch_input(
+        self,
+        a1: torch.Tensor,
+        slice_begin: int,
+        slice_size: int,
+        use_fp8: bool,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Prepare one TP slice for DeepEP dispatch.
+
+        Backends may override this hook to dispatch a tensor together with
+        backend-specific metadata such as a per-token quantization scale. A
+        tuple return must preserve the scale layout expected by that backend's
+        executor; the base FP8 path returns ``(activation, scale)``.
+        """
+        if use_fp8:
+            a1_quant, a1_scale_quant = self._do_quant(a1)
+            assert a1_scale_quant is not None
+            return (
+                torch.narrow(a1_quant, 0, slice_begin, slice_size),
+                torch.narrow(a1_scale_quant, 0, slice_begin, slice_size),
+            )
+        return torch.narrow(a1, 0, slice_begin, slice_size)
 
     def _do_quant(
         self, a1: torch.Tensor

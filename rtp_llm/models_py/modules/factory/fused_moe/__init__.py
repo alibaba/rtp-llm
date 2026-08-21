@@ -22,6 +22,7 @@ from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
 
+from rtp_llm.utils.backend_registry import run_backend_registrations
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
 from .strategy_registry import StrategyRegistry
@@ -113,3 +114,7 @@ else:
         registry.register(CudaFp4EpNormalStrategy())
         registry.register(CudaFp4NoDPStrategy())
     FusedMoeFactory.set_registry(registry)
+
+# Out-of-tree backends registered a hook before this module existed. Runs for
+# every device branch, after the registry is populated and installed.
+run_backend_registrations("fused_moe", registry=registry)
