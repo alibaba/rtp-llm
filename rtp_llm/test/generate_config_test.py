@@ -31,10 +31,8 @@ from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import CustomChatRenderer
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
-from rtp_llm.structure.request_extractor import (
-    RequestExtractor,
-    request_id_field_name,
-)
+from rtp_llm.structure.request_constants import request_id_field_name
+from rtp_llm.structure.request_extractor import RequestExtractor
 
 
 class GenerateConfigTest(TestCase):
@@ -231,15 +229,15 @@ class GenerateConfigTest(TestCase):
 
     def test_select_tokens_str_id_union_dedup(self):
         # 同时提供 select_tokens_str 与 select_tokens_id 时取去重并集:显式 id 保留、
-        # str 派生 token 全部并入、整体无重复;重复调用(batch 共享)保持幂等。
+        # str 派生 token 去重后按序追加;重复调用(batch 共享)保持幂等。
         tokenizer = QWenTokenizer(
             f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
         )
-        str_ids = []
-        for token_str in ["1", "2"]:
-            str_ids += tokenizer.encode(token_str)
+        self.assertEqual(tokenizer.encode("1"), [16])
+        self.assertEqual(tokenizer.encode("2"), [17])
 
-        config = GenerateConfig(select_tokens_str=["1", "2"], select_tokens_id=[99999])
+        # 16 同时来自显式 id 和字符串。显式顺序优先，派生出的 16 被跳过，17 追加。
+        config = GenerateConfig(select_tokens_str=["1", "2"], select_tokens_id=[16])
         for _ in range(2):  # 幂等:第二次调用不应改变结果
             Pipeline.create_generate_config(
                 generate_config=config,
@@ -249,13 +247,34 @@ class GenerateConfigTest(TestCase):
                 generate_env_config=GenerateEnvConfig(),
             )
 
-        # 显式 id 保留,str 未被丢弃,且无重复
-        self.assertIn(99999, config.select_tokens_id)
-        for token_id in str_ids:
-            self.assertIn(token_id, config.select_tokens_id)
-        self.assertEqual(
-            len(config.select_tokens_id), len(set(config.select_tokens_id))
+        self.assertEqual(config.select_tokens_id, [16, 17])
+
+    def test_select_tokens_preserves_explicit_duplicates(self):
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
         )
+
+        # 显式 id 的重复项是既有 API 行为；只对字符串派生的 id 做稳定去重。
+        config = GenerateConfig(
+            select_tokens_str=["1", "2"], select_tokens_id=[16, 16, 99999]
+        )
+        config.convert_select_tokens(vocab_size=200000, tokenizer=tokenizer)
+
+        self.assertEqual(config.select_tokens_id, [16, 16, 99999, 17])
+
+    def test_select_tokens_validation_failure_leaves_state_unchanged(self):
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+        config = GenerateConfig(select_tokens_str=["1"], select_tokens_id=[0])
+
+        # "1" 编码为 16，在 vocab_size=16 时越界。失败不能把半成品写回共享对象。
+        with self.assertRaisesRegex(
+            FtRuntimeException, "should be less than vocab_size"
+        ):
+            config.convert_select_tokens(vocab_size=16, tokenizer=tokenizer)
+
+        self.assertEqual(config.select_tokens_id, [0])
 
     def test_prepare_chain_idempotent(self):
         # 契约守卫:create_generate_config 链上所有 prepare 方法必须幂等。

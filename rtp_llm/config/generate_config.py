@@ -577,8 +577,8 @@ class GenerateConfig(BaseModel):
         # copy.copy),原地累加会让第 N 条拿到 N 份;整体赋值天然幂等,且 vocab 校验失败
         # 时不会在共享 list 上留下半截写入。
         # TODO: C++ 前端 Tokenizer::convertSelectTokens 是「不去重 + insert 到列表头」,
-        # 顺序与本实现相反,同一请求经两条前端会拿到列顺序相反的 logits。该差异在本次
-        # 修改之前就已存在,未在此处对齐;要对齐需同时改 OpenaiEndpoint 的调用点。
+        # 顺序和重叠语义均与本实现不同,同一请求经两条前端可能拿到不同的 logits 列。
+        # 要对齐需同时修改 C++ OpenaiEndpoint 的调用点,不在本次 Python batch 修复内。
         merged = list(self.select_tokens_id)
         seen = set(merged)
         for token_str in self.select_tokens_str:
