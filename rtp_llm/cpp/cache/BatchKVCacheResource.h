@@ -19,6 +19,7 @@ public:
 
     void resetBatchSize(size_t batch_size) {
         batch_resource.resize(batch_size);
+        cache_keys_initialized_ = false;
     }
 
     void initGroups(std::shared_ptr<const CacheTopology> topology) {
@@ -166,6 +167,7 @@ public:
     void clearCacheKeys(int batch_id = 0) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         batch_resource[batch_id].cacheKeys().clear();
+        cache_keys_initialized_ = false;
     }
 
     void pushBackCacheKey(int batch_id, CacheKeyType key) {
@@ -208,6 +210,7 @@ public:
         old_resources = std::move(batch_resource);
         batch_resource.clear();
         batch_resource.resize(new_batch_size);
+        cache_keys_initialized_ = false;
     }
 
     void moveBatchResource(int batch_idx, KVCacheResource&& resource) {
@@ -245,6 +248,20 @@ public:
         return false;
     }
 
+    // Set by initCacheKeys()/updateCacheKeys() once the rolling cache keys have been computed for
+    // this resource. A first malloc that fails with MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED
+    // re-enters KVCacheManager::malloc() having allocated nothing, so curBlocksNum() is still zero
+    // and the attempt still looks like a first malloc. This flag tells the retry apart from a
+    // genuine first attempt, so the keys are not recomputed and the prefill-cache-hit metric is not
+    // double-counted for the same request.
+    bool cacheKeysInitialized() const {
+        return cache_keys_initialized_;
+    }
+
+    void markCacheKeysInitialized() {
+        cache_keys_initialized_ = true;
+    }
+
     bool lastBlockAligned() const {
         for (const auto& resource : batch_resource) {
             if (!resource.lastBlockAligned()) {
@@ -266,6 +283,7 @@ public:
 
 private:
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
+    bool                         cache_keys_initialized_{false};
 };
 
 using BatchKVCacheResourcePtr = std::shared_ptr<BatchKVCacheResource>;

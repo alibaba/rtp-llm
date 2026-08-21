@@ -57,13 +57,27 @@ class KVCacheWriteOp:
             v_cache = kv_cache.kv_cache_base[
                 :, 1, :, :, :
             ]  # [num_pages, num_kv_heads, page_size, head_dim]
+            if key.dtype != k_cache.dtype:
+                raise ValueError(
+                    f"key dtype {key.dtype} must match K cache dtype {k_cache.dtype}"
+                )
+            if value.dtype != v_cache.dtype:
+                raise ValueError(
+                    f"value dtype {value.dtype} must match V cache dtype {v_cache.dtype}"
+                )
+
+            # FlashInfer requires batch_indices/positions size == nnz.
+            # Device planner leaves buffers oversized, so narrow without a host sync.
+            nnz = key.size(0)
+            batch_indices = self.params.batch_indice_d.narrow(0, 0, nnz)
+            positions = self.params.positions_d.narrow(0, 0, nnz)
 
             # Append K and V to paged cache using HND layout
             page.append_paged_kv_cache(  # type: ignore
                 key,  # append_key: [total_tokens, num_kv_heads, head_dim]
                 value,  # append_value: [total_tokens, num_kv_heads, head_dim]
-                self.params.batch_indice_d,
-                self.params.positions_d,
+                batch_indices,
+                positions,
                 (k_cache, v_cache),  # paged_kv_cache: tuple of K and V caches
                 self.params.page_indice_d,
                 self.params.decode_page_indptr_d,

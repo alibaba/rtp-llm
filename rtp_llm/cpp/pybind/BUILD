@@ -8,6 +8,16 @@ load(
 
 package(default_visibility = ["//:__subpackages__"])
 
+py_test(
+    name = "config_pickle_test",
+    srcs = ["config_pickle_test.py"],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer_config",
+    ],
+    deps = ["//rtp_llm:ops"],
+)
+
 cc_library(
     name = "py_utils",
     hdrs = [
@@ -60,7 +70,10 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_info",
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",
@@ -101,6 +114,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
+        "@xgrammar//:xgrammar",
     ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",

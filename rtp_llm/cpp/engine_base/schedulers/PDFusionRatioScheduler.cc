@@ -349,8 +349,8 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
     const size_t available        = cache_manager_->availableBlocksNum();
     const size_t reserved         = cache_manager_->reserveBlocksNum();
     const size_t initial_capacity = (available > reserved) ? (available - reserved) : 0;
-    // force_batch is best-effort grouping, not all-or-nothing admission. Its members were already
-    // checked individually against batch-size and prefill-token limits before KV admission was added;
+    // Grouped requests are best-effort grouping, not all-or-nothing admission. Members are
+    // checked individually against batch-size and prefill-token limits before KV admission;
     // KV gating intentionally preserves that behavior.
     return tryAddToAdmissionPeakState(
         new_stream, static_cast<int64_t>(initial_capacity), static_cast<int64_t>(available));

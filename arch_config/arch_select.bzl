@@ -3,20 +3,44 @@ load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
+load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 def copy_all_so():
     copy_so("@rtp_llm//:th_transformer")
     copy_so("@rtp_llm//:th_transformer_config")
+    copy_so("@rtp_llm//:th_grammar_tokenizer_info")
     copy_so("@rtp_llm//:rtp_compute_ops")
+
+# flash_attn wheels are not published for CUDA 13; FlashInfer JIT provides the
+# kernels instead, so these requirements resolve to nothing on cuda13 configs.
+_CUDA13_DEFERRED = ["flash_attn", "flash-attn-3"]
+
+# xgrammar's wheel metadata pulls apache-tvm-ffi (and triton on x86), which only
+# the cuda12_9/cuda13 locks carry; dash_sc imports it optionally and degrades
+# gracefully, so the other platforms resolve it to nothing.
+_DSV4_PLATFORM_ONLY = ["xgrammar"]
 
 def requirement(names):
     for name in names:
+        cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        if name in _DSV4_PLATFORM_ONLY:
+            native.py_library(
+                name = name,
+                deps = select({
+                    "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+                    "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                    "//conditions:default": [],
+                }),
+                visibility = ["//visibility:public"],
+            )
+            continue
         native.py_library(
             name = name,
             deps = select({
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+                "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
@@ -57,6 +81,15 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        "@rtp_llm//:using_cuda13_x86": [
+            "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/4af4ac732eae77acb57ab3ac59e3ceb796b797b5/deep_gemm-2.5.0%2Blocal-cp310-cp310-linux_x86_64.whl",
+            "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
+            "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl",
+            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
+            "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+        ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
@@ -93,6 +126,11 @@ def torch_deps():
             "@torch_2.6_py310_cuda//:torch",
             "@torch_2.6_py310_cuda//:torch_libs",
         ],
+        "@rtp_llm//:using_cuda13_x86": [
+            "@torch_2.11_py310_cuda//:torch_api",
+            "@torch_2.11_py310_cuda//:torch",
+            "@torch_2.11_py310_cuda//:torch_libs",
+        ],
         "@rtp_llm//:using_cuda12_9_x86": [
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
@@ -109,7 +147,10 @@ def torch_deps():
 def flashinfer_deps():
     native.alias(
         name = "flashinfer",
-        actual = "@flashinfer_cpp//:flashinfer"
+        actual = select({
+            "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
+            "//conditions:default": "@flashinfer_cpp//:flashinfer",
+        })
     )
 
 def flashmla_deps():

@@ -11,7 +11,10 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.models_py.modules.base.common.kvcache_store import (
+    create_write_cache_store_impl as _create_write_cache_store_impl,
+)
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs
 
 
 def reshape_paged_kv_cache(
@@ -44,23 +47,26 @@ def reshape_paged_kv_cache(
 
 def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
+    kv_cache: Optional[KVCache] = None,
 ) -> Optional[WriteCacheStoreOp]:
     """Create write cache store implementation if needed.
 
+    The op class is passed explicitly as this module's ``WriteCacheStoreOp``
+    global, resolved on every call. That keeps this module the single seam for
+    every attention backend: rebinding (or patching) ``WriteCacheStoreOp`` here
+    changes what the shared factory instantiates, instead of being silently
+    bypassed by the delegation.
+
     Args:
         attn_inputs: Attention calculation input parameters
+        kv_cache: Whole-model KV cache handle, for multi-group (DSv4) callers
 
     Returns:
         WriteCacheStoreOp instance if cache store is needed, None otherwise
     """
-    if attn_inputs.is_prefill and attn_inputs.cache_store_inputs:
-        return WriteCacheStoreOp(
-            attn_inputs.input_lengths,
-            attn_inputs.prefix_lengths,
-            attn_inputs.kv_cache_block_id,
-            attn_inputs.cache_store_inputs,
-        )
-    return None
+    return _create_write_cache_store_impl(
+        attn_inputs, kv_cache, op_cls=WriteCacheStoreOp
+    )
 
 
 def apply_write_cache_store(
@@ -75,11 +81,7 @@ def apply_write_cache_store(
         attn_inputs: Attention calculation input parameters
         kv_cache: KV Cache to write to
     """
-    if (
-        attn_inputs.is_prefill
-        and attn_inputs.cache_store_inputs
-        and write_cache_store_impl is not None
-    ):
+    if attn_inputs.is_prefill and write_cache_store_impl is not None:
         write_cache_store_impl(kv_cache)
 
 

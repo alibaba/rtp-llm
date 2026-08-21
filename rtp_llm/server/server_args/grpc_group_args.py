@@ -2,13 +2,22 @@ import argparse
 import json
 import logging
 
+DEFAULT_GRPC_MAX_SERVER_POLLERS = 4
 DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS = 4
 _DASH_SC_DEFAULT_SERVER_RECV_BYTES = 64 * 1024 * 1024
-_MODEL_GRPC_DEFAULT_JSON = '{"client_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_metadata_size": 1073741824}, "server_config": {"grpc.max_metadata_size": 1073741824,"grpc.max_concurrent_streams": 100000, "grpc.max_connection_idle_ms": 600000, "grpc.http2.min_recv_ping_interval_without_data_ms": 1000, "grpc.http2.max_ping_strikes": 1000}}'
+# Model RPC (C++ GenerateStreamCall path) allows 1GiB receive / metadata on both ends.
+_MODEL_GRPC_DEFAULT_JSON = '{"client_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_send_message_length": 1073741824, "grpc.max_metadata_size": 1073741824}, "server_config": {"grpc.max_receive_message_length": 1073741824, "grpc.max_send_message_length": 1073741824, "grpc.max_metadata_size": 1073741824,"grpc.max_concurrent_streams": 100000, "grpc.max_connection_idle_ms": 600000, "grpc.http2.min_recv_ping_interval_without_data_ms": 1000, "grpc.http2.max_ping_strikes": 1000}}'
 
 
 def default_model_grpc_config_json() -> str:
-    return _MODEL_GRPC_DEFAULT_JSON
+    """Model RPC gRPC JSON plus ``max_server_pollers``.
+
+    max_server_pollers>0 sets C++ sync server
+    SetSyncServerOption(MAX_POLLERS, value) per completion queue.
+    """
+    obj = json.loads(_MODEL_GRPC_DEFAULT_JSON)
+    obj["max_server_pollers"] = DEFAULT_GRPC_MAX_SERVER_POLLERS
+    return json.dumps(obj, separators=(",", ":"))
 
 
 def default_dash_sc_grpc_config_json() -> str:
@@ -58,7 +67,7 @@ def init_model_grpc_group_args(parser, grpc_config):
         bind_to=None,  # 不需要绑定，type 函数已经直接修改了 grpc_config
         type=_grpc_config_from_json(grpc_config),
         default=default_json,
-        help="gRPC configuration as JSON string. Format: {\"client_config\": {...}, \"server_config\": {...}}",
+        help='gRPC configuration as JSON string. Format: {"client_config": {...}, "server_config": {...}, "max_server_pollers": 4}',
     )
 
 
@@ -78,5 +87,5 @@ def init_dash_sc_grpc_group_args(parser, dash_sc_grpc_config):
         bind_to=None,
         type=_grpc_config_from_json(dash_sc_grpc_config),
         default=default_json,
-        help="DashSc gRPC configuration as JSON string. Format: {\"client_config\": {...}, \"server_config\": {...}, \"max_server_workers\": 4}",
+        help='DashSc gRPC configuration as JSON string. Format: {"client_config": {...}, "server_config": {...}, "max_server_workers": 4}',
     )

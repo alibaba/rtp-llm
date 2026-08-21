@@ -5,7 +5,6 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
-import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
@@ -98,18 +97,11 @@ def _write_cp_cache_store(
     attention_inputs: PyAttentionInputs, kv_cache: LayerKVCache
 ) -> None:
     """Write a CP linear layer using that layer's tag-local cache metadata."""
-    if attention_inputs.cache_store_inputs is None:
+    cache_store_inputs = attention_inputs.cache_store_inputs
+    cache_store_writer = attention_inputs.cache_store_writer
+    if cache_store_inputs is None or cache_store_writer is None:
         return
-    cp_info = attention_inputs.context_parallel_info
-    if cp_info is None:
-        raise RuntimeError("CP cache store requires context_parallel_info")
-    compute_ops.write_cache_store(
-        cp_info.prefill_actual_input_lengths_cpu,
-        attention_inputs.prefix_lengths,
-        attention_inputs.kv_cache_block_id,
-        attention_inputs.cache_store_inputs,
-        kv_cache,
-    )
+    cache_store_writer.write(cache_store_inputs, kv_cache)
 
 
 def _maybe_write_cp_cache_store(
@@ -386,15 +378,14 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_out = self._fla(
             mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
         )
-        if kv_cache is not None:
-            # write kvcache to cache store
-            compute_ops.write_cache_store(
-                attn_inputs.input_lengths,
-                attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
-                attn_inputs.cache_store_inputs,
-                kv_cache,
-            )
+        cache_store_inputs = attn_inputs.cache_store_inputs
+        cache_store_writer = attn_inputs.cache_store_writer
+        if (
+            kv_cache is not None
+            and cache_store_inputs is not None
+            and cache_store_writer is not None
+        ):
+            cache_store_writer.write(cache_store_inputs, kv_cache)
         return attn_out
 
 

@@ -1,7 +1,7 @@
-import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
@@ -56,9 +56,7 @@ class ServerConfig:
         self.rank_id = 0
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
-        self.shutdown_timeout: int = (
-            50  # Default timeout in seconds, -1 means wait indefinitely
-        )
+        self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
         self.monitor_interval: int = 1  # Monitor interval in seconds
         self.frontend_pre_stop_drain_seconds: float = 120.0
         self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0
@@ -104,10 +102,7 @@ class ServerConfig:
         self.rank_id = local_rank
 
     def validate_port_layout(self, *, dash_sc_enabled: bool) -> None:
-        if (
-            dash_sc_enabled
-            and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM
-        ):
+        if dash_sc_enabled and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM:
             raise ValueError(
                 "worker_info_port_num must be at least "
                 f"{MIN_WORKER_INFO_PORT_NUM} when DashSc gRPC is enabled; "
@@ -182,9 +177,16 @@ class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
+        self.loader_recycle_handles: bool = True
+        self.moe_pure_tp_preshard: bool = False
 
     def to_string(self):
-        return f"load_method: {self.load_method}\nforce_cpu_load_weights: {self.force_cpu_load_weights}"
+        return (
+            f"load_method: {self.load_method}\n"
+            f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
+            f"loader_recycle_handles: {self.loader_recycle_handles}\n"
+            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}"
+        )
 
 
 class RenderConfig:
@@ -262,12 +264,22 @@ class DistributeConfig:
 
 
 class VitConfig:
+    DEFAULT_MM_TIMEOUT_MS: int = 120000
+    DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
+    DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
+
     def __init__(self):
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.vit_trt: int = 0
         self.trt_cache_enabled: int = 0
         self.trt_cache_path: Optional[str] = None
         self.download_headers: str = ""
+        self.mm_image_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB
+        )
+        self.mm_video_max_file_size_kb: int = (
+            VitConfig.DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB
+        )
         self.mm_cache_item_num: int = 10
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
@@ -278,7 +290,7 @@ class VitConfig:
         self.mm_preprocess_max_workers: int = 4
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
-        self.mm_timeout_ms: Optional[int] = None
+        self.mm_timeout_ms: int = VitConfig.DEFAULT_MM_TIMEOUT_MS
         self.extra_data_path: str = ""
         self.local_extra_data_path: str = ""
         self.disable_access_log: bool = False
@@ -338,6 +350,8 @@ class VitConfig:
             f"trt_cache_enabled: {self.trt_cache_enabled}\n"
             f"trt_cache_path: {self.trt_cache_path}\n"
             f"download_headers: {self.download_headers}\n"
+            f"mm_image_max_file_size_kb: {self.mm_image_max_file_size_kb}\n"
+            f"mm_video_max_file_size_kb: {self.mm_video_max_file_size_kb}\n"
             f"mm_cache_item_num: {self.mm_cache_item_num}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
@@ -365,7 +379,7 @@ class GenerateEnvConfig:
     def __init__(self):
         self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
-        self.think_mode: int = 0
+        self.think_mode: str = "disabled"
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
@@ -501,9 +515,15 @@ class MasterConfig:
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
+        self.jit_cache_setup_timeout_s: int = 180
+        self.manage_jit_cache: bool = True
 
     def to_string(self):
-        return f"remote_jit_dir: {self.remote_jit_dir}"
+        return (
+            f"remote_jit_dir: {self.remote_jit_dir}\n"
+            f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}\n"
+            f"manage_jit_cache: {self.manage_jit_cache}"
+        )
 
 
 class DeepEPConfig:
@@ -529,6 +549,29 @@ class DeepEPConfig:
         )
 
 
+@dataclass(slots=True)
+class GrammarAdmissionConfig:
+    """Dash-SC admission sandbox policy, separate from engine grammar settings."""
+
+    queue_timeout_s: float = 30.0
+    compile_timeout_s: float = 30.0
+    sandbox_pool_size: int = 0
+    sandbox_process_memory_limit_mb: int = 1024
+    compiler_cache_bytes: int = 1024 * 1024 * 1024
+    result_cache_max_entries: int = 2048
+
+    def to_string(self):
+        return (
+            f"queue_timeout_s: {self.queue_timeout_s}\n"
+            f"compile_timeout_s: {self.compile_timeout_s}\n"
+            f"sandbox_pool_size: {self.sandbox_pool_size}\n"
+            "sandbox_process_memory_limit_mb: "
+            f"{self.sandbox_process_memory_limit_mb}\n"
+            f"compiler_cache_bytes: {self.compiler_cache_bytes}\n"
+            f"result_cache_max_entries: {self.result_cache_max_entries}"
+        )
+
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
@@ -551,7 +594,7 @@ class PyEnvConfigs:
         self.device_resource_config: DeviceResourceConfig = DeviceResourceConfig()
         self.runtime_config: RuntimeConfig = RuntimeConfig()
         # EngineConfig has been merged into RuntimeConfig and ModelConfig
-        # warm_up and warm_up_with_loss are in RuntimeConfig
+        # warm_up, warm_up_with_loss, and model_warm_up are in RuntimeConfig
         # max_seq_len is in ModelConfig
         self.embedding_config: EmbeddingConfig = EmbeddingConfig()
         self.role_config: RoleConfig = RoleConfig()
@@ -572,6 +615,7 @@ class PyEnvConfigs:
         self.grpc_config = GrpcConfig()
         self.dash_sc_grpc_config = DashScGrpcConfig()
         self.grammar_config = GrammarConfig()
+        self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -628,5 +672,8 @@ class PyEnvConfigs:
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
             "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
             "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
+            "[grammar_admission_config]\n"
+            + self.grammar_admission_config.to_string()
+            + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

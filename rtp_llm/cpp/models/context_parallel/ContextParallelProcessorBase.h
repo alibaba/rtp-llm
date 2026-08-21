@@ -19,8 +19,8 @@ enum class ProcessorType {
 
 class IContextParallelProcessor {
 public:
-    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config):
-        parallelism_config_(parallelism_config) {}
+    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config, bool split_hidden_states):
+        parallelism_config_(parallelism_config), split_hidden_states_(split_hidden_states) {}
     virtual ~IContextParallelProcessor() = default;
 
     /// @brief Prepare context parallel inputs: split and shuffle tokens, compute restore indices and masks.
@@ -31,11 +31,32 @@ public:
                                  const GptModelInputs&                     inputs,
                                  const torch_ext::PyContextParallelParams& cp_params) = 0;
 
+    /// @brief CP exit variant that materializes only the last-token rows lm_head needs.
+    ///
+    /// Instead of all-gathering the full [seq, hidden] sequence and restoring its
+    /// original order (handleOutputs), this gathers only the rows selected by
+    /// inputs.lm_output_indexes. Each selected row lives on exactly one CP rank
+    /// (zigzag is a bijection on valid positions), so the cross-rank merge is a
+    /// single all-reduce-sum over a [num_lm, hidden] buffer. On return,
+    /// hidden_states is replaced by that [num_lm, hidden] tensor, ordered to match
+    /// lm_output_indexes (identical to index_select(restored_hidden, lm_output_indexes)).
+    ///
+    /// Only valid when no consumer needs the full sequence hidden. Requests
+    /// that require all logits or all hidden states are rejected before they
+    /// enter a prefill-CP engine.
+    virtual void handleOutputsLastHidden(torch::Tensor&                            hidden_states,
+                                         const GptModelInputs&                     inputs,
+                                         const torch_ext::PyContextParallelParams& cp_params) = 0;
+
 protected:
     /// @brief Process and distribute input tokens across context parallel ranks
     ///
     /// Plans the distribution of input tokens by splitting and padding as needed.
     /// Each rank receives a processed chunk according to the processing strategy.
+    /// Valid shuffle_indices entries must reference total_input_tokens and be
+    /// strictly increasing. Invalid entries represent padding. handleInputs relies
+    /// on this ordering to remap per-token and multimodal side inputs in one pass;
+    /// every processing strategy must preserve this contract.
     virtual bool plan(const std::vector<int>& total_input_tokens,
                       std::vector<int>&       input_tokens,
                       std::vector<int>&       shuffle_indices,
@@ -53,12 +74,16 @@ protected:
                                                  int                  cp_size) = 0;
 
     ParallelismConfig parallelism_config_;
+    // Fixed for the lifetime of the model instance. Models consuming an MTP
+    // hidden buffer receive rank-local CP rows and set this to false; models
+    // receiving a global hidden tensor set it to true.
+    const bool split_hidden_states_;
 };
 
 class ContextParallelProcessorFactory {
 public:
-    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType            type,
-                                                             const ParallelismConfig& parallelism_config);
+    static std::unique_ptr<IContextParallelProcessor>
+    create(ProcessorType type, const ParallelismConfig& parallelism_config, bool split_hidden_states);
 };
 
 }  // namespace rtp_llm

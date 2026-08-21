@@ -52,6 +52,71 @@ TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
     EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
 }
 
+TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
+    constexpr size_t batch_size     = 4;
+    constexpr size_t batch_size_out = 4;
+    constexpr size_t vocab_size     = 16;
+    constexpr size_t step           = 2;
+    // Sampler inputs always carry token_ids of width step + 1; the greedy kernel
+    // writes the newly sampled token into the last column.
+    constexpr size_t max_seq_len = step + 1;
+
+    auto logits = torch::full({(int64_t)batch_size, (int64_t)vocab_size}, -100.0f, torch::kFloat32);
+    logits[0][5].fill_(10.0f);
+    logits[1][6].fill_(10.0f);
+    logits[2][7].fill_(10.0f);
+    logits[3][8].fill_(10.0f);
+    logits = logits.to(torch::kCUDA);
+
+    auto token_ids = torch::tensor({1, 1, -1, 2, 2, -1, 3, 3, -1, 4, 4, -1}, torch::kInt32)
+                         .reshape({(int64_t)batch_size, (int64_t)max_seq_len});
+    auto input_lengths    = torch::ones({(int64_t)batch_size}, torch::kInt32);
+    auto sequence_lengths = torch::full({(int64_t)batch_size}, (int64_t)step, torch::kInt32);
+    auto num_beams_in     = torch::tensor({1L, 2L, 2L, 1L}, torch::kLong);
+    auto num_beams_out    = torch::tensor({2L, 1L, 1L, 1L}, torch::kLong);
+    auto top_k            = torch::ones({(int64_t)batch_size}, torch::kInt32).pin_memory();
+    auto top_p            = torch::zeros({(int64_t)batch_size}, torch::kFloat32).pin_memory();
+    auto temperature      = torch::ones({(int64_t)batch_size}, torch::kFloat32).pin_memory();
+    auto cum_log_probs    = torch::tensor({0.0f, 0.0f, -100.0f, 0.0f}, torch::kFloat32).to(torch::kCUDA);
+
+    std::vector<at::Generator> generators(batch_size);
+    SamplerInputs              inputs{logits,
+                         token_ids,
+                         input_lengths,
+                         sequence_lengths,
+                         std::make_shared<LogitsProcessorStates>(),
+                         vocab_size,
+                         step,
+                         batch_size,
+                         batch_size_out,
+                         num_beams_in,
+                         num_beams_out,
+                         top_k,
+                         top_p,
+                         temperature,
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         false,
+                         cum_log_probs,
+                         torch::Tensor(),
+                         generators};
+
+    auto output = sampler_->forward(inputs).token_ids.cpu().contiguous();
+
+    ASSERT_EQ(output.size(0), (int64_t)batch_size_out);
+    // The 2->1 group must read its original first parent, not the preceding 1->2 output row.
+    EXPECT_EQ(output[2][0].item<int32_t>(), 2);
+    EXPECT_EQ(output[2][1].item<int32_t>(), 2);
+    // A 1->1 subgroup still needs its history copied when another group requires separate output storage.
+    EXPECT_EQ(output[3][0].item<int32_t>(), 4);
+    EXPECT_EQ(output[3][1].item<int32_t>(), 4);
+    EXPECT_EQ(output[3][step].item<int32_t>(), 8);
+}
+
 TEST_F(SamplerTest, testGeneralSampling) {
     size_t batch_size = 5;
     size_t vocab_size = 8;

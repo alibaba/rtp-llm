@@ -8,6 +8,7 @@ from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
 
+
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -67,8 +68,9 @@ class GenerateInput:
     tokenizer: Any = None  # TODO: remove this
     prefix_length: int = 0
     token_type_ids: List[int] = field(default_factory=list)
-    batch_group_size: int = 1
-    batch_group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    group_size: int = 1
+    group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
 
@@ -119,6 +121,8 @@ class AuxInfo:
     decode_memory_reuse_len: int = 0
 
     multimodal_lengths: Dict[int, int] = field(default_factory=dict)
+    speculative_draft_rounds: int = 0
+    speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

@@ -11,7 +11,9 @@ GenerateContext::~GenerateContext() {
 }
 
 void GenerateContext::reset() {
+    error_info   = ErrorInfo::OkStatus();
     error_status = grpc::Status::OK;
+    retryable_   = true;
 }
 
 bool GenerateContext::ok() const {
@@ -22,8 +24,20 @@ bool GenerateContext::hasError() const {
     return !ok();
 }
 
+bool GenerateContext::shouldRetry() const {
+    return retryable_;
+}
+
+void GenerateContext::setRetryable(bool retryable) {
+    retryable_ = retryable;
+}
+
 bool GenerateContext::cancelled() const {
     return error_status.error_code() == grpc::StatusCode::CANCELLED;
+}
+
+bool GenerateContext::isRequestCancelled() const {
+    return server_context && server_context->IsCancelled();
 }
 
 int64_t GenerateContext::executeTimeMs() {
@@ -37,9 +51,18 @@ void GenerateContext::reportTime() {
 }
 
 void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
-    collector.qps                = true;
-    collector.error_qps          = hasError();
-    collector.cancel_qps         = cancelled();
+    collector.qps        = true;
+    collector.error_qps  = hasError();
+    collector.cancel_qps = cancelled();
+    if (error_info.hasError()) {
+        collector.error_code = error_info.code();
+    } else if (stream_ && stream_->hasError()) {
+        collector.error_code = stream_->statusInfo().code();
+    } else if (cancelled()) {
+        collector.error_code = ErrorCode::CANCELLED;
+    } else if (hasError()) {
+        collector.error_code = ErrorCode::UNKNOWN_ERROR;
+    }
     collector.onflight_request   = onflight_requests;
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;
@@ -63,7 +86,9 @@ void GenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+        if (stream_->getStatus() != StreamState::FINISHED) {
+            stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+        }
         // if is running, waiting util done
         while (stream_->getStatus() == StreamState::RUNNING) {
             RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);

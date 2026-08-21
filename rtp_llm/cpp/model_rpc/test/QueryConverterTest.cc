@@ -1,13 +1,17 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include <array>
 #include <memory>
 #include <optional>
+#include <tuple>
 
 #define private public
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 using namespace std;
@@ -17,6 +21,11 @@ class QueryConverterTest: public DeviceTestBase {};
 
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
+    input.mutable_request_info()->set_frontend_ip("10.0.0.1");
+    input.mutable_request_info()->set_dash_ip("10.0.0.2");
+    input.mutable_request_info()->set_trace_id("trace-123");
+    input.mutable_request_info()->set_request_id("source-request-123");
+    input.mutable_request_info()->set_source_role("frontend");
     input.add_token_ids(0);
     input.add_token_ids(1);
 
@@ -32,9 +41,14 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_top_p_decay()->set_value(0.7);
     generate_config_pb->mutable_top_p_min()->set_value(0.3);
     generate_config_pb->mutable_top_p_reset_ids()->set_value(7);
+    generate_config_pb->mutable_json_schema()->set_value("{\"type\":\"object\"}");
+    generate_config_pb->mutable_regex()->set_value("[a-z]+");
+    generate_config_pb->mutable_ebnf()->set_value("root ::= \"a\"");
+    generate_config_pb->mutable_structural_tag()->set_value("{\"format\":{\"type\":\"json_schema\"}}");
     generate_config_pb->mutable_task_id()->set_value("8");
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
+    generate_config_pb->set_thinking_mode(GenerateConfigPB::THINKING_MODE_ADAPTIVE);
     for (int i = 0; i < 2; ++i) {
         auto* stop_words = generate_config_pb->mutable_stop_words_list()->add_rows();
         for (int j = 0; j < 3; ++j) {
@@ -45,6 +59,11 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto& input_ids      = generate_input->input_ids;
     ASSERT_EQ(input_ids.numel(), 2);
     ASSERT_EQ(input_ids.data_ptr<int32_t>()[0], 0);
+    ASSERT_EQ(generate_input->request_info.frontend_ip, "10.0.0.1");
+    ASSERT_EQ(generate_input->request_info.dash_ip, "10.0.0.2");
+    ASSERT_EQ(generate_input->request_info.trace_id, "trace-123");
+    ASSERT_EQ(generate_input->request_info.request_id, "source-request-123");
+    ASSERT_EQ(generate_input->request_info.source_role, "frontend");
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
@@ -57,15 +76,93 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_FLOAT_EQ(generate_config->top_p_decay.value(), 0.7);
     ASSERT_FLOAT_EQ(generate_config->top_p_min.value(), 0.3);
     ASSERT_EQ(generate_config->top_p_reset_ids.value(), 7);
+    ASSERT_EQ(generate_config->json_schema.value(), "{\"type\":\"object\"}");
+    ASSERT_EQ(generate_config->regex.value(), "[a-z]+");
+    ASSERT_EQ(generate_config->ebnf.value(), "root ::= \"a\"");
+    ASSERT_EQ(generate_config->structural_tag.value(), "{\"format\":{\"type\":\"json_schema\"}}");
     ASSERT_EQ(generate_config->task_id.value(), "8");
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
     ASSERT_FALSE(generate_config->return_logits);
+    ASSERT_EQ(generate_config->thinking_mode, ThinkingMode::ADAPTIVE);
     ASSERT_EQ(generate_config->stop_words_list.size(), 2);
     vector<int> stop_words_1{0, 1, 2};
     vector<int> stop_words_2{3, 4, 5};
     ASSERT_EQ(generate_config->stop_words_list[0], stop_words_1);
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
+}
+
+TEST_F(QueryConverterTest, TransGenerateConfigResolvesThinkingState) {
+    using Case = std::tuple<GenerateConfigPB::ThinkingModePB, bool, ThinkingMode, bool>;
+    const std::array<Case, 5> cases{{
+        {GenerateConfigPB::THINKING_MODE_UNSPECIFIED, false, ThinkingMode::UNSPECIFIED, false},
+        {GenerateConfigPB::THINKING_MODE_UNSPECIFIED, true, ThinkingMode::UNSPECIFIED, true},
+        {GenerateConfigPB::THINKING_MODE_DISABLED, true, ThinkingMode::DISABLED, false},
+        {GenerateConfigPB::THINKING_MODE_ADAPTIVE, true, ThinkingMode::ADAPTIVE, false},
+        {GenerateConfigPB::THINKING_MODE_ENABLED, false, ThinkingMode::ENABLED, true},
+    }};
+
+    for (const auto& [proto_mode, legacy_in_think_mode, expected_mode, expected_in_think_mode] : cases) {
+        GenerateConfigPB config_pb;
+        config_pb.set_thinking_mode(proto_mode);
+        config_pb.set_in_think_mode(legacy_in_think_mode);
+
+        const auto config = QueryConverter::transGenerateConfig(&config_pb);
+
+        EXPECT_EQ(config->thinking_mode, expected_mode);
+        EXPECT_EQ(config->in_think_mode, expected_in_think_mode);
+    }
+}
+
+TEST(ThinkingModeTest, NormalizeThinkingModeRejectsOutOfRangeValues) {
+    EXPECT_EQ(normalizeThinkingMode(-1), ThinkingMode::UNSPECIFIED);
+    EXPECT_EQ(normalizeThinkingMode(4), ThinkingMode::UNSPECIFIED);
+}
+
+TEST(ThinkingModeTest, NormalizeThinkingModePreservesValidValues) {
+    EXPECT_EQ(normalizeThinkingMode(0), ThinkingMode::UNSPECIFIED);
+    EXPECT_EQ(normalizeThinkingMode(1), ThinkingMode::DISABLED);
+    EXPECT_EQ(normalizeThinkingMode(2), ThinkingMode::ADAPTIVE);
+    EXPECT_EQ(normalizeThinkingMode(3), ThinkingMode::ENABLED);
+}
+
+TEST_F(QueryConverterTest, RoleAddrReadsLegacyTypedAndDualWritePayloads) {
+    GenerateConfigPB config;
+
+    auto* legacy = config.add_role_addrs();
+    legacy->set_role(RoleAddrPB::PREFILL);
+    legacy->set_ip("legacy-prefill");
+
+    auto* string_only = config.add_role_addrs();
+    string_only->set_role_str("DECODE");
+    string_only->set_ip("string-decode");
+
+    auto* dual = config.add_role_addrs();
+    dual->set_role(RoleAddrPB::VIT);
+    dual->set_role_str("VIT");
+    dual->set_ip("dual-vit");
+
+    const auto role_addrs = QueryConverter::getRoleAddrs(&config);
+    ASSERT_EQ(role_addrs.size(), 3);
+    EXPECT_EQ(role_addrs[0].role, RoleType::PREFILL);
+    EXPECT_EQ(role_addrs[1].role, RoleType::DECODE);
+    EXPECT_EQ(role_addrs[2].role, RoleType::VIT);
+}
+
+TEST_F(QueryConverterTest, RoleAddrPreservesPdfusionDefaultAndRejectsConflicts) {
+    GenerateConfigPB legacy_pdfusion;
+    legacy_pdfusion.add_role_addrs()->set_role(RoleAddrPB::PDFUSION);
+    EXPECT_EQ(QueryConverter::getRoleAddrs(&legacy_pdfusion)[0].role, RoleType::PDFUSION);
+
+    GenerateConfigPB conflict;
+    auto*            conflicting = conflict.add_role_addrs();
+    conflicting->set_role(RoleAddrPB::PREFILL);
+    conflicting->set_role_str("DECODE");
+    EXPECT_THROW(QueryConverter::getRoleAddrs(&conflict), std::runtime_error);
+
+    GenerateConfigPB omitted_legacy_default;
+    omitted_legacy_default.add_role_addrs();
+    EXPECT_EQ(QueryConverter::getRoleAddrs(&omitted_legacy_default)[0].role, RoleType::PDFUSION);
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {
@@ -76,14 +173,16 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
     GenerateOutputs outputs;
     GenerateOutput  res;
-    res.output_ids            = output_token_ids;
-    res.finished              = true;
-    res.aux_info.cost_time_us = 1000;
-    res.aux_info.iter_count   = 9;
-    res.aux_info.input_len    = 8;
-    res.aux_info.output_len   = 7;
-    auto hidden_states_tensor = torch::empty({3, 2}, torch::kFloat32);
-    auto hidden_states_data   = hidden_states_tensor.data_ptr<float>();
+    res.output_ids                                   = output_token_ids;
+    res.finished                                     = true;
+    res.aux_info.cost_time_us                        = 1000;
+    res.aux_info.iter_count                          = 9;
+    res.aux_info.input_len                           = 8;
+    res.aux_info.output_len                          = 7;
+    res.aux_info.speculative_draft_rounds            = 4;
+    res.aux_info.speculative_accepted_tokens_per_pos = {3, 2, 1};
+    auto hidden_states_tensor                        = torch::empty({3, 2}, torch::kFloat32);
+    auto hidden_states_data                          = hidden_states_tensor.data_ptr<float>();
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;
     }
@@ -99,6 +198,11 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
+    EXPECT_EQ(aux_info_pb.speculative_draft_rounds(), 4);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos_size(), 3);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(0), 3);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(1), 2);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(2), 1);
     auto output_ids_pb = output_pb.output_ids();
     ASSERT_EQ(output_ids_pb.data_type(), TensorPB_DataType::TensorPB_DataType_INT32);
     ASSERT_EQ(output_ids_pb.shape_size(), 3);
@@ -191,6 +295,89 @@ TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     torch::Tensor tensor = torch::ones({1}, torch::kInt64);
     TensorPB      tensor_pb;
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+}
+
+// Typed grammar fields wire as google.protobuf.StringValue → Optional<string>.
+TEST_F(QueryConverterTest, GrammarTypedFieldsAreAccepted) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->mutable_json_schema()->set_value(R"({"type":"object"})");
+    auto cfg = QueryConverter::transQuery(&input)->generate_config;
+    ASSERT_TRUE(cfg->json_schema.has_value());
+    EXPECT_EQ(cfg->json_schema.value(), R"({"type":"object"})");
+}
+
+TEST_F(QueryConverterTest, MultipleGrammarConstraintsAreRejectedByFactory) {
+    using SetGrammarField = void (*)(GenerateConfigPB*);
+    struct GrammarFieldCase {
+        const char*     name;
+        SetGrammarField set;
+    };
+    const std::array<GrammarFieldCase, 4> fields{{
+        {"json_schema",
+         [](GenerateConfigPB* config) { config->mutable_json_schema()->set_value(R"({"type":"object"})"); }},
+        {"regex", [](GenerateConfigPB* config) { config->mutable_regex()->set_value("[a-z]+"); }},
+        {"ebnf", [](GenerateConfigPB* config) { config->mutable_ebnf()->set_value("root ::= \"a\""); }},
+        {"structural_tag",
+         [](GenerateConfigPB* config) { config->mutable_structural_tag()->set_value(R"({"type":"structural_tag"})"); }},
+    }};
+
+    for (size_t first = 0; first < fields.size(); ++first) {
+        for (size_t second = first + 1; second < fields.size(); ++second) {
+            SCOPED_TRACE(std::string(fields[first].name) + "+" + fields[second].name);
+            GenerateInputPB input;
+            input.add_token_ids(0);
+            auto* config = input.mutable_generate_config();
+            fields[first].set(config);
+            fields[second].set(config);
+
+            auto generate_input = QueryConverter::transQuery(&input);
+            auto result         = LogitsProcessorFactory::createLogitsProcessors(
+                std::move(generate_input), /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+            ASSERT_FALSE(result.ok());
+            EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_NE(result.status().ToString().find(fields[first].name), std::string::npos);
+            EXPECT_NE(result.status().ToString().find(fields[second].name), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, GrammarWithMultipleSequencesIsRejectedByFactory) {
+    struct MultiSequenceCase {
+        const char* name;
+        void (*configure)(GenerateConfigPB*);
+    };
+    const std::array<MultiSequenceCase, 3> cases{{
+        {"num_beams", [](GenerateConfigPB* config) { config->set_num_beams(2); }},
+        {"variable_num_beams", [](GenerateConfigPB* config) { config->add_variable_num_beams(2); }},
+        {"num_return_sequences", [](GenerateConfigPB* config) { config->set_num_return_sequences(2); }},
+    }};
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config = input.mutable_generate_config();
+        config->mutable_regex()->set_value("[a-z]+");
+        test_case.configure(config);
+
+        auto generate_input = QueryConverter::transQuery(&input);
+        auto result         = LogitsProcessorFactory::createLogitsProcessors(
+            std::move(generate_input), /*init_batch_size=*/1, /*max_batch_size=*/2, /*eos_token_id=*/0);
+
+        ASSERT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_NE(result.status().ToString().find("does not support beam search or num_return_sequences > 1"),
+                  std::string::npos);
+    }
+}
+
+TEST_F(QueryConverterTest, TimeoutErrorCodeMapsToGrpcDeadline) {
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::GENERATE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::DEADLINE_EXCEEDED), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::WAIT_TO_RUN_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::KEEP_ALIVE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
 }
 
 }  // namespace rtp_llm

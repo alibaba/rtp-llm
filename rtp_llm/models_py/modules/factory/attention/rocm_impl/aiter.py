@@ -1,23 +1,19 @@
-import logging
 import math
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import aiter
 import torch
-from aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
-    pa_decode_gluon_aot,
-)
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
-    reshape_kv_cache_vectorized,
     split_qkv_fp8,
     split_raw_qkv,
     unpad_kv_vectorized,
 )
 from rtp_llm.ops import (
     AttentionConfigs,
+    FMHAConfig,
     FMHAType,
     KvCacheDataType,
     ParallelismConfig,
@@ -31,6 +27,7 @@ from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
+    get_scalar_type,
     paged_attention_atrex,
 )
 
@@ -41,6 +38,64 @@ def _is_mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
     )
+
+
+# aiter.pa_fwd_asm asserts head_size == 128.
+ASM_DECODE_HEAD_SIZES = {128}
+
+
+def _kv_vector_width(attn_configs: AttentionConfigs) -> int:
+    itemsize = (
+        1
+        if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        else attn_configs.dtype.itemsize
+    )
+    return 16 // itemsize
+
+
+def prefill_writes_vectorized_v(
+    attn_configs: AttentionConfigs, fmha_config: Optional[FMHAConfig]
+) -> bool:
+    return (
+        fmha_config is None
+        or fmha_config.use_asm_pa
+        or (attn_configs.kv_cache_dtype == KvCacheDataType.FP8)
+    )
+
+
+def validate_v_layout(
+    attn_configs: AttentionConfigs,
+    attn_inputs: PyAttentionInputs,
+    fmha_config: Optional[FMHAConfig],
+) -> bool:
+    if not attn_configs.need_rope_kv_cache or not _is_mrope_interleaved_supported(
+        attn_configs
+    ):
+        return False
+    page = attn_configs.kernel_tokens_per_block
+    head = attn_configs.size_per_head
+    width = _kv_vector_width(attn_configs)
+    if head % width or page <= 0 or page % width:
+        raise ValueError(f"invalid V geometry: {head=}, {page=}, {width=}")
+    if attn_inputs.is_prefill or fmha_config is None:
+        return True
+    prefill_vec = prefill_writes_vectorized_v(attn_configs, fmha_config)
+    decode_vec = (
+        prefill_vec
+        if fmha_config.use_triton_pa
+        else (fmha_config.use_asm_pa and head in ASM_DECODE_HEAD_SIZES)
+    )
+    if prefill_vec != decode_vec and page != width:
+        remedy = "enable --use_triton_pa 1"
+        if attn_configs.kv_cache_dtype == KvCacheDataType.BASE:
+            remedy += " or set --use_asm_pa 0"
+        raise ValueError(
+            f"ROCm KV-cache V layout mismatch: {fmha_config.use_asm_pa=}, "
+            f"{fmha_config.use_triton_pa=}, "
+            f"{head=}, {page=}, {width=}, {prefill_vec=}, {decode_vec=}; "
+            f"{remedy} to select matching prefill/decode implementations"
+        )
+    return True
 
 
 # Pure Python implementation of FMHAParams
@@ -905,31 +960,54 @@ def _run_triton_paged_attention(
     max_seq_len: int,
     num_kv_heads: int,
     context_partition_size: int,
+    *,
+    linear_v: bool,
     kv_scale_buf: Optional[torch.Tensor] = None,
+    workspace: Optional[dict] = None,
 ) -> torch.Tensor:
     key_cache = paged_kv_cache.select(1, 0)
     value_cache = paged_kv_cache.select(1, 1)
 
     x = 16 // key_cache.element_size()
     kv_sizes = key_cache.shape
+    # K: [N, nkv, ps, hd] -> [N, nkv, hd//x, ps, x]  (shuffle layout)
     key_cache = key_cache.view(
         kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x
     )
+    # 4D V is the linear [hd, ps] reader for the Non-ASM writer; 5D V is the
+    # vectorized VALUE_TRANSPOSED reader for the ASM writer.
     value_cache = value_cache.view(
-        kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x
+        (kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2])
+        if linear_v
+        else (kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x)
     )
 
+    has_kv_scale_base = kv_scale_base is not None and (
+        not isinstance(kv_scale_base, torch.Tensor) or kv_scale_base.numel() > 0
+    )
     key_scale, value_scale = None, None
-    if kv_scale_base is not None:
-        kv_b = kv_scale_buf
-        if kv_b is None or kv_b.device != query.device:
-            kv_b = torch.ones(1, dtype=torch.float32, device=query.device)
-        key_scale = kv_b
-        value_scale = kv_b
+    query_is_fp8 = query.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+    if has_kv_scale_base or query_is_fp8:
+        if kv_scale_buf is None:
+            raise ValueError(
+                "kv_scale_buf is required for Triton paged attention "
+                "when KV or query scales are needed; "
+                "ensure FMHAParams was created with alloc_scale=True"
+            )
+        if kv_scale_buf.dtype != torch.float32:
+            raise ValueError(f"kv_scale_buf must be float32, got {kv_scale_buf.dtype}")
+        if kv_scale_buf.device != query.device:
+            raise ValueError(
+                f"kv_scale_buf must be on query device {query.device}, "
+                f"got {kv_scale_buf.device}"
+            )
+        if kv_scale_buf.numel() == 0:
+            raise ValueError("kv_scale_buf must not be empty")
+        if has_kv_scale_base:
+            key_scale = kv_scale_buf
+            value_scale = kv_scale_buf
 
-    num_query_heads = query.shape[1]
     head_size = query.shape[2]
-    query_group_size = num_query_heads // num_kv_heads
 
     query_dtype = query.dtype
     compute_type = (
@@ -943,91 +1021,74 @@ def _run_triton_paged_attention(
         )
         else query_dtype
     )
-    output_dtype = (
-        torch.bfloat16
-        if query_dtype
-        in (
-            torch.float8_e4m3fnuz,
-            torch.float8_e4m3fn,
-        )
-        else query_dtype
-    )
 
     softmax_scale = 1.0 / (head_size**0.5)
     max_context_partition_num = (
         max_seq_len + context_partition_size - 1
     ) // context_partition_size
-    equivalent_query_group_size = query_length * query_group_size
 
-    output = torch.empty(
-        (num_seqs * query_length, num_query_heads, head_size),
-        dtype=output_dtype,
-        device=query.device,
-    )
-    exp_sums = torch.zeros(
-        (
+    if workspace is None:
+        num_query_heads = query.shape[1]
+        query_group_size = num_query_heads // num_kv_heads
+        output_dtype = (
+            torch.bfloat16
+            if query_dtype
+            in (
+                torch.float8_e4m3fnuz,
+                torch.float8_e4m3fn,
+            )
+            else query_dtype
+        )
+        equivalent_query_group_size = query_length * query_group_size
+        output_shape = (num_seqs * query_length, num_query_heads, head_size)
+        workspace_shape = (
             num_seqs,
             num_kv_heads,
             max_context_partition_num,
             equivalent_query_group_size,
-        ),
-        dtype=torch.float32,
-        device=query.device,
-    )
-    max_logits = torch.full(
-        (
-            num_seqs,
-            num_kv_heads,
-            max_context_partition_num,
-            equivalent_query_group_size,
-        ),
-        -float("inf"),
-        dtype=torch.float32,
-        device=query.device,
-    )
-    temporary_output = torch.zeros(
-        (
-            num_seqs,
-            num_kv_heads,
-            max_context_partition_num,
-            equivalent_query_group_size,
-            head_size,
-        ),
-        dtype=output_dtype,
-        device=query.device,
-    )
-
-    context_lengths = seq_lens.to(dtype=torch.int32, device=query.device)
-    block_tables = block_tables_id_device.to(dtype=torch.int32, device=query.device)
-
-    if query.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn):
-        q_b = kv_scale_buf
-        if q_b is None or q_b.device != query.device:
-            q_b = torch.ones(1, device=query.device, dtype=torch.float32)
-        query_scale = q_b
+        )
+        temporary_shape = (*workspace_shape, head_size)
+        output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
+        exp_sums = torch.empty(
+            workspace_shape, dtype=torch.float32, device=query.device
+        )
+        max_logits = torch.empty(
+            workspace_shape, dtype=torch.float32, device=query.device
+        )
+        temporary_output = torch.empty(
+            temporary_shape, dtype=output_dtype, device=query.device
+        )
     else:
-        query_scale = None
+        output = workspace["output"]
+        exp_sums = workspace["exp_sums"]
+        max_logits = workspace["max_logits"]
+        temporary_output = workspace["temporary_output"]
 
-    pa_decode_gluon_aot(
-        output=output,
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        context_lengths=context_lengths,
-        block_tables=block_tables,
-        softmax_scale=softmax_scale,
-        query_length=query_length,
-        max_context_partition_num=max_context_partition_num,
-        context_partition_size=context_partition_size,
-        compute_type=compute_type,
-        query_scale=query_scale,
-        key_scale=key_scale,
-        value_scale=value_scale,
+    block_tables = block_tables_id_device
+    query_scale = kv_scale_buf if query_is_fp8 else None
+
+    torch.ops.aiter.pa_decode_gluon(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        seq_lens,
+        block_tables,
+        softmax_scale,
+        query_length,
+        max_context_partition_num,
+        context_partition_size,
+        compute_type,
+        query_scale,
+        key_scale,
+        value_scale,
         exp_sums=exp_sums,
         max_logits=max_logits,
         temporary_output=temporary_output,
         alibi_slopes=None,
         sinks=None,
+        sliding_window=-1,
+        ps=False,
     )
     return output
 
@@ -1039,6 +1100,7 @@ class AiterPrefillAttnOpTriton:
         self.head_num_kv = attn_configs.kv_head_num
         self.context_partition_size = 256
         self.alloc_scale = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        self.enable_cuda_graph = False
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -1049,12 +1111,124 @@ class AiterPrefillAttnOpTriton:
         return has_prefix
 
     def prepare(self, attn_inputs: PyAttentionInputs):
+        self.enable_cuda_graph = bool(getattr(attn_inputs, "is_cuda_graph", False))
         fmha_params = FMHAParams(
             attn_inputs=attn_inputs,
             is_prefill=True,
             alloc_scale=self.alloc_scale,
         )
+
+        if self.enable_cuda_graph:
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+            if block_table is None:
+                block_table = getattr(attn_inputs, "kv_cache_block_id_device", None)
+            graph_device = _infer_cuda_graph_device(
+                attn_inputs, fmha_params, block_table
+            )
+            fmha_params.graph_device = graph_device
+
+            self._allocate_graph_workspace(
+                fmha_params,
+                fmha_params.cu_seqlens_q.shape[0] - 1,
+                fmha_params.max_seqlen_q,
+                fmha_params.max_seqlen_k,
+                get_scalar_type(attn_inputs.dtype),
+                fmha_params.graph_device,
+            )
+            self.prepare_cuda_graph(fmha_params, attn_inputs)
+        else:
+            fmha_params.compact_indices = self._calc_compact_indices(fmha_params)
+
         return fmha_params
+
+    def _graph_output_dtype(self, dtype: torch.dtype) -> torch.dtype:
+        return (
+            torch.bfloat16
+            if dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
+            else dtype
+        )
+
+    def _allocate_graph_workspace(
+        self,
+        fmha_params: FMHAParams,
+        num_seqs: int,
+        query_length: int,
+        max_seq_len: int,
+        attn_dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        output_dtype = self._graph_output_dtype(attn_dtype)
+        query_group_size = self.head_num // self.head_num_kv
+        max_context_partition_num = (
+            max_seq_len + self.context_partition_size - 1
+        ) // self.context_partition_size
+        equivalent_query_group_size = query_length * query_group_size
+        output_shape = (num_seqs * query_length, self.head_num, self.head_dim)
+        compact_output_shape = (fmha_params.token_q_num, self.head_num, self.head_dim)
+        workspace_shape = (
+            num_seqs,
+            self.head_num_kv,
+            max_context_partition_num,
+            equivalent_query_group_size,
+        )
+        temporary_shape = (*workspace_shape, self.head_dim)
+
+        # Both the RoPE padding kernel and pa_decode_gluon capture query_length
+        # as a host scalar. FusedRopeKVCacheOp.prepare_in_place rebuilds replay
+        # padding offsets against this stride, so shorter live queries keep the
+        # same padded row layout.
+        fmha_params.graph_query_length = query_length
+        fmha_params.graph_token_q_capacity = fmha_params.token_q_num
+
+        fmha_params.attention_output = torch.empty(
+            output_shape, dtype=output_dtype, device=device
+        )
+        fmha_params.compact_output = torch.empty(
+            compact_output_shape, dtype=output_dtype, device=device
+        )
+        fmha_params.exp_sums = torch.empty(
+            workspace_shape, dtype=torch.float32, device=device
+        )
+        fmha_params.max_logits = torch.empty(
+            workspace_shape, dtype=torch.float32, device=device
+        )
+        fmha_params.temporary_output = torch.empty(
+            temporary_shape, dtype=output_dtype, device=device
+        )
+        fmha_params.compact_indices = torch.full(
+            (fmha_params.token_q_num,), 0, dtype=torch.int32, device=device
+        )
+
+    def _calc_compact_indices(self, fmha_params: FMHAParams):
+        cu_seqlens_q = fmha_params.cu_seqlens_q
+        query_stride = getattr(
+            fmha_params, "graph_query_length", fmha_params.max_seqlen_q
+        )
+        device = cu_seqlens_q.device
+
+        num_seqs = cu_seqlens_q.shape[0] - 1
+        q_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+
+        seq_ids = torch.repeat_interleave(
+            torch.arange(num_seqs, device=device),
+            q_lens,
+            output_size=fmha_params.token_q_num,
+        )
+        within_seq_pos = (
+            torch.arange(fmha_params.token_q_num, device=device) - cu_seqlens_q[seq_ids]
+        )
+        return (
+            seq_ids * query_stride + (query_stride - q_lens[seq_ids]) + within_seq_pos
+        )
+
+    def prepare_cuda_graph(
+        self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs
+    ) -> None:
+        compact_indices = self._calc_compact_indices(fmha_params)
+        fmha_params.compact_indices.fill_(0)
+        fmha_params.compact_indices[: compact_indices.shape[0]].copy_(
+            compact_indices, non_blocking=True
+        )
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
         block_tables_id_device = fmha_params.kv_cache_block_id_device
@@ -1062,17 +1236,20 @@ class AiterPrefillAttnOpTriton:
             block_tables_id_device.shape[0] if block_tables_id_device is not None else 1
         )
         query = qkv[0]
-        token_num = query.shape[0]
-        device = query.device
 
-        # cu_seqlens are already on GPU from FMHAParams.__init__
-        cu_seqlens_q = fmha_params.cu_seqlens_q
-        q_lens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(torch.int32)
         max_q_len = fmha_params.max_seqlen_q
+        token_num = query.shape[0]
         real_token_num = fmha_params.token_q_num
+        seq_lens = fmha_params.prefill_seqlen_k_int32
 
-        cu_seqlens_k = fmha_params.cu_seqlens_k
-        seq_lens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+        workspace = None
+        if self.enable_cuda_graph:
+            workspace = {
+                "output": fmha_params.attention_output,
+                "exp_sums": fmha_params.exp_sums,
+                "max_logits": fmha_params.max_logits,
+                "temporary_output": fmha_params.temporary_output,
+            }
 
         output = _run_triton_paged_attention(
             query,
@@ -1085,20 +1262,20 @@ class AiterPrefillAttnOpTriton:
             fmha_params.max_seqlen_k,
             self.head_num_kv,
             self.context_partition_size,
+            linear_v=False,
             kv_scale_buf=fmha_params.kv_scale,
+            workspace=workspace,
         )
 
-        if token_num != real_token_num:
-            seq_ids = torch.arange(num_seqs, device=device).repeat_interleave(q_lens)
-            within_seq_pos = (
-                torch.arange(real_token_num, device=device) - cu_seqlens_q[seq_ids]
+        if self.enable_cuda_graph:
+            torch.index_select(
+                output, 0, fmha_params.compact_indices, out=fmha_params.compact_output
             )
-            dst_indices = (
-                seq_ids * max_q_len + (max_q_len - q_lens[seq_ids]) + within_seq_pos
-            )
-            output = output[dst_indices]
-
-        return output.view(real_token_num, -1)
+            return fmha_params.compact_output
+        else:
+            if token_num != real_token_num:
+                output = output[fmha_params.compact_indices]
+            return output.view(real_token_num, -1)
 
 
 class AiterDecodeAttnOpBase:
@@ -1172,8 +1349,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
 
-        key_cache = kv_cache.kv_cache_base.select(1, 0)
-        value_cache = kv_cache.kv_cache_base.select(1, 1)
+        paged_kv_cache = self.reshape_kv_cache(kv_cache.kv_cache_base)
+        key_cache, value_cache = paged_kv_cache.unbind(1)
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
         K_QScale = None
@@ -1229,8 +1406,8 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         self, query: torch.Tensor, kv_cache: Optional[LayerKVCache], fmha_params
     ) -> torch.Tensor:
         seq_lens = fmha_params.seq_lens
-        key_cache = kv_cache.kv_cache_base.select(1, 0)
-        value_cache = kv_cache.kv_cache_base.select(1, 1)
+        paged_kv_cache = self.reshape_kv_cache(kv_cache.kv_cache_base)
+        key_cache, value_cache = paged_kv_cache.unbind(1)
 
         K_QScale = None
         V_QScale = None
@@ -1252,11 +1429,19 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
         output = self._get_output(query).view((num_seqs, num_heads, head_size))
-        if max_seq_len <= 16384 and (not using_fp8_kvcache) and head_size <= 128:
-            _PARTITION_SIZE_ROCM = 512
-            max_num_partitions = (
-                max_seq_len + _PARTITION_SIZE_ROCM - 1
-            ) // _PARTITION_SIZE_ROCM
+        use_512_partition = (
+            max_seq_len <= 16384 and (not using_fp8_kvcache) and head_size <= 128
+        )
+        _PARTITION_SIZE_ROCM = 512 if use_512_partition else 256
+        if _PARTITION_SIZE_ROCM % block_size:
+            raise ValueError(
+                f"page={block_size} must divide the non-ASM decode partition "
+                f"{_PARTITION_SIZE_ROCM}; enable --use_triton_pa 1"
+            )
+        max_num_partitions = (
+            max_seq_len + _PARTITION_SIZE_ROCM - 1
+        ) // _PARTITION_SIZE_ROCM
+        if use_512_partition:
             x = 16 // key_cache.element_size()
             grp_size = num_heads // num_kv_heads
             kv_sizes = value_cache.shape
@@ -1294,12 +1479,6 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
                 alibi_slopes,
             )
         else:
-            _PARTITION_SIZE_ROCM = 256
-
-            max_num_partitions = (
-                max_seq_len + _PARTITION_SIZE_ROCM - 1
-            ) // _PARTITION_SIZE_ROCM
-            assert _PARTITION_SIZE_ROCM % block_size == 0
             # output already allocated above via _get_output(query); reuse it here.
             # init tmp_output
             tmp_output = torch.empty(
@@ -1351,10 +1530,11 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
 
 class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 
-    def __init__(self, attn_configs: AttentionConfigs):
+    def __init__(self, attn_configs: AttentionConfigs, *, linear_v: bool):
         super().__init__(attn_configs)
         self.alloc_scale = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
         self.context_partition_size = 256
+        self.linear_v = linear_v
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -1376,6 +1556,7 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
             self.head_num_kv,
             self.context_partition_size,
             kv_scale_buf=fmha_params.kv_scale,
+            linear_v=self.linear_v,
         )
         return output.view(num_seqs, -1)
 
@@ -1525,9 +1706,52 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.rope_kvcache_impl.use_paged_fmha = True
 
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.batch_prefill_impl.prepare(attn_inputs)
+        self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        self.fmha_params: Optional[FMHAParams] = None
+        self.triton_fmha_params: Optional[FMHAParams] = None
+        # attn_inputs is fixed for this implementation instance. Select before
+        # prepare() so only the dispatched backend owns metadata and workspace,
+        # and keep all initialization out of forward().
+        self.backend = self._select_backend(attn_inputs)
+        self._prepare_backend(self.backend)
+        # Only graph-captured Triton prefill needs FusedRopeKVCacheOp to retain
+        # the capture row stride and rebuild replay padding offsets.
+        self.rope_kvcache_impl.pad_query = (
+            self.need_rope_kv_cache
+            and self.enable_cuda_graph
+            and self.backend == "triton"
+        )
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    def _use_triton_paged_prefill(self, attn_inputs: PyAttentionInputs) -> bool:
+        input_lengths = attn_inputs.input_lengths
+        batch_size = input_lengths.numel()
+        max_q_len = int(input_lengths.max().item()) if batch_size > 0 else 0
+        return batch_size > 0 and 0 < max_q_len <= 4
+
+    def _select_backend(self, attn_inputs: PyAttentionInputs) -> str:
+        return "triton" if self._use_triton_paged_prefill(attn_inputs) else "batch"
+
+    def _prepare_backend(self, backend: str) -> FMHAParams:
+        if backend == "triton":
+            if self.triton_fmha_params is None:
+                self.triton_fmha_params = self.triton_prefill_impl.prepare(
+                    self.attn_inputs
+                )
+            return self.triton_fmha_params
+        if backend == "batch":
+            if self.fmha_params is None:
+                self.fmha_params = self.batch_prefill_impl.prepare(self.attn_inputs)
+            return self.fmha_params
+        raise ValueError(f"Unknown Aiter prefill backend: {backend}")
+
+    def _get_fmha_params(self, backend: str) -> FMHAParams:
+        if backend == "triton" and self.triton_fmha_params is not None:
+            return self.triton_fmha_params
+        if backend == "batch" and self.fmha_params is not None:
+            return self.fmha_params
+        raise RuntimeError(f"Aiter prefill backend was not prepared: {backend}")
 
     @classmethod
     def support(
@@ -1540,96 +1764,155 @@ class AiterPrefillImplPaged(FMHAImplBase):
             attn_configs
         )
 
-    def _update_prefill_params_for_cuda_graph(
-        self, attn_inputs: PyAttentionInputs
+    def _copy_padded_int32(self, dst: torch.Tensor, src: torch.Tensor) -> None:
+        """Copy src into dst and pad the tail with the last copied value."""
+        src = src.to(device=dst.device, dtype=torch.int32)
+        if src.numel() > dst.numel():
+            raise ValueError(
+                f"source tensor is larger than destination: {src.numel()} > {dst.numel()}"
+            )
+        dst[: src.numel()].copy_(src, non_blocking=True)
+        if src.numel() < dst.numel():
+            pad_value = (
+                src[-1]
+                if src.numel() > 0
+                else torch.zeros((), dtype=torch.int32, device=dst.device)
+            )
+            dst[src.numel() :].fill_(int(pad_value.item()))
+
+    def _refresh_prefill_fmha_params_for_cuda_graph(
+        self, fmha_params: Any, attn_inputs: PyAttentionInputs
     ) -> None:
-        input_lengths = attn_inputs.input_lengths
+        """Refresh graph-captured prefill metadata in-place.
 
-        fmha_params = self.fmha_params
+        CUDA/HIP graph replay captures tensor addresses. Any tensor consumed by an
+        attention kernel must keep capture-time storage and receive new values via
+        copy_ before replay.
+        """
         expected_batch = fmha_params.cu_seqlens_q.numel() - 1
+        if expected_batch < 0:
+            raise ValueError("cu_seqlens_q must have at least one element")
 
-        live_cu_seqlens_q = getattr(attn_inputs, "cu_seqlens_device", None)
-        live_cu_seqlens_k = getattr(attn_inputs, "cu_kv_seqlens_device", None)
-        use_live_cu_seqlens = (
-            live_cu_seqlens_q is not None
-            and live_cu_seqlens_k is not None
-            and live_cu_seqlens_q.numel() == expected_batch + 1
-            and live_cu_seqlens_k.numel() == expected_batch + 1
+        input_lengths = attn_inputs.input_lengths
+        if input_lengths.numel() > expected_batch:
+            raise ValueError(
+                "Aiter prefill CUDA graph replay batch mismatch: "
+                f"capture={expected_batch}, replay={input_lengths.numel()}"
+            )
+
+        q_lens_host = torch.zeros(expected_batch, dtype=torch.int32)
+        if input_lengths.numel() > 0:
+            q_lens_host[: input_lengths.numel()].copy_(
+                input_lengths.to(dtype=torch.int32, device="cpu")
+            )
+
+        prefix_src = getattr(attn_inputs, "prefix_lengths", None)
+        prefix_host = torch.zeros(expected_batch, dtype=torch.int32)
+        if prefix_src is not None and prefix_src.numel() > 0:
+            if prefix_src.numel() != input_lengths.numel():
+                raise ValueError(
+                    "Aiter prefill CUDA graph replay prefix/input length mismatch: "
+                    f"input={input_lengths.numel()}, prefix={prefix_src.numel()}"
+                )
+            if prefix_src.numel() > expected_batch:
+                raise ValueError(
+                    "Aiter prefill CUDA graph replay prefix length mismatch: "
+                    f"capture={expected_batch}, replay={prefix_src.numel()}"
+                )
+            prefix_host[: prefix_src.numel()].copy_(
+                prefix_src.to(dtype=torch.int32, device="cpu")
+            )
+        kv_lens_host = q_lens_host + prefix_host
+
+        cu_q_host = torch.zeros(expected_batch + 1, dtype=torch.int32)
+        cu_k_host = torch.zeros(expected_batch + 1, dtype=torch.int32)
+        if expected_batch > 0:
+            cu_q_host[1:] = torch.cumsum(q_lens_host, dim=0)
+            cu_k_host[1:] = torch.cumsum(kv_lens_host, dim=0)
+
+        self._copy_padded_int32(fmha_params.cu_seqlens_q, cu_q_host)
+        self._copy_padded_int32(fmha_params.cu_seqlens_k, cu_k_host)
+
+        kv_lens = kv_lens_host.to(device=fmha_params.cu_seqlens_k.device)
+        prefill_seqlen_k = getattr(fmha_params, "prefill_seqlen_k_int32", None)
+        if (
+            prefill_seqlen_k is None
+            or prefill_seqlen_k.numel() != expected_batch
+            or prefill_seqlen_k.device != fmha_params.cu_seqlens_k.device
+        ):
+            raise ValueError(
+                "Aiter prefill CUDA graph params must own a stable "
+                "prefill_seqlen_k_int32 tensor"
+            )
+        prefill_seqlen_k.copy_(kv_lens, non_blocking=True)
+
+        fmha_params.prefix_lengths = prefix_host.to(
+            device=fmha_params.cu_seqlens_q.device
         )
-
-        if use_live_cu_seqlens:
-            fmha_params.cu_seqlens_q.copy_(
-                live_cu_seqlens_q.to(
-                    device=fmha_params.cu_seqlens_q.device, dtype=torch.int32
-                )
-            )
-            fmha_params.cu_seqlens_k.copy_(
-                live_cu_seqlens_k.to(
-                    device=fmha_params.cu_seqlens_k.device, dtype=torch.int32
-                )
-            )
-            q_lengths = fmha_params.cu_seqlens_q[1:] - fmha_params.cu_seqlens_q[:-1]
-            kv_lengths = fmha_params.cu_seqlens_k[1:] - fmha_params.cu_seqlens_k[:-1]
-            prefix_lengths = kv_lengths - q_lengths
-        else:
-            q_lengths = input_lengths.to(
-                device=fmha_params.cu_seqlens_q.device, dtype=torch.int32
-            )
-            fmha_params.cu_seqlens_q.zero_()
-            fmha_params.cu_seqlens_q[1:].copy_(torch.cumsum(q_lengths, dim=0))
-
-            prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
-            if prefix_lengths is None:
-                prefix_lengths = torch.zeros_like(q_lengths)
-            else:
-                if prefix_lengths.shape[0] != expected_batch:
-                    raise ValueError(
-                        "AiterPrefillImplPaged CUDA graph replay prefix length mismatch: "
-                        f"capture={expected_batch}, replay={prefix_lengths.shape[0]}"
-                    )
-                prefix_lengths = prefix_lengths.to(
-                    device=fmha_params.cu_seqlens_k.device, dtype=torch.int32
-                )
-
-            kv_lengths = q_lengths + prefix_lengths
-            fmha_params.cu_seqlens_k.zero_()
-            fmha_params.cu_seqlens_k[1:].copy_(torch.cumsum(kv_lengths, dim=0))
-
-        fmha_params.prefix_lengths = prefix_lengths
-
-        q_lens = input_lengths
-        pl_src = getattr(attn_inputs, "prefix_lengths", None)
-        if pl_src is not None and pl_src.numel() >= expected_batch:
-            p_lens = pl_src[:expected_batch]
-        else:
-            p_lens = torch.zeros_like(q_lens)
-        kv_lens = q_lens + p_lens.to(dtype=q_lens.dtype)
-        fmha_params.max_seq_len = int(q_lens.max()) if expected_batch > 0 else 0
+        fmha_params.max_seq_len = (
+            int(q_lens_host.max().item()) if expected_batch > 0 else 0
+        )
         fmha_params.max_seqlen_q = fmha_params.max_seq_len
-        fmha_params.max_seqlen_k = int(kv_lens.max()) if expected_batch > 0 else 0
-        fmha_params.token_q_num = int(q_lens.sum())
-        fmha_params.token_kv_num = int(kv_lens.sum())
+        fmha_params.max_seqlen_k = (
+            int(kv_lens_host.max().item()) if expected_batch > 0 else 0
+        )
+        fmha_params.token_q_num = int(q_lens_host.sum().item())
+        fmha_params.token_kv_num = int(kv_lens_host.sum().item())
 
-        # Sync prefill_seqlen_k_int32 from updated cu_seqlens_k so that
-        # CUDA graph replay does not reuse stale seqlen_k values.
-        fmha_params.prefill_seqlen_k_int32 = (
-            fmha_params.cu_seqlens_k[1:] - fmha_params.cu_seqlens_k[:-1]
-        ).to(torch.int32)
+        graph_query_length = getattr(fmha_params, "graph_query_length", None)
+        if (
+            graph_query_length is not None
+            and fmha_params.max_seqlen_q > graph_query_length
+        ):
+            raise ValueError(
+                "Aiter prefill CUDA graph replay query length exceeds capture "
+                f"capacity: capture={graph_query_length}, "
+                f"replay={fmha_params.max_seqlen_q}"
+            )
+
+        graph_token_q_capacity = getattr(fmha_params, "graph_token_q_capacity", None)
+        if (
+            graph_token_q_capacity is not None
+            and fmha_params.token_q_num > graph_token_q_capacity
+        ):
+            raise ValueError(
+                "Aiter prefill CUDA graph replay token count exceeds capture "
+                f"capacity: capture={graph_token_q_capacity}, "
+                f"replay={fmha_params.token_q_num}"
+            )
 
         kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if kv_block_id is None:
             kv_block_id = getattr(attn_inputs, "kv_cache_block_id_device", None)
         if kv_block_id is None:
             raise ValueError(
-                "AiterPrefillImplPaged.prepare_cuda_graph requires kv cache block ids"
+                "Aiter prefill CUDA graph replay requires kv cache block ids"
             )
         fmha_params.kv_cache_block_id_device = kv_block_id
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.attn_inputs = attn_inputs
-        self._update_prefill_params_for_cuda_graph(attn_inputs)
 
-        self.batch_prefill_impl.prepare_cuda_graph(self.fmha_params, attn_inputs)
+        if self.backend == "triton":
+            if self.triton_fmha_params is None:
+                raise RuntimeError("Triton graph backend was not prepared at capture")
+            self._refresh_prefill_fmha_params_for_cuda_graph(
+                self.triton_fmha_params, attn_inputs
+            )
+            self.triton_prefill_impl.prepare_cuda_graph(
+                self.triton_fmha_params, attn_inputs
+            )
+        elif self.backend == "batch":
+            if self.fmha_params is None:
+                raise RuntimeError("Batch graph backend was not prepared at capture")
+            self._refresh_prefill_fmha_params_for_cuda_graph(
+                self.fmha_params, attn_inputs
+            )
+            self.batch_prefill_impl.prepare_cuda_graph(self.fmha_params, attn_inputs)
+        else:
+            raise RuntimeError(
+                "Aiter prefill CUDA graph replay has no captured attention backend"
+            )
 
         prepare_in_place = getattr(self.rope_params, "prepare_in_place", None)
         if callable(prepare_in_place):
@@ -1641,19 +1924,17 @@ class AiterPrefillImplPaged(FMHAImplBase):
         kv_cache: Optional[LayerKVCache],
         layer_idx: int = 0,
     ) -> torch.Tensor:
-        cu_seqlens_q = self.fmha_params.cu_seqlens_q
+        fmha_params = self._get_fmha_params(self.backend)
+
+        cu_seqlens_q = fmha_params.cu_seqlens_q
         batch_size = cu_seqlens_q.shape[0] - 1
-        max_q_len = int(self.fmha_params.max_seqlen_q) if batch_size > 0 else 0
-        token_num = int(self.fmha_params.token_q_num) if batch_size > 0 else 0
-        use_triton = (
-            False
-            if self.batch_prefill_impl.enable_cuda_graph
-            else (batch_size > 0 and 0 < max_q_len <= 4)
-        )
+        max_q_len = int(fmha_params.max_seqlen_q) if batch_size > 0 else 0
+        token_num = int(fmha_params.token_q_num) if batch_size > 0 else 0
+        use_triton = self.backend == "triton"
 
         if self.need_rope_kv_cache:
-            self.rope_kvcache_impl.pad_query = (
-                use_triton and token_num != batch_size * max_q_len
+            self.rope_kvcache_impl.pad_query = use_triton and (
+                self.enable_cuda_graph or token_num != batch_size * max_q_len
             )
             fmha_input = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
         else:
@@ -1671,13 +1952,9 @@ class AiterPrefillImplPaged(FMHAImplBase):
         )
 
         if use_triton:
-            return self.triton_prefill_impl.forward(
-                fmha_input, kv_cache, self.fmha_params
-            )
+            return self.triton_prefill_impl.forward(fmha_input, kv_cache, fmha_params)
         else:
-            return self.batch_prefill_impl.forward(
-                fmha_input, kv_cache, self.fmha_params
-            )
+            return self.batch_prefill_impl.forward(fmha_input, kv_cache, fmha_params)
 
 
 class AiterDecodeImplBase(FMHAImplBase):
@@ -1728,7 +2005,10 @@ class AiterDecodeImplAsm(AiterDecodeImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return _is_mrope_interleaved_supported(attn_configs)
+        return (
+            _is_mrope_interleaved_supported(attn_configs)
+            and attn_configs.size_per_head in ASM_DECODE_HEAD_SIZES
+        )
 
     def forward(
         self,
@@ -1801,15 +2081,21 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
 class AiterDecodeImplTriton(AiterDecodeImplBase):
     """Aiter decode attention implementation using Triton."""
 
+    accepts_fmha_config = True
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
+        fmha_config: Optional[FMHAConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = AiterDecodeAttnOpTriton(attn_configs)
-        self.rope_kvcache_impl = FusedRopeKVCacheDecodeOpAsm(attn_configs)
+        linear_v = not prefill_writes_vectorized_v(attn_configs, fmha_config)
+        self.fmha_impl = AiterDecodeAttnOpTriton(attn_configs, linear_v=linear_v)
+        self.rope_kvcache_impl = (
+            FusedRopeKVCacheDecodeOpNonAsm if linear_v else FusedRopeKVCacheDecodeOpAsm
+        )(attn_configs)
 
         self.attn_inputs = attn_inputs
 

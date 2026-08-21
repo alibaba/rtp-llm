@@ -99,9 +99,12 @@ class ExpiredLockFile:
                 pass
 
 
+DEFAULT_PORT_RANGE_START = 10000
+
+
 class PortManager:
     def __init__(self, lock_dir: Path = None, start_port: int = None, ttl: int = 3600):
-        self.start_port = start_port or 10000
+        self.start_port = start_port or get_random_start_port()
         self.port_range = (self.start_port, get_linux_random_port_range()[0])
         self.ttl = ttl
         self.lock_dir = lock_dir or Path(tempfile.gettempdir()) / "test_port_locks"
@@ -139,7 +142,15 @@ class PortManager:
         # try best to reuse all the available ports
         self.cleanup_stale_locks()
 
-        for base_port in range(self.port_range[0], self.port_range[1]):
+        range_start, range_end = self.port_range
+        last_base_port = range_end - num_ports + 1
+        candidate_base_ports = range(range_start, last_base_port)
+        if range_start > DEFAULT_PORT_RANGE_START:
+            candidate_base_ports = list(candidate_base_ports) + list(
+                range(DEFAULT_PORT_RANGE_START, min(range_start, last_base_port))
+            )
+
+        for base_port in candidate_base_ports:
             locks = []
             try:
                 ports = list(range(base_port, base_port + num_ports))

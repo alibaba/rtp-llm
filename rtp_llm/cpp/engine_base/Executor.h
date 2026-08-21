@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include <cstdint>
 #include <memory>
 #include <cstdlib>
 
@@ -14,7 +15,7 @@ namespace rtp_llm {
 class Executor {
 public:
     Executor() {};
-    virtual absl::Status process(const std::list<GenerateStreamPtr>& streams) = 0;
+    virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
@@ -70,6 +71,8 @@ public:
                 model_config.data_type,
                 model_config.layernorm_eps,
                 (size_t)model_config.vocab_size,
+                model_config.output_vocab_ids.size(),
+                (size_t)model_config.output_vocab_padded_size,
                 model_config.layernorm_type == rtp_llm::LayerNormType::post_layernorm,
                 model_config.input_embedding_scalar,
                 model_config.residual_scalar,

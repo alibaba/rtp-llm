@@ -19,7 +19,9 @@ namespace rtp_llm {
 
 class CudaGraphRunner: public GraphBase {
 public:
-    CudaGraphRunner(const GraphParams& graph_params, py::object py_instance):
+    CudaGraphRunner(const GraphParams& graph_params,
+                    py::object         py_instance,
+                    const char*        forward_method_name = "forward"):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
@@ -31,6 +33,8 @@ public:
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
+        input_hidden_size_(graph_params.input_hidden_size),
+        hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
@@ -46,19 +50,20 @@ public:
         }
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_    = py_instance_.attr("forward");
+        py_forward_method_    = py_instance_.attr(forward_method_name);
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
+            hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
                          kernel_seq_size_per_block_,
                          hidden_size_,
+                         input_hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_,
                          is_target_verify_);
@@ -75,6 +80,11 @@ public:
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                          CudaGraphState&      state,
+                                          bool                 skip_forward_event_sync = false) override;
+    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
@@ -98,6 +108,14 @@ private:
     }
     bool isMtpDraftPrefillCudaGraph() const {
         return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    }
+    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
+        // DSpARK propose/commit now run as construction-time-role decode graphs
+        // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
+        // prefill keeps the fixed-capacity Python path: slicing its output buffer
+        // would mismatch the forward_decode [B * q_len, dim] result in
+        // captureOneGraphInstance.
+        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -138,6 +156,8 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
+    size_t                  input_hidden_size_{0};
+    int                     hc_mult_{1};
     int                     sp_steps_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
@@ -161,6 +181,8 @@ private:
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+
+    std::atomic<bool> prepared_attention_inputs_ = false;
 };
 
 }  // namespace rtp_llm

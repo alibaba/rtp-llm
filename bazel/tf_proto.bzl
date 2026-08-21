@@ -137,7 +137,7 @@ def cc_proto_library(
     )
 
     if use_grpc_plugin:
-        cc_libs += ["@grpc//:grpc++"]
+        cc_libs = cc_libs + ["@grpc//:grpc++"]
 
     if default_header:
         header_only_name = name

@@ -55,8 +55,13 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "dspark_noise_token_id",
+        "dspark_target_layer_ids",
+        "dspark_markov_rank",
+        "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
+        "enable_output_vocab_pruning",
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
@@ -125,6 +130,11 @@ class ModelConfig(CppModelConfig):
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
+        "hc_mult",
+        "hc_sinkhorn_iters",
+        "hc_eps",
+        "swiglu_limit",
+        "num_hash_layers",
         "has_positional_encoding",
         "has_pre_decoder_layernorm",
         "has_post_decoder_layernorm",
@@ -135,6 +145,8 @@ class ModelConfig(CppModelConfig):
         "has_moe_norm",
         "prefix_projection",
         "reverse_e_h_norm",
+        "output_vocab_ids",
+        "output_vocab_padded_size",
     }
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -513,8 +525,16 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        # DSpARK draft checkpoint metadata. Runtime proposal width comes only
+        # from sp_config.gen_num_per_cycle.
+        self.dspark_noise_token_id: Optional[int] = None
+        self.dspark_target_layer_ids: Optional[list[int]] = None
+        self.dspark_markov_rank: Optional[int] = None
+        # Target-side decoder layer outputs exported to the DSpARK draft.
+        self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
+        self.enable_output_vocab_pruning: bool = False
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
         # Model loading related fields
@@ -907,6 +927,10 @@ def build_model_config(
 
     if model_args.enable_fp32_lm_head is not None:
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
+
+    model_config.output_vocab_ids = []
+    model_config.output_vocab_padded_size = 0
+    model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
 
     # Apply model override args
     if model_args.json_model_override_args:

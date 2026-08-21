@@ -1,5 +1,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
 
+#include <cfloat>
+
 #if USING_CUDA
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>  // For half
@@ -52,6 +54,22 @@ __device__ __nv_bfloat16 NegativeInfinity<__nv_bfloat16>() {
     return -CUDART_INF_BF16;
 }
 
+// Match BaseLogitsProcessor::neg_inf after conversion to the logits dtype.
+template<typename T>
+__device__ T MaskedLogitValue() {
+    return -FLT_MAX;
+}
+
+template<>
+__device__ __half MaskedLogitValue<__half>() {
+    return NegativeInfinity<__half>();
+}
+
+template<>
+__device__ __nv_bfloat16 MaskedLogitValue<__nv_bfloat16>() {
+    return NegativeInfinity<__nv_bfloat16>();
+}
+
 // Batch version kernel for processing multiple beams
 template<typename T>
 __global__ void
@@ -66,6 +84,44 @@ mask_logits(const int batch_size, const int vocab_size, T* logits_batch, const u
         }
     }
 }
+
+#if USING_CUDA
+template<typename T>
+__global__ void packed_mask_logits(T* __restrict__ logits_batch,
+                                   const int32_t* __restrict__ packed_allow_mask,
+                                   const int32_t* __restrict__ row_indices,
+                                   const int mask_rows,
+                                   const int logits_rows,
+                                   const int logits_row_stride,
+                                   const int vocab_size,
+                                   const int bitmask_row_stride,
+                                   const int bitmask_words) {
+    const int compact_row = blockIdx.y;
+    const int vocab_idx   = threadIdx.x + blockIdx.x * blockDim.x;
+    if (compact_row >= mask_rows || vocab_idx >= vocab_size) {
+        return;
+    }
+
+    const int logits_row = row_indices == nullptr ? compact_row : row_indices[compact_row];
+    if (logits_row < 0 || logits_row >= logits_rows) {
+        return;
+    }
+
+    const int word_idx = vocab_idx / 32;
+    bool      allowed  = false;
+    if (word_idx < bitmask_words) {
+        const int64_t mask_offset =
+            static_cast<int64_t>(compact_row) * static_cast<int64_t>(bitmask_row_stride) + word_idx;
+        const uint32_t word = static_cast<uint32_t>(packed_allow_mask[mask_offset]);
+        allowed             = (word & (1u << (vocab_idx % 32))) != 0u;
+    }
+    if (!allowed) {
+        const int64_t logits_offset =
+            static_cast<int64_t>(logits_row) * static_cast<int64_t>(logits_row_stride) + vocab_idx;
+        logits_batch[logits_offset] = MaskedLogitValue<T>();
+    }
+}
+#endif
 
 template<typename T>
 void invokeMaskLogits(T* logits_batch,
@@ -89,6 +145,36 @@ void invokeMaskLogits(T* logits_batch,
     check_cuda_error();
 }
 
+#if USING_CUDA
+template<typename T>
+void invokePackedMaskLogits(T* logits_batch,
+                            const int32_t* __restrict__ packed_allow_mask,
+                            const int32_t* __restrict__ row_indices,
+                            const int    mask_rows,
+                            const int    logits_rows,
+                            const int    logits_row_stride,
+                            const int    vocab_size,
+                            const int    bitmask_row_stride,
+                            const int    bitmask_words,
+                            cudaStream_t stream) {
+    const dim3 block(256);
+    const dim3 grid((vocab_size + block.x - 1) / block.x, mask_rows);
+    packed_mask_logits<<<grid, block, 0, stream>>>(logits_batch,
+                                                   packed_allow_mask,
+                                                   row_indices,
+                                                   mask_rows,
+                                                   logits_rows,
+                                                   logits_row_stride,
+                                                   vocab_size,
+                                                   bitmask_row_stride,
+                                                   bitmask_words);
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+#endif
+    check_cuda_error();
+}
+#endif
+
 template void invokeMaskLogits<float>(float* logits_batch,
                                       const uint8_t* __restrict__ mask_batch,
                                       const int    batch_size,
@@ -104,5 +190,38 @@ template void invokeMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
                                               const int    batch_size,
                                               const int    vocab_size,
                                               cudaStream_t stream);
+
+#if USING_CUDA
+template void invokePackedMaskLogits<float>(float* logits_batch,
+                                            const int32_t* __restrict__ packed_allow_mask,
+                                            const int32_t* __restrict__ row_indices,
+                                            const int    mask_rows,
+                                            const int    logits_rows,
+                                            const int    logits_row_stride,
+                                            const int    vocab_size,
+                                            const int    bitmask_row_stride,
+                                            const int    bitmask_words,
+                                            cudaStream_t stream);
+template void invokePackedMaskLogits<half>(half* logits_batch,
+                                           const int32_t* __restrict__ packed_allow_mask,
+                                           const int32_t* __restrict__ row_indices,
+                                           const int    mask_rows,
+                                           const int    logits_rows,
+                                           const int    logits_row_stride,
+                                           const int    vocab_size,
+                                           const int    bitmask_row_stride,
+                                           const int    bitmask_words,
+                                           cudaStream_t stream);
+template void invokePackedMaskLogits<__nv_bfloat16>(__nv_bfloat16* logits_batch,
+                                                    const int32_t* __restrict__ packed_allow_mask,
+                                                    const int32_t* __restrict__ row_indices,
+                                                    const int    mask_rows,
+                                                    const int    logits_rows,
+                                                    const int    logits_row_stride,
+                                                    const int    vocab_size,
+                                                    const int    bitmask_row_stride,
+                                                    const int    bitmask_words,
+                                                    cudaStream_t stream);
+#endif
 
 }  // namespace rtp_llm

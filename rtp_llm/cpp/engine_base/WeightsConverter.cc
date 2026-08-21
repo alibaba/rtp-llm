@@ -246,6 +246,10 @@ std::unique_ptr<rtp_llm::Weights> WeightsConverter::createGptWeights(std::unique
     gpt_weights.lm_head         = mayCreateDenseWeights(*global_weight, W::lm_head);
 
     gpt_weights.linear_bias_slopes = mayCreateDenseWeights(*global_weight, W::linear_bias_slopes);
+    gpt_weights.d2t_map            = mayFindTensor(*global_weight, W::multi_tokens_predict_d2t_map);
+    gpt_weights.t2d_map            = mayFindTensor(*global_weight, W::multi_tokens_predict_t2d_map);
+    gpt_weights.dspark_markov_w1   = mayFindTensor(*global_weight, W::v4_dspark_markov_w1);
+    gpt_weights.dspark_markov_w2   = mayFindTensor(*global_weight, W::v4_dspark_markov_w2);
 
     for (auto& layer_weights : layers_weights) {
         rtp_llm::LayerWeights layer_ws;

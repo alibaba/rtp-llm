@@ -33,6 +33,7 @@ This page lists server arguments used to configure the behavior and performance 
 | `--enable_open_source_fmha` | Enables open-source FMHA implementation. | True |
 | `--enable_paged_open_source_fmha` | Enables Paged open-source FMHA implementation. | True |
 | `--disable_flashinfer_native` | Disables FlashInfer native attention backends. | False |
+| `--disable_flashinfer_hybrid_prefill` | Disables FlashInfer native Hybrid Prefill implementation. | True |
 | `--enable_xqa` | Enables XQA feature (requires SM90+ GPU). | True |
 
 ### Removed FMHA options
@@ -45,12 +46,6 @@ The following legacy options and environment variables were removed and must no 
 | `--enable_paged_trt_fmha` | `ENABLE_PAGED_TRT_FMHA` | `--enable_paged_flashinfer_trt_fmha_v2` / `ENABLE_PAGED_FLASHINFER_TRT_FMHA_V2` for paged prefill |
 | `--enable_trtv1_fmha` | `ENABLE_TRTV1_FMHA` | None; select another supported attention backend |
 | `--disable_flash_infer` | `DISABLE_FLASH_INFER` | To preserve global disable behavior, set `--disable_flashinfer_native=true`, `--enable_flashinfer_trtllm_gen=false`, `--enable_flashinfer_trt_fmha_v2=false`, and `--enable_paged_flashinfer_trt_fmha_v2=false` |
-
-#### Compatibility and rollout contract
-
-This migration intentionally establishes a new FMHA configuration contract and is a required breaking change. The embedded TensorRT cubin implementations and their configuration fields were removed in favor of FlashInfer TRT-LLM FMHA v2. The new contiguous and paged implementations have different support constraints and are not aliases for the removed implementations, so the legacy CLI options and environment variables are deliberately not preserved, translated, or warned on. FlashInfer TRT-LLM FMHA v2 requires CUDA 12.9 or later and an SM90 or SM12x GPU.
-
-RTP-LLM deployments are released as versioned, immutable container images, with the matching configuration delivered as part of the same deployment revision. Image and configuration updates therefore form one atomic rollout unit; reusing an older FMHA configuration with a newer image is not a supported deployment mode. Rollback likewise restores the previous image and its configuration together. This image-scoped migration model has also been used for previous backend configuration changes, so no cross-version compatibility aliases are required for this removal.
 
 ## KV Cache Configuration
 
@@ -203,4 +198,7 @@ RTP-LLM deployments are released as versioned, immutable container images, with 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
-| `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch | auto |
+| `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch (`LOAD_METHOD`) | auto |
+| `--force_cpu_load_weights` | Load weights on CPU to reduce device memory usage (`FORCE_CPU_LOAD_WEIGHTS`) | False |
+| `--loader_recycle_handles` | ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (`LOADER_RECYCLE_HANDLES`) | True |
+| `--moe_pure_tp_preshard` | Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (`tp>1, dp=1, ep=1`) before device copy. Unsupported sources or layouts warn and use legacy full reads. (`MOE_PURE_TP_PRESHARD`) | False |

@@ -22,19 +22,68 @@
 import logging
 import unittest
 
+from pydantic import ValidationError
+
 from rtp_llm.config.generate_config import (
-    GenerateConfig,
     _DIVERGE_START_COMBO_WARN_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
+)
+from rtp_llm.config.generate_config import (
     _MAX_DIVERGE_DEPTH,  # pyright: ignore[reportPrivateUsage]
+)
+from rtp_llm.config.generate_config import (
     _reset_sanitize_warn_state,  # pyright: ignore[reportPrivateUsage]
 )
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.response_format import ResponseFormat
+from rtp_llm.structure.request_extractor import RequestExtractor
+
+
+class TestRawGenerateConfigParsing(unittest.TestCase):
+    def test_response_format_dict_is_validated(self):
+        extractor = RequestExtractor(GenerateConfig(max_new_tokens=16))
+        request_values = {
+            "prompt": "hello",
+            "generate_config": {
+                "max_new_tokens": 32,
+                "response_format": '{"type":"regex","pattern":"\\\\d+"}',
+                "nested_unknown": "discarded",
+            },
+            "max_new_tokens": 64,
+            "top_level_unknown": "preserved",
+        }
+
+        config, remain = extractor._format_generate_config(request_values)
+
+        self.assertIsInstance(config.response_format, ResponseFormat)
+        self.assertEqual(config.response_format.type, "regex")
+        self.assertEqual(config.response_format.pattern, r"\d+")
+        self.assertEqual(config.max_new_tokens, 64)
+        self.assertEqual(
+            remain,
+            {"prompt": "hello", "top_level_unknown": "preserved"},
+        )
+        config.validate()
+
+        legacy_config, _ = extractor._format_generate_config(
+            {"prompt": "hello", "json_format": True}
+        )
+        self.assertEqual(legacy_config.response_format.type, "json_object")
+
+    def test_batch_generate_configs_are_deep_copied(self):
+        extractor = RequestExtractor(GenerateConfig())
+        config = GenerateConfig(stop_words_list=[[1]])
+
+        configs = extractor._get_adapter(config, 2)
+        configs[0].stop_words_list.append([2])
+
+        self.assertIsNot(configs[0], configs[1])
+        self.assertEqual(configs[0].stop_words_list, [[1], [2]])
+        self.assertEqual(configs[1].stop_words_list, [[1]])
 
 
 class TestStructuredOutputPassthrough(unittest.TestCase):
-
     def test_structured_output_controls_are_config_passthrough(self):
         cases = {
-            "json_format": True,
             "response_format": {"type": "json_object"},
             "json_schema": {"type": "object"},
             "regex": "a+",
@@ -50,21 +99,37 @@ class TestStructuredOutputPassthrough(unittest.TestCase):
         GenerateConfig().validate()
 
     def test_plain_text_response_format_remains_valid(self):
-        for value in ({"type": "text"}, '{"type":"text"}', "text"):
-            with self.subTest(value=value):
-                GenerateConfig(response_format=value).validate()
+        GenerateConfig(response_format={"type": "text"}).validate()
 
     def test_plain_text_response_format_allows_beam_and_multi_return(self):
-        for value in ({"type": "text"}, '{"type":"text"}', "text", "not-json"):
+        value = {"type": "text"}
+        GenerateConfig(response_format=value, num_beams=2).validate()
+        GenerateConfig(response_format=value, num_return_sequences=2).validate()
+
+    def test_response_format_accepts_legacy_string_inputs(self):
+        for value in ('{"type":"text"}', "text"):
             with self.subTest(value=value):
-                GenerateConfig(response_format=value, num_beams=2).validate()
-                GenerateConfig(
-                    response_format=value, num_return_sequences=2
-                ).validate()
+                config = GenerateConfig(response_format=value)
+                self.assertEqual(config.response_format.type, "text")
+        with self.assertRaises(ValidationError):
+            GenerateConfig(response_format="not-json")
+
+    def test_response_format_rejects_noncanonical_objects(self):
+        cases = (
+            {},
+            {"type": "text", "pattern": "a+"},
+            {
+                "type": "structural_tag",
+                "structural_tag": {"format": {}},
+            },
+        )
+        for value in cases:
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    GenerateConfig(response_format=value)
 
 
 class TestClampDivergeStartCombo(unittest.TestCase):
-
     def setUp(self):
         # 每个用例前复位限流状态，确保用例间独立不受全局时间戳影响。
         _reset_sanitize_warn_state()
@@ -152,7 +217,9 @@ class TestCrossSeqBanCompatibility(unittest.TestCase):
                 num_beams=4,
                 combo_token_size=3,
             )
-        self.assertTrue(any("incompatible with beam search" in msg for msg in cm.output))
+        self.assertTrue(
+            any("incompatible with beam search" in msg for msg in cm.output)
+        )
         self.assertFalse(cfg.enable_cross_sequence_ban)
 
     def test_variable_num_beams_incompatible_disables(self):
@@ -164,7 +231,9 @@ class TestCrossSeqBanCompatibility(unittest.TestCase):
                 variable_num_beams=[1, 4],
                 combo_token_size=3,
             )
-        self.assertTrue(any("incompatible with beam search" in msg for msg in cm.output))
+        self.assertTrue(
+            any("incompatible with beam search" in msg for msg in cm.output)
+        )
         self.assertFalse(cfg.enable_cross_sequence_ban)
 
     def test_combo_token_size_lt2_disables(self):
@@ -363,9 +432,11 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
         """
         EXPECTED_CPP_VALUE = 100  # mirrors C++ kDivergeStartComboWarnThreshold
         self.assertEqual(
-            _DIVERGE_START_COMBO_WARN_THRESHOLD, EXPECTED_CPP_VALUE,
+            _DIVERGE_START_COMBO_WARN_THRESHOLD,
+            EXPECTED_CPP_VALUE,
             f"Python({_DIVERGE_START_COMBO_WARN_THRESHOLD}) != C++ expected({EXPECTED_CPP_VALUE}), "
-            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.")
+            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.",
+        )
 
     def test_max_diverge_depth_sync(self):
         """确保 Python _MAX_DIVERGE_DEPTH == C++ kMaxDivergeDepth(=8)。
@@ -375,9 +446,11 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
         """
         EXPECTED_CPP_VALUE = 8  # mirrors C++ kMaxDivergeDepth
         self.assertEqual(
-            _MAX_DIVERGE_DEPTH, EXPECTED_CPP_VALUE,
+            _MAX_DIVERGE_DEPTH,
+            EXPECTED_CPP_VALUE,
             f"Python({_MAX_DIVERGE_DEPTH}) != C++ expected({EXPECTED_CPP_VALUE}), "
-            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.")
+            f"constants drifted! Check RecommendationLogitsProcessor.cc static_assert.",
+        )
 
     def test_enable_conditions_sync(self):
         """SYNC 真值表比对：验证 Python 侧启用条件的行为语义。
@@ -409,7 +482,9 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
             (2, 1, 1, False),
         ]
         for num_beams, combo_size, num_ret, expected in truth_table:
-            with self.subTest(num_beams=num_beams, combo_size=combo_size, num_ret=num_ret):
+            with self.subTest(
+                num_beams=num_beams, combo_size=combo_size, num_ret=num_ret
+            ):
                 cfg = GenerateConfig(
                     enable_cross_sequence_ban=True,
                     num_beams=num_beams,
@@ -417,9 +492,11 @@ class TestCrossLanguageConstantSync(unittest.TestCase):
                     num_return_sequences=num_ret,
                 )
                 self.assertEqual(
-                    cfg.enable_cross_sequence_ban, expected,
+                    cfg.enable_cross_sequence_ban,
+                    expected,
                     f"Input({num_beams}, {combo_size}, {num_ret}): "
-                    f"expected enabled={expected}, got {cfg.enable_cross_sequence_ban}")
+                    f"expected enabled={expected}, got {cfg.enable_cross_sequence_ban}",
+                )
 
 
 if __name__ == "__main__":

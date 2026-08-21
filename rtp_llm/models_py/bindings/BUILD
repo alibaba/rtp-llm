@@ -4,6 +4,7 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 cc_library(
     name = "op_defs",
     hdrs = [
+        "CacheStoreWriter.h",
         "OpDefs.h",
         "OpDefsUtils.h",
         "ParamsBase.h",
@@ -14,6 +15,7 @@ cc_library(
     deps = torch_deps() + [
         "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_group_type",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ],

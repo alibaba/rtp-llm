@@ -7,6 +7,7 @@ import signal as signal_mod
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +36,7 @@ class MagaServerManager(object):
         role_name: str = "main",
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
+        health_check_path: str = "/health",
     ):
         self._username = os.getenv("USER")
         self._env_args = env_args
@@ -46,7 +48,10 @@ class MagaServerManager(object):
         self._process_file_name = process_file_name
         self._port = port
         self._smoke_args_str = smoke_args_str
+        self._health_check_path = health_check_path
         self._exit_code: Optional[int] = None
+        self._state_lock = threading.Lock()
+        self._stop_requested = False
         if self._port is None:
             self._port = MagaServerManager.get_free_port()
 
@@ -103,7 +108,9 @@ class MagaServerManager(object):
         # exposes /health on its http port only after its preprocess engine and gRPC
         # server finish initializing, so it goes through the same readiness probe as the
         # LLM server instead of being assumed ready.
-        result = wait_sever_done(self._server_process, int(self._port), timeout)
+        result = wait_sever_done(
+            self._server_process, int(self._port), timeout, self._health_check_path
+        )
         if not result:
             rc = self._server_process.poll() if self._server_process else None
             self._exit_code = rc
@@ -175,7 +182,15 @@ class MagaServerManager(object):
         # Set DeepGEMM JIT cache directory to use a persistent global cache
         # instead of the temporary test.outputs directory. This allows kernel
         # cache reuse across test runs, avoiding expensive JIT compilation overhead.
-        if "DG_JIT_CACHE_DIR" not in current_env:
+        # Skip when the JIT cache manager is active (REMOTE_JIT_DIR set): a preset
+        # DG_JIT_CACHE_DIR makes jit_cache_manager.resolve_scope drop the deep_gemm
+        # component inside the server process, forking the scope_id away from the
+        # one out-of-server callers compute (breaks jit_cache_deepseek_v2_lite,
+        # which asserts the publisher uploads under the test-computed scope).
+        if (
+            "DG_JIT_CACHE_DIR" not in current_env
+            and not current_env.get("REMOTE_JIT_DIR", "").strip()
+        ):
             home_dir = os.environ.get("HOME", os.path.expanduser("~"))
             current_env["DG_JIT_CACHE_DIR"] = os.path.join(home_dir, ".deep_gemm")
 
@@ -207,6 +222,20 @@ class MagaServerManager(object):
                     )
                 break
 
+        try:
+            import resource
+
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        except Exception as e:
+            logging.warning(
+                "failed to disable core dumps for server subprocesses: %s", e
+            )
+
+        logging.info(
+            "[%s] CUDA_VISIBLE_DEVICES for subprocess: %s",
+            self._role_name,
+            current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
+        )
         p = subprocess.Popen(
             ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
             env=current_env,
@@ -214,17 +243,32 @@ class MagaServerManager(object):
             stderr=self._file_stream,
             cwd=cwd_path,
         )
-        self._server_process = p
+        with self._state_lock:
+            self._server_process = p
+            stop_requested = self._stop_requested
+
+        if stop_requested:
+            logging.warning(
+                "Server pid=%d was started after a stop request; stopping it now",
+                p.pid,
+            )
+            self.stop_server()
+            return False
+
         return self.wait_sever_done(timeout)
 
     def stop_server(self):
-        if self._server_process is not None and self._server_process.pid is not None:
+        with self._state_lock:
+            self._stop_requested = True
+            server_process = self._server_process
+
+        if server_process is not None and server_process.pid is not None:
             try:
                 # 如果只kill start_server，会残留 backend/frontend 占用显存。
                 # 部署时容器整体会回收，但测试时需要自己递归 kill
                 # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
-                logging.info("stop server and children: %d", self._server_process.pid)
-                parent = psutil.Process(self._server_process.pid)
+                logging.info("stop server and children: %d", server_process.pid)
+                parent = psutil.Process(server_process.pid)
                 children = list(
                     parent.children(recursive=True)
                 )  # 获取所有子进程（递归）
@@ -243,17 +287,31 @@ class MagaServerManager(object):
                     )
                     parent.kill()
                     parent.wait(timeout=5)
-                self._server_process = None
+                with self._state_lock:
+                    if self._server_process is server_process:
+                        self._server_process = None
             except Exception as e:
                 logging.warning("failed to get process with: " + str(e))
-                self._server_process = None
+                with self._state_lock:
+                    if self._server_process is server_process:
+                        self._server_process = None
         if self._file_stream is not None:
             self._file_stream.close()
             self._file_stream = None
         return True
 
-    def visit(self, query: Dict[str, Any], retry_times: int, endpoint: str = "/"):
+    def visit(
+        self,
+        query: Dict[str, Any],
+        retry_times: int,
+        endpoint: str = "/",
+        expected_status_code: Any = 200,
+    ):
         logging.info(f"retry times: {retry_times}")
+        if isinstance(expected_status_code, (list, tuple, set)):
+            expected_status_codes = set(expected_status_code)
+        else:
+            expected_status_codes = {expected_status_code}
         port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
         # for dp test, random select dp for visit
         if int(self._env_args.get("DP_SIZE", 1)) > 1:
@@ -269,7 +327,7 @@ class MagaServerManager(object):
             try:
                 logging.info(f"curl {url} -d '{json.dumps(query)}'")
                 response = requests.post(url, json=query)
-                if response.status_code == 200:
+                if response.status_code in expected_status_codes:
                     logging.debug("%s", response.text)
                 else:
                     logging.warning(

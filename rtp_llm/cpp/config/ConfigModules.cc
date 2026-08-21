@@ -67,6 +67,7 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "enable_sp: " << enable_sp << "\n"
+        << "role_type: " << roleTypeToString(role_type) << "\n"
         << "ffn_disaggregate_config: {\n"
         << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"
@@ -92,6 +93,7 @@ std::string FMHAConfig::to_string() const {
         << "enable_open_source_fmha: " << enable_open_source_fmha << "\n"
         << "enable_paged_open_source_fmha: " << enable_paged_open_source_fmha << "\n"
         << "disable_flashinfer_native: " << disable_flashinfer_native << "\n"
+        << "disable_flashinfer_hybrid_prefill: " << disable_flashinfer_hybrid_prefill << "\n"
         << "enable_xqa: " << enable_xqa << "\n"
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
@@ -144,7 +146,10 @@ std::string KVCacheConfig::to_string() const {
         << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
         << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
-        << "load_cache_retry_times: " << load_cache_retry_times << "\n";
+        << "load_cache_retry_times: " << load_cache_retry_times << "\n"
+        << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
+        << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
+        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n";
     return oss.str();
 }
 
@@ -185,7 +190,8 @@ std::string LinearAttentionConfig::to_string() const {
 // HybridAttentionConfig
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
+        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n";
     return oss.str();
 }
 
@@ -260,6 +266,8 @@ SpeculativeType SpeculativeExecutionConfig::from_string(const std::string& str) 
         return SP_TYPE_EAGLE;
     } else if (str == "deterministic") {
         return SP_TYPE_DETERMINISTIC;
+    } else if (str == "dspark") {
+        return SP_TYPE_DSPARK;
     } else {
         return SP_TYPE_NONE;  // Default to NONE for unknown values
     }
@@ -279,6 +287,8 @@ std::string SpeculativeExecutionConfig::to_string(SpeculativeType type) {
             return "eagle";
         case SP_TYPE_DETERMINISTIC:
             return "deterministic";
+        case SP_TYPE_DSPARK:
+            return "dspark";
         default:
             return "none";
     }
@@ -295,7 +305,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
         << "quantization: " << quantization << "\n"
-        << "checkpoint_path: " << checkpoint_path;
+        << "checkpoint_path: " << checkpoint_path << "\n"
+        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id;
     return oss.str();
 }
 
@@ -379,18 +390,21 @@ std::string FIFOSchedulerConfig::to_string() const {
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
-        << "decode_prefill_ratio: " << decode_prefill_ratio;
+        << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
+        << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
+        << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
+        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache;
     return oss.str();
 }
 
 // GrammarConfig
 std::string GrammarConfig::to_string() const {
     std::ostringstream oss;
-    oss << "grammar_backend: " << grammar_backend << "\n"
-        << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
+    oss << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
+        << "terminate_without_stop_token: " << terminate_without_stop_token << "\n"
         << "num_workers: " << num_workers << "\n"
-        << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
-        << "override_stop_tokens_size: " << override_stop_tokens.size();
+        << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
+        << "tokenizer_info_json_size: " << tokenizer_info_json.size();
     return oss.str();
 }
 
@@ -402,6 +416,7 @@ std::string RuntimeConfig::to_string() const {
         << "reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "\n"
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
+        << "model_warm_up: " << model_warm_up << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"
@@ -501,6 +516,7 @@ GrpcConfig::GrpcConfig(const std::string& json_str) {
 std::string GrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
+    oss << "max_server_pollers: " << max_server_pollers << "\n";
     return oss.str();
 }
 
@@ -511,8 +527,10 @@ void GrpcConfig::from_json(const std::string& json_str) {
 
     client_config.clear();
     server_config.clear();
+    max_server_pollers = 0;
 
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    max_server_pollers = parse_optional_root_int_json(json_str, "max_server_pollers", 0);
 }
 
 DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
@@ -550,24 +568,6 @@ std::string FfnDisAggregateConfig::to_string() const {
     return oss.str();
 }
 
-// Helper function to convert RoleType enum to string
-static std::string roleTypeToString(RoleType role_type) {
-    switch (role_type) {
-        case RoleType::PDFUSION:
-            return "PDFUSION";
-        case RoleType::PREFILL:
-            return "PREFILL";
-        case RoleType::DECODE:
-            return "DECODE";
-        case RoleType::VIT:
-            return "VIT";
-        case RoleType::FRONTEND:
-            return "FRONTEND";
-        default:
-            return "UNKNOWN(" + std::to_string(static_cast<int>(role_type)) + ")";
-    }
-}
-
 // PDSepConfig
 std::string PDSepConfig::to_string() const {
     std::ostringstream oss;
@@ -590,7 +590,9 @@ std::string PDSepConfig::to_string() const {
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
         << "worker_port_offset: " << worker_port_offset << "\n"
-        << "decode_entrance: " << decode_entrance;
+        << "decode_entrance: " << decode_entrance << "\n"
+        << "prefill_prepare_resource_pool_size: " << prefill_prepare_resource_pool_size << "\n"
+        << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms;
     return oss.str();
 }
 

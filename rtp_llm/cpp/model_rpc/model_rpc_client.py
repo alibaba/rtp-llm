@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import time
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
@@ -9,9 +10,11 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
+from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
+    FetchRequestPB,
     GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
@@ -40,73 +43,101 @@ from rtp_llm.utils.grpc_util import (
 )
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
-JsonableOption = Optional[Union[str, Dict[str, Any]]]
-
+JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
 
 
+def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
+    finished = outputs_pb.flatten_output.finished
+    return bool(finished) and all(finished)
+
+
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
+    """Map the frontend role to the original RoleAddrPB field-1 enum.
+
+    Keep this explicit instead of depending on the numeric values of two
+    independently generated enums remaining aligned.
+    """
     if role_type == RoleType.PDFUSION:
         return RoleAddrPB.RoleType.PDFUSION
-    elif role_type == RoleType.PREFILL:
+    if role_type == RoleType.PREFILL:
         return RoleAddrPB.RoleType.PREFILL
-    elif role_type == RoleType.DECODE:
+    if role_type == RoleType.DECODE:
         return RoleAddrPB.RoleType.DECODE
-    elif role_type == RoleType.VIT:
+    if role_type == RoleType.VIT:
         return RoleAddrPB.RoleType.VIT
-    elif role_type == RoleType.FRONTEND:
+    if role_type == RoleType.FRONTEND:
         return RoleAddrPB.RoleType.FRONTEND
+    raise ValueError(f"unsupported role type: {role_type!r}")
 
 
-def _trans_jsonable_option(option_pb: StringValue, value: JsonableOption) -> None:
+def _trans_jsonable_option(
+    option_pb: StringValue, name: str, value: JsonableOption
+) -> None:
+    """Serialize structured config exactly once at the protobuf boundary."""
     if value is None:
         return
     if not isinstance(value, str):
-        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        try:
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError) as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"{name} must be serializable as JSON: {str(e)}",
+            ) from e
     option_pb.value = value
 
 
 def _trans_jsonable_options(
     config_pb: GenerateConfigPB, config: GenerateConfig
 ) -> None:
-    _trans_jsonable_option(config_pb.json_schema, config.json_schema)
-    _trans_jsonable_option(config_pb.regex, config.regex)
-    _trans_jsonable_option(config_pb.ebnf, config.ebnf)
-    _trans_jsonable_option(config_pb.structural_tag, config.structural_tag)
-    _trans_jsonable_option(config_pb.response_format, config.response_format)
+    _trans_jsonable_option(config_pb.json_schema, "json_schema", config.json_schema)
+    _trans_jsonable_option(config_pb.regex, "regex", config.regex)
+    _trans_jsonable_option(config_pb.ebnf, "ebnf", config.ebnf)
+    _trans_jsonable_option(
+        config_pb.structural_tag, "structural_tag", config.structural_tag
+    )
 
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
-    input_pb.batch_group_size = input_py.batch_group_size
-    if input_py.batch_group_id != -1:
-        input_pb.batch_group_id.value = input_py.batch_group_id
+    input_pb.start_time = int(time.time() * 1_000_000)
+    input_pb.group_size = input_py.group_size
+    if hasattr(input_py, "group_id") and input_py.group_id != -1:
+        input_pb.group_id.value = input_py.group_id
 
-    request_info = input_py.request_info
-    input_pb.request_info.frontend_ip = request_info.frontend_ip
-    input_pb.request_info.dash_ip = request_info.dash_ip
-    input_pb.request_info.trace_id = request_info.trace_id
-    input_pb.request_info.request_id = request_info.request_id
-    input_pb.request_info.source_role = request_info.source_role
+    request_info = getattr(input_py, "request_info", None)
+    if request_info is not None:
+        input_pb.request_info.frontend_ip = (
+            getattr(request_info, "frontend_ip", "") or ""
+        )
+        input_pb.request_info.dash_ip = getattr(request_info, "dash_ip", "") or ""
+        input_pb.request_info.trace_id = getattr(request_info, "trace_id", "") or ""
+        input_pb.request_info.request_id = getattr(request_info, "request_id", "") or ""
+        input_pb.request_info.source_role = (
+            getattr(request_info, "source_role", "") or ""
+        )
     if not input_pb.request_info.trace_id:
         input_pb.request_info.trace_id = str(
             input_py.generate_config.trace_id
-            or extract_trace_id(input_py.headers)
+            or extract_trace_id(getattr(input_py, "headers", None))
             or ""
         )
     if not input_pb.request_info.request_id:
         input_pb.request_info.request_id = extract_correlation_request_id(
-            input_py.headers
+            getattr(input_py, "headers", None)
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
-    # check generate config is valid before enter into engine
+    # Preserve main's regular GenerateConfig validation at the RPC boundary,
+    # then assert (without mutating) that the request entrypoint prepared grammar.
     input_py.generate_config.validate()
+    validate_engine_ready(input_py.generate_config)
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
@@ -120,6 +151,7 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.end_think_token_ids
     )
     generate_config_pb.in_think_mode = input_py.generate_config.in_think_mode
+    generate_config_pb.thinking_mode = int(input_py.generate_config.thinking_mode)
     generate_config_pb.num_beams = input_py.generate_config.num_beams
     generate_config_pb.variable_num_beams.extend(
         input_py.generate_config.variable_num_beams
@@ -219,8 +251,7 @@ def trans_input(input_py: GenerateInput):
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "trace_id", functools.partial(str)
     )
-    trans_option(generate_config_pb, input_py.generate_config, "batch_group_timeout")
-    trans_option(generate_config_pb, input_py.generate_config, "force_batch")
+    trans_option(generate_config_pb, input_py.generate_config, "group_timeout")
 
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
@@ -228,15 +259,23 @@ def trans_input(input_py: GenerateInput):
 
     # 生成式推荐：组合 token 约束
     generate_config_pb.combo_token_size = input_py.generate_config.combo_token_size
-    generate_config_pb.enable_cross_sequence_ban = input_py.generate_config.enable_cross_sequence_ban
-    generate_config_pb.cross_seq_diverge_start_combo = input_py.generate_config.cross_seq_diverge_start_combo
+    generate_config_pb.enable_cross_sequence_ban = (
+        input_py.generate_config.enable_cross_sequence_ban
+    )
+    generate_config_pb.cross_seq_diverge_start_combo = (
+        input_py.generate_config.cross_seq_diverge_start_combo
+    )
     for i in range(len(input_py.generate_config.banned_combo_token_ids)):
         banned_combo = generate_config_pb.banned_combo_token_ids.rows.add()
         banned_combo.values.extend(input_py.generate_config.banned_combo_token_ids[i])
 
     for role_addr in input_py.generate_config.role_addrs:
         role_addr_pb = RoleAddrPB()
-        role_addr_pb.role = trans_role_type(role_addr.role)
+        proto_role = trans_role_type(role_addr.role)
+        # Dual-write the original enum at field 1 and the string extension so
+        # both old and new engines decode role addresses during rolling upgrade.
+        role_addr_pb.role = proto_role
+        role_addr_pb.role_str = role_addr.role.name
         role_addr_pb.ip = role_addr.ip
         role_addr_pb.http_port = role_addr.http_port
         role_addr_pb.grpc_port = role_addr.grpc_port
@@ -409,6 +448,10 @@ def trans_output(
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
+                speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
+                speculative_accepted_tokens_per_pos=list(
+                    aux_info_pb.speculative_accepted_tokens_per_pos
+                ),
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )
@@ -486,7 +529,9 @@ class ModelRpcClient(object):
 
         Args:
             addresses: List of RPC addresses for data parallel communication
-            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds
+            max_rpc_timeout_ms: Maximum RPC timeout in milliseconds. <= 0 disables
+                the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
+                (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
         """
         self._addresses = addresses
@@ -516,14 +561,21 @@ class ModelRpcClient(object):
             return rpc_timeout_ms / 1000
         return timeout_ms / 1000
 
-    def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
+    def _handle_grpc_error(
+        self, e: grpc.RpcError, request_desc: str, target_address: str = ""
+    ) -> None:
+        # NOTE: keep the backend peer (target_address) in the log lines ONLY.
+        # Do NOT append it to the FtRuntimeException message, which is
+        # serialized into the client-facing error response and would leak
+        # internal cluster topology (worker ip:port) to callers.
+        peer_desc = f" to [{target_address}]" if target_address else ""
         error_details = ErrorDetailsPB()
         metadata = e.trailing_metadata()
         if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
         ):
             logging.error(
-                f"{request_desc} RPC failed: "
+                f"{request_desc} RPC{peer_desc} failed: "
                 f"{e.code()}, {e.details()}, detail error code is "
                 f"{ExceptionType.from_value(error_details.error_code)}"
             )
@@ -532,70 +584,115 @@ class ModelRpcClient(object):
             )
         else:
             logging.error(
-                f"{request_desc} RPC failed: "
+                f"{request_desc} RPC{peer_desc} failed: "
                 f"error code is {e.code()}, detail is {e.details()}"
             )
             if e.code() == StatusCode.DEADLINE_EXCEEDED:
                 raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
             elif e.code() == StatusCode.CANCELLED:
                 raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+            elif e.code() == StatusCode.UNAVAILABLE:
+                details = e.details() or ""
+                lower_details = details.lower()
+                if (
+                    "socket closed" in lower_details
+                    or "connection reset" in lower_details
+                ):
+                    exception_type = ExceptionType.CONNECTION_RESET_BY_PEER
+                elif "timed out" in lower_details or "timeout" in lower_details:
+                    exception_type = ExceptionType.CONNECT_TIMEOUT
+                else:
+                    exception_type = ExceptionType.CONNECT_FAILED
+                raise FtRuntimeException(exception_type, details)
             else:
                 raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
 
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        grpc_timeout_seconds = self._compute_grpc_timeout(
-            input_py.generate_config.timeout_ms
+        request_timeout_ms = input_py.generate_config.timeout_ms
+        # Prefer per-request timeout; otherwise fall back to the server-side default
+        # (pd_sep_config.max_rpc_timeout_ms). effective_ms <= 0 means no gRPC deadline.
+        effective_ms = (
+            request_timeout_ms
+            if request_timeout_ms is not None and request_timeout_ms > 0
+            else self._max_rpc_timeout_ms
         )
-        input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
+        if effective_ms > 0:
+            # Write the normalized timeout back so the server-visible timeout_ms
+            # matches the client gRPC deadline: engine-side timeout checks and
+            # P2P deadlineMs() require a positive timeout_ms.
+            input_py.generate_config.timeout_ms = int(effective_ms)
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
+        use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
 
-        address_list = self._addresses
-
-        for role_addr in input_py.generate_config.role_addrs:
-            if (
-                (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                or role_addr.role == RoleType.PDFUSION
-                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ):
-                if role_addr.ip != "":
-                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                    break
+        if use_fetch_response:
+            address_list = [
+                role_addr.ip + ":" + str(role_addr.grpc_port)
+                for role_addr in input_py.generate_config.role_addrs
+                if role_addr.role == RoleType.PREFILL and role_addr.ip
+            ]
+        else:
+            address_list = self._addresses
+            for role_addr in input_py.generate_config.role_addrs:
+                if (
+                    (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                    or role_addr.role == RoleType.PDFUSION
+                    or (
+                        not self._decode_entrance and role_addr.role == RoleType.PREFILL
+                    )
+                ):
+                    if role_addr.ip != "":
+                        address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
+                        break
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")
+        # Select target address before entering the try block so it is always
+        # available to the error handlers below (surfaced in logs only)
+        # details to identify which backend peer dropped the connection).
+        target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
-            f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_py.request_id}] send to address: {target_address}"
         )
-
-        input_pb = trans_input(input_py)
-
+        stub = None
+        stream_done = False
+        terminal_seen = False
         try:
-            # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
-            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
-            response_iterator = stub.GenerateStreamCall(
-                input_pb, timeout=grpc_timeout_seconds
-            )
+            grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            if use_fetch_response:
+                response_iterator = stub.FetchResponse(
+                    FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
+                )
+            else:
+                response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                yield trans_output(input_py, response, stream_state)
+                output = trans_output(input_py, response, stream_state)
+                if use_fetch_response and _is_finished_response(response):
+                    terminal_seen = True
+                yield output
+            stream_done = True
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]")
+            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
         except Exception as e:
-            logging.error(f"rpc unknown error:{str(e)}")
+            logging.error(
+                f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
+            )
             raise e
         finally:
-            if response_iterator:
+            should_cancel = not stream_done and not (
+                use_fetch_response and terminal_seen
+            )
+            if response_iterator and should_cancel:
                 response_iterator.cancel()
 
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:

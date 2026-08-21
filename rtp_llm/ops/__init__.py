@@ -1,11 +1,15 @@
+import importlib
 import logging
 import os
 import pathlib
 import sys
+import threading
 import traceback
-from typing import List
+from typing import List, Optional
 
 import torch
+
+from rtp_llm.utils import torch_patch  # noqa: F401
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
@@ -190,6 +194,17 @@ except BaseException as e:
     raise e
 
 
+def serialize_grammar_tokenizer_info(
+    encoded_vocab: List[str],
+    tokenizer_metadata_json: str,
+) -> str:
+    from libth_grammar_tokenizer_info import (
+        serialize_grammar_tokenizer_info as serialize,
+    )
+
+    return serialize(encoded_vocab, tokenizer_metadata_json)
+
+
 def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
     try:
         # split token_ids into chunks of size block_size, dropping the last chunk if it is smaller than block_size
@@ -210,25 +225,139 @@ class EmptyClass:
     def __init__(self, **kwargs):
         pass
 
-try:
-    import librtp_compute_ops
-    from .compute_ops import rtp_llm_ops
-    # Export LayerKVCache and other types from librtp_compute_ops
-    from librtp_compute_ops import LayerKVCache, KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
-except BaseException as e:
-    logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
-    rtp_llm_ops = EmptyClass
-    LayerKVCache = KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
 
-try:
+_COMPUTE_SYMBOLS = {
+    "compute_ops",
+    "KVCache",
+    "LayerKVCache",
+    "PyAttentionInputs",
+    "PyCacheStoreInputs",
+    "PyModelInitResources",
+    "PyModelInputs",
+    "PyModelOutputs",
+    "CacheStoreWriter",
+    "rtp_llm_ops",
+}
+_ENGINE_SYMBOLS = {
+    "EmbeddingCppOutput",
+    "MultimodalInputCpp",
+    "RtpEmbeddingOp",
+    "RtpLLMOp",
+}
+_compute_ops_lock = threading.RLock()
+_compute_ops_loaded = False
+_compute_ops_error: Optional[BaseException] = None
+_engine_ops_lock = threading.RLock()
+_engine_ops_loaded = False
+_engine_ops_error: Optional[BaseException] = None
 
-    from libth_transformer import RtpEmbeddingOp, RtpLLMOp
-    from libth_transformer import EmbeddingCppOutput
 
-    libth_transformer_imported = True
-except BaseException as e:
-    EmbeddingCppOutput = RtpEmbeddingOp = RtpLLMOp = EmptyClass
+def _set_compute_fallbacks() -> None:
+    globals()["rtp_llm_ops"] = EmptyClass
+    globals()["LayerKVCache"] = EmptyClass
+    globals()["KVCache"] = EmptyClass
+    globals()["PyAttentionInputs"] = EmptyClass
+    globals()["PyModelInputs"] = EmptyClass
+    globals()["PyModelOutputs"] = EmptyClass
+    globals()["PyModelInitResources"] = EmptyClass
+    globals()["PyCacheStoreInputs"] = EmptyClass
+    globals()["CacheStoreWriter"] = EmptyClass
 
-    logging.info(
-        "libth_transformer not imported, you may under python standalone mode or frontend mode now."
-    )
+
+def _raise_required_load_error(kind: str, error: BaseException) -> None:
+    raise RuntimeError(f"failed to load required RTP-LLM {kind} ops") from error
+
+
+def _load_compute_ops(required: bool = False) -> None:
+    global _compute_ops_error, _compute_ops_loaded
+    with _compute_ops_lock:
+        if _compute_ops_loaded:
+            if required and _compute_ops_error is not None:
+                _raise_required_load_error("compute", _compute_ops_error)
+            return
+        try:
+            import librtp_compute_ops
+
+            globals()["KVCache"] = librtp_compute_ops.KVCache
+            globals()["LayerKVCache"] = librtp_compute_ops.LayerKVCache
+            globals()["CacheStoreWriter"] = librtp_compute_ops.CacheStoreWriter
+            globals()["PyAttentionInputs"] = librtp_compute_ops.PyAttentionInputs
+            globals()["PyCacheStoreInputs"] = librtp_compute_ops.PyCacheStoreInputs
+            globals()["PyModelInitResources"] = librtp_compute_ops.PyModelInitResources
+            globals()["PyModelInputs"] = librtp_compute_ops.PyModelInputs
+            globals()["PyModelOutputs"] = librtp_compute_ops.PyModelOutputs
+
+            compute_ops = importlib.import_module(f"{__name__}.compute_ops")
+            globals()["compute_ops"] = compute_ops
+            globals()["rtp_llm_ops"] = compute_ops.rtp_llm_ops
+            _compute_ops_error = None
+        except BaseException as e:
+            _compute_ops_error = e
+            logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
+            _set_compute_fallbacks()
+            if required:
+                _raise_required_load_error("compute", e)
+        _compute_ops_loaded = True
+
+
+def _set_engine_fallbacks() -> None:
+    globals()["MultimodalInputCpp"] = EmptyClass
+    globals()["EmbeddingCppOutput"] = EmptyClass
+    globals()["RtpEmbeddingOp"] = EmptyClass
+    globals()["RtpLLMOp"] = EmptyClass
+
+
+def _load_engine_ops(required: bool = False) -> None:
+    global _engine_ops_error, _engine_ops_loaded
+    with _engine_ops_lock:
+        if _engine_ops_loaded:
+            if required and _engine_ops_error is not None:
+                _raise_required_load_error("engine", _engine_ops_error)
+            return
+        # libth_transformer has historically been loaded after librtp_compute_ops.
+        # Keep that order even with lazy imports; loading it first can corrupt
+        # process teardown in the current binary build.
+        _load_compute_ops(required=required)
+        try:
+            from libth_transformer import EmbeddingCppOutput
+
+            # MultimodalInput is registered by the config module
+            # (libth_transformer_config) in this build; alias it here so
+            # callers keep using the historical MultimodalInputCpp name.
+            from libth_transformer_config import MultimodalInput as MultimodalInputCpp
+            from libth_transformer import RtpEmbeddingOp, RtpLLMOp
+
+            globals()["EmbeddingCppOutput"] = EmbeddingCppOutput
+            globals()["MultimodalInputCpp"] = MultimodalInputCpp
+            globals()["RtpEmbeddingOp"] = RtpEmbeddingOp
+            globals()["RtpLLMOp"] = RtpLLMOp
+            _engine_ops_error = None
+        except BaseException as e:
+            _engine_ops_error = e
+            _set_engine_fallbacks()
+            logging.info(
+                "libth_transformer not imported, you may under python standalone mode or frontend mode now."
+            )
+            if required:
+                _raise_required_load_error("engine", e)
+        _engine_ops_loaded = True
+
+
+def ensure_compute_ops_loaded() -> None:
+    _load_compute_ops(required=True)
+
+
+def ensure_engine_ops_loaded() -> None:
+    _load_engine_ops(required=True)
+
+
+def __getattr__(name: str):
+    if name in _COMPUTE_SYMBOLS:
+        _load_compute_ops()
+        if name in globals():
+            return globals()[name]
+    if name in _ENGINE_SYMBOLS:
+        _load_engine_ops()
+        if name in globals():
+            return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

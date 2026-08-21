@@ -6,7 +6,8 @@ namespace rtp_llm {
 
 TreeLogitsProcessor::TreeLogitsProcessor(std::vector<StreamTreeInfo> tree_infos): tree_infos_(tree_infos) {}
 
-void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
+std::optional<ErrorInfo>
+TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {
     auto batch_size = size();
     RTP_LLM_CHECK(batch_size == finish_idx - start_idx);
     bool                             need_process = false;
@@ -25,13 +26,14 @@ void TreeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx,
     }
     // If no beams need processing, return early
     if (!need_process) {
-        return;
+        return std::nullopt;
     }
 
     auto   batch_logits     = inputs.logits.narrow(0, start_idx, batch_size);
     size_t vocab_size       = batch_logits.size(1);
     auto   batch_vocab_mask = generateVocabMask(batch_size, vocab_size, batch_candidate_token_ids);
     maskLogits(batch_logits, batch_vocab_mask);
+    return std::nullopt;
 }
 
 void TreeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch_indices) {
@@ -42,7 +44,7 @@ void TreeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_batch
     tree_infos_ = std::move(new_tree_infos);
 }
 
-void TreeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+std::optional<ErrorInfo> TreeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens.dim());
     RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
@@ -67,6 +69,7 @@ void TreeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens, int32_t 
 
         info.current_output_length += num_new_tokens;
     }
+    return std::nullopt;
 }
 
 TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,

@@ -17,7 +17,7 @@ class StreamCacheResource;  // forward declaration
 
 // Stream 生命周期状态机，将原先分散在 FIFOScheduler 中的状态转移逻辑集中管理。
 // 状态转移路径: WAITING -> LOADING_CACHE -> WAITING -> RUNNING -> FINISHED
-// 每次调度轮调用 moveToNext() 驱动状态转移，由 FIFOScheduler::evaluateAndUpdateStreams 统一调用。
+// 每次调度轮由 scheduler 调用 moveToNext() 驱动状态转移。
 // 外部通过 reportEvent() 投递事件（替代原先分散的 reportXX 接口），moveToNext() 消费累积事件后决策转移。
 // 线程安全说明：GenerateStateMachine 本身不提供同步机制，外部调用者需保证 reportEvent() 和 moveToNext()
 // 的调用串行化（通常通过 GenerateStream::mutex_ 保护）。

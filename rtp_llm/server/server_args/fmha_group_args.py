@@ -63,6 +63,14 @@ def init_fmha_group_args(parser, fmha_config):
         help="控制是否禁用FlashInfer Native Attention实现。True表示禁用，False表示启用。",
     )
     fmha_group.add_argument(
+        "--disable_flashinfer_hybrid_prefill",
+        env_name="DISABLE_FLASHINFER_HYBRID_PREFILL",
+        bind_to=(fmha_config, "disable_flashinfer_hybrid_prefill"),
+        type=str2bool,
+        default=True,
+        help="控制是否禁用FlashInfer Hybrid Prefill实现。True表示禁用，False表示启用。",
+    )
+    fmha_group.add_argument(
         "--enable_xqa",
         env_name="ENABLE_XQA",
         bind_to=(fmha_config, "enable_xqa"),

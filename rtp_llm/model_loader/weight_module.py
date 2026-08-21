@@ -96,6 +96,9 @@ class WeightModule(ABC):
     def from_params(cls, params):
         return cls(**params)
 
+    # Constructor params a subclass forbids copying onto clones (see MoeAtomicWeight).
+    _CLONE_EXCLUDED: frozenset = frozenset()
+
     @classmethod
     def extract_params(
         cls,
@@ -122,6 +125,9 @@ class WeightModule(ABC):
                 params["src_weight_info"] = weight_info
                 continue
 
+            if param.name in weight_info._CLONE_EXCLUDED:
+                continue  # Clone falls back to the constructor default.
+
             if hasattr(weight_info, param.name):
                 value = getattr(weight_info, param.name)
                 # 递归创建子权重
@@ -138,6 +144,8 @@ class WeightModule(ABC):
 
         if need_var_key:
             for k, v in weight_info.__dict__.items():
+                if k in weight_info._CLONE_EXCLUDED:
+                    continue
                 if isinstance(v, WeightModule):
                     continue
                 if k in params:
@@ -624,11 +632,24 @@ class AtomicWeight(WeightModule):
         load_config: LoadConfig,
     ):
         raw_tensor = tensor if isinstance(tensor, torch.Tensor) else tensor[self.name]
-        if (
-            load_config.tp_size <= 1
-            and load_config.dp_size <= 1
-            and load_config.ep_size <= 1
-        ):
+        # lm_head uses its own (lm_head_tp_size, lm_head_tp_rank) which can
+        # differ from the attn-tp pair the rest of the loader plumbs through.
+        # Most importantly, under prefill-CP RTP-LLM repurposes the TP group
+        # as the CP group; ``get_attn_tp_size()`` returns 1 (so attention
+        # weights stay unsharded) but ``parallelism_config.tp_size`` is still
+        # the raw CP/TP size (so the C++ engine's ``tpSyncEmbeddingOrLogits``
+        # all-gathers across that group expecting sharded lm_head logits).
+        # The early-bypass below would skip the split altogether based on the
+        # generic ``load_config.tp_size``, leaving lm_head as a full
+        # ``[vocab, dim]`` tensor on every rank. The gather then doubles it
+        # into ``[B, vocab * tp_size]`` and argmax lands in the OOV range
+        # ``[vocab, vocab * tp_size)``.  Use the lm_head-specific size here
+        # so the bypass and the actual ``__split_tensor`` agree.
+        if self.name in [W.lm_head]:
+            tp_for_skip = load_config.lm_head_tp_size
+        else:
+            tp_for_skip = load_config.tp_size
+        if tp_for_skip <= 1 and load_config.dp_size <= 1 and load_config.ep_size <= 1:
             return {self.name: raw_tensor}
 
         split_func = self._get_split_func()

@@ -1,13 +1,25 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Type, Union
+from typing import (
+    Any,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Type,
+    Union,
+    cast,
+    runtime_checkable,
+)
 
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.output_vocab_config import load_output_vocab_ids
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
@@ -16,21 +28,40 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
-from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
+
+
+@runtime_checkable
+class _MultiModalModel(Protocol):
+    def init_multimodal(
+        self,
+        mm_model_config: Any,
+        vit_config: VitConfig,
+        device: str,
+    ) -> None: ...
+
+    def load_mm_weight(
+        self,
+        model_config: ModelConfig,
+        ctype: str,
+        tp_size: int,
+        tp_rank: int,
+        device: str,
+    ) -> None: ...
 
 
 class BaseModel(object):
@@ -57,6 +88,8 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
+        loader_recycle_handles: bool = False,
+        moe_pure_tp_preshard: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -83,8 +116,15 @@ class BaseModel(object):
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
+        self.loader_recycle_handles = loader_recycle_handles
+        self.moe_pure_tp_preshard = moe_pure_tp_preshard
         self.weight = None
         self.weight_manager = None
+        # Keep the owner alive for the complete lifetime of any non-owning
+        # tensor aliases. The alias names are immutable construction metadata;
+        # a draft must never silently become an owner during reload/update.
+        self._weight_alias_owner: Optional["BaseModel"] = None
+        self._weight_alias_names: tuple[str, ...] = ()
 
         self.linear_bias_slopes: Optional[torch.Tensor] = None
         self.prefix_tokens: Optional[torch.Tensor] = None
@@ -94,6 +134,7 @@ class BaseModel(object):
         self.py_model = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
+        self._finalize_output_vocab_config()
 
         if (
             self.kv_cache_config.multi_task_prompt
@@ -141,20 +182,19 @@ class BaseModel(object):
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
         self._load(device_str)
+        from rtp_llm.model_loader.weight_manager import WeightManager
+
         self.weight_manager = WeightManager(
-            self.device, self.weight, self.model_weights_loader
+            self.device,
+            self.weight,
+            self.model_weights_loader,
+            non_owned_global_weights=self._weight_alias_names,
         )
         if skip_python_model:
             return
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        remote_jit_dir = os.environ.get("REMOTE_JIT_DIR", None)
-        logging.info(f"python model remote_jit_dir for deep_gemm: {remote_jit_dir}")
-        if remote_jit_dir:
-            os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
-                remote_jit_dir, "deep_gemm_python"
-            )
         self._create_python_model()
 
     def _create_python_model(self):
@@ -167,15 +207,29 @@ class BaseModel(object):
         # set empty weights for attention service
         # record device string for later use (e.g., WeightManager, python model init)
         self.device = device
+        aliases = self._resolve_global_weight_aliases()
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=device
+            device=device, global_weight_aliases=aliases
         )
         self._load_custom_module()
 
         # 清理checkpoint加载过程中使用的临时资源，释放host内存
+        # Alias descriptors have already been resolved and do not depend on the
+        # draft loader retaining its database metadata.
         self._cleanup_loader_resources()
 
         self.model_weights_loader.force_clean_all_memory()
+
+    def _resolve_global_weight_aliases(self):
+        aliases = {}
+        if self._weight_alias_owner is not None:
+            if self._weight_alias_owner.weight is None:
+                raise RuntimeError("global weight alias owner must be loaded first")
+            aliases = {
+                name: self._weight_alias_owner.weight.get_global_weight(name)
+                for name in self._weight_alias_names
+            }
+        return aliases
 
     def _cleanup_loader_resources(self):
         """清理模型加载过程中使用的临时资源，释放host内存
@@ -219,6 +273,19 @@ class BaseModel(object):
         ]
 
     @classmethod
+    def speculative_weight_alias_names(
+        cls, target_model: "BaseModel", draft_model_config: ModelConfig
+    ) -> tuple[str, ...]:
+        """Declare global weights that this speculative model may borrow.
+
+        The default is deliberately empty.  A draft model must opt in and
+        validate semantic compatibility with the concrete target owner before
+        the loader skips any checkpoint tensors.  ``from_config`` retains a
+        strong reference to ``target_model`` for the complete alias lifetime.
+        """
+        return ()
+
+    @classmethod
     def from_config(
         cls,
         model_config: ModelConfig,
@@ -234,6 +301,10 @@ class BaseModel(object):
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
         skip_python_model: bool = False,
+        loader_recycle_handles: bool = False,
+        moe_pure_tp_preshard: bool = False,
+        weight_alias_owner: Optional["BaseModel"] = None,
+        weight_alias_names: Sequence[str] = (),
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -262,7 +333,15 @@ class BaseModel(object):
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
+            loader_recycle_handles=loader_recycle_handles,
+            moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
+        if weight_alias_names and weight_alias_owner is None:
+            raise ValueError(
+                "weight_alias_names require an explicit weight_alias_owner"
+            )
+        model._weight_alias_owner = weight_alias_owner
+        model._weight_alias_names = tuple(weight_alias_names)
 
         import os
 
@@ -296,15 +375,96 @@ class BaseModel(object):
         tokenizer_path = self.model_config.tokenizer_path
         model_type = self.model_config.model_type
         self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
-        if self.tokenizer.eos_token_id:
-            self.model_config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+        self._fill_tokenizer_special_tokens()
+
+    def _fill_tokenizer_special_tokens(self) -> None:
+        eos_token_id = self.tokenizer.eos_token_id
+        if isinstance(eos_token_id, (list, tuple)):
+            eos_token_id = eos_token_id[0] if eos_token_id else None
+        if eos_token_id is not None:
+            self.model_config.special_tokens.eos_token_id = int(eos_token_id)
+
+    def build_grammar_tokenizer_info(self) -> str:
+        # Grammar tokenizer metadata is a startup-time compatibility contract, not
+        # an optional per-request optimization.  Fail fast below if it cannot be
+        # built: accepting ordinary requests with empty metadata would defer an
+        # unsupported tokenizer or missing stop-token configuration until the
+        # first grammar request reaches the engine.
+        real_tokenizer = self.tokenizer.get_real_tokenizer()
+        if real_tokenizer is None:
+            return ""
+
+        try:
+            return build_grammar_tokenizer_info_json(
+                real_tokenizer,
+                model_vocab_size=int(self.model_config.vocab_size or 0),
+                stop_token_ids=self._collect_tokenizer_info_stop_token_ids(),
+            )
+        except Exception as e:
+            message = f"Failed to build grammar tokenizer metadata from tokenizer: {e}"
+            logging.warning(message)
+            raise RuntimeError(message) from e
+
+    def _collect_tokenizer_info_stop_token_ids(self) -> List[int]:
+        ids: List[int] = []
+
+        def add_id(token_id: int) -> None:
+            if token_id < 0:
+                return
+            if token_id not in ids:
+                ids.append(token_id)
+
+        special_tokens = self.model_config.special_tokens
+        add_id(int(special_tokens.eos_token_id))
+        for token_ids in special_tokens.stop_words_id_list:
+            if len(token_ids) == 1:
+                add_id(int(token_ids[0]))
+        ids.sort()
+        return ids
+
+    def _finalize_output_vocab_config(self) -> None:
+        if not self.model_config.enable_output_vocab_pruning:
+            self.model_config.output_vocab_ids = []
+            self.model_config.output_vocab_padded_size = 0
+            return
+        if not self.model_config.has_lm_head:
+            raise ValueError("output vocabulary pruning requires a model LM head")
+
+        eos_token_id = self.model_config.special_tokens.eos_token_id
+        output_vocab_ids = load_output_vocab_ids(
+            self.model_config.ckpt_path,
+            self.model_config.vocab_size,
+            self.model_config.input_vocab_size,
+            tokenizer=self.tokenizer.get_real_tokenizer(),
+            extra_token_ids=(eos_token_id,),
+        )
+        self.model_config.output_vocab_ids = output_vocab_ids
+
+        is_distributed = (
+            self.parallelism_config.tp_size > 1
+            or self.parallelism_config.dp_size > 1
+            or self.parallelism_config.ep_size > 1
+        )
+        self.model_config.output_vocab_padded_size = (
+            sp_0_pad8_size(len(output_vocab_ids), self.parallelism_config.tp_size)
+            if is_distributed
+            else len(output_vocab_ids)
+        )
+        logging.info(
+            "finalized output vocabulary: V=%d, K=%d, P=%d, eos_token_id=%d",
+            self.model_config.vocab_size,
+            len(output_vocab_ids),
+            self.model_config.output_vocab_padded_size,
+            eos_token_id,
+        )
 
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal
 
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=self._get_device_str()
+            device=self._get_device_str(),
+            global_weight_aliases=self._resolve_global_weight_aliases(),
         )
 
     @timer_wrapper(description="load custom module")
@@ -315,7 +475,9 @@ class BaseModel(object):
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading
         database = CkptDatabase(
-            self.model_config.ckpt_path, self.model_config.ptuning_path
+            self.model_config.ckpt_path,
+            self.model_config.ptuning_path,
+            recycle_handles=self.loader_recycle_handles,
         )
         lora_infos = self.model_config.lora_infos
         static_lora: bool = len(lora_infos) == 1
@@ -342,4 +504,5 @@ class BaseModel(object):
             database,
             load_method=self.load_method,
             force_cpu_load_weights=self.force_cpu_load_weights,
+            moe_pure_tp_preshard=self.moe_pure_tp_preshard,
         )

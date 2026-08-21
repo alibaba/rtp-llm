@@ -20,11 +20,7 @@ from rtp_llm.dash_sc.codec import (
     build_dash_error_response,
     parse_max_new_tokens_for_proxy,
 )
-from rtp_llm.dash_sc.grpc_metrics import (
-    report_arrival,
-    report_chunk,
-    report_forwarder_rpc_done,
-)
+from rtp_llm.dash_sc.grpc_metrics import report_chunk, report_forwarder_rpc_done
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
@@ -83,7 +79,7 @@ async def _abort_with_downstream_grpc_error(
         "[DashScGrpc] proxy downstream grpc error: downstream_frontend_addr=%s "
         "code=%s details=%s",
         downstream_addr,
-        code.name,
+        getattr(code, "name", str(code)),
         details,
     )
     await context.abort(code, details)
@@ -153,7 +149,6 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             raw_mode=True,
         )
         emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
-        report_arrival(rank_id=self._rank_id, server_id=self._server_id)
         exc: Optional[BaseException] = None
         try:
             request_iter = request_iterator.__aiter__()

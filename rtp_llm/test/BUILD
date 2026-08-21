@@ -82,6 +82,18 @@ py_test(
 )
 
 py_test(
+    name = "deepseekv4_renderer_test",
+    srcs = [
+        "deepseekv4_renderer_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",
@@ -226,6 +238,18 @@ py_test(
 )
 
 py_test(
+    name = "start_server_warmup_test",
+    srcs = [
+        "start_server_warmup_test.py",
+    ],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "auto_configure_deepep_test",
     srcs = [
         "auto_configure_deepep_test.py",
@@ -289,6 +313,27 @@ py_test(
     name="token_normalizer_test",
     srcs=[
         "token_normalizer_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)
+
+py_test(
+    name="mtp_tool_call_segmentation_test",
+    srcs=[
+        "mtp_tool_call_segmentation_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+)
+
+py_test(
+    name="frontend_streaming_utf8_replay_test",
+    srcs=[
+        "frontend_streaming_utf8_replay_test.py",
     ],
     data=[],
     deps=["//rtp_llm:testlib"],
