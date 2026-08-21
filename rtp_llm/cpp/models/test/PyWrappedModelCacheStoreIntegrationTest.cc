@@ -391,22 +391,22 @@ Scenario makeMicroBatchScenario() {
 }
 
 Scenario makeContextParallelScenario() {
-    auto     config = makeCacheConfig({{"default", 2, 16}});
+    auto     config = makeCacheConfig({{"linear", 1, 24}, {"full", 2, 16}});
     auto     layout = makeLayout(config);
     auto     inputs = makeInputs(/*input_lengths=*/{6},
                              /*request_ids=*/{301},
                              /*cache_keys=*/{3101, 3102, 3103, 3104, 3105, 3106},
                              /*cache_keys_width=*/6,
-                             /*block_ids=*/{1, 2, 3},
-                             /*group_count=*/1,
-                             /*block_table_width=*/3,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
+                             /*block_ids=*/{3, 4, 5, 6, 7, 8, 1, 2, 3, -1, -1, -1},
+                             /*group_count=*/2,
+                             /*block_table_width=*/6,
+                             /*global_tokens_per_block=*/1,
+                             /*global_stride_bytes=*/24);
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.parallelism.tp_size                            = 2;
     scenario.parallelism.tp_rank                            = 1;
     scenario.parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
-    scenario.parallelism.prefill_cp_config.kv_cache_sharded = true;
+    scenario.parallelism.prefill_cp_config.kv_cache_sharded = false;
     scenario.replace_cp_processor                           = true;
     return scenario;
 }
