@@ -152,7 +152,12 @@ int LinearKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
-    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    int                      common_seq_len,
+    int                      seq_len,
+    int                      reserve_step,
+    int                      reuse_blocks_len,
+    bool                     reuse_enabled,
+    const RequiredPositions& required_positions) const {
     NeedBlocksInfo info;
 
     const int common_slots = needBlocksNum(common_seq_len, 0);
@@ -178,6 +183,15 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
             info.common_blocks--;
         } else if (reused_tail_pos < total_slots && final_required(reused_tail_pos)) {
             info.extra_blocks--;
+        }
+    }
+
+    for (const size_t position : required_positions) {
+        if (position >= static_cast<size_t>(common_slots)) {
+            continue;
+        }
+        if (!common_required(static_cast<int>(position)) || static_cast<int>(position) == reused_tail_pos) {
+            ++info.common_blocks;
         }
     }
 

@@ -103,23 +103,58 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
 MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_info,
                                                     size_t            reserve_blocks,
                                                     InitCapacityMode  mode) const {
-    const int need_blocks = getNeedBlocks(malloc_info);
-    if (need_blocks <= 0) {
-        return MallocStatus::NONE;
-    }
-
-    const size_t required_blocks = static_cast<size_t>(need_blocks);
-    auto         fits            = [required_blocks, reserve_blocks](size_t capacity) {
-        return required_blocks <= capacity && reserve_blocks <= capacity - required_blocks;
+    const size_t planned_blocks = static_cast<size_t>(std::max(getNeedBlocks(malloc_info), 0));
+    const auto   demand         = initBlockDemand(malloc_info, planned_blocks);
+    auto         fits_total     = [demand, planned_blocks, reserve_blocks](size_t capacity) {
+        return demand.retained_blocks <= capacity && planned_blocks <= capacity - demand.retained_blocks
+               && reserve_blocks <= capacity - demand.retained_blocks - planned_blocks;
     };
-
-    if (!fits(totalBlocksNum())) {
+    if (!fits_total(totalBlocksNum())) {
         return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
     }
-    if (mode == InitCapacityMode::TOTAL_AND_AVAILABLE && !fits(availableBlocksNum())) {
+    auto fits_available = [demand, reserve_blocks](size_t capacity) {
+        return demand.additional_blocks <= capacity && reserve_blocks <= capacity - demand.additional_blocks;
+    };
+    if (mode == InitCapacityMode::TOTAL_AND_AVAILABLE && !fits_available(availableBlocksNum())) {
         return MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
     }
     return MallocStatus::NONE;
+}
+
+size_t KVCacheAllocator::heldRequestBlocks(const MallocInfo& malloc_info, int group_id) {
+    const auto& resource = malloc_info.batch_kv_cache_resource;
+    if (!resource) {
+        return 0;
+    }
+    RTP_LLM_CHECK_WITH_INFO(group_id >= -1 && group_id < resource->groupNums(),
+                            "held-block group out of range: group_id=%d groups=%d",
+                            group_id,
+                            resource->groupNums());
+    const int group_begin = group_id < 0 ? 0 : group_id;
+    const int group_end   = group_id < 0 ? resource->groupNums() : group_id + 1;
+    std::unordered_set<BlockIdxType> held_blocks;
+    for (int batch = 0; batch < resource->batchSize(); ++batch) {
+        for (int group = group_begin; group < group_end; ++group) {
+            for (const BlockIdxType block : resource->blocks(batch, group)) {
+                if (block > 0 && !isNullBlockIdx(block)) {
+                    held_blocks.insert(block);
+                }
+            }
+        }
+    }
+    return held_blocks.size();
+}
+
+KVCacheAllocator::InitBlockDemand
+KVCacheAllocator::initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, int group_id) {
+    const size_t held_blocks = heldRequestBlocks(malloc_info, group_id);
+    if (malloc_info.reuse_cache) {
+        return {held_blocks, planned_blocks};
+    }
+    // No-reuse planners already describe the full request. Account only for
+    // the portion not represented by the current partial allocation.
+    return held_blocks > planned_blocks ? InitBlockDemand{held_blocks - planned_blocks, 0} :
+                                          InitBlockDemand{0, planned_blocks - held_blocks};
 }
 
 MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {

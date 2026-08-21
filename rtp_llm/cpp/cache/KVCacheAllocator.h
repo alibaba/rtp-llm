@@ -176,6 +176,21 @@ protected:
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
+    struct InitBlockDemand {
+        // Added to the planner's result when checking the request's complete
+        // footprint against pool total.
+        size_t retained_blocks{0};
+        // Compared with currently available capacity.
+        size_t additional_blocks{0};
+    };
+    // Count unique valid physical blocks already held by this request. A
+    // negative group_id counts all groups that share the allocator's pool.
+    static size_t heldRequestBlocks(const MallocInfo& malloc_info, int group_id = -1);
+    // Reuse-aware interpretation of planner output: reuse planners report
+    // additional demand; no-reuse planners report the full footprint.
+    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info,
+                                           size_t            planned_blocks,
+                                           int               group_id = -1);
     // Estimate peak additional blocks for one sequence resource.
     virtual int  estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                         int                    seq_len,

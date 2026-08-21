@@ -214,6 +214,11 @@ public:
         flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::CanRun));
     }
 
+    void clearLoadInitiated() {
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
+                                        & ~static_cast<uint32_t>(EventType::LoadInitiated));
+    }
+
 private:
     EventType flags_ = EventType::None;
 };
