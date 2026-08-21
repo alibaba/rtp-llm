@@ -1,0 +1,72 @@
+name: Nightly Regression Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # UTC 02:00 = 北京时间 10:00
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to test"
+        required: false
+        default: "main"
+
+env:
+  IMAGE: ${{ vars.ALI_ROCM_IMAGE }}
+
+jobs:
+  nightly_regression:
+    runs-on: [ MI308 ]
+    steps:
+    # for schedule: using default branch; for manual: use input branch
+    - name: Check out rtp llm source code
+      uses: actions/checkout@v3
+      if: ${{ github.event_name != 'workflow_dispatch' }}
+      with:
+        path: rtp-llm
+
+    - name: Check out rtp llm source code (manual)
+      uses: actions/checkout@v3
+      if: ${{ github.event_name == 'workflow_dispatch' }}
+      with:
+        ref: ${{ inputs.branch }}
+        path: rtp-llm
+
+    - name: Run regression tests in container
+      run: |
+        docker run --rm \
+          --privileged \
+          --cap-add=SYS_PTRACE \
+          --security-opt seccomp=unconfined \
+          --ulimit nofile=655350:655350 \
+          --ulimit memlock=-1 \
+          --cpu-shares=15360 \
+          --cpu-quota=9600000 \
+          --cpu-period=100000 \
+          --memory=500000m \
+          --network=host \
+          --device=/dev/kfd \
+          --device=/dev/dri \
+          --ipc=host \
+          --group-add video \
+          --group-add render \
+          --shm-size=64g \
+          -v /mnt/raid0:/mnt/raid0 \
+          -v /mnt/raid1:/mnt/raid1 \
+          -v ${PWD}:${PWD} \
+          -w ${{ github.workspace }} \
+          -e IMAGE_NAME=${IMAGE#*:} \
+          -e CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+          -e HSA_NO_SCRATCH_RECLAIM=1 \
+          $IMAGE \
+          ${{ github.workspace }}/rtp-llm/rtp_llm_benchmark/ci/run_rtp_regressionTests.sh
+
+    - name: Compress regression logs
+      if: always()
+      run: tar -czf logs_regression.tar.gz -C logs .
+
+    - name: Upload regression logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: logs_nightly_regression
+        path: logs_regression.tar.gz
