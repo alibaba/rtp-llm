@@ -103,24 +103,43 @@ int SWAKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
 }
 
 NeedBlocksInfo SWAKVCacheGroup::getNeedBlocks(
-    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    int                      common_seq_len,
+    int                      seq_len,
+    int                      reserve_step,
+    int                      reuse_blocks_len,
+    bool                     reuse_enabled,
+    const RequiredPositions& required_positions) const {
     (void)common_seq_len;
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
     const int  active_tail_blocks      = activeTailBlockCount();
-
     NeedBlocksInfo info;
 
     const int seq_slots   = needBlocksNum(seq_len, 0);
     const int total_slots = needBlocksNum(seq_len, 0, reserve_step);
 
-    info.common_blocks = 0;
-    for (int i = reuse_blocks_len; i < seq_slots; ++i) {
+    const int ordinary_start = reuse_enabled ? reuse_blocks_len : 0;
+    info.common_blocks       = 0;
+    for (int i = ordinary_start; i < seq_slots; ++i) {
         if (shouldAllocateBlock(i, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled, active_tail_blocks)) {
             ++info.extra_blocks;
         }
     }
-    info.extra_blocks += std::max(total_slots - std::max(seq_slots, reuse_blocks_len), 0);
+    info.extra_blocks += std::max(total_slots - std::max(seq_slots, ordinary_start), 0);
+    for (const size_t position : required_positions) {
+        if (position >= static_cast<size_t>(std::max(total_slots, 0))) {
+            continue;
+        }
+        const int pos = static_cast<int>(position);
+        const bool ordinary_seq_position =
+            pos >= ordinary_start && pos < seq_slots
+            && shouldAllocateBlock(
+                pos, seq_slots, /*reserve_step=*/0, step, effective_reuse_enabled, active_tail_blocks);
+        const bool ordinary_reserve_position = pos >= std::max(seq_slots, ordinary_start) && pos < total_slots;
+        if (!ordinary_seq_position && !ordinary_reserve_position) {
+            ++info.common_blocks;
+        }
+    }
 
     info.extra_blocks = std::max(info.extra_blocks, 0);
     return info;

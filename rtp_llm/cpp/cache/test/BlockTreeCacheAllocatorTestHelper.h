@@ -45,6 +45,15 @@ public:
         storage_backend_ = std::move(storage_backend);
     }
 
+    MallocStatus preparedReserveStatusForTest(const MallocInfo&              malloc_info,
+                                              size_t                         reserve_blocks,
+                                              std::vector<RequiredPositions> required_positions) const {
+        typename Allocator::PreparedKVCache prepared;
+        prepared.required_positions = std::move(required_positions);
+        return this->evaluatePreparedInitCapacity(
+            malloc_info, reserve_blocks, prepared, /*has_load_context=*/true);
+    }
+
 private:
     CacheConfig   config_;
     KVCacheConfig kv_cache_config_;
