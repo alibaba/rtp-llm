@@ -34,7 +34,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ThreadPoolExecutor;
 
-import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
@@ -122,8 +121,6 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS);
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_AFFINITY_DECISION_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -310,13 +307,6 @@ public class EngineHealthReporter {
                 }
             }
         }
-    }
-
-    public void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
-        monitor.report(CACHE_AFFINITY_DECISION_QPS, FlexMetricTags.of(
-                "role", roleType == null ? "" : roleType.name(),
-                "engineIp", engineIp == null ? "" : engineIp,
-                "decision", decision == null ? "" : decision), 1.0);
     }
 
     public void reportMasterNode(String master) {
