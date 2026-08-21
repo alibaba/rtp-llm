@@ -281,7 +281,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         if (stream->forceBatch() && stream->batchGroupId() != -1) {
             auto& info = request_group_info[stream->batchGroupId()];
             if (info.count == 0) {
-                info.first_arrival_time = stream->enqueueTime() / 1000;
+                info.first_arrival_time = stream->schedulerEnqueueTimeUs() / 1000;
             }
             info.count++;
         }
@@ -422,6 +422,26 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     // allocate KV blocks, so a permanent CanRun bit alone must not bypass capacity checks.
     size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
+    // K3 MLA request-DP assigns each force-batched request to an explicit
+    // owner rank.  PD cache loads complete asynchronously, so FIFO enqueue
+    // order is not a stable owner order even when requests were dispatched in
+    // rank order.  The Python model uses contiguous owner slices; normalize
+    // the newly admitted fixed group before it becomes the running batch.
+    // The optional owner field is experimental and sorting is deliberately
+    // limited to complete force-batch groups where every stream carries it.
+    const bool order_by_mla_owner = !new_streams_.empty()
+                                    && std::all_of(new_streams_.begin(),
+                                                   new_streams_.end(),
+                                                   [](const GenerateStreamPtr& stream) {
+                                                       return stream->forceBatch() && stream->batchGroupId() != -1
+                                                              && stream->generateConfig()->mla_cache_owner_rank.has_value();
+                                                   });
+    if (order_by_mla_owner) {
+        new_streams_.sort([](const GenerateStreamPtr& lhs, const GenerateStreamPtr& rhs) {
+            return lhs->generateConfig()->mla_cache_owner_rank.value()
+                   < rhs->generateConfig()->mla_cache_owner_rank.value();
+        });
+    }
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 

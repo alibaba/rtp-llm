@@ -1001,6 +1001,7 @@ class KimiK3Model(GptModelBase):
                 attention_inputs,
                 owner_layout,
                 device=input_ids.device,
+                global_query_tokens=int(input_ids.numel()),
             )
             attn_meta = KimiK3DecoderMetadata(
                 cu_seqlens=cu_seqlens,

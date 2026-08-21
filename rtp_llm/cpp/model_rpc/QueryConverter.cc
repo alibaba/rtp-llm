@@ -100,6 +100,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(batch_group_timeout);
     TRANS_OPTIONAL(force_batch);
+    TRANS_OPTIONAL(mla_cache_owner_rank);
 
     return generate_config;
 }

@@ -29,7 +29,9 @@ class DecodeOwnerLayoutTest(unittest.TestCase):
         attention.is_cuda_graph = False
         attention.cache_store_inputs = None
         attention.input_lengths = torch.ones(batch, dtype=torch.int32)
-        attention.input_lengths_host = torch.ones(batch, dtype=torch.int32)
+        attention.input_lengths_host = torch.arange(
+            100, 100 + batch, dtype=torch.int32
+        )
         attention.prefix_lengths = torch.arange(batch, dtype=torch.int32)
         attention.prefix_lengths_host = attention.prefix_lengths.clone()
         attention.sequence_lengths = torch.arange(100, 100 + batch, dtype=torch.int32)
@@ -45,7 +47,10 @@ class DecodeOwnerLayoutTest(unittest.TestCase):
 
         layout = DecodeOwnerLayout.fixed(batch, 8, 3)
         local = build_owner_attention_inputs(
-            attention, layout, device=torch.device("cpu")
+            attention,
+            layout,
+            device=torch.device("cpu"),
+            global_query_tokens=batch,
         )
 
         self.assertEqual((layout.start, layout.stop), (6, 8))
@@ -63,12 +68,13 @@ class DecodeOwnerLayoutTest(unittest.TestCase):
         attention.is_target_verify = False
         attention.is_cuda_graph = False
         attention.cache_store_inputs = None
-        attention.input_lengths_host = torch.tensor([1, 1, 1, 1, 1, 1, 1, 2])
+        attention.input_lengths_host = torch.arange(100, 108, dtype=torch.int32)
         with self.assertRaisesRegex(ValueError, "q_len=1"):
             build_owner_attention_inputs(
                 attention,
                 DecodeOwnerLayout.fixed(8, 8, 7),
                 device=torch.device("cpu"),
+                global_query_tokens=9,
             )
 
 

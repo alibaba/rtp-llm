@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/MlaCacheTpTransfer.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -322,6 +323,17 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_prefill_attention_tp_size(
         static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
     alloc_request.set_prefill_cache_dtype(static_cast<int32_t>(cache_config.dtype));
+    if (k3MlaCacheTpEnvEnabled()) {
+        const int shard_count = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
+        // Constructor performs the 512/64 divisibility check. The Decode side
+        // repeats this validation from wire metadata before accepting shards.
+        K3MlaCacheTpLayout layout(shard_count);
+        RTP_LLM_CHECK_WITH_INFO(cache_config.use_mla,
+                                "KIMI_K3_MLA_CACHE_TP P->D metadata requires an MLA cache configuration");
+        alloc_request.set_prefill_mla_cache_tp(true);
+        alloc_request.set_mla_cache_layout_version(K3MlaCacheTpLayout::kLayoutVersion);
+        alloc_request.set_mla_cache_shard_count(shard_count);
+    }
     for (const auto& spec : cache_config.cache_specs) {
         const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(spec.get());
         if (linear_spec == nullptr) {

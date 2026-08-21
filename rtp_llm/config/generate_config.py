@@ -187,6 +187,11 @@ class GenerateConfig(BaseModel):
 
     unique_key: str = ""
 
+    # Explicit stable Decode owner for dimension-sharded K3 MLA cache.  This is
+    # intentionally optional: production must not infer ownership from
+    # request_id, because that would make later DPLB/migration ambiguous.
+    mla_cache_owner_rank: Optional[int] = None
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0
