@@ -87,8 +87,15 @@ def acquire_flock(path: Path, blocking: bool = True, create: bool = True) -> int
         raise
 
 
-def reap_stale_batons(root: Path) -> None:
-    cutoff = time.time() - STALE_BATON_S
+def reap_stale_batons(root: Path, stale_after_s: float = STALE_BATON_S) -> None:
+    """Remove abandoned existence-based build locks older than the threshold.
+
+    ``-1`` disables cleanup. Callers must keep the threshold above the longest
+    expected cold build because torch and AITER batons do not record an owner.
+    """
+    if stale_after_s == -1:
+        return
+    cutoff = time.time() - stale_after_s
     for path in (p for g in ("lock", "lock_*") for p in root.rglob(g)):
         with suppress(OSError):
             if (fd := acquire_flock(path, False, create=False)) is not None:
@@ -96,6 +103,11 @@ def reap_stale_batons(root: Path) -> None:
                     old, current = os.fstat(baton.fileno()), path.stat()
                     if old.st_mtime < cutoff and os.path.samestat(old, current):
                         path.unlink()
+                        logging.info(
+                            "JIT_CACHE_STALE_BATON_REAPED: %s (older than %ss)",
+                            path,
+                            stale_after_s,
+                        )
 
 
 def scope_root_usable(root: Path) -> bool:

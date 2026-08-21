@@ -35,6 +35,12 @@ snapshot restore only: build-scope probing runs before it and can add tens of
 seconds on a cold host. `JIT_CACHE_RESTORED`, `JIT_CACHE_FAIL_OPEN`, and a
 `JIT shared root ... mode ...` line report status.
 
+`JIT_CACHE_STALE_BATON_TIMEOUT_S` (default `7200`; `-1` disables cleanup)
+controls when abandoned torch/AITER existence-based build locks are removed at
+startup. It also applies when `TORCH_EXTENSIONS_DIR` or `AITER_JIT_DIR` is set
+explicitly. Keep it above the longest expected cold compile: these lock files do
+not carry owner identity, so a threshold that is too short can race a live build.
+
 The local root is fixed, not configurable: ninja depfiles and compiled artifacts
 embed absolute paths, so a snapshot restored under a different root cannot be
 reused. Opt out of the feature rather than relocating it.

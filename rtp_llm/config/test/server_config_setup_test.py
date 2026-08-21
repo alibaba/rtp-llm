@@ -106,21 +106,31 @@ class GenerateConfigTest(TestCase):
 
     def test_jit_config(self):
         valid = (
-            ([], {}, ("", 180)),
+            ([], {}, ("", 180, 7200)),
             (
                 [],
                 {"REMOTE_JIT_DIR": "/remote/jit", "JIT_CACHE_SETUP_TIMEOUT_S": "60"},
-                ("/remote/jit", 60),
+                ("/remote/jit", 60, 7200),
             ),
-            (["--jit_cache_setup_timeout_s", "5"], {}, ("", 5)),
-            (["--jit_cache_setup_timeout_s", "-1"], {}, ("", -1)),
-            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "-1"}, ("", -1)),
+            (["--jit_cache_setup_timeout_s", "5"], {}, ("", 5, 7200)),
+            (["--jit_cache_setup_timeout_s", "-1"], {}, ("", -1, 7200)),
+            ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "-1"}, ("", -1, 7200)),
+            (
+                ["--jit_cache_stale_baton_timeout_s", "3600"],
+                {},
+                ("", 180, 3600),
+            ),
+            (
+                [],
+                {"JIT_CACHE_STALE_BATON_TIMEOUT_S": "-1"},
+                ("", 180, -1),
+            ),
             # CLI wins over env even for -1, which the provided_args scanner sees
             # as an option rather than as a value.
             (
                 ["--jit_cache_setup_timeout_s", "-1"],
                 {"JIT_CACHE_SETUP_TIMEOUT_S": "60"},
-                ("", -1),
+                ("", -1, 7200),
             ),
         )
         for args, env, expected in valid:
@@ -129,7 +139,12 @@ class GenerateConfigTest(TestCase):
             ):
                 config = setup_args(args).jit_config
                 self.assertEqual(
-                    (config.remote_jit_dir, config.jit_cache_setup_timeout_s), expected
+                    (
+                        config.remote_jit_dir,
+                        config.jit_cache_setup_timeout_s,
+                        config.jit_cache_stale_baton_timeout_s,
+                    ),
+                    expected,
                 )
 
         for args, env, expected in (
@@ -148,6 +163,8 @@ class GenerateConfigTest(TestCase):
             (["--jit_cache_setup_timeout_s", "-2"], {}, timeout_error),
             ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "0"}, timeout_error),
             ([], {"JIT_CACHE_SETUP_TIMEOUT_S": "invalid"}, timeout_error),
+            (["--jit_cache_stale_baton_timeout_s", "0"], {}, timeout_error),
+            ([], {"JIT_CACHE_STALE_BATON_TIMEOUT_S": "invalid"}, timeout_error),
             ([], {"MANAGE_JIT_CACHE": "maybe"}, bool_error),
             # An empty value fails like every other int/str2bool arg does.
             ([], {"JIT_CACHE_SETUP_TIMEOUT_S": ""}, timeout_error),
@@ -170,15 +187,20 @@ class GenerateConfigTest(TestCase):
         This is the deployment path: every value arrives as a raw env string.
         """
         for env, expected in (
-            ({"JIT_CACHE_SETUP_TIMEOUT_S": "45"}, (45, True)),
-            ({"MANAGE_JIT_CACHE": "0"}, (180, False)),
+            ({"JIT_CACHE_SETUP_TIMEOUT_S": "45"}, (45, 7200, True)),
+            ({"JIT_CACHE_STALE_BATON_TIMEOUT_S": "3600"}, (180, 3600, True)),
+            ({"MANAGE_JIT_CACHE": "0"}, (180, 7200, False)),
         ):
             with self.subTest(env=env), patch.object(sys, "argv", ["prog"]), patch.dict(
                 os.environ, _jit_env(**env), clear=True
             ):
                 config = setup_args().jit_config
                 self.assertEqual(
-                    (config.jit_cache_setup_timeout_s, config.manage_jit_cache),
+                    (
+                        config.jit_cache_setup_timeout_s,
+                        config.jit_cache_stale_baton_timeout_s,
+                        config.manage_jit_cache,
+                    ),
                     expected,
                 )
 
