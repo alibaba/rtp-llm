@@ -533,11 +533,19 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
     config.max_descriptors_per_transfer_batch = static_cast<size_t>(max_batch_descriptors);
 
-    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(
-        group_sets,
-        DeviceHostCopyOptions{},
-        config.device_disk_staging_block_count,
-        config.max_descriptors_per_transfer_batch);
+    const int64_t scan_interval_ms = kv_cache_config.block_tree_full_prefix_scan_interval_ms;
+    if (scan_interval_ms < 0 || (scan_interval_ms > 0 && scan_interval_ms < 1000)) {
+        RTP_LLM_LOG_ERROR("block_tree_full_prefix_scan_interval_ms must be 0 or >= 1000, got %ld", scan_interval_ms);
+        return nullptr;
+    }
+    config.full_prefix_scan_interval_ms = scan_interval_ms;
+    config.world_rank                   = static_cast<int>(parallelism_config.world_rank);
+    config.local_rank                   = static_cast<int>(parallelism_config.local_rank);
+
+    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                                        DeviceHostCopyOptions{},
+                                                                        config.device_disk_staging_block_count,
+                                                                        config.max_descriptors_per_transfer_batch);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
@@ -555,8 +563,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                    std::move(transfer_dispatcher),
                                                    std::move(task_pool));
     if (result->isRemoteCacheEnabled()) {
-        const auto                               storage_topology = cache_config.topologyPtr();
-        const auto                               resolver_pools   = group_pools;
+        const auto storage_topology = cache_config.topologyPtr();
+        const auto resolver_pools   = group_pools;
         RTP_LLM_CHECK_WITH_INFO(result->storageBackend()->init(
                                     storage_topology,
                                     group_pools,

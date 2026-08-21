@@ -486,11 +486,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
         .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
-        .def_readwrite("kv_cache_event_publisher_type", &KVCacheConfig::kv_cache_event_publisher_type)
-        .def_readwrite("kv_cache_event_manager_endpoint", &KVCacheConfig::kv_cache_event_manager_endpoint)
-        .def_readwrite("kv_cache_event_instance_group", &KVCacheConfig::kv_cache_event_instance_group)
-        .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
-        .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
         .def_readwrite("reco_server_address", &KVCacheConfig::reco_server_address)
@@ -511,8 +506,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reco_get_broadcast_timeout", &KVCacheConfig::reco_get_broadcast_timeout)
         .def_readwrite("reco_put_broadcast_timeout", &KVCacheConfig::reco_put_broadcast_timeout)
         .def_readwrite("reco_client_config", &KVCacheConfig::reco_client_config)
+        .def_readwrite("block_tree_full_prefix_scan_interval_ms",
+                       &KVCacheConfig::block_tree_full_prefix_scan_interval_ms)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
         .def("to_string", &KVCacheConfig::to_string)
+        .def_readwrite("kv_cache_event_publisher_type", &KVCacheConfig::kv_cache_event_publisher_type)
+        .def_readwrite("kv_cache_event_manager_endpoint", &KVCacheConfig::kv_cache_event_manager_endpoint)
+        .def_readwrite("kv_cache_event_instance_group", &KVCacheConfig::kv_cache_event_instance_group)
+        .def_readwrite("kv_cache_event_instance_id", &KVCacheConfig::kv_cache_event_instance_id)
+        .def_readwrite("kv_cache_event_host_ip_port", &KVCacheConfig::kv_cache_event_host_ip_port)
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
@@ -571,8 +573,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
                                       self.dsv4_fixed_pool_use_memory,
-                                      // This unreleased event-field block follows declaration order.
-                                      // Future fields must be appended after the block.
+                                      self.block_tree_full_prefix_scan_interval_ms,
                                       self.kv_cache_event_publisher_type,
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
@@ -580,7 +581,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port);
             },
             [](py::tuple t) {
-                constexpr size_t kFieldCount = 59;
+                constexpr size_t kFieldCount = 60;
                 if (t.size() != kFieldCount + 2 || t[0].cast<std::string>() != "KVCacheConfig"
                     || t[1].cast<int>() != 1) {
                     throw std::runtime_error("invalid KVCacheConfig state");
@@ -642,11 +643,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.dsv4_fixed_pool_blocks                         = value(51).cast<uint32_t>();
                 c.dsv4_hca_state_pool_blocks                    = value(52).cast<uint32_t>();
                 c.dsv4_fixed_pool_use_memory                    = value(53).cast<bool>();
-                c.kv_cache_event_publisher_type = value(54).cast<std::string>();
-                c.kv_cache_event_manager_endpoint = value(55).cast<std::string>();
-                c.kv_cache_event_instance_group = value(56).cast<std::string>();
-                c.kv_cache_event_instance_id = value(57).cast<std::string>();
-                c.kv_cache_event_host_ip_port = value(58).cast<std::string>();
+                c.block_tree_full_prefix_scan_interval_ms             = value(54).cast<int64_t>();
+                c.kv_cache_event_publisher_type = value(55).cast<std::string>();
+                c.kv_cache_event_manager_endpoint = value(56).cast<std::string>();
+                c.kv_cache_event_instance_group = value(57).cast<std::string>();
+                c.kv_cache_event_instance_id = value(58).cast<std::string>();
+                c.kv_cache_event_host_ip_port = value(59).cast<std::string>();
                 return c;
             }));
 
