@@ -3,6 +3,10 @@
 # Recommended one-command startup from a controller with SSH access to both
 # hosts (the driver enters lhc_GPU and launches both roles concurrently):
 #
+# Merge-gate requirement: always use SMOKE_SUITE=all for the final 93-layer
+# accuracy/cache acceptance run. The flow suite is only a four-layer RDMA
+# connectivity and multi-round preflight; it is not a substitute for all.
+#
 #    PREFILL_SSH_TARGET=L20-dev-112 \
 #    DECODE_SSH_TARGET=L20-dev-113 \
 #    PREFILL_REPO_ROOT=/data3/user/RTP-LLM/github-opensource \
@@ -71,15 +75,30 @@ and result channel. The default result channel is DECODE host at DECODE port +
 The validated BF16 1M model/runtime profile is fixed by this smoke. Only host,
 checkpoint, artifact, timeout and prebuilt-launcher settings are configurable.
 
+Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
+only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
+the final acceptance requirement.
+
 Important optional variables:
   SMOKE_ARTIFACT_ROOT       defaults to /tmp/kimi-k3-two-host-pd-smoke
   SMOKE_STARTUP_TIMEOUT_S   defaults to 14400
   SMOKE_REQUEST_TIMEOUT_S   defaults to 900
   SMOKE_RESULT_TIMEOUT_S    defaults to 18000
   SMOKE_RESULT_ENDPOINT     defaults to decode-host:(decode-port + 100)
-  SMOKE_SUITE               must be all (default and merge-gate requirement)
-                            covers identity, cache reuse, concurrent mixed
-                            batches, and >64K single/batched chunk cases
+  SMOKE_SUITE               all (default) or flow
+                            flow: four-layer-friendly multi-round RDMA flow
+                                  check without semantic-answer assertions
+                            all: identity, single miss/hit, partial hit,
+                                 concurrent all-miss/all-hit, mixed hit+miss
+                                 batches, and >64K single/batched chunk cases
+  SMOKE_EXPECTED_LAYERS     checkpoint layer count; defaults to 93. Set to 4
+                            only for the required four-layer RDMA flow smoke.
+  SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
+  SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
+  SMOKE_CHUNK_TOKENS        whole-model chunk budget; defaults to 65536
+  SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
+  SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
+                            0 retains compute-all-then-transfer behavior
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -144,12 +163,16 @@ esac
     || die "missing checkpoint config.json"
 [[ -f "${checkpoint_real}/model.safetensors.index.json" ]] \
     || die "missing checkpoint model.safetensors.index.json"
-python3 - "${checkpoint_real}/config.json" <<'PY'
+smoke_expected_layers="${SMOKE_EXPECTED_LAYERS:-93}"
+[[ "${smoke_expected_layers}" =~ ^[1-9][0-9]*$ ]] \
+    || die "SMOKE_EXPECTED_LAYERS must be a positive integer"
+python3 - "${checkpoint_real}/config.json" "${smoke_expected_layers}" <<'PY'
 import json
 import pathlib
 import sys
 
 config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected_layers = int(sys.argv[2])
 layer_counts = []
 
 def visit(value):
@@ -163,11 +186,12 @@ def visit(value):
             visit(child)
 
 visit(config)
-if 93 not in layer_counts:
+if expected_layers not in layer_counts:
     raise SystemExit(
-        f"full-model smoke requires a 93-layer checkpoint; found {layer_counts or 'none'}"
+        f"smoke requires a {expected_layers}-layer checkpoint; "
+        f"found {layer_counts or 'none'}"
     )
-print("checkpoint layers=93")
+print(f"checkpoint layers={expected_layers}")
 PY
 
 artifact_root="${SMOKE_ARTIFACT_ROOT:-/tmp/kimi-k3-two-host-pd-smoke}"
@@ -187,6 +211,24 @@ for timeout_value in "${startup_timeout}" "${request_timeout}" "${result_timeout
     [[ "${timeout_value}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke timeouts must be positive integers"
 done
+
+smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
+smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
+smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
+smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
+smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
+for size_value in \
+    "${smoke_block_size}" \
+    "${smoke_kernel_block_size}" \
+    "${smoke_chunk_tokens}" \
+    "${smoke_linear_step}"; do
+    [[ "${size_value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "smoke block/chunk/linear settings must be positive integers"
+done
+((smoke_block_size % 64 == 0)) \
+    || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
+[[ "${smoke_chunkwise_rdma}" == "0" || "${smoke_chunkwise_rdma}" == "1" ]] \
+    || die "SMOKE_CHUNKWISE_RDMA must be 0 or 1"
 
 service_pid=
 listener_pid=
@@ -302,11 +344,28 @@ verify_role_environment() {
     local env_file="${role_dir}/service.env"
     # Never dump the full process environment: it can contain unrelated
     # credentials. Read and persist only the K3 smoke allowlist.
-    python3 - "${service_pid}" "${role}" "${env_file}" <<'PY'
+    python3 - \
+        "${service_pid}" \
+        "${role}" \
+        "${env_file}" \
+        "${smoke_block_size}" \
+        "${smoke_kernel_block_size}" \
+        "${smoke_chunk_tokens}" \
+        "${smoke_linear_step}" \
+        "${smoke_chunkwise_rdma}" <<'PY'
 import pathlib
 import sys
 
-pid, role, output = sys.argv[1:]
+(
+    pid,
+    role,
+    output,
+    block_size,
+    kernel_block_size,
+    chunk_tokens,
+    linear_step,
+    chunkwise_rdma,
+) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 env = {}
 for entry in entries:
@@ -318,14 +377,15 @@ expected = {
     "LOAD_METHOD": "fastsafetensors",
     "MAX_SEQ_LEN": "1048577",
     "MAX_BATCH_TOKENS_SIZE": "1048576",
-    "SEQ_SIZE_PER_BLOCK": "4096",
-    "KERNEL_SEQ_SIZE_PER_BLOCK": "128",
+    "SEQ_SIZE_PER_BLOCK": block_size,
+    "KERNEL_SEQ_SIZE_PER_BLOCK": kernel_block_size,
     "CONCURRENCY_LIMIT": "4",
     "MAX_CONTEXT_BATCH_SIZE": "4",
     "REUSE_CACHE": "1",
-    "LINEAR_STEP": "1",
+    "LINEAR_STEP": linear_step,
     "CACHE_STORE_RDMA_MODE": "1",
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "2000",
+    "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
@@ -339,13 +399,13 @@ if role == "prefill":
         "KV_CACHE_MEM_MB": "43000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "8192",
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1",
-        "KIMI_K3_PREFILL_CHUNK_TOKENS": "65536",
+        "KIMI_K3_PREFILL_CHUNK_TOKENS": chunk_tokens,
         "ENABLE_CUDA_GRAPH": "0",
     })
     absent.extend(["RTP_MLA_DECODE_KERNEL", "DECODE_CAPTURE_CONFIG"])
 else:
     expected.update({
-        "KV_CACHE_MEM_MB": "46000",
+        "KV_CACHE_MEM_MB": "44000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "1",
         "ENABLE_CUDA_GRAPH": "1",
         "DECODE_CAPTURE_CONFIG": "1,2,3,4",
@@ -382,14 +442,15 @@ apply_validated_common_profile() {
     export LOAD_METHOD=fastsafetensors
     export MAX_SEQ_LEN=1048577
     export MAX_BATCH_TOKENS_SIZE=1048576
-    export SEQ_SIZE_PER_BLOCK=4096
-    export KERNEL_SEQ_SIZE_PER_BLOCK=128
+    export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
+    export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
     export CONCURRENCY_LIMIT=4
     export MAX_CONTEXT_BATCH_SIZE=4
     export REUSE_CACHE=1
-    export LINEAR_STEP=1
+    export LINEAR_STEP="${smoke_linear_step}"
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=2000
+    export KIMI_K3_CHUNKWISE_RDMA="${smoke_chunkwise_rdma}"
     export DSV4_MEGA_MOE_INPUT_PACKER=fused
     export DSV4_MEGA_MOE_INPUT_PACKER_IMPL=optimized
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -411,13 +472,14 @@ apply_validated_prefill_profile() {
     export KV_CACHE_MEM_MB=43000
     export MEGA_MOE_MAX_TOKENS_PER_RANK=8192
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1
-    export KIMI_K3_PREFILL_CHUNK_TOKENS=65536
+    export KIMI_K3_PREFILL_CHUNK_TOKENS="${smoke_chunk_tokens}"
     export ENABLE_CUDA_GRAPH=0
     unset RTP_MLA_DECODE_KERNEL DECODE_CAPTURE_CONFIG
 }
 
 apply_validated_decode_profile() {
-    export KV_CACHE_MEM_MB=46000
+    # Leave headroom for CUDA graph capture with the current CUDA13 runtime.
+    export KV_CACHE_MEM_MB=44000
     export MEGA_MOE_MAX_TOKENS_PER_RANK=1
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     export ENABLE_CUDA_GRAPH=1
@@ -525,7 +587,10 @@ max_tokens="${SMOKE_MAX_TOKENS:-32}"
 [[ "${max_tokens}" =~ ^[1-9][0-9]*$ ]] \
     || die "SMOKE_MAX_TOKENS must be a positive integer"
 smoke_suite="${SMOKE_SUITE:-all}"
-[[ "${smoke_suite}" == "all" ]] || die "SMOKE_SUITE must be all"
+case "${smoke_suite}" in
+    flow | all) ;;
+    *) die "SMOKE_SUITE must be flow or all" ;;
+esac
 
 python3 "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \
@@ -535,7 +600,7 @@ python3 "${case_runner}" \
     --namespace "${SMOKE_RUN_ID}" \
     --batch-size 4 \
     --block-size "${SEQ_SIZE_PER_BLOCK}" \
-    --chunk-tokens "${KIMI_K3_PREFILL_CHUNK_TOKENS}" \
+    --chunk-tokens "${smoke_chunk_tokens}" \
     --max-tokens "${max_tokens}" \
     --timeout "${request_timeout}"
 

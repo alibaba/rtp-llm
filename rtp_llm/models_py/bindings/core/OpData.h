@@ -194,6 +194,12 @@ struct KvCacheInfo {
     std::vector<size_t> linear_cache_segment_sizes;
 };
 
+struct CacheStorePublishPlan {
+    torch::Tensor begin_block_host;
+    torch::Tensor end_block_host;
+    torch::Tensor terminal_host;
+};
+
 struct CacheStoreInputs {
     torch::Tensor input_lengths_host;
     torch::Tensor prefix_lengths_host;
@@ -217,6 +223,10 @@ struct CacheStoreInputs {
     bool                     decode_entrance       = false;
     bool                     warmup;
     bool                     use_opaque_kv_cache_store = false;
+
+    // Restrict this invocation to the incremental publication range supplied
+    // by the modeling layer. Absence preserves the legacy full publication.
+    std::optional<CacheStorePublishPlan> publish_plan;
 
     int               layer_id    = 0;
     KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;

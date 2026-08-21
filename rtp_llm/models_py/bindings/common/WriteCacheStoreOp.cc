@@ -10,7 +10,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                        const torch::Tensor&                         prefix_lengths,
                        const torch::Tensor&                         kv_cache_block_id_host,
                        std::optional<torch_ext::PyCacheStoreInputs> cache_store_member,
-                       std::optional<torch_ext::LayerKVCache>       kv_cache) {
+                       std::optional<torch_ext::LayerKVCache>       kv_cache,
+                       std::optional<torch_ext::PyCacheStorePublishPlan> publish_plan) {
     if (!kv_cache.has_value() || !cache_store_member.has_value()) {
         return;
     }
@@ -24,6 +25,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
     auto captured_cache_store            = cache_store_inputs;
     auto captured_kv_cache               = kv_cache.value();
+    auto captured_publish_plan            = std::move(publish_plan);
 
     // Create event in main thread to avoid cudaEventRecord contention on background threads.
     auto event = runtimeCreateEvent();
@@ -33,6 +35,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_kv_cache_block_id_host,
                 captured_cache_store,
                 captured_kv_cache,
+                captured_publish_plan,
                 event = std::move(event)]() mutable {
         auto resolve_store_stride = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
             size_t stride_bytes = fallback_stride;
@@ -118,6 +121,11 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.decode_entrance,
                                 captured_cache_store.warmup,
                                 captured_cache_store.use_opaque_kv_cache_store,
+                                captured_publish_plan.has_value() ?
+                                    std::make_optional(CacheStorePublishPlan{captured_publish_plan->begin_block_host,
+                                                                             captured_publish_plan->end_block_host,
+                                                                             captured_publish_plan->terminal_host}) :
+                                    std::nullopt,
                                 captured_kv_cache.layer_id,
                                 captured_kv_cache.region_name,
                                 captured_cache_store.cp_rank,

@@ -94,6 +94,35 @@ TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
 }
 
+TEST_F(RequestBlockBufferStoreTest, testWatchFunc_ReceivesIncrementalRegistrations) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+
+    size_t                   callback_count = 0;
+    std::vector<std::string> received_keys;
+    RequestBlockBuffer::WatchFunc watch_func = [&callback_count, &received_keys](
+                                                     bool success,
+                                                     const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
+        ASSERT_TRUE(success);
+        ++callback_count;
+        for (const auto& block : blocks) {
+            received_keys.push_back(block->key);
+        }
+    };
+    ASSERT_TRUE(store->setRequestBlockBufferWatchFunc("request-1", std::move(watch_func)));
+
+    auto first = std::make_shared<RequestBlockBuffer>("request-1");
+    first->addBlock(block_buffer_util_->makeBlockBuffer("b1", 1024, '0', false));
+    ASSERT_TRUE(store->setRequestBlockBuffer(first));
+    ASSERT_EQ(callback_count, 1);
+    ASSERT_EQ(received_keys, std::vector<std::string>({"b1"}));
+
+    auto second = std::make_shared<RequestBlockBuffer>("request-1");
+    second->addBlock(block_buffer_util_->makeBlockBuffer("b2", 1024, '1', false));
+    ASSERT_TRUE(store->setRequestBlockBuffer(second));
+    ASSERT_EQ(callback_count, 2);
+    ASSERT_EQ(received_keys, std::vector<std::string>({"b1", "b2"}));
+}
+
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetAfterBlocks) {
     auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());

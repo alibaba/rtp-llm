@@ -49,9 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", default=env_default("SMOKE_RUN_ID"))
     parser.add_argument(
         "--suite",
-        choices=("all",),
+        choices=("flow", "all"),
         default=env_default("SMOKE_SUITE", "all"),
-        help="complete accuracy suite; all is required before merge",
     )
     parser.add_argument(
         "--result-endpoint", default=env_default("SMOKE_RESULT_ENDPOINT")
@@ -74,6 +73,29 @@ def parse_args() -> argparse.Namespace:
         default=env_default("DECODE_CONTAINER_RUNTIME", "docker"),
     )
     parser.add_argument("--ssh-bin", default=env_default("SMOKE_SSH_BIN", "ssh"))
+    parser.add_argument(
+        "--prefill-ssh-control-path",
+        default=env_default("PREFILL_SSH_CONTROL_PATH"),
+    )
+    parser.add_argument(
+        "--decode-ssh-control-path",
+        default=env_default("DECODE_SSH_CONTROL_PATH"),
+    )
+    parser.add_argument(
+        "--remote-detached",
+        action="store_true",
+        help=(
+            "start both role scripts as detached container execs and poll short-lived "
+            "status commands; use this when a WebTerminal relay cannot carry a long SSH session"
+        ),
+    )
+    parser.add_argument(
+        "--remote-control-root",
+        default=env_default(
+            "SMOKE_REMOTE_CONTROL_ROOT",
+            env_default("SMOKE_ARTIFACT_ROOT", "/tmp/kimi-k3-two-host-pd-smoke"),
+        ),
+    )
     parser.add_argument(
         "--artifact-root",
         type=pathlib.Path,
@@ -113,6 +135,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--result-endpoint must have host:port form")
     if args.overall_timeout <= 0:
         parser.error("--overall-timeout must be positive")
+    if not args.remote_control_root.startswith("/"):
+        parser.error("--remote-control-root must be an absolute path")
     return args
 
 
@@ -124,6 +148,12 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_REQUEST_TIMEOUT_S",
         "SMOKE_RESULT_TIMEOUT_S",
         "SMOKE_MAX_TOKENS",
+        "SMOKE_EXPECTED_LAYERS",
+        "SMOKE_BLOCK_SIZE",
+        "SMOKE_KERNEL_BLOCK_SIZE",
+        "SMOKE_CHUNK_TOKENS",
+        "SMOKE_LINEAR_STEP",
+        "SMOKE_CHUNKWISE_RDMA",
         "RTP_LLM_SKIP_BUILD",
     )
     for name in names:
@@ -139,7 +169,9 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
     return result
 
 
-def build_remote_command(args: argparse.Namespace, role: str) -> str:
+def role_launch_parts(
+    args: argparse.Namespace, role: str
+) -> tuple[str, str, str, list[str]]:
     is_prefill = role == "prefill"
     repo_root = args.prefill_repo_root if is_prefill else args.decode_repo_root
     checkpoint = (
@@ -162,6 +194,11 @@ def build_remote_command(args: argparse.Namespace, role: str) -> str:
     env_command = ["env"]
     env_command.extend(f"{key}={value}" for key, value in role_environment.items())
     env_command.extend((ROLE_SCRIPT, role))
+    return repo_root, runtime, args.container, env_command
+
+
+def build_remote_command(args: argparse.Namespace, role: str) -> str:
+    repo_root, runtime, container, env_command = role_launch_parts(args, role)
     inner = f"cd {shlex.quote(repo_root)} && exec {shlex.join(env_command)}"
     return shlex.join(
         (
@@ -169,7 +206,7 @@ def build_remote_command(args: argparse.Namespace, role: str) -> str:
             "exec",
             "-u",
             args.container_user,
-            args.container,
+            container,
             "bash",
             "-lc",
             inner,
@@ -177,17 +214,97 @@ def build_remote_command(args: argparse.Namespace, role: str) -> str:
     )
 
 
+def detached_control_paths(args: argparse.Namespace, role: str) -> dict[str, str]:
+    base = pathlib.PurePosixPath(args.remote_control_root) / args.run_id / "controller"
+    return {
+        "dir": str(base),
+        "log": str(base / f"{role}.log"),
+        "pid": str(base / f"{role}.pid"),
+        "status": str(base / f"{role}.status"),
+    }
+
+
+def build_detached_remote_command(args: argparse.Namespace, role: str) -> str:
+    repo_root, runtime, container, env_command = role_launch_parts(args, role)
+    paths = detached_control_paths(args, role)
+    role_inner = f"cd {shlex.quote(repo_root)} && exec {shlex.join(env_command)}"
+    wrapper = "\n".join(
+        (
+            "set -u",
+            f"mkdir -p {shlex.quote(paths['dir'])}",
+            f"test ! -e {shlex.quote(paths['status'])}",
+            (
+                f"setsid bash -lc {shlex.quote(role_inner)} "
+                f">{shlex.quote(paths['log'])} 2>&1 &"
+            ),
+            "child=$!",
+            f"printf '%s\\n' \"$child\" >{shlex.quote(paths['pid'])}",
+            "set +e",
+            "wait \"$child\"",
+            "rc=$?",
+            f"printf '%s\\n' \"$rc\" >{shlex.quote(paths['status'])}",
+            "exit 0",
+        )
+    )
+    return shlex.join(
+        (
+            runtime,
+            "exec",
+            "-d",
+            "-u",
+            args.container_user,
+            container,
+            "bash",
+            "-lc",
+            wrapper,
+        )
+    )
+
+
 def build_ssh_command(args: argparse.Namespace, role: str) -> list[str]:
     target = args.prefill_ssh_target if role == "prefill" else args.decode_ssh_target
-    return [
+    control_path = (
+        args.prefill_ssh_control_path
+        if role == "prefill"
+        else args.decode_ssh_control_path
+    )
+    command = [
         args.ssh_bin,
         "-o",
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=10",
-        target,
-        build_remote_command(args, role),
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=120",
     ]
+    if control_path:
+        command.extend(("-S", control_path))
+    command.extend((target, build_remote_command(args, role)))
+    return command
+
+
+def build_short_ssh_command(
+    args: argparse.Namespace, role: str, remote_command: str
+) -> list[str]:
+    target = args.prefill_ssh_target if role == "prefill" else args.decode_ssh_target
+    control_path = (
+        args.prefill_ssh_control_path
+        if role == "prefill"
+        else args.decode_ssh_control_path
+    )
+    command = [
+        args.ssh_bin,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+    ]
+    if control_path:
+        command.extend(("-S", control_path))
+    command.extend((target, remote_command))
+    return command
 
 
 @dataclass
@@ -248,6 +365,171 @@ class RemoteRole:
         return rc
 
 
+def run_short_ssh(
+    args: argparse.Namespace,
+    role: str,
+    remote_command: str,
+    *,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        build_short_ssh_command(args, role, remote_command),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def fetch_detached_log(
+    args: argparse.Namespace, role: str, destination: pathlib.Path
+) -> None:
+    result = run_short_ssh(
+        args,
+        role,
+        f"cat {shlex.quote(detached_control_paths(args, role)['log'])}",
+    )
+    destination.write_text(
+        result.stdout + (result.stderr if result.returncode else ""),
+        encoding="utf-8",
+    )
+
+
+def stop_detached_role(args: argparse.Namespace, role: str) -> None:
+    paths = detached_control_paths(args, role)
+    _, runtime, container, _ = role_launch_parts(args, role)
+    stop_inner = "\n".join(
+        (
+            f"test -f {shlex.quote(paths['pid'])} || exit 0",
+            f"read -r pid <{shlex.quote(paths['pid'])}",
+            "case \"$pid\" in ''|*[!0-9]*) exit 2;; esac",
+            "kill -TERM -- \"-$pid\" 2>/dev/null || true",
+        )
+    )
+    remote_command = shlex.join(
+        (
+            runtime,
+            "exec",
+            "-u",
+            args.container_user,
+            container,
+            "bash",
+            "-lc",
+            stop_inner,
+        )
+    )
+    try:
+        run_short_ssh(args, role, remote_command)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
+    roles = ("decode", "prefill")
+    launches: dict[str, subprocess.Popen[str]] = {}
+    for role in roles:
+        command = build_short_ssh_command(
+            args, role, build_detached_remote_command(args, role)
+        )
+        launches[role] = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    launch_errors = []
+    for role, process in launches.items():
+        try:
+            output, _ = process.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            output, _ = process.communicate()
+        if process.returncode != 0:
+            launch_errors.append(
+                f"{role} detached launch rc={process.returncode}: {output.strip()}"
+            )
+    if launch_errors:
+        for role in roles:
+            stop_detached_role(args, role)
+        print("FAIL: " + "; ".join(launch_errors), file=sys.stderr)
+        return 1
+
+    print("detached Decode and Prefill role scripts accepted; polling status files")
+    started_at = time.monotonic()
+    statuses: dict[str, int | None] = {role: None for role in roles}
+    poll_failures: dict[str, int] = {role: 0 for role in roles}
+    try:
+        while any(status is None for status in statuses.values()):
+            if time.monotonic() - started_at > args.overall_timeout:
+                raise TimeoutError(
+                    f"smoke exceeded controller timeout {args.overall_timeout}s"
+                )
+            for role in roles:
+                if statuses[role] is not None:
+                    continue
+                status_path = detached_control_paths(args, role)["status"]
+                try:
+                    result = run_short_ssh(
+                        args,
+                        role,
+                        (
+                            f"if test -f {shlex.quote(status_path)}; then "
+                            f"cat {shlex.quote(status_path)}; else exit 3; fi"
+                        ),
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    poll_failures[role] += 1
+                    print(
+                        f"[{role}] transient status poll failure "
+                        f"{poll_failures[role]}: {exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+                if result.returncode == 0:
+                    value = result.stdout.strip()
+                    if re.fullmatch(r"[0-9]+", value) is None:
+                        raise RuntimeError(
+                            f"{role} returned invalid detached status {value!r}"
+                        )
+                    statuses[role] = int(value)
+                    print(f"[{role}] detached role completed rc={value}")
+                    continue
+                if result.returncode == 3:
+                    poll_failures[role] = 0
+                    continue
+                poll_failures[role] += 1
+                print(
+                    f"[{role}] transient status poll rc={result.returncode}: "
+                    f"{result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                if poll_failures[role] >= 12:
+                    raise RuntimeError(
+                        f"{role} status polling failed {poll_failures[role]} times"
+                    )
+            time.sleep(2)
+    except (KeyboardInterrupt, TimeoutError, OSError, RuntimeError) as exc:
+        print(f"controller abort: {exc}", file=sys.stderr)
+        for role in roles:
+            if statuses[role] is None:
+                stop_detached_role(args, role)
+        for role in roles:
+            fetch_detached_log(args, role, run_dir / f"{role}.log")
+            show_tail(run_dir / f"{role}.log")
+        return 1
+
+    for role in roles:
+        fetch_detached_log(args, role, run_dir / f"{role}.log")
+    if any(status != 0 for status in statuses.values()):
+        print(f"FAIL: detached remote role exit codes={statuses}", file=sys.stderr)
+        for role in roles:
+            show_tail(run_dir / f"{role}.log")
+        return 1
+    print(f"PASS: both detached remote roles completed; artifacts={run_dir}")
+    return 0
+
+
 def show_tail(path: pathlib.Path, line_count: int = 80) -> None:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -260,7 +542,17 @@ def show_tail(path: pathlib.Path, line_count: int = 80) -> None:
 
 def main() -> int:
     args = parse_args()
-    commands = {role: build_ssh_command(args, role) for role in ("decode", "prefill")}
+    if args.remote_detached:
+        commands = {
+            role: build_short_ssh_command(
+                args, role, build_detached_remote_command(args, role)
+            )
+            for role in ("decode", "prefill")
+        }
+    else:
+        commands = {
+            role: build_ssh_command(args, role) for role in ("decode", "prefill")
+        }
     if args.dry_run:
         for role in ("decode", "prefill"):
             print(f"{role}: {shlex.join(commands[role])}")
@@ -268,16 +560,19 @@ def main() -> int:
 
     run_dir = args.artifact_root / args.run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+    print(
+        f"starting Decode and Prefill concurrently; run_id={args.run_id} "
+        f"suite={args.suite} controller_artifacts={run_dir} "
+        f"remote_detached={args.remote_detached}"
+    )
+    if args.remote_detached:
+        return run_detached(args, run_dir)
     roles = {
         role: RemoteRole(role, commands[role], run_dir / f"{role}.log")
         for role in ("decode", "prefill")
     }
     started_at = time.monotonic()
     controller_error: BaseException | None = None
-    print(
-        f"starting Decode and Prefill concurrently; run_id={args.run_id} "
-        f"suite={args.suite} controller_artifacts={run_dir}"
-    )
     try:
         # Launch back-to-back without waiting for either model to load. The role
         # scripts perform model/result-channel readiness handshakes themselves.

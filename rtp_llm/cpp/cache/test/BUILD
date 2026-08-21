@@ -89,6 +89,19 @@ cc_library(
 )
 
 cc_test(
+    name = "kv_cache_transfer_planner_test",
+    srcs = [
+        "KVCacheTransferPlannerTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "cp_slot_mapper_test",
     srcs = [
         "CPSlotMapperTest.cc",

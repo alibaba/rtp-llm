@@ -242,6 +242,32 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const size_t cache_keys_per_batch =
         param.context_batch_size > 0 ? (param.cache_keys.size() / param.context_batch_size) : 0;
 
+    const bool incremental_publish = param.publish_plan.has_value();
+    if (incremental_publish) {
+        const auto& publish_plan = param.publish_plan.value();
+        RTP_LLM_CHECK_WITH_INFO(publish_plan.begin_block_host.defined()
+                                    && publish_plan.end_block_host.defined()
+                                    && publish_plan.terminal_host.defined(),
+                                "incremental cache-store publish plan requires defined begin/end/terminal tensors");
+        RTP_LLM_CHECK_WITH_INFO(publish_plan.begin_block_host.device().is_cpu()
+                                    && publish_plan.end_block_host.device().is_cpu()
+                                    && publish_plan.terminal_host.device().is_cpu(),
+                                "incremental cache-store publication tensors must be on CPU");
+        RTP_LLM_CHECK_WITH_INFO(publish_plan.begin_block_host.scalar_type() == torch::kInt32
+                                    && publish_plan.end_block_host.scalar_type() == torch::kInt32
+                                    && publish_plan.terminal_host.scalar_type() == torch::kBool,
+                                "incremental cache-store publication tensors must be int32/int32/bool");
+        RTP_LLM_CHECK_WITH_INFO(publish_plan.begin_block_host.is_contiguous()
+                                    && publish_plan.end_block_host.is_contiguous()
+                                    && publish_plan.terminal_host.is_contiguous(),
+                                "incremental cache-store publication tensors must be contiguous");
+        RTP_LLM_CHECK_WITH_INFO(
+            static_cast<size_t>(publish_plan.begin_block_host.numel()) == param.context_batch_size
+                && static_cast<size_t>(publish_plan.end_block_host.numel()) == param.context_batch_size
+                && static_cast<size_t>(publish_plan.terminal_host.numel()) == param.context_batch_size,
+            "incremental cache-store publication batch size mismatch");
+    }
+
     for (size_t batch_id = 0; batch_id < param.context_batch_size; batch_id++) {
         if (*(param.request_pd_separation.data_ptr<bool>() + batch_id) == false) {
             continue;
@@ -400,13 +426,36 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         // pairs for both legacy and sharded cases.
         // Clamp by cache_keys_per_batch (global stride) — NOT max_blocks_per_batch,
         // which under CP shard is the local-compact stride for FULL groups.
-        const auto block_plan = buildCacheStoreBlockPlan(
-            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
-            /*reuse_block_size=*/0,
-            use_group_cache_transfer_policy,
-            group_type,
-            param.cp_rank,
-            param.cp_size);
+        const size_t planned_total_blocks =
+            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch)));
+        std::vector<CacheStoreBlockPair> block_plan;
+        if (incremental_publish) {
+            const auto&   publish_plan = param.publish_plan.value();
+            const int32_t begin_block  = publish_plan.begin_block_host.data_ptr<int32_t>()[batch_id];
+            const int32_t end_block    = publish_plan.end_block_host.data_ptr<int32_t>()[batch_id];
+            RTP_LLM_CHECK_WITH_INFO(begin_block >= 0 && end_block >= begin_block,
+                                    "invalid incremental cache-store range [%d, %d) for batch %zu",
+                                    begin_block,
+                                    end_block,
+                                    batch_id);
+            block_plan = buildIncrementalCacheStoreBlockPlan(
+                planned_total_blocks,
+                /*reuse_block_size=*/0,
+                use_group_cache_transfer_policy,
+                group_type,
+                param.cp_rank,
+                param.cp_size,
+                CacheStorePublishRange{static_cast<size_t>(begin_block),
+                                       static_cast<size_t>(end_block),
+                                       publish_plan.terminal_host.data_ptr<bool>()[batch_id]});
+        } else {
+            block_plan = buildCacheStoreBlockPlan(planned_total_blocks,
+                                                  /*reuse_block_size=*/0,
+                                                  use_group_cache_transfer_policy,
+                                                  group_type,
+                                                  param.cp_rank,
+                                                  param.cp_size);
+        }
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }

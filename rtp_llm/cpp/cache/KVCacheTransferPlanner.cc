@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -71,6 +72,46 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
         }
         plan.push_back({p, p / cp_size});
     }
+    return plan;
+}
+
+std::vector<CacheStoreBlockPair>
+buildIncrementalCacheStoreBlockPlan(size_t                        total_logical_blocks,
+                                    size_t                        reuse_block_size,
+                                    bool                          use_hybrid,
+                                    CacheGroupType                group_type,
+                                    int                           cp_rank,
+                                    int                           cp_size,
+                                    const CacheStorePublishRange& publish_range) {
+    if (publish_range.begin_block > publish_range.end_block
+        || publish_range.end_block > total_logical_blocks) {
+        throw std::invalid_argument("incremental cache-store range is outside the logical block table");
+    }
+
+    if (group_type == CacheGroupType::LINEAR) {
+        if (!publish_range.terminal) {
+            return {};
+        }
+        if (publish_range.end_block != total_logical_blocks) {
+            throw std::invalid_argument("terminal LINEAR publication must reach the final logical block");
+        }
+        return buildCacheStoreBlockPlan(
+            total_logical_blocks, reuse_block_size, /*use_hybrid=*/true, group_type, cp_rank, cp_size);
+    }
+    if (group_type != CacheGroupType::FULL) {
+        throw std::invalid_argument("incremental cache-store only supports FULL and LINEAR groups");
+    }
+
+    auto plan = buildCacheStoreBlockPlan(
+        total_logical_blocks, reuse_block_size, use_hybrid, group_type, cp_rank, cp_size);
+
+    plan.erase(std::remove_if(plan.begin(),
+                              plan.end(),
+                              [&](const CacheStoreBlockPair& pair) {
+                                  const size_t key_index = static_cast<size_t>(pair.key_index);
+                                  return key_index < publish_range.begin_block || key_index >= publish_range.end_block;
+                              }),
+               plan.end());
     return plan;
 }
 

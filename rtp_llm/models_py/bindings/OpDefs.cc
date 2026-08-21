@@ -111,6 +111,12 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_lengths_host", &PyCacheStoreInputs::input_lengths_host)
         .def_readwrite("prefix_lengths_host", &PyCacheStoreInputs::prefix_lengths_host);
 
+    pybind11::class_<PyCacheStorePublishPlan>(m, "PyCacheStorePublishPlan")
+        .def(pybind11::init<>())
+        .def_readwrite("begin_block_host", &PyCacheStorePublishPlan::begin_block_host)
+        .def_readwrite("end_block_host", &PyCacheStorePublishPlan::end_block_host)
+        .def_readwrite("terminal_host", &PyCacheStorePublishPlan::terminal_host);
+
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())
         .def(

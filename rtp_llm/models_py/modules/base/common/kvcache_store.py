@@ -10,6 +10,7 @@ from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     PyAttentionInputs,
     PyCacheStoreInputs,
+    PyCacheStorePublishPlan,
 )
 
 
@@ -36,6 +37,7 @@ class WriteCacheStoreOp(nn.Module):
         self,
         kv_cache: Optional[LayerKVCache],
         kv_cache_block_id_host: torch.Tensor,
+        publish_plan: Optional[PyCacheStorePublishPlan],
     ) -> None:
         compute_ops.write_cache_store(
             self.input_lengths,
@@ -43,6 +45,7 @@ class WriteCacheStoreOp(nn.Module):
             kv_cache_block_id_host,
             self.cache_store_inputs,
             kv_cache,
+            publish_plan,
         )
 
     def _block_ids_for_layer_cache(
@@ -79,17 +82,18 @@ class WriteCacheStoreOp(nn.Module):
     def forward(
         self,
         kv_cache: Union[Optional[LayerKVCache], Sequence[LayerKVCache]],
+        publish_plan: Optional[PyCacheStorePublishPlan] = None,
     ) -> None:
         if isinstance(kv_cache, Sequence):
             for layer_kv in kv_cache:
                 block_ids = self._block_ids_for_layer_cache(layer_kv)
                 if block_ids is not None:
-                    self._write_one(layer_kv, block_ids)
+                    self._write_one(layer_kv, block_ids, publish_plan)
             return
 
         block_ids = self._block_ids_for_layer_cache(kv_cache)
         if block_ids is not None:
-            self._write_one(kv_cache, block_ids)
+            self._write_one(kv_cache, block_ids, publish_plan)
 
 
 def create_write_cache_store_impl(

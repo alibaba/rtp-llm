@@ -22,6 +22,12 @@ struct CacheStoreBlockPair {
     int offset_index;
 };
 
+struct CacheStorePublishRange {
+    size_t begin_block = 0;
+    size_t end_block   = 0;
+    bool   terminal    = false;
+};
+
 // Build the per-prefill-write iteration plan for cache_store registration.
 //
 // Background: ``cache_keys`` is always the FULL logical-block hash sequence
@@ -48,5 +54,18 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           CacheGroupType group_type,
                                                           int            cp_rank,
                                                           int            cp_size);
+
+// Restrict the regular cache-store plan to one incremental publication.
+// FULL groups publish only the supplied half-open logical-block range;
+// LINEAR groups publish their existing final-state entry only on a terminal
+// publication. Other hybrid group policies are deliberately unsupported.
+std::vector<CacheStoreBlockPair>
+buildIncrementalCacheStoreBlockPlan(size_t                        total_logical_blocks,
+                                    size_t                        reuse_block_size,
+                                    bool                          use_hybrid,
+                                    CacheGroupType                group_type,
+                                    int                           cp_rank,
+                                    int                           cp_size,
+                                    const CacheStorePublishRange& publish_range);
 
 }  // namespace rtp_llm

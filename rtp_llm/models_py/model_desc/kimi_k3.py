@@ -56,6 +56,8 @@ from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import (
     should_use_all_gather_gemm,
 )
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
+    KimiK3ChunkCachePublisher,
+    KimiK3ChunkPublishContext,
     KimiK3ChunkRound,
     build_chunk_model_inputs,
     host_lengths,
@@ -656,7 +658,6 @@ class KimiK3Model(GptModelBase):
         )
         input_ids = inputs.input_ids.reshape(-1)
         attention_inputs = inputs.attention_inputs
-        assert attention_inputs is not None
         total_tokens = int(input_ids.numel())
         input_lengths = host_lengths(
             attention_inputs.input_lengths_host, "input_lengths_host"
@@ -687,10 +688,19 @@ class KimiK3Model(GptModelBase):
             chunk_budget=chunk_tokens,
             page_size=page_size,
         )
+        chunk_cache_publisher = KimiK3ChunkCachePublisher.create(
+            attention_inputs,
+            self.kv_cache,
+            self.layers,
+            input_lengths=input_lengths,
+            prefix_lengths=prefix_lengths,
+            page_size=page_size,
+        )
         barrier(Group.TP)
         logging.info(
             "[K3_WHOLE_CHUNK_PREFILL] enabled total_tokens=%d "
-            "requests=%d rounds=%d chunk_tokens=%d page_size=%d TP=%d EP=%d",
+            "requests=%d rounds=%d chunk_tokens=%d page_size=%d TP=%d EP=%d "
+            "chunkwise_rdma=%s",
             total_tokens,
             len(input_lengths),
             len(rounds),
@@ -698,6 +708,7 @@ class KimiK3Model(GptModelBase):
             page_size,
             int(self.parallelism_config.get_attn_tp_size()),
             int(self.parallelism_config.ep_size),
+            chunk_cache_publisher.enabled,
         )
         terminal_hidden: Optional[torch.Tensor] = None
         terminal_written = [False] * len(input_lengths)
@@ -713,6 +724,7 @@ class KimiK3Model(GptModelBase):
                         f"{layer_cache.seq_size_per_block} "
                         f"physical_page={page_size}"
                     )
+        chunk_cache_publisher.publish_prefix()
         for round_plan in rounds:
             chunk_inputs = build_chunk_model_inputs(
                 input_ids,
@@ -720,14 +732,16 @@ class KimiK3Model(GptModelBase):
                 round_plan=round_plan,
             )
             chunk_attention = chunk_inputs.attention_inputs
-            assert chunk_attention is not None
             prepare_round_fmha(fmha_impl, chunk_attention)
+            chunk_publish_context = chunk_cache_publisher.begin_round(round_plan)
             round_output = self._forward_impl_one(
                 chunk_inputs,
                 fmha_impl,
                 kda_current_state_registry=current_state_registry,
                 round_plan=round_plan,
+                chunk_publish_context=chunk_publish_context,
             )
+            chunk_cache_publisher.commit_round(chunk_publish_context)
             if terminal_hidden is None:
                 terminal_hidden = torch.empty(
                     (len(input_lengths), round_output.hidden_states.shape[-1]),
@@ -746,7 +760,9 @@ class KimiK3Model(GptModelBase):
             del chunk_inputs
             del chunk_attention
             del round_output
-        self._publish_whole_chunk_cache(attention_inputs)
+        chunk_cache_publisher.validate_complete()
+        if not chunk_cache_publisher.enabled:
+            self._publish_whole_chunk_cache(attention_inputs)
         if terminal_hidden is None or not all(terminal_written):
             missing = [
                 idx for idx, written in enumerate(terminal_written) if not written
@@ -768,6 +784,7 @@ class KimiK3Model(GptModelBase):
         *,
         kda_current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
         round_plan: Optional[KimiK3ChunkRound] = None,
+        chunk_publish_context: Optional[KimiK3ChunkPublishContext] = None,
     ) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
         if attention_inputs is None:
@@ -956,9 +973,11 @@ class KimiK3Model(GptModelBase):
             block_residual = layer_output.block_residual
             if layer_idx in aux_layer_set:
                 eagle3_hidden_states.append((layer_idx, hidden_states))
+            if chunk_publish_context is not None:
+                chunk_publish_context.publish_layer(layer_idx, layer, layer_cache)
             # Loop-level cache-store is only for KDA layers. MLA publishes
             # from its wrapper immediately after concat_and_cache_mla.
-            if (
+            elif (
                 layer.is_kda
                 and write_cache_store_impl is not None
                 and layer_cache is not None

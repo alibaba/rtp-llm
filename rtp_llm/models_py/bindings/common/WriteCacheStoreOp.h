@@ -9,6 +9,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                        const torch::Tensor&                         prefix_lengths,
                        const torch::Tensor&                         kv_cache_block_id_host,
                        std::optional<torch_ext::PyCacheStoreInputs> cache_store_member,
-                       std::optional<torch_ext::LayerKVCache>       kv_cache);
+                       std::optional<torch_ext::LayerKVCache>       kv_cache,
+                       std::optional<torch_ext::PyCacheStorePublishPlan> publish_plan = std::nullopt);
 
 }  // namespace rtp_llm

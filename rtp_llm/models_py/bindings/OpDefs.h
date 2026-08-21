@@ -302,6 +302,16 @@ struct PyCacheStoreInputs {
     int cp_rank = 0;
 };
 
+// Optional per-forward incremental publication plan.  The tensors are CPU
+// mirrors indexed by the original context-batch row.  FULL cache groups
+// publish the half-open logical-block range [begin, end); LINEAR groups only
+// publish their final state for rows whose terminal flag is true.
+struct PyCacheStorePublishPlan {
+    torch::Tensor begin_block_host;
+    torch::Tensor end_block_host;
+    torch::Tensor terminal_host;
+};
+
 struct PyPrefillCudaGaphCopyParams {
     // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
     // so we can't get the real batch size for `copy kernel` using `input_lengths.size(0)`(which is max_batch_size).
