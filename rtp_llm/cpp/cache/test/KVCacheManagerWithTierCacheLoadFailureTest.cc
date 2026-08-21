@@ -36,14 +36,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ConcurrentDiskLowerHitFailureSettles
     ASSERT_NO_FATAL_FAILURE(runConcurrentLowerHitJoinScenario(Tier::DISK, /*transfer_success=*/false));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBeforeCommit) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitPermanentCapacityRejectsBeforeCommit) {
     if (GetParam() != TierLayout::HOST_ONLY) {
-        GTEST_SKIP() << "pre-commit allocation rollback isolates a HostOnly source";
+        GTEST_SKIP() << "pre-commit capacity rejection isolates a HostOnly source";
     }
 
     // Two physical blocks expose exactly one usable block in each independent
-    // device pool. The lower hit can materialize its common target, but the
-    // second logical block cannot be allocated before LoadTicket::commit().
+    // device pool. The complete two-sequence footprint cannot fit, so typed
+    // admission must reject it before materializing or committing the lower hit.
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/2));
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
@@ -114,71 +114,12 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
     ASSERT_EQ(failed_token_ids->commonSeqLength(), seq_size_per_block);
     ASSERT_EQ(failed_token_ids->seqLength(), 2 * seq_size_per_block);
 
-    const auto allocator_groups = manager_->allocator_->cacheGroups();
-    ASSERT_EQ(allocator_groups.size(), static_cast<size_t>(kDsv4GroupCount));
-    ASSERT_NE(allocator_groups[0], nullptr);
-    bool   outer_incr_evict_observed = false;
-    size_t outer_incr_evict_calls    = 0;
-    allocator_groups[0]->setEvictCallback([&](size_t need_blocks) {
-        outer_incr_evict_observed = true;
-        ++outer_incr_evict_calls;
-        EXPECT_EQ(need_blocks, 1u);
-
-        for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-            for (int group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
-                EXPECT_EQ(failed_resource->blocksNum(batch_id, group_id), 1)
-                    << "batch=" << batch_id << " group=" << group_id;
-                const auto& blocks = failed_resource->blocks(batch_id, group_id);
-                if (blocks.size() == 1u) {
-                    EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "batch=" << batch_id << " group=" << group_id;
-                }
-            }
-        }
-        for (const auto& group : allocator_groups) {
-            const auto pool = group->blockPool();
-            EXPECT_EQ(pool->usedBlocksNum(), 1u) << pool->poolName();
-            EXPECT_EQ(pool->freeBlocksNum(), 0u) << pool->poolName();
-            EXPECT_EQ(pool->referencedBlocksNum(), 1u) << pool->poolName();
-            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u) << pool->poolName();
-            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << pool->poolName();
-        }
-
-        auto pending_path = snapshotPathResources(*cache, seed.cache_keys);
-        EXPECT_TRUE(pending_path.has_value());
-        if (pending_path.has_value() && pending_path->size() == 1u) {
-            for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-                const auto& group_set = cache->groupSets()[group_set_id];
-                const auto& resource  = (*pending_path)[0][group_set_id];
-                EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING) << "group_set=" << group_set_id;
-                EXPECT_TRUE(resource.hasTier(Tier::HOST)) << "group_set=" << group_set_id;
-                EXPECT_FALSE(resource.hasTier(Tier::DEVICE)) << "group_set=" << group_set_id;
-                EXPECT_EQ(resource.host_block, host_sources[group_set_id]) << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u) << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 1u)
-                    << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u)
-                    << "group_set=" << group_set_id;
-                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u)
-                    << "group_set=" << group_set_id;
-            }
-        }
-
-        const int reclaimed = cache->evictForGroup(/*group_id=*/0, need_blocks);
-        EXPECT_EQ(reclaimed, 0);
-        return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0u;
-    });
-
     MallocInfo failed_info{failed_resource, failed_token_ids};
     failed_info.reuse_cache         = true;
     failed_info.enable_cache_lookup = true;
     const auto failed_result        = manager_->malloc(failed_info);
-    allocator_groups[0]->setEvictCallback([cache](size_t need_blocks) {
-        const int reclaimed = cache->evictForGroup(/*group_id=*/0, need_blocks);
-        return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0u;
-    });
-    EXPECT_TRUE(outer_incr_evict_observed);
-    EXPECT_EQ(outer_incr_evict_calls, 1u);
     EXPECT_FALSE(failed_result.success);
+    EXPECT_EQ(failed_result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
     EXPECT_EQ(failed_result.async_context, nullptr);
     EXPECT_EQ(failed_result.reuse_len, 0);
     EXPECT_EQ(failed_result.host_reuse_len, 0);
