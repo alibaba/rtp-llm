@@ -105,7 +105,8 @@ struct KVCache {
                 const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
                 if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    const int64_t width              = static_cast<int64_t>(kv_lora_rank + rope_head_dim);
+                    const int64_t width = base.dim() == 3 ? base.size(2) :
+                                                           static_cast<int64_t>(kv_lora_rank + rope_head_dim);
                     const int64_t logical_page_elems = static_cast<int64_t>(kernel_seq_size_per_block) * width;
                     if (base.dim() == 2 && base.stride(0) != static_cast<int64_t>(seq_size_per_block) * width) {
                         // Shared HybridCache may be sized by a larger KDA state.

@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 
@@ -8,6 +11,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -24,6 +28,23 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
         rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
+        const char* cache_tp = std::getenv("KIMI_K3_MLA_CACHE_TP");
+        if (cache_tp != nullptr && std::strcmp(cache_tp, "0") != 0 && std::strcmp(cache_tp, "1") != 0) {
+            throw std::runtime_error("KIMI_K3_MLA_CACHE_TP must be 0 or 1");
+        }
+        if (cache_tp != nullptr && std::strcmp(cache_tp, "1") == 0
+            && parallelism_config.role_type == RoleType::PREFILL) {
+            const auto tp = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
+            RTP_LLM_CHECK_WITH_INFO(kv_lora_rank == 512 && rope_head_dim == 64,
+                                    "KIMI_K3_MLA_CACHE_TP requires K3 MLA 512+64, got %u+%u",
+                                    kv_lora_rank,
+                                    rope_head_dim);
+            RTP_LLM_CHECK_WITH_INFO(tp > 1 && kv_lora_rank % tp == 0 && rope_head_dim % tp == 0,
+                                    "KIMI_K3_MLA_CACHE_TP requires TP>1 dividing 512 and 64, got TP=%u",
+                                    tp);
+            kv_lora_rank /= tp;
+            rope_head_dim /= tp;
+        }
     }
 
     size_t block_size() const override {
