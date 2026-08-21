@@ -42,6 +42,7 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _collect_dsv4_mhc_head_fused_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
     _compute_mhc_prenorm_num_split,
+    _cp_batch_block_warmup_sizes,
     _cp_padded_tokens_per_rank_bound,
     _dense_gemm_m_grid,
     _dist_rank,
@@ -55,6 +56,7 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _warmup_fused_kv_compress_norm_rope_insert,
     warmup_batched_fp8_einsum_jit,
     warmup_compressor_combine_branch_kernels,
+    warmup_cp_metadata_jit,
     warmup_dense_gemm_jit,
     warmup_dsv4_fp8_swa_slot_dequant_jit,
     warmup_fp8_mqa_logits_jit,
@@ -84,6 +86,12 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 device=device,
                 gen_num_per_cycle=1,
             )
+            warmup_cp_metadata_jit(
+                cp_size=2,
+                max_batch_size=4,
+                fp8_kv_cache=True,
+                device=device,
+            )
             warmup_dense_gemm_jit({}, max_m=1, device=device)
             warmup_batched_fp8_einsum_jit({}, max_m=1, device=device)
             warmup_mhc_prenorm_gemm_jit({}, max_m=1, device=device)
@@ -94,6 +102,243 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 cp_size=1,
                 device=device,
             )
+
+    def test_cp_warmup_covers_pool_restore_batch_blocks(self):
+        from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_gather_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+
+        pool_calls = []
+        indexer_calls = []
+        compressor_calls = []
+        metadata_restore_batches = []
+        metadata_position_batches = []
+        metadata_forward_batches = []
+
+        def fake_metadata_restore(lengths, **_kwargs):
+            metadata_restore_batches.append(int(lengths.numel()))
+            return ()
+
+        def fake_metadata_positions(lengths, _prefixes, **_kwargs):
+            metadata_position_batches.append(int(lengths.numel()))
+            return ()
+
+        def fake_forward_metadata(lengths, *_args, **_kwargs):
+            metadata_forward_batches.append(int(lengths.numel()))
+            return ()
+
+        def fake_pool_restore(out, gathered, restore_indices, seq_lens, offset):
+            pool_calls.append(
+                (
+                    tuple(out.shape),
+                    tuple(gathered.shape),
+                    tuple(restore_indices.shape),
+                    tuple(seq_lens.tolist()),
+                    offset,
+                )
+            )
+            return True
+
+        def fake_indexer_gather(
+            cache,
+            block_table,
+            padded_lens,
+            actual_lens,
+            out_q,
+            out_scale,
+            *,
+            total_actual_tokens,
+        ):
+            indexer_calls.append(
+                (
+                    tuple(cache.shape),
+                    tuple(block_table.shape),
+                    tuple(padded_lens.tolist()),
+                    tuple(actual_lens.tolist()),
+                    tuple(out_q.shape),
+                    tuple(out_scale.shape),
+                    total_actual_tokens,
+                )
+            )
+            return True
+
+        def fake_compressor_meta(
+            positions,
+            b_idx,
+            state_bt,
+            state_eb,
+            kv_bt,
+            kv_eb,
+            ratio,
+            seq_start,
+            cu_seq,
+            state_tpb,
+            **kwargs,
+        ):
+            compressor_calls.append(
+                (
+                    tuple(positions.shape),
+                    tuple(b_idx.shape),
+                    tuple(state_bt.shape),
+                    state_eb,
+                    tuple(kv_bt.shape),
+                    kv_eb,
+                    ratio,
+                    tuple(seq_start.shape),
+                    tuple(cu_seq.shape),
+                    state_tpb,
+                    kwargs,
+                )
+            )
+            return (), (), ()
+
+        def run_launch(_label, _detail, launch_fn, *, device):
+            self.assertEqual(device.type, "cpu")
+            launch_fn()
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            warmup_module, "_dist_barrier"
+        ), mock.patch.object(
+            warmup_module, "_sync_cuda"
+        ), mock.patch.object(
+            warmup_module,
+            "_run_triton_warmup_launch_with_retry",
+            side_effect=run_launch,
+        ), mock.patch.object(
+            _cp_metadata_triton, "_enabled", return_value=True
+        ), mock.patch.object(
+            _cp_metadata_triton, "cp_prepare_fusion_enabled", return_value=True
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_restore_indices",
+            side_effect=fake_metadata_restore,
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_full_prefill_positions",
+            side_effect=fake_metadata_positions,
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_forward_metadata",
+            side_effect=fake_forward_metadata,
+        ), mock.patch.object(
+            _swa_dequant_triton,
+            "try_restore_dequantize_scatter_packed_k_cache_flat",
+            side_effect=fake_pool_restore,
+        ), mock.patch.object(
+            _indexer_cp_gather_triton,
+            "cp_indexer_padded_gather_enabled",
+            return_value=True,
+        ), mock.patch.object(
+            _indexer_cp_gather_triton,
+            "try_gather_indexer_k_to_padded",
+            side_effect=fake_indexer_gather,
+        ), mock.patch.object(
+            _fused_compressor_meta_triton, "_TRITON_AVAILABLE", True
+        ), mock.patch.object(
+            _fused_compressor_meta_triton,
+            "fused_compressor_slot_mapping",
+            side_effect=fake_compressor_meta,
+        ), mock.patch.dict(
+            os.environ,
+            {
+                "DSV4_CP_POOL_RESTORE_TRITON": "1",
+                "DSV4_CP_INDEXER_GATHER_TRITON": "1",
+            },
+        ):
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+            warmup_cp_metadata_jit(
+                cp_size=4,
+                max_batch_size=64,
+                fp8_kv_cache=True,
+                device=torch.device("cpu"),
+            )
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+
+        batch_blocks = (1, 2, 4, 8, 16, 32, 64)
+        self.assertEqual(metadata_restore_batches, list(batch_blocks))
+        self.assertEqual(metadata_position_batches, list(batch_blocks[1:]))
+        self.assertEqual(metadata_forward_batches, list(batch_blocks))
+        self.assertEqual(
+            pool_calls,
+            [
+                (
+                    (batch_size, 2, 512),
+                    (2 * batch_size, 584),
+                    (2 * batch_size,),
+                    (2,) * batch_size,
+                    0,
+                )
+                for batch_size in batch_blocks
+            ],
+        )
+        self.assertEqual(
+            indexer_calls,
+            [
+                ((2, 4, 132), (b, 1), (2,) * b, (1,) * b, (2 * b, 128), (2 * b, 4), b)
+                for b in batch_blocks
+            ],
+        )
+        self.assertEqual(
+            [call[0] for call in compressor_calls],
+            [(2 * batch_size,) for batch_size in batch_blocks],
+        )
+        for batch_size, call in zip(batch_blocks, compressor_calls):
+            self.assertEqual(call[2], (batch_size, 2))
+            self.assertEqual(call[7], (batch_size,))
+            self.assertEqual(call[8], (batch_size + 1,))
+            self.assertEqual(call[10]["cp_size"], 4)
+            self.assertEqual(call[10]["kv_owner_tokens_per_block"], 4)
+
+    def test_cp_warmup_batch_sizes_cover_runtime_specialization_buckets(self):
+        self.assertEqual(_cp_batch_block_warmup_sizes(1), (1,))
+        self.assertEqual(_cp_batch_block_warmup_sizes(3), (1, 2, 4))
+        self.assertEqual(_cp_batch_block_warmup_sizes(5), (1, 2, 4, 8))
+        self.assertEqual(
+            _cp_batch_block_warmup_sizes(1024), (1, 2, 4, 8, 16, 32, 64)
+        )
+
+    def test_cp_warmup_skips_fp8_kernels_for_non_fp8_cache(self):
+        from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_gather_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            _cp_metadata_triton, "_enabled", return_value=False
+        ), mock.patch.object(
+            _cp_metadata_triton, "cp_prepare_fusion_enabled", return_value=False
+        ), mock.patch.object(
+            _indexer_cp_gather_triton, "cp_indexer_padded_gather_enabled"
+        ) as indexer_enabled, mock.patch.object(
+            _indexer_cp_gather_triton, "try_gather_indexer_k_to_padded"
+        ) as indexer_gather, mock.patch.object(
+            _swa_dequant_triton,
+            "try_restore_dequantize_scatter_packed_k_cache_flat",
+        ) as pool_restore:
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+            warmup_cp_metadata_jit(
+                cp_size=4,
+                max_batch_size=4,
+                fp8_kv_cache=False,
+                device=torch.device("cpu"),
+            )
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+
+        indexer_enabled.assert_not_called()
+        indexer_gather.assert_not_called()
+        pool_restore.assert_not_called()
 
     def test_tilelang_prewarm_skips_when_model_warmup_disabled(self):
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
@@ -977,6 +1222,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
 
     def test_jit_kernel_specialization_contracts(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_gather_triton
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton
 
@@ -1013,6 +1259,33 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertIn('"num_cache_blocks"', dequant_src)
         self.assertNotIn("pool_block_stride: tl.constexpr", dequant_src)
         self.assertNotIn("num_cache_blocks: tl.constexpr", dequant_src)
+
+        self.assertEqual(
+            set(
+                _swa_dequant_triton._restore_dequantize_scatter_packed_k_cache_flat_kernel.do_not_specialize
+            ),
+            {
+                "out_stride0",
+                "out_stride1",
+                "batch_size",
+                "n_tokens",
+                "offset",
+            },
+        )
+        self.assertEqual(
+            set(
+                _indexer_cp_gather_triton._cp_gather_indexer_k_to_padded_kernel.do_not_specialize
+            ),
+            {
+                "batch_size",
+                "total_local_tokens",
+                "block_table_stride_b",
+                "max_blocks_per_request",
+                "cache_block_size",
+                "cache_stride_b",
+                "num_cache_blocks",
+            },
+        )
 
         gather_src = inspect.getsource(
             _swa_dequant_triton._gather_k_cache_packed_kernel.fn

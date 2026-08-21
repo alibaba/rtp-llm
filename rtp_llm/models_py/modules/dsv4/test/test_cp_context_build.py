@@ -509,6 +509,11 @@ def test_cp_full_prefill_positions_preserve_request_ids() -> None:
     positions, b_idx, seq_start, cu_seq = build_cp_full_prefill_positions(
         ctx, torch.device("cpu")
     )
+    cached = build_cp_full_prefill_positions(ctx, torch.device("cpu"))
+    assert all(
+        a.data_ptr() == b.data_ptr()
+        for a, b in zip(cached, (positions, b_idx, seq_start, cu_seq))
+    )
     assert torch.equal(
         positions,
         torch.cat(

@@ -634,73 +634,63 @@ class CompressorFP8(PoolBackedModule):
             "seq_start_per_req and cu_seq_per_req are required for ring write mask; "
             "caller must supply per-request metadata"
         )
-        input_lens = (cu_seq_per_req[1:] - cu_seq_per_req[:-1]).to(torch.long)
-        seq_end_per_req = seq_start_per_req.to(torch.long) + input_lens
+        from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
-        if not self._kv_cache_sharded:
-            from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
-
-            if not _fused_compressor_meta_triton._TRITON_AVAILABLE:
-                raise RuntimeError(
-                    "DSV4 FP8 compressor requires fused Triton metadata preparation"
+        if not _fused_compressor_meta_triton._TRITON_AVAILABLE:
+            raise RuntimeError(
+                "DSV4 FP8 compressor requires fused Triton metadata preparation"
+            )
+        pool_rows = 0
+        if self._kv_pool_view is not None:
+            pool_rows = int(
+                self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
+            )
+        cp_ctx = self._cp_ctx if self._kv_cache_sharded else None
+        cp_size = int(cp_ctx.cp_size) if cp_ctx is not None else 1
+        cp_rank = int(cp_ctx.cp_rank) if cp_ctx is not None else 0
+        (
+            state_slots,
+            kv_slots,
+            token_to_req,
+        ) = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
+            positions,
+            b_idx,
+            self._state_block_table,
+            self._state_eb,
+            self._kv_block_table,
+            self._kv_eb,
+            self.compress_ratio,
+            seq_start_per_req,
+            cu_seq_per_req,
+            self._state_tokens_per_block,
+            pool_rows=pool_rows,
+            kv_tokens_per_block=self._kv_tokens_per_block,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+            kv_owner_tokens_per_block=int(
+                getattr(
+                    self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block
                 )
-            pool_rows = 0
-            if self._kv_pool_view is not None:
-                pool_rows = int(
-                    self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
-                )
-            (
-                state_slots,
-                kv_slots,
-                token_to_req,
-            ) = _fused_compressor_meta_triton.fused_compressor_slot_mapping(
-                positions,
-                b_idx,
-                self._state_block_table,
-                self._state_eb,
-                self._kv_block_table,
-                self._kv_eb,
-                self.compress_ratio,
-                seq_end_per_req,
-                self._state_tokens_per_block,
-                pool_rows=pool_rows,
-            )
-            return CompressorMeta(
-                positions=positions,
-                b_idx=b_idx,
-                state_slots=state_slots,
-                kv_slots=kv_slots,
-                token_to_req=token_to_req,
-                has_prefix=has_prefix,
-                is_batched=is_batched,
-                seq_start_per_req=seq_start_per_req,
-                cu_seq_per_req=cu_seq_per_req,
-            )
-
-        with record_function_range("dsv4.fp8.compressor.meta.state_slots"):
-            state_slots = self._compute_state_slot_mapping(
-                positions, b_idx, seq_end_per_req
-            )
-        with record_function_range("dsv4.fp8.compressor.meta.kv_slots"):
-            kv_slots = self._compute_kv_slot_mapping(positions, b_idx)
-        with record_function_range("dsv4.fp8.compressor.meta.token_to_req"):
-            token_to_req = b_idx.to(torch.int32)
-        return _cache_cp_state_read_selection(
-            CompressorMeta(
-                positions=positions,
-                b_idx=b_idx,
-                state_slots=state_slots,
-                kv_slots=kv_slots,
-                token_to_req=token_to_req,
-                has_prefix=has_prefix,
-                is_batched=is_batched,
-                seq_start_per_req=seq_start_per_req,
-                cu_seq_per_req=cu_seq_per_req,
             ),
-            self._state_pool_3d,
+        )
+        meta = CompressorMeta(
+            positions=positions,
+            b_idx=b_idx,
+            state_slots=state_slots,
+            kv_slots=kv_slots,
+            token_to_req=token_to_req,
+            has_prefix=has_prefix,
+            is_batched=is_batched,
+            seq_start_per_req=seq_start_per_req,
+            cu_seq_per_req=cu_seq_per_req,
+        )
+        return _cache_cp_state_read_selection(
+            meta,
+            getattr(self, "_state_pool_3d", None),
             self._state_block_table,
             cp_ctx=self._cp_ctx,
-            token_count=(1 + int(self.overlap)) * self.compress_ratio,
+            token_count=(1 + int(getattr(self, "overlap", False)))
+            * self.compress_ratio,
             state_tokens_per_block=self._state_tokens_per_block,
         )
 

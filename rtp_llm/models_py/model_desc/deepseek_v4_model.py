@@ -867,6 +867,7 @@ class DeepSeekV4Model(GptModelBase):
                     resolve_dense_gemm_warmup_max_m,
                     warmup_batched_fp8_einsum_jit,
                     warmup_compressor_combine_branch_kernels,
+                    warmup_cp_metadata_jit,
                     warmup_dense_gemm_jit,
                     warmup_dsv4_fp8_swa_slot_dequant_jit,
                     warmup_fp8_mqa_logits_jit,
@@ -936,6 +937,18 @@ class DeepSeekV4Model(GptModelBase):
                     if _prefill_cp_enabled
                     else 1
                 )
+                if (
+                    not self._is_decode_role
+                    and _prefill_cp_enabled
+                    and _prefill_cp_size > 1
+                    and _prefill_kv_cache_sharded
+                ):
+                    warmup_cp_metadata_jit(
+                        cp_size=_prefill_cp_size,
+                        max_batch_size=int(self._max_context_batch_size),
+                        fp8_kv_cache=self.fp8_kv_cache,
+                        device=_jit_device,
+                    )
                 _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
                     max_seq_len=int(self._v4_args.max_seq_len),
                     max_batch_size=int(self._v4_args.max_batch_size),

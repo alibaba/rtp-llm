@@ -34,6 +34,12 @@ py_test(
 )
 
 py_test(
+    name = "test_cp_metadata_triton",
+    srcs = ["test_cp_metadata_triton.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_slot_mapping",
     srcs = ["test_cp_slot_mapping.py"],
     deps = _DSV4_TEST_DEPS,
@@ -142,6 +148,15 @@ py_test(
 py_test(
     name = "test_prefill_fast_path",
     srcs = ["test_prefill_fast_path.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_layer_profiler_ranges",
+    srcs = ["test_layer_profiler_ranges.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",

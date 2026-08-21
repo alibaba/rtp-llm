@@ -130,6 +130,36 @@ def test_single_request_partial_last_virtual_block():
     _check(per_req=[20], cp_size=4, block_size=4)
 
 
+def test_single_request_does_not_call_repeat_interleave():
+    original = CP.torch.repeat_interleave
+
+    def fail_repeat_interleave(*args, **kwargs):
+        raise AssertionError("B=1 restore must not call repeat_interleave")
+
+    CP.torch.repeat_interleave = fail_repeat_interleave
+    try:
+        _check(per_req=[17], cp_size=2, block_size=4)
+    finally:
+        CP.torch.repeat_interleave = original
+
+
+def test_multi_request_supplies_repeat_interleave_output_size():
+    original = CP.torch.repeat_interleave
+    seen_output_sizes = []
+
+    def record_repeat_interleave(*args, **kwargs):
+        seen_output_sizes.append(kwargs.get("output_size"))
+        return original(*args, **kwargs)
+
+    CP.torch.repeat_interleave = record_repeat_interleave
+    try:
+        _check(per_req=[8, 12, 4], cp_size=2, block_size=4)
+    finally:
+        CP.torch.repeat_interleave = original
+
+    assert seen_output_sizes == [24]
+
+
 def test_multi_request_mixed():
     _check(per_req=[8, 12, 4], cp_size=2, block_size=4)
 
@@ -159,6 +189,45 @@ def test_zero_kv_request_in_batch():
 def test_block_size_one():
     """block_size=1 degenerate case: every token is its own block, RR by token."""
     _check(per_req=[6], cp_size=2, block_size=1)
+
+
+def test_scalar_length_helpers_match_tensor_formulas():
+    for cp_size in (1, 2, 4):
+        for block_size in (1, 2, 4, 8):
+            for total in (0, 1, block_size - 1, block_size, 17, 65):
+                lengths = torch.tensor([total], dtype=torch.int64)
+                padded = CP.cp_padded_local_kv_lens(
+                    lengths, cp_size, block_size
+                ).item()
+                assert (
+                    CP.cp_padded_local_kv_len(total, cp_size, block_size) == padded
+                )
+                for cp_rank in range(cp_size):
+                    actual = CP.cp_actual_owned_kv_lens(
+                        lengths, cp_size, block_size, cp_rank
+                    ).item()
+                    assert (
+                        CP.cp_actual_owned_kv_len(
+                            total, cp_size, block_size, cp_rank
+                        )
+                        == actual
+                    )
+
+
+def test_known_host_lengths_match_default_builder():
+    per_req = torch.tensor([8, 12, 4], dtype=torch.int64)
+    expected = CP.build_kv_allgather_restore_indices(
+        per_req, 2, 4, torch.device("cpu")
+    )
+    actual = CP.build_kv_allgather_restore_indices(
+        per_req,
+        2,
+        4,
+        torch.device("cpu"),
+        total_kv_len=24,
+        total_local_kv=16,
+    )
+    assert torch.equal(actual, expected)
 
 
 def test_rejects_negative_cp_size():

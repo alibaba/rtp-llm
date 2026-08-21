@@ -61,9 +61,13 @@ def _stub_modules():
             out.zero_()
             out[..., :width].copy_(packed[..., :width].to(out.dtype))
 
+        def _stub_fused_restore(*args, **kwargs):
+            return False
+
         sk.dequantize_and_gather_k_cache = _stub_dequant
         sk.gather_k_cache_packed = _stub_gather_packed
         sk.dequantize_packed_k_cache_flat = _stub_dequant_flat
+        sk.try_restore_dequantize_scatter_packed_k_cache_flat = _stub_fused_restore
         sys.modules[sk_name] = sk
         for p in (
             "rtp_llm.models_py.modules",
@@ -298,6 +302,53 @@ def test_scatter_flat_to_workspace():
     assert torch.equal(out[1, 1:3], restored[3:5])
     assert torch.equal(out[0, 0], torch.full((3,), -1.0))
     assert torch.equal(out[0, 4], torch.full((3,), -1.0))
+
+
+def test_cp_restore_prefers_fused_path_without_running_fallback():
+    cp_ctx = _fake_cp_ctx(cp_size=2, cp_rank=0)
+    restore_indices = torch.tensor([2, 0, 3], dtype=torch.int64)
+    reader = PR.CPShardedPoolReader(
+        PR.CPShardConfig(
+            cp_ctx=cp_ctx,
+            per_req_total_kv_lens=torch.tensor([1, 2], dtype=torch.int64),
+            restore_indices=restore_indices,
+            block_size=1,
+            total_local_kv=2,
+        )
+    )
+    gathered = torch.zeros((4, PR.ENTRY_BYTES), dtype=torch.uint8)
+    out = torch.full((2, 4, 3), -1.0)
+    seq_lens = torch.tensor([1, 2], dtype=torch.int32)
+    calls = []
+
+    def fake_fused(actual_out, actual_gathered, actual_restore, actual_lens, offset):
+        calls.append(
+            (actual_out, actual_gathered, actual_restore, actual_lens, offset)
+        )
+        actual_out.fill_(7.0)
+        return True
+
+    def fail_fallback(*args, **kwargs):
+        raise AssertionError("fallback dequant must not run after fused success")
+
+    old_fused = PR.try_restore_dequantize_scatter_packed_k_cache_flat
+    old_dequant = PR.dequantize_packed_k_cache_flat
+    try:
+        PR.try_restore_dequantize_scatter_packed_k_cache_flat = fake_fused
+        PR.dequantize_packed_k_cache_flat = fail_fallback
+        reader._restore_dequant_scatter(gathered, out, seq_lens, offset=1)
+    finally:
+        PR.try_restore_dequantize_scatter_packed_k_cache_flat = old_fused
+        PR.dequantize_packed_k_cache_flat = old_dequant
+
+    assert len(calls) == 1
+    actual_out, actual_gathered, actual_restore, actual_lens, actual_offset = calls[0]
+    assert actual_out is out
+    assert actual_gathered is gathered
+    assert actual_restore is restore_indices
+    assert actual_lens is seq_lens
+    assert actual_offset == 1
+    assert torch.equal(out, torch.full_like(out, 7.0))
 
 
 # ---------- End-to-end fill (CPU dataflow) ----------

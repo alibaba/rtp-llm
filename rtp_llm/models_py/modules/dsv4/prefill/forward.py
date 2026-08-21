@@ -140,6 +140,21 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
 
 
+def _cp_prepare_fusion_enabled(v4: "V4Transformer") -> bool:
+    if getattr(v4, "_cp_info", None) is None or int(
+        getattr(v4, "_cp_size", 1)
+    ) <= 1:
+        return False
+    try:
+        from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
+            cp_prepare_fusion_enabled,
+        )
+
+        return cp_prepare_fusion_enabled()
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
 def _prefill_fast_path_layer_calls(
     v4: "V4Transformer",
 ) -> Optional[Tuple[_PrefillFastLayerCall, ...]]:
@@ -330,17 +345,23 @@ def forward_layers(
     cp_size = getattr(v4, "_cp_size", 1)
     cp_rank = getattr(v4, "_cp_rank", 0)
     cp_ctx = None
-    if cp_info is not None and cp_size > 1:
-        cp_ctx = build_cp_context_for_forward(
-            cp_info,
-            cp_size,
-            cp_rank,
-            int(input_ids.size(0)),
-            input_ids.device,
-            prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
-            kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
-        )
-    v4._propagate_cp_ctx(cp_ctx)
+    with _profiler.record_function_range("dsv4.prefill.prepare_cp_context"):
+        if cp_info is not None and cp_size > 1:
+            cp_ctx = build_cp_context_for_forward(
+                cp_info,
+                cp_size,
+                cp_rank,
+                int(input_ids.size(0)),
+                input_ids.device,
+                prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
+                prefix_lengths_host=getattr(
+                    cp_info, "prefill_prefix_lengths_cpu", None
+                ),
+                chunk_lengths_device=getattr(attn_inputs, "input_lengths", None),
+                kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
+            )
+    with _profiler.record_function_range("dsv4.prefill.propagate_cp_context"):
+        v4._propagate_cp_ctx(cp_ctx)
     if cp_ctx is not None:
         # The framework's fallback position_ids are rank-local contiguous
         # after ZigZagProcessor rewrites input_lengths to CP chunk lengths.
@@ -370,13 +391,14 @@ def forward_layers(
     if kv_cache is not None and attn_inputs is not None:
         write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
 
-    if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
-        if _rt_on:
-            _rt.record("prefill_embed_out", h)
-        h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
-    else:
-        h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
+    with _profiler.record_function_range("dsv4.prefill.embedding"):
+        if prepare_hidden_fn is None:
+            h = v4.embed(input_ids)  # [T_total, dim]
+            if _rt_on:
+                _rt.record("prefill_embed_out", h)
+            h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
+        else:
+            h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
@@ -496,6 +518,7 @@ def forward_layers(
                 workspace=ws,
             )
 
+    layer_forward_range = _profiler.make_layer_forward_range()
     try:
         with record_range_ctx():
             # Two callable chains intentionally coexist:
@@ -509,52 +532,53 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
-                h = layer_call(
-                    h,  # [T, hc, dim]
-                    input_ids,  # [T]
-                    positions,  # [T]
-                    cu_seqlens,  # [B+1]
-                    kv_cache=kv_cache,
-                    block_tables_by_type=block_tables_by_type,
-                )  # [T, hc, dim]
-                if layer_idx in capture_ids:
-                    v4.capture_aux_hidden(layer_idx, h)
-                if _rt_on:
-                    _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
-                if write_cache_store_impl is not None:
-                    write_cache_store_impl(kv_cache.get_layer_caches(layer_idx))
-                if _rt_on:
-                    _rt.record(f"layer{layer_idx:02d}_out", h)
-                    if cp_ctx is None:
-                        layer_last = h[-1:].contiguous()
-                    else:
-                        layer_last_pos = cp_ctx.seq_len_total - 1
-                        layer_last_mask = (
-                            cp_ctx.global_positions == layer_last_pos
-                        ) & cp_ctx.local_is_real
-                        layer_last = h[layer_last_mask].contiguous()
-                        dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
-                        if dbg_pos >= 0:
-                            layer_pos_mask = (
-                                cp_ctx.global_positions == dbg_pos
+                with layer_forward_range(layer_idx):
+                    h = layer_call(
+                        h,  # [T, hc, dim]
+                        input_ids,  # [T]
+                        positions,  # [T]
+                        cu_seqlens,  # [B+1]
+                        kv_cache=kv_cache,
+                        block_tables_by_type=block_tables_by_type,
+                    )  # [T, hc, dim]
+                    if layer_idx in capture_ids:
+                        v4.capture_aux_hidden(layer_idx, h)
+                    if _rt_on:
+                        _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
+                    if write_cache_store_impl is not None:
+                        write_cache_store_impl(kv_cache.get_layer_caches(layer_idx))
+                    if _rt_on:
+                        _rt.record(f"layer{layer_idx:02d}_out", h)
+                        if cp_ctx is None:
+                            layer_last = h[-1:].contiguous()
+                        else:
+                            layer_last_pos = cp_ctx.seq_len_total - 1
+                            layer_last_mask = (
+                                cp_ctx.global_positions == layer_last_pos
                             ) & cp_ctx.local_is_real
+                            layer_last = h[layer_last_mask].contiguous()
+                            dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
+                            if dbg_pos >= 0:
+                                layer_pos_mask = (
+                                    cp_ctx.global_positions == dbg_pos
+                                ) & cp_ctx.local_is_real
+                                _rt.record(
+                                    f"layer{layer_idx:02d}_pos{dbg_pos}",
+                                    h[layer_pos_mask].contiguous(),
+                                )
+                            layer_tail_mask = (
+                                (
+                                    cp_ctx.global_positions
+                                    >= max(cp_ctx.seq_len_total - 128, 0)
+                                )
+                                & (cp_ctx.global_positions < cp_ctx.seq_len_total)
+                                & cp_ctx.local_is_real
+                            )
                             _rt.record(
-                                f"layer{layer_idx:02d}_pos{dbg_pos}",
-                                h[layer_pos_mask].contiguous(),
+                                f"layer{layer_idx:02d}_tail128",
+                                h[layer_tail_mask].contiguous(),
                             )
-                        layer_tail_mask = (
-                            (
-                                cp_ctx.global_positions
-                                >= max(cp_ctx.seq_len_total - 128, 0)
-                            )
-                            & (cp_ctx.global_positions < cp_ctx.seq_len_total)
-                            & cp_ctx.local_is_real
-                        )
-                        _rt.record(
-                            f"layer{layer_idx:02d}_tail128",
-                            h[layer_tail_mask].contiguous(),
-                        )
-                    _rt.record(f"layer{layer_idx:02d}_last", layer_last)
+                        _rt.record(f"layer{layer_idx:02d}_last", layer_last)
     finally:
         # Always drop the per-layer ``common.workspace`` references, even if a
         # layer raises mid-prefill (e.g. a CUDA OOM under memory pressure —
@@ -710,16 +734,25 @@ def forward_prefill(
     # but a dtype-converting ``.to(device=..., dtype=int64)`` on a pinned
     # tensor produces an unpinned intermediate which capture rejects.
     if positions is None:
-        il_d = attn.input_lengths
-        pl_d = attn.prefix_lengths
-        input_lens = il_d if il_d.numel() > 0 else attn.input_lengths
-        prefix_lens = pl_d if pl_d.numel() > 0 else attn.prefix_lengths
-        positions = _build_positions_from_lengths(
-            input_lens,
-            prefix_lens,
-            input_ids.device,
-            total_tokens=int(input_ids.numel()),
-        )
+        with _profiler.record_function_range("dsv4.prefill.prepare_positions"):
+            if _cp_prepare_fusion_enabled(v4):
+                # CPContext replaces this placeholder with rank-local zigzag
+                # global positions before embedding. Building contiguous
+                # fallback positions here would be dead work.
+                positions = torch.empty(
+                    0, dtype=torch.int64, device=input_ids.device
+                )
+            else:
+                il_d = attn.input_lengths
+                pl_d = attn.prefix_lengths
+                input_lens = il_d if il_d.numel() > 0 else attn.input_lengths
+                prefix_lens = pl_d if pl_d.numel() > 0 else attn.prefix_lengths
+                positions = _build_positions_from_lengths(
+                    input_lens,
+                    prefix_lens,
+                    input_ids.device,
+                    total_tokens=int(input_ids.numel()),
+                )
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
 
