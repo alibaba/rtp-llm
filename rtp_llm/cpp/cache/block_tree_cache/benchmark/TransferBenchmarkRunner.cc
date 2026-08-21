@@ -287,6 +287,59 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
             BenchmarkFixture::createFullGroupSet(setup.device_pools, host_pool, disk_pool, 0, topology, group_ids);
     }
 
+    std::vector<GroupSetPtr> engine_group_sets{setup.group_set};
+    if (std::find(options_.transfer_directions.begin(), options_.transfer_directions.end(), "disk2d")
+        != options_.transfer_directions.end()) {
+        for (const auto& capacity_info : profile_.group_sets) {
+            if (capacity_info.name == gs_info.name) {
+                continue;
+            }
+            std::vector<std::pair<std::string, rtp_llm::CacheGroupType>> capacity_specs;
+            std::vector<size_t> capacity_strides;
+            std::vector<size_t> capacity_layer_counts;
+            std::vector<size_t> capacity_group_ids;
+            std::vector<size_t> capacity_sliding_windows;
+            std::vector<DeviceBlockPoolPtr> capacity_device_pools;
+            for (size_t index = 0; index < capacity_info.member_tags.size(); ++index) {
+                const auto* member = profile_.findGroup(capacity_info.member_tags[index]);
+                RTP_LLM_CHECK(member != nullptr);
+                const auto type = member->type == CacheGroupType::SWA ? rtp_llm::CacheGroupType::SWA :
+                                                                        rtp_llm::CacheGroupType::FULL;
+                capacity_specs.emplace_back(member->tag, type);
+                capacity_strides.push_back(member->layer_stride_bytes);
+                capacity_layer_counts.push_back(member->layer_count);
+                capacity_group_ids.push_back(index);
+                capacity_sliding_windows.push_back(member->sliding_window_size);
+                capacity_device_pools.push_back(BenchmarkFixture::createDevicePool(member->layer_stride_bytes,
+                                                                                    member->layer_count,
+                                                                                    1,
+                                                                                    pool_prefix + "capacity_"
+                                                                                        + member->tag));
+            }
+            auto capacity_topology = BenchmarkFixture::createTopology(capacity_specs,
+                                                                       capacity_strides,
+                                                                       capacity_layer_counts,
+                                                                       capacity_sliding_windows);
+            const size_t group_set_id = engine_group_sets.size();
+            if (capacity_info.group_type == CacheGroupType::SWA) {
+                engine_group_sets.push_back(BenchmarkFixture::createSWAGroupSet(capacity_device_pools,
+                                                                                 nullptr,
+                                                                                 nullptr,
+                                                                                 group_set_id,
+                                                                                 capacity_topology,
+                                                                                 capacity_group_ids,
+                                                                                 capacity_info.sliding_window_size));
+            } else {
+                engine_group_sets.push_back(BenchmarkFixture::createFullGroupSet(capacity_device_pools,
+                                                                                  nullptr,
+                                                                                  nullptr,
+                                                                                  group_set_id,
+                                                                                  capacity_topology,
+                                                                                  capacity_group_ids));
+            }
+        }
+    }
+    const size_t engine_group_set_count = engine_group_sets.size();
     setup.copy_stats = std::make_shared<BenchmarkDeviceHostCopyStats>();
     DeviceHostCopyOptions copy_options;
     if (options_.copy_strategy == "staged-sm") {
@@ -298,23 +351,34 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
         copy_options.staged_sm_copy_enabled  = false;
         copy_options.cuda_batch_copy_enabled = true;
     }
-    // Staging leases bound in-flight device<->disk ops; with more wave lanes
-    // than leases the pool is guaranteed to be exhausted, so floor it at the
-    // number of allocated lane blocks.
-    const size_t staging_count = std::max(options_.device_disk_staging_block_count, device_block_count);
+    copy_options.cuda_batch_serialize = options_.cuda_batch_serialize;
     const size_t max_descriptors_per_task = options_.transfer_descriptor_batch_size == 0 ?
                                                 kBenchmarkMaxDescriptorsPerTask :
                                                 options_.transfer_descriptor_batch_size;
     setup.engine               = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{setup.group_set},
+        std::move(engine_group_sets),
         copy_options,
-        staging_count,
+        options_.device_disk_staging_block_count,
         max_descriptors_per_task,
         options_.transfer_worker_count);
     installStrategyRecorders(*setup.engine, setup.copy_stats);
     writer_.addResolvedConfigInt("transfer_worker_count", options_.transfer_worker_count);
     writer_.addResolvedConfigInt("engine_max_descriptors_per_task", max_descriptors_per_task);
+    writer_.addResolvedConfigInt("engine_group_set_count", engine_group_set_count);
+    writer_.addResolvedConfigInt("device_disk_staging_block_count", options_.device_disk_staging_block_count);
+    if (setup.engine->device_disk_executor_ != nullptr) {
+        const size_t full_capacity =
+            setup.engine->device_disk_executor_->batchCapacity(rtp_llm::CacheGroupType::FULL);
+        const size_t swa_capacity =
+            setup.engine->device_disk_executor_->batchCapacity(rtp_llm::CacheGroupType::SWA);
+        writer_.addResolvedConfigInt("disk_to_device_full_batch_capacity", full_capacity);
+        writer_.addResolvedConfigInt("disk_to_device_swa_batch_capacity", swa_capacity);
+        writer_.addResolvedConfigInt(
+            "disk_to_device_batch_capacity",
+            is_swa ? swa_capacity : full_capacity);
+    }
     writer_.addResolvedConfig("requested_copy_strategy", options_.copy_strategy);
+    writer_.addResolvedConfigInt("cuda_batch_serialize", options_.cuda_batch_serialize ? 1 : 0);
     writer_.addResolvedConfigInt("member_group_count", setup.members.size());
     writer_.addResolvedConfigInt("copy_tile_count", tile_count);
     return setup;
