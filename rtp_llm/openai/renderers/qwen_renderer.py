@@ -138,10 +138,32 @@ def make_context(
     im_end_tokens = [tokenizer.im_end_id]
     nl_tokens = tokenizer.encode("\n")
 
+    # `allowed_special` is a tiktoken-only kwarg (Qwen1-style tokenizers).
+    # HF PreTrainedTokenizer(Fast) rejects it, so probe once per tokenizer
+    # and fall back to a plain encode for such tokenizers.
+    supports_allowed_special = getattr(
+        tokenizer, "_supports_allowed_special", None
+    )
+    if supports_allowed_special is None:
+        try:
+            tokenizer.encode("", allowed_special=set())
+            supports_allowed_special = True
+        except TypeError:
+            supports_allowed_special = False
+        try:
+            tokenizer._supports_allowed_special = supports_allowed_special
+        except AttributeError:
+            pass
+
+    def _encode_text(text):
+        if supports_allowed_special:
+            return tokenizer.encode(text, allowed_special=set())
+        return tokenizer.encode(text)
+
     def _tokenize_str(role, content):
-        return f"{role}\n{content}", tokenizer.encode(
-            role, allowed_special=set()
-        ) + nl_tokens + tokenizer.encode(content, allowed_special=set())
+        return f"{role}\n{content}", _encode_text(role) + nl_tokens + _encode_text(
+            content
+        )
 
     system_text, system_tokens_part = _tokenize_str("system", system)
     system_tokens = im_start_tokens + system_tokens_part + im_end_tokens
