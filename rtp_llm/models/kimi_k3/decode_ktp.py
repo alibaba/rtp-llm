@@ -90,6 +90,7 @@ def build_owner_attention_inputs(
     layout: DecodeOwnerLayout,
     *,
     device: torch.device,
+    global_query_tokens: int,
 ) -> PyAttentionInputs:
     """Return the local request view consumed by logical-TP1 MLA Decode."""
 
@@ -101,6 +102,16 @@ def build_owner_attention_inputs(
         raise ValueError("KIMI_K3_DECODE_KTP phase one does not support CUDA Graph")
     if getattr(attention_inputs, "cache_store_inputs", None) is not None:
         raise ValueError("KIMI_K3_DECODE_KTP phase one does not support cache-store")
+
+    # Decode PyAttentionInputs intentionally has no cu_seqlens_host: the C++
+    # boundary only materializes that host mirror for Prefill.  The packed
+    # query tensor is authoritative here.  q_len=1 therefore means exactly
+    # one query token for every request in the global owner layout.
+    if global_query_tokens != layout.global_batch:
+        raise ValueError(
+            "KIMI_K3_DECODE_KTP phase one requires q_len=1: "
+            f"tokens={global_query_tokens} BS={layout.global_batch}"
+        )
 
     local = copy.copy(attention_inputs)
     tensor_fields = (
@@ -120,8 +131,6 @@ def build_owner_attention_inputs(
     local_lengths_host = getattr(local, "input_lengths_host", None)
     if local_lengths_host is None or local_lengths_host.numel() != layout.local_batch:
         raise ValueError("KIMI_K3_DECODE_KTP requires host input lengths")
-    if any(int(value) != 1 for value in local_lengths_host.tolist()):
-        raise ValueError("KIMI_K3_DECODE_KTP phase one requires q_len=1")
 
     local.cu_seqlens = torch.arange(
         layout.local_batch + 1, dtype=torch.int32, device=device

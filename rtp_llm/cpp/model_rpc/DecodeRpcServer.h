@@ -29,6 +29,7 @@ public:
         LoadKVCacheContext(int64_t                          request_id,
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
+                           std::vector<std::string>         mla_peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
                            const GroupBlockIds&             block_ids_by_group,
                            int64_t                          reuse_block_size,
@@ -37,10 +38,14 @@ public:
                            int                              partition_id,
                            grpc::ServerContext*             server_context,
                            int32_t                          prefill_cp_size = 1,
-                           bool                             force_disable_sp_run = false):
+                           bool                             force_disable_sp_run = false,
+                           int32_t                          mla_cache_owner_rank = -1,
+                           int32_t                          mla_cache_layout_version = 0,
+                           int32_t                          mla_cache_shard_count = 0):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
+            mla_peer_addrs(std::move(mla_peer_addrs)),
             cache_keys(cache_keys),
             block_ids_by_group(block_ids_by_group),
             reuse_block_size(reuse_block_size),
@@ -49,10 +54,14 @@ public:
             partition_id(partition_id),
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
-            force_disable_sp_run(force_disable_sp_run) {}
+            force_disable_sp_run(force_disable_sp_run),
+            mla_cache_owner_rank(mla_cache_owner_rank),
+            mla_cache_layout_version(mla_cache_layout_version),
+            mla_cache_shard_count(mla_cache_shard_count) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
+        std::vector<std::string>         mla_peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
         const GroupBlockIds&             block_ids_by_group;
         int64_t                          reuse_block_size;
@@ -63,6 +72,9 @@ public:
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
         bool                 force_disable_sp_run;
+        int32_t              mla_cache_owner_rank;
+        int32_t              mla_cache_layout_version;
+        int32_t              mla_cache_shard_count;
     };
 
 private:

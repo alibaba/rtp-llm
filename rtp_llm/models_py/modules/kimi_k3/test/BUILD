@@ -17,3 +17,9 @@ py_test(
     srcs = ["test_mla_cache_tp.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "test_pd_mla_shard_fanin",
+    srcs = ["test_pd_mla_shard_fanin.py"],
+    deps = ["//rtp_llm:testlib"],
+)
