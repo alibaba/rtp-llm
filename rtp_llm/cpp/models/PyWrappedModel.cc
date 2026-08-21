@@ -892,6 +892,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
+            // Attention runs on rank-local chunks; every cache-store tag publishes the global plan.
             attention_inputs_.context_parallel_info = cp_params;
             if (attention_inputs_.cache_store_inputs.has_value()) {
                 attention_inputs_.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
