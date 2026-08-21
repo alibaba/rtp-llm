@@ -157,6 +157,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.local_reuse_len  = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
             generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
+            generate_output.aux_info.predicted_remaining_len = predictedRemainingLen();
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 

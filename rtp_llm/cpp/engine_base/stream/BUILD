@@ -53,6 +53,7 @@ cc_library(
         ":generate_config",
         ":complete_token_ids",
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
+        "//rtp_llm/cpp/length_predictor:length_predictor_state",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/cache:cache",

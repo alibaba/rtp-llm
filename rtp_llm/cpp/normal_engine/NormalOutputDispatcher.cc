@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/length_predictor/LengthPredictor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -149,7 +150,48 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
-    for (auto& stream : stream_groups.allStreams()) {
+    // Remaining-length predictor (observe-only, async). hidden_states holds
+    // one post-final-layernorm row per model batch row: the last prompt token
+    // for a context stream, the current token for a decode stream. submitStep
+    // is queue-push only (no CUDA calls on this thread); the predictor's
+    // worker launches its encoder on a private stream. This block must stay
+    // AFTER the token-id D2H synchronization above: that sync proves the
+    // kernels producing hidden_states have completed, which is what lets the
+    // worker read the tensor without cross-stream events. Predictions are
+    // published with a 1-2 step delay.
+    // allStreams() copies the stream list; materialize it once for both the
+    // predictor pass and the dispatch loop below.
+    const auto all_streams = stream_groups.allStreams();
+    if (auto* length_predictor = LengthPredictor::instance();
+        length_predictor != nullptr && merge_outputs.model_output.hidden_states.defined()) {
+        std::vector<LengthPredictorEntry> entries;
+        entries.reserve(all_streams.size());
+        int32_t row = 0;
+        for (const auto& stream : all_streams) {
+            const auto cur  = stream->currentBatchSize();
+            const auto next = stream->nextBatchSize();
+            if (cur == 1 && next == 1) {  // beam/multi-sample streams are unsupported
+                const int64_t decode_step = static_cast<int64_t>(stream->seqLength()) - stream->inputLength();
+                if (decode_step >= 0 && length_predictor->wantsStep(decode_step)) {
+                    entries.push_back(LengthPredictorEntry{std::static_pointer_cast<void>(stream),
+                                                           &stream->lengthPredictorState(),
+                                                           row,
+                                                           decode_step});
+                }
+            }
+            row += cur;
+        }
+        // Defensive shape check: steps carrying need_all_logits (loss/prompt
+        // logits requests) materialize hidden_states as all-token rows [T,H]
+        // instead of one row per batch row (PyWrappedModel::forwardPostLayers,
+        // need_all_logits branch). Row indexing would silently read the wrong
+        // token there, so only submit when the layout is one-row-per-stream.
+        if (merge_outputs.model_output.hidden_states.size(0) == row) {
+            length_predictor->submitStep(merge_outputs.model_output.hidden_states, std::move(entries));
+        }
+    }
+
+    for (auto& stream : all_streams) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();

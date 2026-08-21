@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/length_predictor/LengthPredictor.h"
 
 namespace rtp_llm {
 
@@ -36,6 +37,9 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();
     output_dispatcher_      = std::make_unique<NormalOutputDispatcher>(model_config.output_vocab_ids);
+    // Warm up the length predictor so checkpoint loading (if enabled via env)
+    // happens at engine construction, not on the first request's dispatch.
+    LengthPredictor::instance();
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,

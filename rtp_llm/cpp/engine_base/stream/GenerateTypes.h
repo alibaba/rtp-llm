@@ -127,6 +127,9 @@ struct AuxInfo {
     int32_t                      decode_local_reuse_len   = 0;
     int32_t                      decode_remote_reuse_len  = 0;
     int32_t                      decode_memory_reuse_len  = 0;
+    // Remaining-length countdown from the hidden-state length predictor;
+    // negative when the predictor is disabled or not yet anchored.
+    float                        predicted_remaining_len  = -1.0f;
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
