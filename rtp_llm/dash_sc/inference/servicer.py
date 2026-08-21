@@ -28,7 +28,10 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    cap_frontend_max_new_tokens,
+)
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -821,7 +824,7 @@ def _phase2_max_new_tokens_for_completion_alias(
             max_new_tokens,
             max(0, int(sampling.max_total_tokens) - int(generate_think_token_num)),
         )
-    return max_new_tokens
+    return cap_frontend_max_new_tokens(max_new_tokens)
 
 
 def _clone_generate_config(generate_config: GenerateConfig) -> GenerateConfig:

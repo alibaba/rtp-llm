@@ -7,7 +7,10 @@ from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    cap_frontend_max_new_tokens,
+)
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -306,6 +309,7 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
+        config.max_new_tokens = cap_frontend_max_new_tokens(config.max_new_tokens)
         if request.debug_info:
             config.return_output_ids = True
         return config

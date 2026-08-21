@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
@@ -15,6 +16,33 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
     {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
 )
 _JSON_OBJECT_SCHEMA: Dict[str, str] = {"type": "object"}
+FRONTEND_MAX_NEW_TOKENS_ENV = "FRONTEND_MAX_NEW_TOKENS"
+
+
+def cap_frontend_max_new_tokens(max_new_tokens: int) -> int:
+    """Apply the optional frontend output-length cap to a positive limit."""
+    raw_cap = os.environ.get(FRONTEND_MAX_NEW_TOKENS_ENV)
+    if raw_cap is None:
+        return max_new_tokens
+    try:
+        cap = int(raw_cap)
+    except ValueError:
+        logging.warning(
+            "ignore invalid %s=%r: expected a positive integer",
+            FRONTEND_MAX_NEW_TOKENS_ENV,
+            raw_cap,
+        )
+        return max_new_tokens
+    if cap <= 0:
+        logging.warning(
+            "ignore invalid %s=%r: expected a positive integer",
+            FRONTEND_MAX_NEW_TOKENS_ENV,
+            raw_cap,
+        )
+        return max_new_tokens
+    if max_new_tokens <= 0:
+        return max_new_tokens
+    return min(max_new_tokens, cap)
 
 
 def _compact_json(value: Union[str, Dict[str, Any]]) -> str:

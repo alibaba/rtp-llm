@@ -49,6 +49,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
     _make_frontend_metric_observer,
+    _phase2_max_new_tokens_for_completion_alias,
     _request_qos_level,
     _slice_generate_output_token_span,
     build_think_runtime,
@@ -371,6 +372,19 @@ def _assert_parameter_error_response(
 
 
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
+    def test_phase2_completion_alias_respects_frontend_cap(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+        )
+
+        with patch.dict("os.environ", {"FRONTEND_MAX_NEW_TOKENS": "32"}):
+            max_new_tokens = _phase2_max_new_tokens_for_completion_alias(
+                sampling, generate_think_token_num=10
+            )
+
+        self.assertEqual(max_new_tokens, 32)
+
     def test_compact_logprob_slice_updates_offset_count_and_tensor_rows(self):
         out = GenerateOutput(
             output_ids=torch.tensor([10, 11, 128822, 271, 20], dtype=torch.int32),
