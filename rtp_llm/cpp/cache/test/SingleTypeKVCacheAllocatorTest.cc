@@ -1051,7 +1051,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, DeferredBackendMatchRetriesZeroReservePoo
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
     resource->setBatchCacheKeys(0, CacheKeysType{100});
-    auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    // Keep one completed block reusable; the final block remains writable and
+    // therefore is not eligible for backend matching.
+    auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.enable_cache_lookup = true;
     malloc_info.reuse_cache         = true;

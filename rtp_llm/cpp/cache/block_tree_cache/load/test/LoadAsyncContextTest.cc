@@ -327,6 +327,57 @@ TEST(LoadAsyncContextTest, CoordinatorCommitFailurePublishesInternalStatusBefore
     coordinator->shutdown();
 }
 
+TEST(LoadAsyncContextTest, ConcurrentCommitRunsCoordinatorCallbackOnceAndKeepsWinnerState) {
+    using namespace std::chrono_literals;
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    entered  = false;
+    bool                    released = false;
+    size_t                  commits  = 0;
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [&](const std::shared_ptr<LoadAsyncContext>&) {
+            std::unique_lock<std::mutex> lock(mutex);
+            ++commits;
+            entered = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return released; });
+            return true;
+        },
+        [](LoadAsyncContext&) {});
+    std::vector<TransferDescriptor> descriptors;
+    descriptors.emplace_back(nullptr,
+                             /*group_set_id=*/0,
+                             /*path_index=*/0,
+                             Tier::HOST,
+                             Tier::DEVICE,
+                             BlockIndicesType{1});
+    auto context = coordinator->create(std::move(descriptors), {false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    auto winner = std::async(std::launch::async, [&] { return context->commit(); });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return entered; });
+    }
+    auto loser = std::async(std::launch::async, [&] { return context->commit(); });
+    ASSERT_EQ(loser.wait_for(100ms), std::future_status::ready);
+    EXPECT_FALSE(loser.get());
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+    }
+    cv.notify_all();
+
+    EXPECT_TRUE(winner.get());
+    EXPECT_EQ(commits, 1u);
+    EXPECT_TRUE(context->completeOne(true));
+    context->waitDone();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    coordinator->shutdown();
+}
+
 TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFallbackStatus) {
     size_t commits = 0;
     auto coordinator = std::make_shared<LoadContextCoordinator>(
