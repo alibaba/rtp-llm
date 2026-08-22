@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 import signal
 import threading
@@ -77,6 +78,52 @@ class DeriveEchoPrefixIdsTest(TestCase):
             _EnvCfg(), _BaseTok(_FakeTokenizer(raise_exc=True))
         )
         self.assertEqual(ids, [])
+
+
+class BuildK3XtmlGrammarRuntimeTest(TestCase):
+    _ID_MAP = {
+        "<|open|>think<|sep|>": [163587, 12092, 163589],
+        "<|open|>response<|sep|>": [163587, 2778, 163589],
+    }
+
+    def test_builds_runtime_for_kimi_k3(self) -> None:
+        tok = _FakeTokenizer(id_map=self._ID_MAP)
+        runtime = bg_app._build_k3_xtml_grammar_runtime(_BaseTok(tok), "kimi_k3")
+        self.assertIsNotNone(runtime)
+        self.assertEqual(runtime.think_open_ids, (163587, 12092, 163589))
+        self.assertEqual(runtime.response_open_ids, (163587, 2778, 163589))
+        thinking_tag = json.loads(runtime.thinking_tag_json)
+        plain_tag = json.loads(runtime.plain_tag_json)
+        self.assertEqual(
+            thinking_tag["format"]["elements"][0]["end"], "<|close|>think<|sep|>"
+        )
+        self.assertEqual(
+            plain_tag["format"]["elements"][0]["end"], "<|close|>response<|sep|>"
+        )
+        self.assertEqual(
+            thinking_tag["format"]["elements"][-1]["value"], "<|close|>message<|sep|>"
+        )
+
+    def test_none_for_other_models(self) -> None:
+        tok = _FakeTokenizer(id_map=self._ID_MAP)
+        self.assertIsNone(
+            bg_app._build_k3_xtml_grammar_runtime(_BaseTok(tok), "qwen_3")
+        )
+        self.assertIsNone(bg_app._build_k3_xtml_grammar_runtime(_BaseTok(tok), None))
+        self.assertEqual(tok.encode_calls, [])
+
+    def test_fail_open_on_tokenizer_error_or_degenerate_ids(self) -> None:
+        self.assertIsNone(
+            bg_app._build_k3_xtml_grammar_runtime(
+                _BaseTok(_FakeTokenizer(raise_exc=True)), "kimi_k3"
+            )
+        )
+        # Both markers tokenizing to the same ids cannot distinguish the tails.
+        self.assertIsNone(
+            bg_app._build_k3_xtml_grammar_runtime(
+                _BaseTok(_FakeTokenizer(ids=[1, 2])), "kimi_k3"
+            )
+        )
 
 
 class CreateProxyServicerOnLoopTest(TestCase):

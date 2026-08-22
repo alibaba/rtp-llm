@@ -15,6 +15,7 @@ coroutine automatically.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
@@ -27,6 +28,9 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import (
+    _response_format_is_grammar as _response_format_is_constraining_rf,
+)
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -357,6 +361,88 @@ def build_think_runtime(
     )
 
 
+@dataclass(frozen=True)
+class K3XtmlGrammarRuntime:
+    """Init-time-resolved Kimi-K3 XTML structural-tag snapshot.
+
+    The dash_sc path bypasses the OpenAI renderer, so K3 chat requests arrive
+    with no ``structural_tag`` and used to run unconstrained: the model could
+    emit XTML-illegal terminations (e.g. ``<|close|>response<|sep|>`` straight
+    from the think body — empty ``content`` with ``finish_reason=stop``).
+    This runtime carries the two pre-serialized minimal chat grammars (built
+    via ``KimiK3Renderer.pretokenized_chat_structural_tag``) and the token-id
+    forms of the prompt-tail markers the upstream template emits, so the hot
+    path only does one tail comparison.
+    """
+
+    think_open_ids: tuple[int, ...]
+    response_open_ids: tuple[int, ...]
+    thinking_tag_json: str
+    plain_tag_json: str
+
+    def match_tail_thinking(self, input_ids_list: list[int]) -> Optional[bool]:
+        """True/False when the prompt tail opened the think/response block."""
+        for ids, thinking in (
+            (self.think_open_ids, True),
+            (self.response_open_ids, False),
+        ):
+            if (
+                len(input_ids_list) >= len(ids)
+                and tuple(input_ids_list[-len(ids) :]) == ids
+            ):
+                return thinking
+        return None
+
+
+def _k3_response_format_is_constraining(generate_config: GenerateConfig) -> bool:
+    """False for absent/plain-text response_format (no grammar semantics)."""
+    return _response_format_is_constraining_rf(
+        getattr(generate_config, "response_format", None)
+    )
+
+
+def _apply_k3_xtml_grammar(
+    generate_config: GenerateConfig,
+    input_ids_list: list[int],
+    runtime: Optional[K3XtmlGrammarRuntime],
+) -> bool:
+    """Inject the K3 XTML grammar when nothing else constrains the request.
+
+    Rules:
+      - skip when the request already carries a structural_tag (tool-call
+        requests supply their own) or any other grammar control (plain
+        ``{"type": "text"}`` response_format carries no constraint);
+      - the prompt tail is authoritative over ``enable_thinking``: the grammar
+        describes the continuation of the actual prompt, so a mismatched
+        request flag never picks the wrong block layout;
+      - on match, clear the legacy think fields so the C++ factory builds
+        GrammarLogitsProcessor instead of ThinkModeLogitsProcessor (same
+        contract as ``KimiK3Renderer.apply_chat_completion_constraints``).
+    """
+    if runtime is None:
+        return False
+    if getattr(generate_config, "structural_tag", None):
+        return False
+    if getattr(generate_config, "json_format", False) or any(
+        getattr(generate_config, attr, None)
+        for attr in ("json_schema", "regex", "ebnf")
+    ):
+        return False
+    if _k3_response_format_is_constraining(generate_config):
+        return False
+    thinking = runtime.match_tail_thinking(input_ids_list)
+    if thinking is None:
+        return False
+    generate_config.structural_tag = (
+        runtime.thinking_tag_json if thinking else runtime.plain_tag_json
+    )
+    generate_config.in_think_mode = False
+    generate_config.begin_think_token_ids = []
+    generate_config.end_think_token_ids = []
+    generate_config.max_thinking_tokens = 0
+    return True
+
+
 def _phase2_input_ids_for_deepseek_v4(
     input_ids_list: list[int],
     matched_bos_ids: list[int],
@@ -546,6 +632,7 @@ async def iter_real_model_stream_infer(
     tokenizer: Any = None,
     generate_env_config: Any = None,
     think_runtime: Optional[_ThinkRuntime] = None,
+    k3_xtml_runtime: Optional[K3XtmlGrammarRuntime] = None,
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: Any = None,
     mm_inputs: Optional[list] = None,
@@ -620,6 +707,8 @@ async def iter_real_model_stream_infer(
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, sampling, other, runtime)
+        if _apply_k3_xtml_grammar(generate_config, input_ids_list, k3_xtml_runtime):
+            logging.debug("[DashScGrpc] [%s] injected kimi_k3 XTML structural_tag", tag)
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -1188,6 +1277,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         tokenizer: Any = None,
         generate_env_config: Any = None,
         think_runtime: Optional[_ThinkRuntime] = None,
+        k3_xtml_runtime: Optional[K3XtmlGrammarRuntime] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ):
@@ -1209,6 +1299,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._think_runtime = (
             think_runtime if think_runtime is not None else _ThinkRuntime()
         )
+        # None means the model is not kimi_k3 (or its XTML open markers failed
+        # to tokenize); requests then keep the legacy unconstrained behavior.
+        self._k3_xtml_runtime = k3_xtml_runtime
         self._seq_counter = AtomicCounter()
         # Access-log identity, injected at construction (``DashScApp`` /
         # ``__main__`` own the rank/server identity). The two ids are the only
@@ -1438,6 +1531,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         tokenizer=self._tokenizer,
                         generate_env_config=self._generate_env_config,
                         think_runtime=self._think_runtime,
+                        k3_xtml_runtime=self._k3_xtml_runtime,
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
                         mm_inputs=mm_inputs,

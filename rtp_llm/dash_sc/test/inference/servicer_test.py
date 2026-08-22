@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -37,6 +37,8 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    K3XtmlGrammarRuntime,
+    _apply_k3_xtml_grammar,
     _dash_error_spec_for_ft_exception,
     build_think_runtime,
     iter_real_model_stream_infer,
@@ -2312,6 +2314,126 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             visitor.last_generate_input.headers,
             {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
+
+
+def _k3_runtime() -> K3XtmlGrammarRuntime:
+    # Real K3 token ids: <|open|>=163587, 'think'=12092, 'response'=2778,
+    # <|sep|>=163589.
+    return K3XtmlGrammarRuntime(
+        think_open_ids=(163587, 12092, 163589),
+        response_open_ids=(163587, 2778, 163589),
+        thinking_tag_json='{"tag":"thinking"}',
+        plain_tag_json='{"tag":"plain"}',
+    )
+
+
+class K3XtmlGrammarRuntimeTest(unittest.TestCase):
+    def test_match_tail_thinking(self) -> None:
+        runtime = _k3_runtime()
+        self.assertIs(runtime.match_tail_thinking([5, 163587, 12092, 163589]), True)
+        self.assertIs(runtime.match_tail_thinking([5, 163587, 2778, 163589]), False)
+        # Markers inside history but not at the tail never match.
+        self.assertIsNone(
+            runtime.match_tail_thinking(
+                [163587, 12092, 163589, 163587, 2778, 163589, 9, 9]
+            )
+        )
+        self.assertIsNone(runtime.match_tail_thinking([]))
+        self.assertIsNone(runtime.match_tail_thinking([163587, 12092]))
+
+
+class ApplyK3XtmlGrammarTest(unittest.TestCase):
+    def test_think_tail_injects_grammar_and_clears_legacy_think_fields(self) -> None:
+        config = GenerateConfig(in_think_mode=True, max_thinking_tokens=12345)
+        config.end_think_token_ids = [163586]
+        self.assertTrue(
+            _apply_k3_xtml_grammar(config, [1, 163587, 12092, 163589], _k3_runtime())
+        )
+        self.assertEqual(config.structural_tag, '{"tag":"thinking"}')
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.begin_think_token_ids, [])
+        self.assertEqual(config.end_think_token_ids, [])
+        self.assertEqual(config.max_thinking_tokens, 0)
+
+    def test_response_tail_injects_plain_grammar(self) -> None:
+        config = GenerateConfig()
+        self.assertTrue(
+            _apply_k3_xtml_grammar(config, [1, 163587, 2778, 163589], _k3_runtime())
+        )
+        self.assertEqual(config.structural_tag, '{"tag":"plain"}')
+
+    def test_request_structural_tag_is_never_overridden(self) -> None:
+        config = GenerateConfig(structural_tag='{"tag":"tool-call"}')
+        self.assertFalse(
+            _apply_k3_xtml_grammar(config, [1, 163587, 12092, 163589], _k3_runtime())
+        )
+        self.assertEqual(config.structural_tag, '{"tag":"tool-call"}')
+
+    def test_other_grammar_controls_skip_injection(self) -> None:
+        for kwargs in (
+            {"json_format": True},
+            {"response_format": '{"type":"json_object"}'},
+        ):
+            config = GenerateConfig(**kwargs)
+            self.assertFalse(
+                _apply_k3_xtml_grammar(
+                    config, [1, 163587, 12092, 163589], _k3_runtime()
+                )
+            )
+            self.assertIsNone(config.structural_tag)
+
+    def test_plain_text_response_format_still_injects(self) -> None:
+        # The online incident request carries response_format={"type": "text"},
+        # which carries no grammar semantics and must not block the injection.
+        for rf in ('{"type": "text"}', {"type": "text"}):
+            config = GenerateConfig(response_format=rf)
+            self.assertTrue(
+                _apply_k3_xtml_grammar(
+                    config, [1, 163587, 12092, 163589], _k3_runtime()
+                )
+            )
+            self.assertEqual(config.structural_tag, '{"tag":"thinking"}')
+
+    def test_no_tail_match_or_no_runtime_is_noop(self) -> None:
+        config = GenerateConfig(in_think_mode=True)
+        self.assertFalse(_apply_k3_xtml_grammar(config, [1, 2, 3], _k3_runtime()))
+        self.assertTrue(config.in_think_mode)
+        self.assertIsNone(config.structural_tag)
+        self.assertFalse(
+            _apply_k3_xtml_grammar(GenerateConfig(), [1, 163587, 12092, 163589], None)
+        )
+
+
+class K3XtmlGrammarStreamInferTest(unittest.IsolatedAsyncioTestCase):
+    async def test_think_open_tail_reaches_backend_with_grammar(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "trace-k3"
+        req.model_name = "default"
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=5, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 163587, 12092, 163589],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=1,
+                k3_xtml_runtime=_k3_runtime(),
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.structural_tag, '{"tag":"thinking"}')
+        self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.max_thinking_tokens, 0)
 
 
 if __name__ == "__main__":

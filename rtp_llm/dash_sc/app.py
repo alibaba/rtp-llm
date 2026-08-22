@@ -21,6 +21,7 @@ from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    K3XtmlGrammarRuntime,
     build_think_runtime,
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
@@ -219,6 +220,53 @@ def _tokenize_marker_text(base_tok: Any, text: str) -> List[int]:
     except TypeError:
         token_ids = tokenizer.encode(text)
     return [int(token_id) for token_id in token_ids]
+
+
+def _build_k3_xtml_grammar_runtime(
+    base_tok: Any, model_type: Optional[str]
+) -> Optional[K3XtmlGrammarRuntime]:
+    """Build the Kimi-K3 XTML grammar runtime, or None for other models.
+
+    Fail-open on tokenize errors: the dash_sc path must keep serving (legacy
+    unconstrained behavior) rather than fail startup when a K3 tokenizer
+    cannot encode the XTML open markers.
+    """
+    if str(model_type or "").replace("-", "_").lower() != "kimi_k3":
+        return None
+    try:
+        think_ids = tuple(_tokenize_marker_text(base_tok, "<|open|>think<|sep|>"))
+        response_ids = tuple(_tokenize_marker_text(base_tok, "<|open|>response<|sep|>"))
+        if not think_ids or not response_ids or think_ids == response_ids:
+            raise ValueError(
+                f"invalid XTML open marker ids: think={think_ids} "
+                f"response={response_ids}"
+            )
+        from rtp_llm.openai.renderers.kimi_k3_renderer import KimiK3Renderer
+
+        runtime = K3XtmlGrammarRuntime(
+            think_open_ids=think_ids,
+            response_open_ids=response_ids,
+            thinking_tag_json=json.dumps(
+                KimiK3Renderer.pretokenized_chat_structural_tag(True),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            plain_tag_json=json.dumps(
+                KimiK3Renderer.pretokenized_chat_structural_tag(False),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+    except Exception as e:
+        logging.warning("[DashScApp] kimi_k3 XTML runtime build failed: %s", e)
+        return None
+    logging.info(
+        "[DashScApp] kimi_k3 XTML grammar runtime ready "
+        "(think_open=%s, response_open=%s)",
+        think_ids,
+        response_ids,
+    )
+    return runtime
 
 
 def _build_repetition_monitor_config(
@@ -560,6 +608,9 @@ class DashScApp:
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
                 )
+                k3_xtml_runtime = _build_k3_xtml_grammar_runtime(
+                    base_tok, model_config.model_type
+                )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -570,6 +621,7 @@ class DashScApp:
                     tokenizer=base_tok,
                     generate_env_config=self.py_env_configs.generate_env_config,
                     think_runtime=think_runtime,
+                    k3_xtml_runtime=k3_xtml_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                 )

@@ -136,13 +136,12 @@ class KimiK3RendererTest(unittest.TestCase):
         self.assertEqual(tag["type"], "structural_tag")
         elements = tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "")
-        self.assertEqual(
-            elements[0]["content"]["excludes"], ["<|open|>", "<|close|>"]
-        )
+        self.assertEqual(elements[0]["content"]["excludes"], ["<|open|>", "<|close|>"])
         self.assertEqual(elements[0]["end"], "<|close|>think<|sep|>")
         self.assertEqual(elements[1]["begin"], "<|open|>response<|sep|>")
         self.assertEqual(
-            elements[1]["content"], {"type": "any_text", "excludes": ["<|open|>", "<|close|>"]}
+            elements[1]["content"],
+            {"type": "any_text", "excludes": ["<|open|>", "<|close|>"]},
         )
         self.assertEqual(elements[1]["end"], "<|close|>response<|sep|>")
         self.assertEqual(elements[-1]["value"], "<|close|>message<|sep|>")
@@ -173,6 +172,42 @@ class KimiK3RendererTest(unittest.TestCase):
             request, request.model_dump(exclude_none=True, mode="json")
         )
         self.assertEqual(kwargs["thinking_effort"], "low")
+
+    def test_pretokenized_chat_structural_tag_matches_full_builder(self) -> None:
+        # dash_sc pre-tokenized requests must get the exact grammar the
+        # renderer path builds for a no-tools text chat request.
+        response_content = KimiK3Renderer._response_content_format(GenerateConfig())
+        for thinking in (True, False):
+            self.assertEqual(
+                KimiK3Renderer.pretokenized_chat_structural_tag(thinking),
+                KimiK3Renderer._build_k3_structural_tag(
+                    self.request(enable_thinking=thinking),
+                    response_content,
+                    thinking,
+                ),
+            )
+
+    def test_pretokenized_chat_structural_tag_thinking_exits_via_close_think(
+        self,
+    ) -> None:
+        tag = KimiK3Renderer.pretokenized_chat_structural_tag(True)
+        elements = tag["format"]["elements"]
+        self.assertEqual(len(elements), 3)
+        think_tag = elements[0]
+        self.assertEqual(think_tag["begin"], "")
+        self.assertEqual(think_tag["end"], "<|close|>think<|sep|>")
+        self.assertEqual(elements[1]["begin"], "<|open|>response<|sep|>")
+        self.assertEqual(elements[2]["value"], "<|close|>message<|sep|>")
+
+    def test_pretokenized_chat_structural_tag_plain_starts_in_response_body(
+        self,
+    ) -> None:
+        tag = KimiK3Renderer.pretokenized_chat_structural_tag(False)
+        elements = tag["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["begin"], "")
+        self.assertEqual(elements[0]["end"], "<|close|>response<|sep|>")
+        self.assertEqual(elements[1]["value"], "<|close|>message<|sep|>")
 
     def test_dynamic_tools_stay_in_messages(self) -> None:
         class Tokenizer:
@@ -345,7 +380,8 @@ class KimiK3RendererTest(unittest.TestCase):
         elements = json.loads(config.structural_tag)["format"]["elements"]
         self.assertEqual(elements[0]["end"], "<|close|>think<|sep|>")
         self.assertEqual(
-            elements[1]["content"], {"type": "json_schema", "json_schema": {"type": "object"}}
+            elements[1]["content"],
+            {"type": "json_schema", "json_schema": {"type": "object"}},
         )
         self.assertEqual(elements[1]["end"], "<|close|>response<|sep|>")
 

@@ -38,7 +38,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 
-
 _K3_MEDIA_PREFLIGHT_CONCURRENCY = 4
 _K3_MEDIA_EXECUTOR = ThreadPoolExecutor(
     max_workers=_K3_MEDIA_PREFLIGHT_CONCURRENCY,
@@ -838,6 +837,49 @@ class KimiK3Renderer(CustomChatRenderer):
             "format": {"type": "sequence", "elements": elements},
         }
 
+    @classmethod
+    def pretokenized_chat_structural_tag(cls, thinking: bool) -> Dict[str, Any]:
+        """No-tools XTML structural tag for pre-tokenized entry paths.
+
+        The dash_sc gRPC path receives input_ids already rendered by the
+        upstream DashScope layer: the prompt ends with ``<|open|>think<|sep|>``
+        (thinking) or ``<|open|>response<|sep|>`` (plain), so the constrained
+        output starts inside that block's body — same contract as
+        :meth:`_build_k3_structural_tag`, minus the request-derived tool tags
+        and response_format content. Tool-call requests on that path keep
+        their request-supplied structural_tag and must not use this minimal
+        form.
+        """
+        elements: List[Dict[str, Any]] = []
+        if thinking:
+            elements.append(
+                {
+                    "type": "tag",
+                    "begin": "",
+                    "content": {
+                        "type": "any_text",
+                        "excludes": cls._SPECIAL_TEXT_EXCLUDES,
+                    },
+                    "end": cls._THINK_CLOSE,
+                }
+            )
+        elements.append(
+            {
+                "type": "tag",
+                "begin": cls._RESPONSE_OPEN if thinking else "",
+                "content": {
+                    "type": "any_text",
+                    "excludes": cls._SPECIAL_TEXT_EXCLUDES,
+                },
+                "end": cls._RESPONSE_CLOSE,
+            }
+        )
+        elements.append({"type": "const_string", "value": cls._MESSAGE_CLOSE})
+        return {
+            "type": "structural_tag",
+            "format": {"type": "sequence", "elements": elements},
+        }
+
     @staticmethod
     def _template_kwargs(
         request: ChatCompletionRequest, request_dict: Dict[str, Any]
@@ -957,9 +999,7 @@ class KimiK3Renderer(CustomChatRenderer):
         )
 
     @override
-    async def render_chat_async(
-        self, request: ChatCompletionRequest
-    ) -> RenderedInputs:
+    async def render_chat_async(self, request: ChatCompletionRequest) -> RenderedInputs:
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
         tensors, metadata = await self._preflight_media_async(mm_input.urls)
