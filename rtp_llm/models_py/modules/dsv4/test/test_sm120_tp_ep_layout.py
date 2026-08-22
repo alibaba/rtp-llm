@@ -30,28 +30,23 @@ def _cfg(*, tp_size: int, ep_size: int) -> MoeCfg:
 class Sm120TpEpLayoutTest(unittest.TestCase):
     def test_tp4_ep4_world4_skips_token_gather(self):
         self.assertTrue(
-            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=4, ep_size=4), 4, 12)
-        )
-
-    def test_non_sm120_keeps_original_gather(self):
-        self.assertFalse(
-            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=4, ep_size=4), 4, 10)
+            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=4, ep_size=4), 4)
         )
 
     def test_cp4_ep4_keeps_token_gather(self):
         # CP reports effective attention tp_size=1.
         self.assertFalse(
-            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=1, ep_size=4), 4, 12)
+            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=1, ep_size=4), 4)
         )
 
     def test_dp4_ep4_keeps_token_gather(self):
         self.assertFalse(
-            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=1, ep_size=4), 4, 12)
+            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=1, ep_size=4), 4)
         )
 
     def test_mixed_world_does_not_assume_overlapping_groups(self):
         self.assertFalse(
-            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=4, ep_size=4), 8, 12)
+            _sm120_uses_replicated_tp_tokens(_cfg(tp_size=4, ep_size=4), 8)
         )
 
 

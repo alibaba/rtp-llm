@@ -65,8 +65,7 @@ def sm120_dsv4_perf(name, topology, phase, speculative = True):
         "DSV4_BF16_VLLM": "0",
         "DSV4_FIXED_POOL_BLOCKS": "256" if cp_dp else "128",
         "DSV4_FUSED_PREPARE": "1",
-        "DSV4_MOE_CHUNK_TOKENS": "4096",
-        "DSV4_SM120_NCCL_EP_PIPELINE": "1",
+        "DSV4_MOE_CHUNK_TOKENS": "16384",
         "ENABLE_FP32_LM_HEAD": "0",
         "GEN_TIMELINE_SYNC": "1",
         "PERF_GRID_WARMUP_RUNS": "1",
@@ -90,8 +89,8 @@ def sm120_dsv4_perf(name, topology, phase, speculative = True):
     # is substantially faster than host-staged copies on this topology; only
     # disable inter-node IB discovery.
     env["NCCL_IB_DISABLE"] = "1"
-    env["NCCL_MIN_P2P_NCHANNELS"] = "8"
-    env["NCCL_MAX_P2P_NCHANNELS"] = "8"
+    env["NCCL_MIN_P2P_NCHANNELS"] = "24"
+    env["NCCL_MAX_P2P_NCHANNELS"] = "24"
 
     py_test(
         name = name,

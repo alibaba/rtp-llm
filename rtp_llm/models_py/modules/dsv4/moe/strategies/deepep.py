@@ -32,13 +32,10 @@ from .grouped_fp4 import GroupedFP4Strategy, _has_fp8_fp4_grouped_kernel
 # (``torch.where(idx == -1)`` never matches a real expert index).
 _DEEPEP_SUPPORTED_TOPK = (2, 4, 8, 16)
 
-def _sm120_uses_replicated_tp_tokens(
-    cfg: MoeCfg, world: int, cuda_major: int
-) -> bool:
+def _sm120_uses_replicated_tp_tokens(cfg: MoeCfg, world: int) -> bool:
     """True only when WORLD is the same TP+EP group with replicated tokens."""
     return (
-        cuda_major == 12
-        and cfg.tp_size > 1
+        cfg.tp_size > 1
         and cfg.tp_size == cfg.ep_size
         and cfg.ep_size == world
     )
@@ -130,7 +127,6 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 and _sm120_uses_replicated_tp_tokens(
                     self.cfg,
                     dist.get_world_size(dist.group.WORLD),
-                    12,
                 )
             )
             if (
@@ -271,74 +267,85 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         scale_cols = x.size(1) // 32
         x_scale = x_scale.reshape(x.size(0), scale_cols)
         topk = weights.size(1)
+        x_end = x.size(1)
+        scale_end = x_end + scale_cols
+        weight_end = scale_end + topk * 4
+        payload_cols = weight_end + topk * 4
+        indices_i32 = indices.to(torch.int32)
+        send_counts = [x.size(0)] * world
+
+        long_cp_allgather = x.size(0) > 4096
+        if long_cp_allgather:
+            # Long CP ranks are equal-sized and top-k reaches nearly every EP
+            # rank. A single ring AllGather avoids materializing and sending
+            # four copies of the activation payload through peer AllToAll.
+            local_payload = torch.cat(
+                [
+                    x_fp8.view(torch.uint8),
+                    x_scale,
+                    weights.contiguous().view(torch.uint8).reshape(
+                        x.size(0), topk * 4
+                    ),
+                    indices_i32.contiguous().view(torch.uint8).reshape(
+                        x.size(0), topk * 4
+                    ),
+                ],
+                dim=1,
+            )
+            recv_counts = send_counts
+            recv_payload = torch.empty(
+                (world * x.size(0), payload_cols),
+                dtype=torch.uint8,
+                device=x.device,
+            )
+            dist.all_gather_into_tensor(recv_payload, local_payload, group=group)
+        else:
+            # DP ranks can own different active-token counts at batch boundaries.
+            local_count = torch.full(
+                (1,), x.size(0), dtype=torch.int64, device=x.device
+            )
+            gathered_counts = torch.empty(world, dtype=torch.int64, device=x.device)
+            dist.all_gather_into_tensor(gathered_counts, local_count, group=group)
+            recv_counts = [int(v) for v in gathered_counts.cpu().tolist()]
+            recv_payload = torch.empty(
+                (sum(recv_counts), payload_cols), dtype=torch.uint8, device=x.device
+            )
+
         destination = torch.div(
             indices, experts_per_rank, rounding_mode="floor"
         ).clamp_(0, world - 1)
         # V4 top-k=6 reaches almost every EP4 rank. Fixed N-row peer blocks add
         # less than 2% traffic and avoid dynamic compaction and source index_add.
-        token_ids = torch.arange(x.size(0), device=x.device)
-        padded_all_to_all = True
-        send_payload_parts = []
-        send_counts = []
-        for dst in range(world):
-            owned = (destination == dst) & (indices >= 0)
-            send_counts.append(token_ids.numel())
-
-            token_owned = owned.index_select(0, token_ids)
-            token_weights = weights.index_select(0, token_ids)
-            token_indices = indices.index_select(0, token_ids)
-            packed_weights = torch.where(
-                token_owned, token_weights, torch.zeros_like(token_weights)
+        if not long_cp_allgather:
+            send_payload_by_peer = torch.empty(
+                (world, x.size(0), payload_cols), dtype=torch.uint8, device=x.device
             )
-            packed_indices = torch.where(
-                token_owned,
-                token_indices,
-                torch.full_like(token_indices, -1),
-            ).to(torch.int32)
-            send_payload_parts.append(
-                torch.cat(
-                    [
-                        x_fp8.index_select(0, token_ids).view(torch.uint8),
-                        x_scale.index_select(0, token_ids),
-                        packed_weights.contiguous().view(torch.uint8).reshape(
-                            token_ids.numel(), topk * 4
-                        ),
-                        packed_indices.contiguous().view(torch.uint8).reshape(
-                            token_ids.numel(), topk * 4
-                        ),
-                    ],
-                    dim=1,
+            send_payload_by_peer[:, :, :x_end].copy_(x_fp8.view(torch.uint8))
+            send_payload_by_peer[:, :, x_end:scale_end].copy_(x_scale)
+            send_weights = send_payload_by_peer[:, :, scale_end:weight_end].view(
+                torch.float32
+            )
+            send_indices = send_payload_by_peer[:, :, weight_end:].view(torch.int32)
+            for dst in range(world):
+                owned = (destination == dst) & (indices >= 0)
+                torch.where(
+                    owned, weights, torch.zeros_like(weights), out=send_weights[dst]
                 )
+                torch.where(
+                    owned,
+                    indices_i32,
+                    torch.full_like(indices_i32, -1),
+                    out=send_indices[dst],
+                )
+            send_payload = send_payload_by_peer.view(-1, payload_cols)
+            dist.all_to_all_single(
+                recv_payload,
+                send_payload,
+                output_split_sizes=recv_counts,
+                input_split_sizes=send_counts,
+                group=group,
             )
-
-        send_payload = torch.cat(send_payload_parts, dim=0).contiguous()
-
-        # DP ranks can own different active-token counts at batch boundaries.
-        local_count = torch.full(
-            (1,), x.size(0), dtype=torch.int64, device=x.device
-        )
-        gathered_counts = torch.empty(
-            world, dtype=torch.int64, device=x.device
-        )
-        dist.all_gather_into_tensor(gathered_counts, local_count, group=group)
-        recv_counts = [int(v) for v in gathered_counts.cpu().tolist()]
         recv_tokens = sum(recv_counts)
-
-        recv_payload = torch.empty(
-            (recv_tokens, send_payload.size(1)),
-            dtype=torch.uint8,
-            device=x.device,
-        )
-        dist.all_to_all_single(
-            recv_payload,
-            send_payload,
-            output_split_sizes=recv_counts,
-            input_split_sizes=send_counts,
-            group=group,
-        )
-        x_end = x.size(1)
-        scale_end = x_end + scale_cols
-        weight_end = scale_end + topk * 4
         recv_x = recv_payload[:, :x_end].contiguous().view(torch.float8_e4m3fn)
         recv_scale = recv_payload[:, x_end:scale_end].contiguous()
         recv_w = (
@@ -355,90 +362,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         local_i = recv_i - cfg.local_expert_start
         valid = (local_i >= 0) & (local_i < cfg.n_local_experts)
         local_w = recv_w * valid.to(recv_w.dtype)
-        local_i = local_i.clamp(0, cfg.n_local_experts - 1)
-
-        equal_peer_counts = all(count == x.size(0) for count in recv_counts)
-        fp8_combine = True
-        pipeline_combine = (
-            equal_peer_counts
-            and os.environ.get("DSV4_SM120_NCCL_EP_PIPELINE", "0") != "0"
-        )
-        if pipeline_combine:
-            if self._sm120_grouped is None:
-                raise RuntimeError("SM120 MXFP8 dispatch requires grouped FP4 MoE")
-
-            # recv_* is source-rank-major: [source_rank, local_token, ...].
-            # Process an equally sized slice from every source rank, then send
-            # that slice back immediately.  Keeping one asynchronous combine
-            # in flight overlaps PCIe traffic and peer skew with the next
-            # FlashInfer fused-MoE chunk without changing token ordering.
-            chunk_tokens = int(os.environ.get("DSV4_MOE_CHUNK_TOKENS", "4096"))
-            peer_chunk = max(chunk_tokens // world, 1)
-            recv_x_by_peer = recv_x.view(world, x.size(0), x.size(1))
-            recv_scale_by_peer = recv_scale.view(
-                world, x.size(0), scale_cols
-            )
-            local_w_by_peer = local_w.view(world, x.size(0), topk)
-            local_i_by_peer = local_i.view(world, x.size(0), topk)
-            pending = []
-            output_parts = []
-
-            def finish_oldest_combine() -> None:
-                work, returned_payload, _combine_payload, rows = pending.pop(0)
-                work.wait()
-                from .._nccl_ep_combine_triton import mxfp8_dequant_peer_sum
-
-                output_parts.append(
-                    mxfp8_dequant_peer_sum(
-                        returned_payload, rows, x.size(1), world
-                    )
-                )
-
-            for begin in range(0, x.size(0), peer_chunk):
-                end = min(begin + peer_chunk, x.size(0))
-                rows = end - begin
-                chunk_x = recv_x_by_peer[:, begin:end].contiguous().view(
-                    world * rows, x.size(1)
-                )
-                chunk_scale = recv_scale_by_peer[:, begin:end].contiguous().view(
-                    world * rows, scale_cols
-                )
-                chunk_w = local_w_by_peer[:, begin:end].contiguous().view(
-                    world * rows, topk
-                )
-                chunk_i = local_i_by_peer[:, begin:end].contiguous().view(
-                    world * rows, topk
-                )
-                chunk_output = self._sm120_grouped.forward_sm120_mxfp8(
-                    chunk_x, chunk_scale, chunk_w, chunk_i
-                ).to(x.dtype)
-                combine_q, combine_scale = mxfp8_quantize(
-                    chunk_output, is_sf_swizzled_layout=False
-                )
-                combine_payload = torch.cat(
-                    [
-                        combine_q.view(torch.uint8),
-                        combine_scale.reshape(world * rows, scale_cols),
-                    ],
-                    dim=1,
-                ).contiguous()
-                returned_payload = torch.empty_like(combine_payload)
-                splits = [rows] * world
-                work = dist.all_to_all_single(
-                    returned_payload,
-                    combine_payload,
-                    output_split_sizes=splits,
-                    input_split_sizes=splits,
-                    group=group,
-                    async_op=True,
-                )
-                # Keep both buffers alive until NCCL signals completion.
-                pending.append((work, returned_payload, combine_payload, rows))
-                if len(pending) == 2:
-                    finish_oldest_combine()
-            while pending:
-                finish_oldest_combine()
-            return torch.cat(output_parts, dim=0)
+        local_i = torch.where(valid, local_i, 0)
 
         if self._sm120_grouped is not None:
             output_parts = []
@@ -461,65 +385,30 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         else:
             raise RuntimeError("SM120 MXFP8 dispatch requires grouped FP4 MoE")
 
-        reduce_scatter_combine = (
-            padded_all_to_all
-            and equal_peer_counts
-            and os.environ.get("DSV4_SM120_NCCL_EP_REDUCE_SCATTER", "0") != "0"
+        combine_q, combine_scale = mxfp8_quantize(
+            recv_output.contiguous(), is_sf_swizzled_layout=False
         )
-        if reduce_scatter_combine:
-            reduced = torch.empty(
-                (x.size(0), x.size(1)), dtype=x.dtype, device=x.device
-            )
-            dist.reduce_scatter_tensor(
-                reduced, recv_output.contiguous(), group=group
-            )
-            return reduced.float()
-
-        if fp8_combine:
-            combine_q, combine_scale = mxfp8_quantize(
-                recv_output.contiguous(), is_sf_swizzled_layout=False
-            )
-            combine_scale = combine_scale.reshape(recv_tokens, scale_cols)
-            combine_payload = torch.cat(
-                [combine_q.view(torch.uint8), combine_scale], dim=1
-            ).contiguous()
-            returned_payload = torch.empty(
-                (send_payload.size(0), combine_payload.size(1)),
-                dtype=torch.uint8,
-                device=x.device,
-            )
-            dist.all_to_all_single(
-                returned_payload,
-                combine_payload,
-                output_split_sizes=send_counts,
-                input_split_sizes=recv_counts,
-                group=group,
-            )
-            from .._nccl_ep_combine_triton import mxfp8_dequant_peer_sum
-
-            return mxfp8_dequant_peer_sum(
-                returned_payload, x.size(0), x.size(1), world
-            )
-
-        returned = torch.empty(
-            (send_payload.size(0), x.size(1)), dtype=x.dtype, device=x.device
+        combine_scale = combine_scale.reshape(recv_tokens, scale_cols)
+        combine_payload = torch.cat(
+            [combine_q.view(torch.uint8), combine_scale], dim=1
+        ).contiguous()
+        returned_payload = torch.empty(
+            (world * x.size(0), combine_payload.size(1)),
+            dtype=torch.uint8,
+            device=x.device,
         )
         dist.all_to_all_single(
-            returned,
-            recv_output,
+            returned_payload,
+            combine_payload,
             output_split_sizes=send_counts,
             input_split_sizes=recv_counts,
             group=group,
         )
-        if padded_all_to_all:
-            # Every peer returns exactly one row per source token, in source
-            # token order.  Invalid peer routes produced zero expert output.
-            return returned.view(world, x.size(0), x.size(1)).float().sum(dim=0)
-        output = torch.zeros(
-            (x.size(0), x.size(1)), dtype=torch.float32, device=x.device
+        from .._nccl_ep_combine_triton import mxfp8_dequant_peer_sum
+
+        return mxfp8_dequant_peer_sum(
+            returned_payload, x.size(0), x.size(1), world
         )
-        output.index_add_(0, send_token_ids, returned.float())
-        return output
 
     def _forward_sm120_collective(
         self,
@@ -544,10 +433,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         # Gathering those rows again creates ``tp_size`` duplicate copies and
         # multiplies routed GEMM work. CP reports effective tp_size=1 and DP
         # also remains on the disjoint-token gather path below.
-        cuda_major = torch.cuda.get_device_capability(x.device)[0]
-        replicated_tp_tokens = _sm120_uses_replicated_tp_tokens(
-            self.cfg, world, cuda_major
-        )
+        replicated_tp_tokens = _sm120_uses_replicated_tp_tokens(self.cfg, world)
         if replicated_tp_tokens:
             counts = [x.size(0)]
             all_x = x
@@ -568,23 +454,17 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 counts = [int(v.item()) for v in counts_t]
             max_n = max(max(counts), 1)
 
-            def gather_padded(t: torch.Tensor, fill: float | int) -> list[torch.Tensor]:
+            def gather_padded(t: torch.Tensor, fill: float | int) -> torch.Tensor:
                 padded = torch.full(
                     (max_n, *t.shape[1:]), fill, dtype=t.dtype, device=t.device
                 )
                 if t.size(0):
                     padded[: t.size(0)].copy_(t)
-                if cuda_major == 12:
-                    gathered = torch.empty(
-                        (world * max_n, *t.shape[1:]), dtype=t.dtype, device=t.device
-                    )
-                    dist.all_gather_into_tensor(gathered, padded, group=group)
-                    return list(
-                        gathered.view(world, max_n, *t.shape[1:]).unbind(0)
-                    )
-                gathered_list = [torch.empty_like(padded) for _ in range(world)]
-                dist.all_gather(gathered_list, padded, group=group)
-                return gathered_list
+                gathered = torch.empty(
+                    (world * max_n, *t.shape[1:]), dtype=t.dtype, device=t.device
+                )
+                dist.all_gather_into_tensor(gathered, padded, group=group)
+                return gathered.view(world, max_n, *t.shape[1:])
 
             xs = gather_padded(x, 0.0)
             ws = gather_padded(weights, 0.0)
@@ -594,52 +474,27 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             all_i = torch.cat([t[:c] for t, c in zip(ids, counts)], dim=0)
             local_begin = sum(counts[:rank])
             local_end = local_begin + counts[rank]
-        if self._sm120_grouped is not None:
-            local_i = all_i - self.cfg.local_expert_start
-            valid = (local_i >= 0) & (local_i < self.cfg.n_local_experts)
-            local_w = all_w * valid.to(all_w.dtype)
-            local_i = local_i.clamp(0, self.cfg.n_local_experts - 1)
-            try:
-                # The FlashInfer SM120 path materialises routed activations for
-                # its input rows.  Bound that model-forward workspace instead
-                # of letting CP all-gathered 16k/32k warmup requests consume the
-                # remaining HBM in one call.  Every EP rank has the same all_x
-                # ordering, so the per-chunk all-reduces are collective-safe.
-                chunk_tokens = 4096
-                output = torch.empty(
-                    (local_end - local_begin, all_x.size(1)),
-                    dtype=torch.float32,
-                    device=all_x.device,
-                )
-                for begin in range(0, all_x.size(0), chunk_tokens):
-                    end = min(begin + chunk_tokens, all_x.size(0))
-                    partial = self._sm120_grouped(
-                        all_x[begin:end], local_w[begin:end], local_i[begin:end]
-                    )
-                    dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
-                    copy_begin = max(begin, local_begin)
-                    copy_end = min(end, local_end)
-                    if copy_begin < copy_end:
-                        output[
-                            copy_begin - local_begin : copy_end - local_begin
-                        ].copy_(partial[copy_begin - begin : copy_end - begin])
-                return output
-            except BaseException:
-                # PyWrappedModel crosses a C++ worker-thread boundary whose
-                # terminate path otherwise hides the originating Python error.
-                import traceback
-                traceback.print_exc()
-                raise
-        else:
-            partial = self._local._forward_into_buf(
-                all_x,
-                all_w,
-                all_i,
-                local_start=self.cfg.local_expert_start,
-                local_end=self.cfg.local_expert_end,
+        if self._sm120_grouped is None:
+            raise RuntimeError("SM120 requires grouped FP8xFP4 MoE")
+        local_i = all_i - self.cfg.local_expert_start
+        valid = (local_i >= 0) & (local_i < self.cfg.n_local_experts)
+        local_w = all_w * valid.to(all_w.dtype)
+        local_i.clamp_(0, self.cfg.n_local_experts - 1)
+        output = torch.empty(
+            (local_end - local_begin, all_x.size(1)),
+            dtype=torch.float32,
+            device=all_x.device,
+        )
+        # Bound FlashInfer's routed-activation workspace for TP prefill.
+        for begin in range(0, all_x.size(0), 4096):
+            end = min(begin + 4096, all_x.size(0))
+            partial = self._sm120_grouped(
+                all_x[begin:end], local_w[begin:end], local_i[begin:end]
             )
-        dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
-        if replicated_tp_tokens:
-            return partial.float()
-        offset = sum(counts[:rank])
-        return partial[offset : offset + counts[rank]].float()
+            dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
+            lo, hi = max(begin, local_begin), min(end, local_end)
+            if lo < hi:
+                output[lo - local_begin : hi - local_begin].copy_(
+                    partial[lo - begin : hi - begin]
+                )
+        return output
