@@ -390,3 +390,18 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
+
+# NOTE: 纯 CPU 的量化元数据解析测试，只依赖 torch 的 dtype 常量，不跑 kernel。
+# 与同目录其他 target 一样保留 GPU exec_properties，仅为对齐 RBE 平台选择。
+py_test(
+    name = "compressed_int8_quant_config_test",
+    srcs = [
+        "compressed_int8_quant_config_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    imports = [],
+    exec_properties = {'gpu':'H20'},
+)

@@ -216,6 +216,17 @@ class QuantizationConfig(ABC):
                         "ignore_patterns": ignore_patterns,
                     }
                 )
+            elif W8A8Int8PerChannelCompressedQuantConfig.matches_weights(
+                weights_config
+            ):
+                # INT8 W8A8: per-channel symmetric weights + dynamic per-token
+                # activations. Validate the whole group and fail closed, so a
+                # near-miss checkpoint cannot silently fall through to the base
+                # compressed-tensors config, which carries no scheme at all.
+                return (
+                    W8A8Int8PerChannelCompressedQuantConfig
+                    .from_checkpoint_quant_config(quant_config)
+                )
 
         if quant_method == "quark":
             quark_weights_config = quant_config["global_quant_config"]["weight"]
@@ -485,6 +496,140 @@ class Fp8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8PerChannelCompressedQuantConfig(**config)
+
+
+class W8A8Int8PerChannelCompressedQuantConfig(CompressedTensorsQuantConfig):
+    """compressed-tensors INT8 W8A8 pre-quantized weights.
+
+    Emitted by llm-compressor for e.g. GLM-4.7 INT8:
+      - weights: per-channel symmetric int8 (`weight` + `weight_scale`)
+      - input_activations: dynamic per-token int8, quantized on-line, so the
+        checkpoint carries no `input_scale`
+      - ignore: modules kept unquantized (lm_head, ...)
+    """
+
+    DEFAULT_WEIGHT_SCALE_SUFFIX = ".weight_scale"
+
+    # Field contract of `config_groups.group_0`. Every entry must match exactly;
+    # anything else is a different scheme and is rejected rather than coerced.
+    EXPECTED_WEIGHTS: Dict[str, Any] = {
+        "num_bits": 8,
+        "type": QuantizationType.INT.value,
+        "strategy": "channel",
+        "symmetric": True,
+    }
+    EXPECTED_ACTIVATIONS: Dict[str, Any] = {
+        "num_bits": 8,
+        "type": QuantizationType.INT.value,
+        "strategy": "token",
+        "dynamic": True,
+    }
+
+    def __init__(self, bits: int = 8, is_quanted: bool = True, **kwargs: Any):
+        if bits != 8:
+            raise ValueError(f"invalid params {bits} != 8")
+        if not is_quanted:
+            # compressed-tensors is a pre-quantized checkpoint format; there is
+            # no on-the-fly variant of this scheme to fall back to.
+            raise ValueError(f"{self.get_method()} requires a quantized checkpoint")
+        super().__init__(bits=bits, is_quanted=is_quanted)
+        self._ignore_patterns: List[str] = list(kwargs.get("ignore_patterns", []))
+        self._weight_scale_suffix = kwargs.get(
+            "weight_scale_suffix", self.DEFAULT_WEIGHT_SCALE_SUFFIX
+        )
+        # `ignore` is the compressed-tensors spelling of the generic
+        # exclude_modules contract the weight loaders already consume.
+        self.exclude_modules = set(self._ignore_patterns)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "W8A8_INT8_PER_CHANNEL_COMPRESSED"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "w8a8_int8_per_channel_compressed"
+
+    @property
+    def ignore_patterns(self) -> List[str]:
+        return self._ignore_patterns
+
+    @property
+    def weight_scale_suffix(self) -> str:
+        return self._weight_scale_suffix
+
+    def is_dynamic(self) -> bool:
+        # Activation scales are computed per token at runtime, never loaded.
+        return True
+
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    @classmethod
+    def matches_weights(cls, weights_config: Dict[str, Any]) -> bool:
+        """Discriminate this scheme from the other compressed-tensors variants.
+
+        Only looks at the fields that pick a branch (dtype/width/granularity).
+        The remaining contract is enforced by from_checkpoint_quant_config, so
+        a checkpoint that gets here but is malformed raises instead of being
+        silently handed to another branch.
+        """
+        return all(
+            weights_config.get(key) == cls.EXPECTED_WEIGHTS[key]
+            for key in ("num_bits", "type", "strategy")
+        )
+
+    @classmethod
+    def _verify_group_fields(
+        cls, section_name: str, section: Dict[str, Any], expected: Dict[str, Any]
+    ) -> None:
+        mismatches = {
+            key: (section.get(key), value)
+            for key, value in expected.items()
+            if section.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(
+                f"unsupported compressed-tensors {section_name} for "
+                f"{cls.get_method()}, {{field: (actual, expected)}}: {mismatches}"
+            )
+
+    @classmethod
+    def from_checkpoint_quant_config(
+        cls, quant_config: Dict[str, Any]
+    ) -> "QuantizationConfig":
+        """Build from a checkpoint `quantization_config`, failing closed."""
+        try:
+            group = quant_config["config_groups"]["group_0"]
+            weights = group["weights"]
+            activations = group["input_activations"]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                f"quantization_config is not a {cls.get_method()} checkpoint: "
+                f"{quant_config}"
+            ) from error
+        cls._verify_group_fields("weights", weights, cls.EXPECTED_WEIGHTS)
+        cls._verify_group_fields(
+            "input_activations", activations, cls.EXPECTED_ACTIVATIONS
+        )
+        return cls.from_config(
+            {
+                "bits": cls.EXPECTED_WEIGHTS["num_bits"],
+                "method": cls.get_method(),
+                "group_size": 0,
+                "is_quanted": True,
+                "ignore_patterns": list(quant_config.get("ignore", [])),
+            }
+        )
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return W8A8Int8PerChannelCompressedQuantConfig(**config)
 
 
 class QuarkQuantConfig(QuantizationConfig):
@@ -831,6 +976,10 @@ DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
     CompressedW4A8Int4PerChannelQuantConfig(bits=4, group_size=32, is_quanted=True)
 )
 
+DEFAULT_W8A8_INT8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = (
+    W8A8Int8PerChannelCompressedQuantConfig(bits=8, is_quanted=True)
+)
+
 preset_quant_config = {
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
@@ -843,6 +992,9 @@ preset_quant_config = {
     "W4A8_INT4_PER_CHANNEL": DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG,
     "W4A8_INT4_PER_CHANNEL_COMPRESSED": (
         DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG
+    ),
+    "W8A8_INT8_PER_CHANNEL_COMPRESSED": (
+        DEFAULT_W8A8_INT8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG
     ),
 }
 
