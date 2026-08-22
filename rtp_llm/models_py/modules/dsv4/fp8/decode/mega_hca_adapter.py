@@ -41,8 +41,8 @@ class MegaHCAAdapter:
 
     HCA has no indexer, no TopK and no MQA stage: opA (front) and opB (q_b)
     carry the whole fused pipeline, the dense compressed index comes from the
-    per-step metadata, and query RMSNorm+RoPE stays on the framework Triton
-    pass because opB publishes the raw projection on purpose.
+    per-step metadata, and the decode-specialized CUDA RMSNorm+RoPE consumes
+    the raw query projection published by opB.
     """
 
     def __init__(
@@ -116,6 +116,7 @@ class MegaHCAAdapter:
             "hc_reduce_fuse_out",
             "front_mixed_gemm_hca",
             "wq_b_proj_gemm_merged_hca",
+            "q_rmsnorm_rope_cuda_",
             "mla_o_inv_rope_quant",
         )
         missing = [name for name in required if not hasattr(dsv4_mega, name)]
@@ -141,6 +142,7 @@ class MegaHCAAdapter:
                 "window_page_tokens",
                 "compressed_page_tokens",
             ),
+            "q_rmsnorm_rope_cuda_": ("q", "freqs_cis", "eps"),
             "mla_o_inv_rope_quant": (
                 "input",
                 "positions",
@@ -304,9 +306,6 @@ class MegaHCAAdapter:
     ) -> torch.Tensor:
         g = self._geometry
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
-        from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import (
-            fused_rmsnorm_rope,
-        )
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
             get_or_build_sched_meta,
@@ -428,16 +427,13 @@ class MegaHCAAdapter:
             compressed_page_tokens=pools.compressed_entries,
             state_ring_entries=pools.state_ring_entries,
         )
-        # opB publishes the raw projection; per-head RMSNorm + partial RoPE
-        # stay on the same framework Triton pass the original path uses.
+        # opB publishes the raw projection; normalize each head and rotate the
+        # final RoPE dimensions before entering the unchanged FlashMLA path.
         freqs_cis = attn.freqs_cis.index_select(0, positions_i64).contiguous()
-        q_ready = fused_rmsnorm_rope(
+        q_ready = dsv4_mega.q_rmsnorm_rope_cuda_(
             q_raw.view(m, 1, g.main_heads, HEAD_DIM),
-            None,
             freqs_cis,
-            ROPE_DIM,
             eps=attn.eps,
-            inplace=True,
         )
         attention = attn._forward_decode_compressed(
             q_ready,
