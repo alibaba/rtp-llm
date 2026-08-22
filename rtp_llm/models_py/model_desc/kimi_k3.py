@@ -26,6 +26,7 @@ from torch import nn
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.decode_ktp import (
     DecodeOwnerLayout,
+    KdaParallelContext,
     build_owner_attention_inputs,
     decode_ktp_enabled,
     logical_tp1_parallelism,
@@ -216,8 +217,16 @@ class KimiK3DecoderLayer(nn.Module):
             if self.mla_dp_enabled
             else parallelism_config
         )
+        kda_context = KdaParallelContext.from_parallelism(parallelism_config)
+        kda_parallelism = kda_context.parallelism_config(parallelism_config)
         self.self_attn: nn.Module = (
-            KimiK3KDA(config, parallelism_config, weights, layer_idx)
+            KimiK3KDA(
+                config,
+                kda_parallelism,
+                weights,
+                layer_idx,
+                collective_group=kda_context.group,
+            )
             if self.is_kda
             else KimiK3MLA(config, attention_parallelism, weights, layer_idx)
         )
@@ -476,6 +485,12 @@ class KimiK3Model(GptModelBase):
         self._whole_chunk_prefill_active = False
         self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
         self._decode_ktp_enabled = decode_ktp_enabled(parallelism_config.role_type)
+        self._kda_parallel_context = KdaParallelContext.from_parallelism(
+            parallelism_config
+        )
+        self._kda_parallelism_config = self._kda_parallel_context.parallelism_config(
+            parallelism_config
+        )
         self._mla_parallelism_config = (
             logical_tp1_parallelism(parallelism_config)
             if self._decode_ktp_enabled

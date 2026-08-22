@@ -250,6 +250,17 @@ def set_parallelism_config(
     parallelism_config.tp_rank = (
         parallelism_config.world_rank % parallelism_config.tp_size
     )
+    assert parallelism_config.ktp_size >= 1, (
+        f"ktp_size must be positive, got {parallelism_config.ktp_size}"
+    )
+    assert parallelism_config.world_size % parallelism_config.ktp_size == 0, (
+        "world_size must be divisible by ktp_size, got "
+        f"world_size={parallelism_config.world_size}, "
+        f"ktp_size={parallelism_config.ktp_size}"
+    )
+    parallelism_config.ktp_rank = (
+        parallelism_config.world_rank % parallelism_config.ktp_size
+    )
     parallelism_config.dp_rank = (
         parallelism_config.world_rank // parallelism_config.tp_size
     )

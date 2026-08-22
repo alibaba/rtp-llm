@@ -50,10 +50,12 @@ class KimiK3KDA(nn.Module):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_idx: int = -1,
+        collective_group: Group = Group.TP,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.parallelism_config = parallelism_config
+        self.collective_group = collective_group
         self.weights = weights
         runtime = config.k3_runtime_config
         self.head_dim = int(config.linear_attention_config.linear_key_head_dim)
@@ -283,7 +285,7 @@ class KimiK3KDA(nn.Module):
                 self.weights[W.linear_attn_out_w],
             )
             if self.attn_tp_size > 1:
-                output = all_reduce(output, group=Group.TP)
+                output = all_reduce(output, group=self.collective_group)
                 decode_sp = (
                     sequence_parallel and not is_target_verify and hidden_states.is_cuda
                 )
@@ -305,7 +307,7 @@ class KimiK3KDA(nn.Module):
             fused = gemm_reduce_scatter(
                 projection_input,
                 self.weights[W.linear_attn_out_w],
-                get_process_group(Group.TP),
+                get_process_group(self.collective_group),
                 pad_rows=pad_reduce_scatter,
             )
             if fused is not None:
@@ -317,6 +319,7 @@ class KimiK3KDA(nn.Module):
             reduce_scatter_tokens=use_reduce_scatter,
             pad_reduce_scatter_tokens=pad_reduce_scatter,
             use_input_dtype_reduce_scatter=(mode == "prefill"),
+            group=self.collective_group,
         )
 
     def _validate_request(

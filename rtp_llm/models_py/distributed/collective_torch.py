@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.distributed
 
-from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+from rtp_llm.ops import NcclCommConfig, ParallelismConfig, RoleType
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
 _CPP_PARALLEL_MODE_TP = 0
@@ -25,6 +25,7 @@ class Group(Enum):
 
     DP = "DP"
     TP = "TP"
+    KTP = "KTP"
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -36,6 +37,13 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
+
+
+def _decode_ktp_requested(parallelism_config: ParallelismConfig) -> bool:
+    raw = os.environ.get("KIMI_K3_DECODE_KTP", "0").strip()
+    if raw not in ("0", "1"):
+        raise ValueError(f"KIMI_K3_DECODE_KTP must be 0 or 1, got {raw!r}")
+    return raw == "1" and parallelism_config.role_type == RoleType.DECODE
 
 
 def _get_rocm_rccl():
@@ -107,6 +115,10 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
             )
         parallelism_config.tp_rank = tp_rank
         parallelism_config.dp_rank = dp_rank
+    if parallelism_config.ktp_size > 0:
+        parallelism_config.ktp_rank = (
+            parallelism_config.world_rank % parallelism_config.ktp_size
+        )
 
 
 def init_distributed_environment(
@@ -289,6 +301,29 @@ def _create_process_groups(
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+
+    ktp_size = int(parallelism_config.ktp_size)
+    if ktp_size > 1 and _decode_ktp_requested(parallelism_config):
+        if world_size != ktp_size:
+            raise ValueError(
+                "Decode KTP phase one requires world_size == ktp_size, got "
+                f"world_size={world_size}, ktp_size={ktp_size}"
+            )
+        ktp_ranks = list(range(ktp_size))
+        logging.info(
+            "[rank: %s] Creating independent KTP group with ranks: %s",
+            world_rank,
+            ktp_ranks,
+        )
+        _group_map[Group.KTP] = torch.distributed.new_group(
+            ranks=ktp_ranks,
+            backend=backend,
+            timeout=timedelta(days=36500),
+        )
+        # Keep KTP on a separate communicator even though its rank set equals
+        # WORLD.  The barrier is only group-construction ordering; KDA calls do
+        # not share collective sequence state with TP, DP, or DeepEP.
+        torch.distributed.barrier()
 
 
 def _register_process_groups_to_cpp():
@@ -627,7 +662,9 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
     world_size = _parallelism_config.world_size
-    if group == Group.DP and dp_size > 1 and world_size != dp_size:
+    if group == Group.KTP:
+        group_key = Group.KTP
+    elif group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
         group_key = Group.DP.name + str(tp_rank)
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
