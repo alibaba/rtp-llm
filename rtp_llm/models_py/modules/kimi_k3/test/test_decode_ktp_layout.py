@@ -8,12 +8,16 @@ import torch
 from rtp_llm.models.kimi_k3.decode_ktp import (
     DecodeOwnerLayout,
     KdaParallelContext,
+    KtpBatchPlan,
+    KtpStepDescriptor,
     build_owner_attention_inputs,
+    rendezvous_ktp_step,
 )
 from rtp_llm.models.kimi_k3.kimi_k3_weight import _KimiK3KDAWeight
 from rtp_llm.model_loader.linear_attn_weight import LinearAttnConfig
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.kimi_k3.kda import KimiK3KDA
 from rtp_llm.ops import LinearAttentionConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W, identity
@@ -200,6 +204,150 @@ class KdaParallelContextTest(unittest.TestCase):
             FakeLoadConfig(tp_size=1, tp_rank=0),
         )[W.linear_attn_alog]
         self.assertEqual(loaded.tolist(), list(range(24, 32)))
+
+
+class KtpBatchRendezvousTest(unittest.TestCase):
+    @staticmethod
+    def _descriptors(
+        local_batches, *, bucket=4, step_epoch=7
+    ) -> tuple[KtpStepDescriptor, ...]:
+        return tuple(
+            KtpStepDescriptor.build(
+                rank=rank,
+                step_epoch=step_epoch,
+                local_batch=local_batch,
+                bucket=bucket,
+                request_ids=range(rank * 100, rank * 100 + local_batch),
+                generation_epochs=[3] * local_batch,
+            )
+            for rank, local_batch in enumerate(local_batches)
+        )
+
+    def test_rendezvous_supports_empty_and_uneven_dp_batches(self):
+        local_batches = [1, 2, 3, 4, 1, 2, 3, 4]
+        descriptors = self._descriptors(local_batches)
+        gathered = torch.cat(
+            [descriptor.pack(torch.device("cpu")) for descriptor in descriptors]
+        )
+        context = KdaParallelContext(8, 3, Group.KTP)
+        with patch(
+            "rtp_llm.models.kimi_k3.decode_ktp.all_gather",
+            return_value=gathered,
+        ):
+            plan = rendezvous_ktp_step(
+                context,
+                step_epoch=7,
+                local_batch=4,
+                fixed_bucket=4,
+                device=torch.device("cpu"),
+                request_ids=range(300, 304),
+                generation_epochs=[3] * 4,
+            )
+        self.assertEqual(plan.valid_rows, sum(local_batches))
+        self.assertEqual(plan.physical_rows, 32)
+        self.assertEqual(plan.local_batch, 4)
+        self.assertEqual(
+            [key for key in plan.request_keys if key is not None][0], (0, 3)
+        )
+        self.assertEqual(plan.valid_mask(torch.device("cpu")).sum().item(), 20)
+
+    def test_partial_and_all_idle_ranks_still_have_physical_rows(self):
+        partial = KtpBatchPlan(
+            self._descriptors([0, 1, 0, 1, 0, 1, 0, 1], bucket=1), rank=0
+        )
+        idle = KtpBatchPlan(self._descriptors([0] * 8, bucket=1), rank=5)
+        self.assertEqual((partial.valid_rows, partial.physical_rows), (4, 8))
+        self.assertEqual((idle.valid_rows, idle.physical_rows), (0, 8))
+        self.assertFalse(idle.valid_mask(torch.device("cpu")).any())
+
+    def test_activation_padding_all_gather_and_reduce_scatter_trim(self):
+        plan = KtpBatchPlan(
+            self._descriptors([1, 2, 3, 4, 1, 2, 3, 4]), rank=2
+        )
+        local = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        rank_rows = [
+            torch.full((4, 2), float(rank), dtype=torch.float32)
+            for rank in range(8)
+        ]
+        with patch(
+            "rtp_llm.models.kimi_k3.decode_ktp.all_gather",
+            return_value=torch.cat(rank_rows),
+        ) as gather:
+            global_rows = plan.all_gather_rows(local)
+        submitted = gather.call_args.args[0]
+        self.assertEqual(tuple(submitted.shape), (4, 2))
+        self.assertTrue(torch.equal(submitted[:3], local))
+        self.assertTrue(torch.equal(submitted[3], torch.zeros(2)))
+        self.assertEqual(tuple(global_rows.shape), (32, 2))
+
+        local_physical = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        with patch(
+            "rtp_llm.models.kimi_k3.decode_ktp.reduce_scatter",
+            return_value=local_physical,
+        ):
+            trimmed = plan.reduce_scatter_rows(torch.zeros(32, 2))
+        self.assertTrue(torch.equal(trimmed, local_physical[:3]))
+
+    def test_mismatched_step_epoch_fails_after_descriptor_collective(self):
+        descriptors = list(self._descriptors([1] * 8, bucket=1))
+        descriptors[6] = KtpStepDescriptor.build(
+            rank=6,
+            step_epoch=8,
+            local_batch=1,
+            bucket=1,
+            request_ids=[600],
+            generation_epochs=[3],
+        )
+        with self.assertRaisesRegex(ValueError, "different decode step epochs"):
+            KtpBatchPlan(tuple(descriptors), rank=0)
+
+    def test_fake_stream_contributes_only_padding(self):
+        descriptor = KtpStepDescriptor.build(
+            rank=4,
+            step_epoch=9,
+            local_batch=1,
+            bucket=2,
+            request_ids=[44],
+            generation_epochs=[1],
+            is_fake=True,
+        )
+        self.assertEqual(descriptor.local_batch, 0)
+        self.assertEqual(descriptor.request_ids, (-1, -1))
+        self.assertEqual(descriptor.valid_mask, (False, False))
+
+    def test_kda_decode_output_uses_ktp_reduce_scatter(self):
+        module = KimiK3KDA.__new__(KimiK3KDA)
+        torch.nn.Module.__init__(module)
+        module.weights = {
+            W.linear_attn_norm_w: torch.ones(2),
+            W.linear_attn_out_w: torch.eye(2),
+        }
+        module.eps = 1e-6
+        module.projection_size = 2
+        module.attn_tp_size = 8
+        module.attn_tp_rank = 3
+        module.collective_group = Group.KTP
+        output = torch.ones(1, 8, 1, 2)
+        output_gate = torch.ones(1, 8, 1, 2)
+        expected = torch.full((1, 2), 7.0)
+        hidden = SimpleNamespace(is_cuda=True)
+        with patch(
+            "rtp_llm.models_py.modules.kimi_k3.kda.module.reduce_scatter_padded",
+            return_value=expected,
+        ) as reduce_scatter, patch(
+            "rtp_llm.models_py.modules.kimi_k3.kda.module.all_reduce"
+        ) as all_reduce:
+            actual = module._project_output(
+                output,
+                output_gate,
+                is_target_verify=False,
+                sequence_parallel=True,
+                hidden_states=hidden,
+                mode="decode",
+            )
+        self.assertIs(actual, expected)
+        self.assertEqual(reduce_scatter.call_args.kwargs["group"], Group.KTP)
+        all_reduce.assert_not_called()
 
 
 if __name__ == "__main__":

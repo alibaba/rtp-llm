@@ -285,8 +285,9 @@ class KimiK3DecoderLayer(nn.Module):
         mode = attn_meta.mode
         sequence_parallel = attn_meta.sequence_parallel
         prefill_sp_layout = attn_meta.prefill_sp_layout
+        mla_dp_enabled = bool(getattr(self, "mla_dp_enabled", False))
         owner_local_decode = bool(
-            self.mla_dp_enabled
+            mla_dp_enabled
             and mode == "decode"
             and attn_meta.mla_owner_layout is not None
         )

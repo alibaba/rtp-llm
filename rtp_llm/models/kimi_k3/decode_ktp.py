@@ -11,16 +11,22 @@ from __future__ import annotations
 import copy
 import os
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 import torch
 
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
-from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    reduce_scatter,
+)
 
 
 _DECODE_KTP_ENV = "KIMI_K3_DECODE_KTP"
+_KTP_DESCRIPTOR_VERSION = 1
+_KTP_DESCRIPTOR_HEADER = 5
 
 
 def decode_ktp_enabled(role_type: RoleType) -> bool:
@@ -93,6 +99,300 @@ class KdaParallelContext:
         result.tp_size = self.size
         result.tp_rank = self.rank
         return result
+
+
+@dataclass(frozen=True)
+class KtpStepDescriptor:
+    """Fixed-width metadata contributed by one Decode DP worker.
+
+    Request ids remain optional until the distributed KDA shadow registry is
+    installed.  In that transition state, deterministic negative ids identify
+    physical rows but are never valid registry keys.
+    """
+
+    rank: int
+    step_epoch: int
+    local_batch: int
+    bucket: int
+    request_ids: tuple[int, ...]
+    generation_epochs: tuple[int, ...]
+    valid_mask: tuple[bool, ...]
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        rank: int,
+        step_epoch: int,
+        local_batch: int,
+        bucket: int,
+        request_ids: Optional[Iterable[int]] = None,
+        generation_epochs: Optional[Iterable[int]] = None,
+        is_fake: bool = False,
+    ) -> "KtpStepDescriptor":
+        if rank < 0 or step_epoch < 0:
+            raise ValueError(f"invalid KTP rank/epoch rank={rank} epoch={step_epoch}")
+        if bucket <= 0:
+            raise ValueError(f"KTP local bucket must be positive, got {bucket}")
+        semantic_batch = 0 if is_fake else int(local_batch)
+        if semantic_batch < 0 or semantic_batch > bucket:
+            raise ValueError(
+                "KTP local batch exceeds fixed bucket: "
+                f"local_batch={semantic_batch}, bucket={bucket}"
+            )
+
+        ids = tuple(int(value) for value in request_ids or ())
+        epochs = tuple(int(value) for value in generation_epochs or ())
+        if is_fake:
+            # The framework's fake stream may carry one placeholder request
+            # row. It is a collective participant, never a cache owner.
+            ids = ()
+            epochs = ()
+        if ids and len(ids) != semantic_batch:
+            raise ValueError(
+                f"KTP request id count {len(ids)} != local batch {semantic_batch}"
+            )
+        if epochs and len(epochs) != semantic_batch:
+            raise ValueError(
+                "KTP generation epoch count "
+                f"{len(epochs)} != local batch {semantic_batch}"
+            )
+        if not ids:
+            # Temporary Stage-2 row identity. Stage 3 replaces these values
+            # with real (request_id, generation_epoch) registry keys.
+            ids = tuple(-(rank * bucket + row + 2) for row in range(semantic_batch))
+        if not epochs:
+            epochs = (0,) * semantic_batch
+        pad = bucket - semantic_batch
+        return cls(
+            rank=rank,
+            step_epoch=step_epoch,
+            local_batch=semantic_batch,
+            bucket=bucket,
+            request_ids=ids + (-1,) * pad,
+            generation_epochs=epochs + (-1,) * pad,
+            valid_mask=(True,) * semantic_batch + (False,) * pad,
+        )
+
+    @property
+    def packed_width(self) -> int:
+        return _KTP_DESCRIPTOR_HEADER + 3 * self.bucket
+
+    def pack(self, device: torch.device) -> torch.Tensor:
+        values = [
+            _KTP_DESCRIPTOR_VERSION,
+            self.rank,
+            self.step_epoch,
+            self.local_batch,
+            self.bucket,
+            *self.request_ids,
+            *self.generation_epochs,
+            *(int(value) for value in self.valid_mask),
+        ]
+        if len(values) != self.packed_width:
+            raise RuntimeError("KTP descriptor has inconsistent fixed-width fields")
+        return torch.tensor(values, dtype=torch.int64, device=device)
+
+    @classmethod
+    def unpack(cls, packed: torch.Tensor) -> "KtpStepDescriptor":
+        values = [int(value) for value in packed.detach().cpu().tolist()]
+        if len(values) < _KTP_DESCRIPTOR_HEADER:
+            raise ValueError("KTP descriptor is shorter than its header")
+        version, rank, step_epoch, local_batch, bucket = values[:5]
+        if version != _KTP_DESCRIPTOR_VERSION:
+            raise ValueError(
+                f"unsupported KTP descriptor version {version}; "
+                f"expected {_KTP_DESCRIPTOR_VERSION}"
+            )
+        expected = _KTP_DESCRIPTOR_HEADER + 3 * bucket
+        if bucket <= 0 or len(values) != expected:
+            raise ValueError(
+                f"invalid KTP descriptor width={len(values)} bucket={bucket}"
+            )
+        ids_begin = _KTP_DESCRIPTOR_HEADER
+        epoch_begin = ids_begin + bucket
+        valid_begin = epoch_begin + bucket
+        descriptor = cls(
+            rank=rank,
+            step_epoch=step_epoch,
+            local_batch=local_batch,
+            bucket=bucket,
+            request_ids=tuple(values[ids_begin:epoch_begin]),
+            generation_epochs=tuple(values[epoch_begin:valid_begin]),
+            valid_mask=tuple(bool(value) for value in values[valid_begin:]),
+        )
+        descriptor.validate()
+        return descriptor
+
+    def validate(self) -> None:
+        if self.bucket <= 0 or not 0 <= self.local_batch <= self.bucket:
+            raise ValueError(
+                f"invalid KTP descriptor batch={self.local_batch} bucket={self.bucket}"
+            )
+        if not (
+            len(self.request_ids)
+            == len(self.generation_epochs)
+            == len(self.valid_mask)
+            == self.bucket
+        ):
+            raise ValueError("KTP descriptor fields do not match its bucket")
+        expected_mask = (True,) * self.local_batch + (False,) * (
+            self.bucket - self.local_batch
+        )
+        if self.valid_mask != expected_mask:
+            raise ValueError("KTP valid mask must be a contiguous local prefix")
+        for idx in range(self.local_batch, self.bucket):
+            if self.request_ids[idx] != -1 or self.generation_epochs[idx] != -1:
+                raise ValueError("KTP padding rows must use -1 request/epoch sentinels")
+
+
+@dataclass(frozen=True)
+class KtpBatchPlan:
+    """Rank-major fixed-bucket layout shared by every KTP participant."""
+
+    descriptors: tuple[KtpStepDescriptor, ...]
+    rank: int
+
+    def __post_init__(self) -> None:
+        if not self.descriptors or not 0 <= self.rank < len(self.descriptors):
+            raise ValueError("invalid KTP batch plan rank or descriptor set")
+        epoch = self.descriptors[0].step_epoch
+        bucket = self.descriptors[0].bucket
+        for expected_rank, descriptor in enumerate(self.descriptors):
+            descriptor.validate()
+            if descriptor.rank != expected_rank:
+                raise ValueError(
+                    "KTP descriptor rank order mismatch: "
+                    f"slot={expected_rank}, descriptor={descriptor.rank}"
+                )
+            if descriptor.step_epoch != epoch:
+                raise ValueError("KTP workers entered different decode step epochs")
+            if descriptor.bucket != bucket:
+                raise ValueError("KTP workers disagree on the fixed local bucket")
+
+    @property
+    def bucket(self) -> int:
+        return self.descriptors[0].bucket
+
+    @property
+    def step_epoch(self) -> int:
+        return self.descriptors[0].step_epoch
+
+    @property
+    def local_batch(self) -> int:
+        return self.descriptors[self.rank].local_batch
+
+    @property
+    def physical_rows(self) -> int:
+        return len(self.descriptors) * self.bucket
+
+    @property
+    def valid_rows(self) -> int:
+        return sum(descriptor.local_batch for descriptor in self.descriptors)
+
+    @property
+    def local_physical_slice(self) -> slice:
+        begin = self.rank * self.bucket
+        return slice(begin, begin + self.bucket)
+
+    @property
+    def request_keys(self) -> tuple[Optional[tuple[int, int]], ...]:
+        keys: list[Optional[tuple[int, int]]] = []
+        for descriptor in self.descriptors:
+            keys.extend(
+                (request_id, generation_epoch) if valid else None
+                for request_id, generation_epoch, valid in zip(
+                    descriptor.request_ids,
+                    descriptor.generation_epochs,
+                    descriptor.valid_mask,
+                )
+            )
+        return tuple(keys)
+
+    def valid_mask(self, device: torch.device) -> torch.Tensor:
+        return torch.tensor(
+            [valid for item in self.descriptors for valid in item.valid_mask],
+            dtype=torch.bool,
+            device=device,
+        )
+
+    def pad_local_rows(self, value: torch.Tensor) -> torch.Tensor:
+        if value.ndim == 0 or int(value.shape[0]) != self.local_batch:
+            raise ValueError(
+                "KTP local activation rows do not match descriptor: "
+                f"shape={tuple(value.shape)}, local_batch={self.local_batch}"
+            )
+        if self.local_batch == self.bucket:
+            return value.contiguous()
+        padding = value.new_zeros(
+            [self.bucket - self.local_batch] + list(value.shape[1:])
+        )
+        return torch.cat((value, padding), dim=0).contiguous()
+
+    def trim_local_rows(self, value: torch.Tensor) -> torch.Tensor:
+        if value.ndim == 0 or int(value.shape[0]) != self.bucket:
+            raise ValueError(
+                "KTP local physical shard does not match fixed bucket: "
+                f"shape={tuple(value.shape)}, bucket={self.bucket}"
+            )
+        return value.narrow(0, 0, self.local_batch).contiguous()
+
+    def all_gather_rows(self, local_value: torch.Tensor) -> torch.Tensor:
+        gathered = all_gather(self.pad_local_rows(local_value), group=Group.KTP)
+        if int(gathered.shape[0]) != self.physical_rows:
+            raise RuntimeError(
+                "KTP activation AllGather returned unexpected rows: "
+                f"rows={gathered.shape[0]}, expected={self.physical_rows}"
+            )
+        return gathered
+
+    def reduce_scatter_rows(self, global_partial: torch.Tensor) -> torch.Tensor:
+        if global_partial.ndim == 0 or int(global_partial.shape[0]) != self.physical_rows:
+            raise ValueError(
+                "KTP global partial rows do not match rank-major layout: "
+                f"shape={tuple(global_partial.shape)}, expected={self.physical_rows}"
+            )
+        return self.trim_local_rows(reduce_scatter(global_partial, group=Group.KTP))
+
+
+def rendezvous_ktp_step(
+    context: KdaParallelContext,
+    *,
+    step_epoch: int,
+    local_batch: int,
+    fixed_bucket: int,
+    device: torch.device,
+    request_ids: Optional[Iterable[int]] = None,
+    generation_epochs: Optional[Iterable[int]] = None,
+    is_fake: bool = False,
+) -> KtpBatchPlan:
+    """AllGather fixed-width descriptors and validate one global decode tick."""
+
+    if context.group != Group.KTP or context.size <= 1:
+        raise ValueError("Decode DP rendezvous requires an enabled KTP context")
+    local = KtpStepDescriptor.build(
+        rank=context.rank,
+        step_epoch=step_epoch,
+        local_batch=local_batch,
+        bucket=fixed_bucket,
+        request_ids=request_ids,
+        generation_epochs=generation_epochs,
+        is_fake=is_fake,
+    )
+    packed = local.pack(device)
+    gathered = all_gather(packed, group=Group.KTP)
+    expected_values = context.size * local.packed_width
+    if gathered.ndim != 1 or gathered.numel() != expected_values:
+        raise RuntimeError(
+            "KTP descriptor AllGather returned unexpected shape: "
+            f"shape={tuple(gathered.shape)}, expected_values={expected_values}"
+        )
+    rows = gathered.reshape(context.size, local.packed_width)
+    descriptors = tuple(KtpStepDescriptor.unpack(row) for row in rows)
+    plan = KtpBatchPlan(descriptors, context.rank)
+    if plan.descriptors[context.rank] != local:
+        raise RuntimeError("KTP gathered local descriptor was corrupted or reordered")
+    return plan
 
 
 @dataclass(frozen=True)
@@ -226,8 +526,11 @@ def build_owner_attention_inputs(
 
 __all__ = [
     "DecodeOwnerLayout",
+    "KtpBatchPlan",
+    "KtpStepDescriptor",
     "KdaParallelContext",
     "build_owner_attention_inputs",
     "decode_ktp_enabled",
     "logical_tp1_parallelism",
+    "rendezvous_ktp_step",
 ]
