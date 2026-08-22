@@ -1169,6 +1169,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<ParallelismConfig>(m, "ParallelismConfig")
         .def(py::init<>())
         .def_readwrite("tp_size", &ParallelismConfig::tp_size)
+        .def_readwrite("ktp_size", &ParallelismConfig::ktp_size)
         .def_readwrite("ep_size", &ParallelismConfig::ep_size)
         .def_readwrite("dp_size", &ParallelismConfig::dp_size)
         .def_readwrite("pp_size", &ParallelismConfig::pp_size)
@@ -1178,6 +1179,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("local_rank", &ParallelismConfig::local_rank)
         .def_readwrite("ffn_sp_size", &ParallelismConfig::ffn_sp_size)
         .def_readwrite("tp_rank", &ParallelismConfig::tp_rank)
+        .def_readwrite("ktp_rank", &ParallelismConfig::ktp_rank)
         .def_readwrite("ep_rank", &ParallelismConfig::ep_rank)
         .def_readwrite("dp_rank", &ParallelismConfig::dp_rank)
         .def_readwrite("ffn_tp_size", &ParallelismConfig::ffn_tp_size)
@@ -1190,6 +1192,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &ParallelismConfig::to_string)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
         .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
+        .def("get_kda_tp_size", &ParallelismConfig::get_kda_tp_size)
+        .def("get_kda_tp_rank", &ParallelismConfig::get_kda_tp_rank)
         .def("get_ffn_tp_size", &ParallelismConfig::get_ffn_tp_size)
         .def("get_ffn_tp_rank", &ParallelismConfig::get_ffn_tp_rank)
         .def(py::pickle(
@@ -1211,10 +1215,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.ffn_disaggregate_config,
                                       self.prefill_cp_config,
                                       self.use_ub_comm,
-                                      self.role_type);
+                                      self.role_type,
+                                      self.ktp_size,
+                                      self.ktp_rank);
             },
             [](py::tuple t) {
-                if (t.size() != 18)
+                if (t.size() != 18 && t.size() != 20)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
@@ -1236,6 +1242,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
                     c.use_ub_comm             = t[16].cast<bool>();
                     c.role_type               = t[17].cast<RoleType>();
+                    if (t.size() == 20) {
+                        c.ktp_size = t[18].cast<int64_t>();
+                        c.ktp_rank = t[19].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }

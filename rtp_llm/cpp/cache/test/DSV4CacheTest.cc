@@ -448,6 +448,32 @@ TEST(MLAKVCacheSpecTest, KimiCacheTpUsesFlatContiguousPrefillShards) {
     }
 }
 
+TEST(LinearKVCacheSpecTest, KdaUsesIndependentKtpShardShape) {
+    AttentionConfigs attn;
+    attn.tokens_per_block = 1;
+    LinearAttentionConfig linear;
+    linear.linear_conv_kernel_dim = 4;
+    linear.linear_key_head_dim = 128;
+    linear.linear_value_head_dim = 128;
+    linear.linear_num_key_heads = 64;
+    linear.linear_num_value_heads = 64;
+
+    ParallelismConfig decode;
+    decode.tp_size = 1;
+    decode.ktp_size = 8;
+    decode.role_type = RoleType::DECODE;
+    LinearKVCacheSpec ktp_spec(attn, decode, linear);
+    EXPECT_EQ(ktp_spec.local_num_k_heads, 8u);
+    EXPECT_EQ(ktp_spec.local_num_v_heads, 8u);
+
+    ParallelismConfig baseline;
+    baseline.tp_size = 8;
+    LinearKVCacheSpec tp_spec(attn, baseline, linear);
+    EXPECT_EQ(tp_spec.local_num_k_heads, ktp_spec.local_num_k_heads);
+    EXPECT_EQ(tp_spec.local_num_v_heads, ktp_spec.local_num_v_heads);
+    EXPECT_EQ(tp_spec.block_size_bytes(), ktp_spec.block_size_bytes());
+}
+
 TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
     ParallelismConfig pc;
     auto              config =

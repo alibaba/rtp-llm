@@ -58,6 +58,7 @@ struct FfnDisAggregateConfig {
 
 struct ParallelismConfig {
     int64_t tp_size          = 1;
+    int64_t ktp_size         = 1;
     int64_t ep_size          = 1;
     int64_t dp_size          = 1;
     int64_t pp_size          = 1;
@@ -67,6 +68,7 @@ struct ParallelismConfig {
     int64_t local_rank       = 0;
     int64_t ffn_sp_size      = 1;
     int64_t tp_rank          = 0;
+    int64_t ktp_rank         = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
     int64_t ffn_tp_size      = 1;
@@ -90,6 +92,12 @@ struct ParallelismConfig {
     }
     int64_t get_attn_tp_rank() const {
         return prefill_cp_config.is_enabled() ? 0 : tp_rank;
+    }
+    int64_t get_kda_tp_size() const {
+        return role_type == RoleType::DECODE && ktp_size > 1 ? ktp_size : tp_size;
+    }
+    int64_t get_kda_tp_rank() const {
+        return role_type == RoleType::DECODE && ktp_size > 1 ? ktp_rank : tp_rank;
     }
     int64_t get_ffn_tp_size() const {
         return prefill_cp_config.is_enabled() ? 1 : ffn_tp_size;

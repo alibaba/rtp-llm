@@ -17,6 +17,7 @@ import torch
 
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.models_py.distributed.collective_torch import Group
 
 
 _DECODE_KTP_ENV = "KIMI_K3_DECODE_KTP"
@@ -40,6 +41,58 @@ def logical_tp1_parallelism(config: ParallelismConfig) -> ParallelismConfig:
     result.ffn_tp_size = 1
     result.ffn_tp_rank = 0
     return result
+
+
+@dataclass(frozen=True)
+class KdaParallelContext:
+    """KDA-only tensor-parallel view over Decode DP workers."""
+
+    size: int
+    rank: int
+    group: Group
+
+    @classmethod
+    def from_parallelism(cls, config: ParallelismConfig) -> "KdaParallelContext":
+        if not decode_ktp_enabled(config.role_type):
+            return cls(
+                int(config.tp_size),
+                int(config.tp_rank),
+                Group.TP,
+            )
+
+        topology = {
+            "tp_size": int(config.tp_size),
+            "dp_size": int(config.dp_size),
+            "ep_size": int(config.ep_size),
+            "ktp_size": int(config.ktp_size),
+            "world_size": int(config.world_size),
+            "world_rank": int(config.world_rank),
+            "dp_rank": int(config.dp_rank),
+            "ktp_rank": int(config.ktp_rank),
+        }
+        world = topology["world_size"]
+        if (
+            topology["tp_size"] != 1
+            or topology["dp_size"] != world
+            or topology["ep_size"] != world
+            or topology["ktp_size"] != world
+            or world <= 1
+            or topology["dp_rank"] != topology["world_rank"]
+            or topology["ktp_rank"] != topology["world_rank"]
+        ):
+            raise ValueError(
+                "KIMI_K3_DECODE_KTP requires Decode TP1/DP=EP=KTP=WORLD "
+                f"with dp_rank=ktp_rank=world_rank, got {topology}"
+            )
+        return cls(world, topology["world_rank"], Group.KTP)
+
+    def parallelism_config(self, config: ParallelismConfig) -> ParallelismConfig:
+        """Clone the global DP config into the view consumed only by KDA."""
+
+        result = copy.copy(config)
+        result.tp_size = self.size
+        result.tp_rank = self.rank
+        return result
 
 
 @dataclass(frozen=True)
@@ -173,6 +226,7 @@ def build_owner_attention_inputs(
 
 __all__ = [
     "DecodeOwnerLayout",
+    "KdaParallelContext",
     "build_owner_attention_inputs",
     "decode_ktp_enabled",
     "logical_tp1_parallelism",
