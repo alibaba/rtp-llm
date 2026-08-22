@@ -2,11 +2,23 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test(
-    name = "combo_position_ids_validation_test",
-    srcs = ["combo_position_ids_validation_test.cc"],
+    name = "cuda_graph_replay_contracts_test",
+    srcs = ["cuda_graph_replay_contracts_test.cc"],
     copts = copts(),
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_replay_contracts",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+# The host test intentionally compiles the old compatibility target/header;
+# remove it only after downstream migration is confirmed.
+cc_test(
+    name = "cuda_graph_replay_contracts_host_test",
+    srcs = ["cuda_graph_replay_contracts_host_test.cc"],
+    copts = copts(),
     deps = [
         "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
         "@com_google_googletest//:gtest_main",

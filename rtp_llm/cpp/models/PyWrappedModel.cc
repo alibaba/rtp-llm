@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_replay_contracts.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -71,6 +72,20 @@ private:
     std::shared_ptr<CacheStoreAsyncWriter> writer_;
     bool                                   active_{false};
 };
+
+bool hasRequestOwnedMultimodalInputs(const GptModelInputs& inputs) {
+    const bool has_text_tokens_mask    = inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel() > 0;
+    const bool has_multimodal_features = inputs.multimodal_features && !inputs.multimodal_features->empty();
+    const bool has_multimodal_locs     = inputs.mm_features_locs.defined() && inputs.mm_features_locs.numel() > 0;
+    const bool has_multimodal_extra    = inputs.mm_extra_input && !inputs.mm_extra_input->empty();
+    return hasRequestOwnedMultimodalSignals(
+        has_multimodal_features, has_multimodal_locs, has_multimodal_extra, has_text_tokens_mask);
+}
+
+bool hasBertRequestOwnedMultimodalInputs(const GptModelInputs& inputs, const Weights& weights) {
+    const bool is_bert_embedding_model = weights.position_encoding && weights.token_type_embedding;
+    return is_bert_embedding_model && hasRequestOwnedMultimodalInputs(inputs);
+}
 
 }  // namespace
 
@@ -661,6 +676,11 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
+    // Do not expose stale prepared state while rebuilding request mirrors. The
+    // flag is published only after all copies have been issued and optional
+    // graph preparation has returned successfully; stream/event ordering
+    // provides device readiness.
+    prepared_attention_inputs_.store(false, std::memory_order_release);
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
         --pinned_check_remaining_;
@@ -688,7 +708,6 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs, inputs);
     }
     attention_inputs_ = std::move(attention_inputs);
-    prepared_attention_inputs_.store(true, std::memory_order_release);
 
     // CRITICAL ORDERING: flush queued H2D copies BEFORE graph_runner_->prepareAttentionInputs.
     // The graph runner internally launches strided D2D copies that READ from these freshly
@@ -703,20 +722,26 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_         = CudaGraphState();
-    auto empty           = torch::Tensor();
-    auto py_model_inputs = PyModelInputs({empty,
-                                          empty,
-                                          empty,
-                                          torch_ext::PyEmbeddingInputs(),
-                                          torch_ext::PyMultimodalInputs(),
-                                          attention_inputs_,
-                                          attention_inputs_by_tag_,
-                                          torch_ext::BertEmbeddingInputs()});
-    if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
-        RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
-        graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
+    graph_state_ = CudaGraphState();
+    if (enable_cuda_graph_ && !hasRequestOwnedMultimodalInputs(inputs)) {
+        auto empty                 = torch::Tensor();
+        auto bert_embedding_inputs = weights_.position_encoding && weights_.token_type_embedding ?
+                                         buildBertEmbeddingInputs(inputs) :
+                                         torch_ext::BertEmbeddingInputs();
+        auto py_model_inputs       = PyModelInputs({empty,
+                                                    empty,
+                                                    attention_inputs_.combo_position_ids,
+                                                    torch_ext::PyEmbeddingInputs(),
+                                                    torch_ext::PyMultimodalInputs(),
+                                                    attention_inputs_,
+                                                    attention_inputs_by_tag_,
+                                                    bert_embedding_inputs});
+        if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
+            RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
+            graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
+        }
     }
+    prepared_attention_inputs_.store(true, std::memory_order_release);
 }
 
 void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
@@ -729,16 +754,19 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     attention_inputs_by_tag_ = setupKVCacheForAttentionInputs(attention_inputs_, inputs);
     fusedCopy(d2d_copies_);
 
-    if (enable_cuda_graph_) {
-        auto empty           = torch::Tensor();
-        auto py_model_inputs = PyModelInputs({empty,
-                                              empty,
-                                              empty,
-                                              torch_ext::PyEmbeddingInputs(),
-                                              torch_ext::PyMultimodalInputs(),
-                                              attention_inputs_,
-                                              attention_inputs_by_tag_,
-                                              torch_ext::BertEmbeddingInputs()});
+    if (enable_cuda_graph_ && !hasRequestOwnedMultimodalInputs(inputs)) {
+        auto empty                 = torch::Tensor();
+        auto bert_embedding_inputs = weights_.position_encoding && weights_.token_type_embedding ?
+                                         buildBertEmbeddingInputs(inputs) :
+                                         torch_ext::BertEmbeddingInputs();
+        auto py_model_inputs       = PyModelInputs({empty,
+                                                    empty,
+                                                    attention_inputs_.combo_position_ids,
+                                                    torch_ext::PyEmbeddingInputs(),
+                                                    torch_ext::PyMultimodalInputs(),
+                                                    attention_inputs_,
+                                                    attention_inputs_by_tag_,
+                                                    bert_embedding_inputs});
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -1140,8 +1168,23 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
         return {false, {}};
     }
 
+    // Bert request-owned multimodal metadata is a whole-request payload and is
+    // not partitioned by the two-slot layer-micro-batch protocol. Disable a
+    // real two-slot plan and use the regular fallback, which reuses the full
+    // request for the fake slot.
+    const auto should_disable_for_multimodal_inputs = [&]() {
+        if (!hasBertRequestOwnedMultimodalInputs(inputs, weights_)) {
+            return false;
+        }
+        RTP_LLM_LOG_DEBUG("layer micro batch disabled for Bert request-owned multimodal inputs");
+        return true;
+    };
+
     if (context_batch_size && decoder_batch_size) {
         if (layer_num_ == 1) {
+            if (should_disable_for_multimodal_inputs()) {
+                return {false, {}};
+            }
             size_t total_token_num = decoder_batch_size;
             for (size_t i = 0; i < context_batch_size; i++) {
                 total_token_num += input_lengths_ptr[i + decoder_batch_size];
@@ -1190,6 +1233,9 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     const size_t micro_batch_0_size  = (batch_size_to_split + 1) / 2;
     const size_t micro_batch_1_size  = batch_size_to_split - micro_batch_0_size;
 
+    if (should_disable_for_multimodal_inputs()) {
+        return {false, {}};
+    }
     RTP_LLM_LOG_DEBUG("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
     return context_batch_size ? MicroBatchPlan{true, {{micro_batch_0_size, 0}, {micro_batch_1_size, 0}}} :
                                 MicroBatchPlan{true, {{0, micro_batch_0_size}, {0, micro_batch_1_size}}};
@@ -1206,11 +1252,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

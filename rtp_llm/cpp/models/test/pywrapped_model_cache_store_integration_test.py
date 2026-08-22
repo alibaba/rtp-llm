@@ -17,6 +17,9 @@ class CacheStoreForwardModel:
         self.forward_calls = 0
         self.micro_batch_calls = 0
         self.seen_input_lengths: list[list[int]] = []
+        self.seen_bert_position_ids: list[list[int]] = []
+        self.seen_bert_token_type_ids: list[list[int]] = []
+        self.seen_text_tokens_masks: list[list[int]] = []
 
     def initialize(self, resources) -> bool:
         self.kv_cache = resources.kv_cache
@@ -33,6 +36,18 @@ class CacheStoreForwardModel:
             else attention_inputs
         )
         self.seen_input_lengths.append(first_inputs.input_lengths.tolist())
+
+        bert_inputs = inputs.bert_embedding_inputs
+        if bert_inputs.combo_position_ids is not None:
+            self.seen_bert_position_ids.append(bert_inputs.combo_position_ids.tolist())
+        if bert_inputs.combo_tokens_type_ids is not None:
+            self.seen_bert_token_type_ids.append(
+                bert_inputs.combo_tokens_type_ids.tolist()
+            )
+        if inputs.embedding_inputs.text_tokens_mask is not None:
+            self.seen_text_tokens_masks.append(
+                inputs.embedding_inputs.text_tokens_mask.tolist()
+            )
 
         assert self.kv_cache is not None
         for layer_cache in self.kv_cache.get_layer_cache_groups(0):
@@ -149,6 +164,53 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         for block in record["blocks"]
                     )
                 )
+
+    def test_bert_multimodal_signals_disable_layer_micro_batch(self) -> None:
+        signals = (
+            "text_mask",
+            "features",
+            "locs",
+            "extra",
+        )
+        for signal in signals:
+            with self.subTest(signal=signal):
+                model = CacheStoreForwardModel()
+                run_scenario(model, f"unsupported_micro_batch_{signal}")
+
+                self.assertEqual(model.forward_calls, 0)
+                self.assertEqual(model.micro_batch_calls, 1)
+                self.assertEqual(
+                    model.seen_input_lengths,
+                    [[2, 4, 2], [2, 4, 2]],
+                )
+
+    def test_bert_multimodal_signal_keeps_degenerate_micro_batch_fallback(
+        self,
+    ) -> None:
+        for kind in ("single_request", "mixed_multilayer"):
+            with self.subTest(kind=kind):
+                model = CacheStoreForwardModel()
+                result = run_scenario(
+                    model,
+                    f"degenerate_micro_batch_{kind}_text_mask",
+                )
+
+                self.assertEqual(model.forward_calls, 0)
+                if kind == "single_request":
+                    self.assertEqual(model.micro_batch_calls, 1)
+                    self.assertEqual(model.seen_text_tokens_masks, [[1, 1], [1, 1]])
+                else:
+                    self.assertEqual(model.micro_batch_calls, 0)
+                    self.assertFalse(result["micro_batch_plan_enabled"])
+
+    def test_bert_embedding_tables_and_ids_are_wired_together(self) -> None:
+        model = CacheStoreForwardModel()
+        run_scenario(model, "bert_wiring")
+
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(model.micro_batch_calls, 0)
+        self.assertEqual(model.seen_bert_position_ids, [[0, 1, 2, 3]])
+        self.assertEqual(model.seen_bert_token_type_ids, [[1, 1, 1, 1]])
 
     def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
         model = CacheStoreForwardModel()
