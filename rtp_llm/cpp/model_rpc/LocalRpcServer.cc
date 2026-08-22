@@ -1,4 +1,5 @@
 #include <memory>
+#include <stdexcept>
 #include <chrono>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -38,6 +39,54 @@ std::string formatRequestLogTag(const std::string& request_key, const RequestInf
     }
     return tag;
 }
+
+class BatchStreamCleanupGuard {
+public:
+    explicit BatchStreamCleanupGuard(std::vector<GenerateStreamPtr>& streams): streams_(streams) {}
+
+    ~BatchStreamCleanupGuard() {
+        if (dismissed_ || streams_.empty()) {
+            return;
+        }
+
+        size_t cancelled_streams = 0;
+        for (size_t i = handled_stream_count_; i < streams_.size(); ++i) {
+            const auto& stream = streams_[i];
+            if (!stream) {
+                continue;
+            }
+            try {
+                if (stream->getStatus() == StreamState::FINISHED || stream->hasError()
+                    || stream->hasEvent(StreamEvents::GenerateDone)
+                    || stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+                    continue;
+                }
+                stream->reportError(ErrorCode::CANCELLED, "batch generate call exited before all streams finished");
+                ++cancelled_streams;
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("failed to cancel batch stream [%ld]: %s", stream->streamId(), e.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("failed to cancel batch stream [%ld]: unknown exception", stream->streamId());
+            }
+        }
+        RTP_LLM_LOG_WARNING("BatchGenerateCall cleanup completed, cancelled_streams=%zu", cancelled_streams);
+    }
+
+    void markHandled(size_t stream_index) noexcept {
+        if (handled_stream_count_ <= stream_index) {
+            handled_stream_count_ = stream_index + 1;
+        }
+    }
+
+    void dismiss() noexcept {
+        dismissed_ = true;
+    }
+
+private:
+    std::vector<GenerateStreamPtr>& streams_;
+    size_t                          handled_stream_count_{0};
+    bool                            dismissed_{false};
+};
 
 }  // namespace
 
@@ -84,15 +133,17 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     return serializeErrorMsg(request_key, RequestInfo(), error_info);
 }
 
-grpc::Status
-LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
+grpc::Status LocalRpcServer::serializeErrorMsg(const string&                   request_key,
+                                               const RequestInfo&              request_info,
+                                               ErrorInfo                       error_info,
+                                               std::optional<grpc::StatusCode> grpc_status_override) {
     const auto& error_msg       = error_info.ToString();
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
                         ErrorCodeToString(error_info.code()).c_str(),
                         error_msg.c_str());
-    auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
+    auto           grpc_error_code = grpc_status_override.value_or(transErrorCodeToGrpc(error_info.code()));
     ErrorDetailsPB error_details;
     error_details.set_error_code(static_cast<int>(error_info.code()));
     error_details.set_error_message(error_msg);
@@ -151,13 +202,25 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 }
 
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
-    if (mm_processor_ != nullptr && output->multimodal_inputs) {
-        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(output);
-        if (!mm_res.ok()) {
-            return mm_res;
+    output.reset();
+    try {
+        output = QueryConverter::transQuery(&input_pb);
+        if (!output) {
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "query conversion returned a null input");
         }
+        if (mm_processor_ != nullptr && output->multimodal_inputs) {
+            RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+            auto mm_res = mm_processor_->updateMultimodalFeatures(output);
+            if (!mm_res.ok()) {
+                return mm_res;
+            }
+        }
+    } catch (const std::invalid_argument& e) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+    } catch (const std::exception& e) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, e.what());
+    } catch (...) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "input preparation failed with an unknown exception");
     }
     return ErrorInfo::OkStatus();
 }
@@ -188,17 +251,23 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
 
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
-                                                grpc::ServerWriter<GenerateOutputsPB>* writer) {
+                                                grpc::ServerWriter<GenerateOutputsPB>* writer) try {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
-    auto               request_id = request->request_id();
+    if (request == nullptr) {
+        return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "generate request must not be null"));
+    }
+    auto request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     std::shared_ptr<GenerateInput> input;
     {
         auto mm_res = prepareInput(*request, input);
+        if (mm_res.ok() && !input) {
+            mm_res = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "input preparation returned a null input");
+        }
         if (!mm_res.ok()) {
             generate_context.error_info = mm_res;
             generate_context.error_status =
@@ -209,6 +278,14 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         generate_context.request_info = input->request_info;
     }
     CHECK_ERROR_STATUS(generate_context);
+    if (writer == nullptr) {
+        return serializeErrorMsg(generate_context.request_key,
+                                 generate_context.request_info,
+                                 ErrorInfo(ErrorCode::INVALID_PARAMS, "generate response writer must not be null"));
+    }
+    if (!engine_) {
+        throw std::runtime_error("LocalRpcServer engine is not initialized");
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     {
@@ -220,75 +297,154 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
-    meta_->dequeue(generate_context.request_id, generate_context.getStream());
+    if (meta_) {
+        meta_->dequeue(generate_context.request_id, generate_context.getStream());
+    }
     return generate_context.error_status;
+} catch (const std::exception& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(request_key,
+                             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                       "GenerateStreamCall failed with exception: " + std::string(e.what())));
+} catch (...) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "GenerateStreamCall failed with unknown exception"));
 }
 
 grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
                                                const BatchGenerateInputPB* request,
                                                BatchGenerateOutputsPB*     response) {
-    RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
-    c10::InferenceMode inference_guard(true);
-    AtomicGuard        request_guard(onflight_requests_);
-    const int          batch_size = request->inputs_size();
-    RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
+    std::vector<GenerateStreamPtr> streams;
+    BatchStreamCleanupGuard        stream_cleanup_guard(streams);
 
-    if (batch_size == 0) {
-        return grpc::Status::OK;
-    }
+    try {
+        RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
+        c10::InferenceMode inference_guard(true);
+        AtomicGuard        request_guard(onflight_requests_);
+        if (request == nullptr || response == nullptr) {
+            return serializeErrorMsg(
+                "unknown",
+                ErrorInfo(ErrorCode::INVALID_PARAMS, "batch generate request and response must not be null"));
+        }
+        const int batch_size = request->inputs_size();
+        RTP_LLM_LOG_INFO("receive batch generate request, batch_size=%d", batch_size);
+        response->clear_results();
 
-    std::vector<std::shared_ptr<GenerateInput>> inputs;
-    inputs.reserve(batch_size);
-    for (int i = 0; i < batch_size; i++) {
-        std::shared_ptr<GenerateInput> input;
-        auto                           err = prepareInput(request->inputs(i), input);
-        if (!err.ok()) {
-            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
-            for (int j = 0; j < batch_size; j++) {
-                auto* result = response->add_results();
-                auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
-                if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
-                } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
+        if (batch_size == 0) {
+            return serializeErrorMsg(
+                "batch",
+                ErrorInfo(ErrorCode::INVALID_PARAMS, "batch generate request must contain at least one input"));
+        }
+
+        std::vector<std::shared_ptr<GenerateInput>> inputs;
+        inputs.reserve(batch_size);
+        for (int i = 0; i < batch_size; i++) {
+            std::shared_ptr<GenerateInput> input;
+            auto                           err = prepareInput(request->inputs(i), input);
+            if (err.ok() && !input) {
+                err = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "input preparation returned a null input");
+            }
+            if (!err.ok()) {
+                // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping.
+                const bool invalid_params = err.code() == ErrorCode::INVALID_PARAMS;
+                for (int j = 0; j < batch_size; j++) {
+                    auto* result = response->add_results();
+                    auto* err_pb = result->mutable_error_info();
+                    // Internal ErrorCode values and RPC enum values are independent wire contracts.
+                    err_pb->set_error_code(transErrorCodeToRPC(err.code()));
+                    if (j == i) {
+                        err_pb->set_error_message(invalid_params ? err.ToString() :
+                                                                   "input preparation failed: " + err.ToString());
+                    } else if (invalid_params) {
+                        err_pb->set_error_message("batch aborted due to invalid parameters at index "
+                                                  + std::to_string(i));
+                    } else {
+                        err_pb->set_error_message("batch aborted due to input preparation failure at index "
+                                                  + std::to_string(i));
+                    }
                 }
+                return grpc::Status::OK;
+            }
+            inputs.push_back(input);
+        }
+
+        if (!engine_) {
+            for (int i = 0; i < batch_size; ++i) {
+                auto* error_info = response->add_results()->mutable_error_info();
+                error_info->set_error_code(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION));
+                error_info->set_error_message("LocalRpcServer engine is not initialized");
             }
             return grpc::Status::OK;
         }
-        inputs.push_back(input);
-    }
 
-    // enqueueMultiple contract: the returned stream vector is 1:1 with `inputs` (same size, same
-    // order). Streams that failed checkInputLength carry an error reported via reportError() and
-    // surface it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto streams = engine_->enqueueMultiple(inputs).second;
-
-    // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
-    // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
-    // mixed-length batches.
-    for (int i = 0; i < (int)streams.size(); i++) {
-        auto* result = response->add_results();
-
-        GenerateOutputs last_outputs;
-        auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
-        if (!err.ok()) {
-            auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
-                                                                        ErrorCodePB::UNKNOWN_ERROR);
-            err_pb->set_error_message(err.ToString());
-        } else {
-            auto* output_pb = result->mutable_final_output();
-            QueryConverter::transResponse(output_pb,
-                                          &last_outputs,
-                                          inputs[i]->generate_config->aux_info,
-                                          maga_init_params_.misc_config.aux_string,
-                                          streams[i]->specialTokens().eos_token_id);
+        // enqueueMultiple contract: the returned stream vector is 1:1 with `inputs` (same size, same
+        // order). Streams that failed checkInputLength carry an error reported via reportError() and
+        // surface it through collectStreamOutput → nextOutput → ErrorInfo path below.
+        streams = engine_->enqueueMultiple(inputs).second;
+        if (streams.size() != inputs.size()) {
+            throw std::runtime_error("enqueueMultiple returned " + std::to_string(streams.size()) + " streams for "
+                                     + std::to_string(inputs.size()) + " inputs");
         }
-    }
 
-    RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
-    return grpc::Status::OK;
+        // collectStreamOutput is currently SERIAL: streams[0] must finish before streams[1] is drained.
+        // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
+        // mixed-length batches.
+        for (int i = 0; i < (int)streams.size(); i++) {
+            if (!streams[i]) {
+                throw std::runtime_error("enqueueMultiple returned a null stream at index " + std::to_string(i));
+            }
+            auto* result = response->add_results();
+
+            GenerateOutputs last_outputs;
+            auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
+            stream_cleanup_guard.markHandled(static_cast<size_t>(i));
+            if (!err.ok()) {
+                auto* err_pb = result->mutable_error_info();
+                err_pb->set_error_code(transErrorCodeToRPC(err.code()));
+                err_pb->set_error_message(err.ToString());
+            } else {
+                auto* output_pb = result->mutable_final_output();
+                QueryConverter::transResponse(output_pb,
+                                              &last_outputs,
+                                              inputs[i]->generate_config->aux_info,
+                                              maga_init_params_.misc_config.aux_string,
+                                              streams[i]->specialTokens().eos_token_id);
+            }
+        }
+
+        stream_cleanup_guard.dismiss();
+        RTP_LLM_LOG_INFO("batch generate done, batch_size=%d", batch_size);
+        return grpc::Status::OK;
+    } catch (const std::exception& e) {
+        const std::string error_message = "BatchGenerateCall failed with exception: " + std::string(e.what());
+        const int         batch_size    = request ? request->inputs_size() : 0;
+        RTP_LLM_LOG_ERROR("%s, batch_size=%d", error_message.c_str(), batch_size);
+        if (response == nullptr) {
+            return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_message));
+        }
+        response->clear_results();
+        for (int i = 0; i < batch_size; ++i) {
+            auto* error_info = response->add_results()->mutable_error_info();
+            error_info->set_error_code(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION));
+            error_info->set_error_message(error_message);
+        }
+        return grpc::Status::OK;
+    } catch (...) {
+        const std::string error_message = "BatchGenerateCall failed with unknown exception";
+        const int         batch_size    = request ? request->inputs_size() : 0;
+        RTP_LLM_LOG_ERROR("%s, batch_size=%d", error_message.c_str(), batch_size);
+        if (response == nullptr) {
+            return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_message));
+        }
+        response->clear_results();
+        for (int i = 0; i < batch_size; ++i) {
+            auto* error_info = response->add_results()->mutable_error_info();
+            error_info->set_error_code(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION));
+            error_info->set_error_message(error_message);
+        }
+        return grpc::Status::OK;
+    }
 }
 
 grpc::Status

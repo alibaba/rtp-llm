@@ -1,13 +1,16 @@
 
 #pragma once
 #include <c10/core/InferenceMode.h>
+#include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
 #include <atomic>
+#include <cstdint>
 #include <memory>
-#include <mutex>
+
+#include <unordered_set>
 #include <utility>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
@@ -67,15 +70,17 @@ public:
                    bool                      allow_cuda_graph           = true);
     ~PyWrappedModel();
 
-    GptModelOutputs forward(const GptModelInputs& inputs) override;
-    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
-    void            releaseBuffers() override;
-    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool            hasMtpTargetHiddenBuffer() const override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
+    void                       releaseBuffers() override;
+    torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                       hasMtpTargetHiddenBuffer() const override;
+    HiddenStateCaptureStats    hiddenStateCaptureStats() const;
+    void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -93,6 +98,7 @@ private:
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    bool                            shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -139,6 +145,8 @@ private:
     bool       has_mtp_hidden_buffer_{false};
     bool       enable_device_perf_{false};
     bool       check_nan_{false};
+
+    std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::shared_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -418,6 +426,47 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             ProcessorType::ZIG_ZAG, params.parallelism_config, split_hidden_states);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, split_hidden_states=%d.",
                          static_cast<int>(split_hidden_states));
+    }
+
+    if (!params.hidden_state_capture_layer_ids.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            !(int(device_props_.enable_layer_micro_batch) && device_props_.enable_prefill_cp),
+            "hidden-state capture does not support context parallel combined with layer micro-batching");
+        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "supports_hidden_state_capture")
+                                    && py_model_.attr("supports_hidden_state_capture").cast<bool>(),
+                                "configured Python model does not support hidden-state capture");
+        RTP_LLM_CHECK_WITH_INFO(params.hidden_size > 0, "hidden-state capture requires a positive hidden size");
+        RTP_LLM_CHECK_WITH_INFO(params.hidden_state_capture_dtype == HiddenStateCaptureDtype::BF16
+                                    || params.hidden_state_capture_dtype == HiddenStateCaptureDtype::FP8_E4M3,
+                                "unsupported hidden-state capture dtype: %d",
+                                static_cast<int>(params.hidden_state_capture_dtype));
+#if USING_ROCM
+        RTP_LLM_CHECK_WITH_INFO(
+            params.hidden_state_capture_dtype != HiddenStateCaptureDtype::FP8_E4M3,
+            "TorchSpec hidden-state capture does not support FP8 on ROCm because TorchSpec stores float8_e4m3fn, "
+            "while ROCm requires float8_e4m3fnuz");
+#endif
+        std::unordered_set<int64_t> unique_capture_layer_ids;
+        for (const auto layer_id : params.hidden_state_capture_layer_ids) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_num_,
+                                    "hidden-state capture layer id %ld is outside [0, %zu)",
+                                    layer_id,
+                                    layer_num_);
+            RTP_LLM_CHECK_WITH_INFO(unique_capture_layer_ids.insert(layer_id).second,
+                                    "hidden-state capture layer ids must be unique; duplicate id %ld",
+                                    layer_id);
+        }
+        if (!device_props_.ffn_as_service) {
+            hidden_state_capture_publisher_ = std::make_unique<HiddenStateCapturePublisher>(
+                static_cast<int64_t>(params.hidden_state_capture_layer_ids.size()),
+                params.hidden_size,
+                params.hidden_state_capture_dtype,
+                dataTypeToTorchType(description_.data_type),
+                params.parallelism_config.tp_rank == 0,
+                params.parallelism_config.local_rank,
+                params.hidden_state_capture_fail_open,
+                params.metrics_reporter);
+        }
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

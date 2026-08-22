@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <unistd.h>
@@ -27,6 +28,17 @@ using grpc::ClientContext;
 namespace rtp_llm {
 
 namespace {
+
+using GenerateStreamCallSetupFailpoint                                             = void (*)();
+thread_local GenerateStreamCallSetupFailpoint generate_stream_call_setup_failpoint = nullptr;
+
+void runGenerateStreamCallSetupFailpoint() {
+    auto failpoint                       = generate_stream_call_setup_failpoint;
+    generate_stream_call_setup_failpoint = nullptr;
+    if (failpoint != nullptr) {
+        failpoint();
+    }
+}
 
 bool envValueIsTrue(const char* value) {
     return value != nullptr
@@ -99,6 +111,14 @@ void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_c
 }
 
 }  // namespace
+
+namespace prefill_rpc_server_test {
+
+void setGenerateStreamCallSetupFailpoint(GenerateStreamCallSetupFailpoint failpoint) {
+    generate_stream_call_setup_failpoint = failpoint;
+}
+
+}  // namespace prefill_rpc_server_test
 
 PrefillRpcServer::~PrefillRpcServer() = default;
 
@@ -661,26 +681,35 @@ grpc::Status PrefillRpcServer::preferPriorityPreemption(PrefillGenerateContext& 
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
-                                                  grpc::ServerWriter<GenerateOutputsPB>* writer) {
+                                                  grpc::ServerWriter<GenerateOutputsPB>* writer) try {
     RTP_LLM_PROFILE_FUNCTION();
+    if (request == nullptr) {
+        return serializeErrorMsg("unknown",
+                                 ErrorInfo(ErrorCode::INVALID_PARAMS, "prefill generate request must not be null"));
+    }
     RTP_LLM_LOG_DEBUG("request [%ld] start generate stream call", request->request_id());
     c10::InferenceMode inference_guard(true);
-    auto pd_separation = request->generate_config().max_new_tokens() > 1 && request->generate_config().num_beams() <= 1
-                         && request->generate_config().variable_num_beams().size() == 0
-                         && request->generate_config().num_return_sequences() <= 1
-                         && request->generate_config().can_use_pd_separation();
+    const auto&        request_config = request->generate_config();
+    // Resolve generation mode before routing so the router and converter preserve the same
+    // legacy bare-zero semantics and reject the same explicit prefill-only conflicts.
+    const int raw_max_new_tokens      = request_config.max_new_tokens();
+    const int resolved_max_new_tokens = QueryConverter::resolveMaxNewTokens(request_config);
+    auto      pd_separation           = resolved_max_new_tokens > 1 && request_config.num_beams() <= 1
+                         && request_config.variable_num_beams().size() == 0
+                         && request_config.num_return_sequences() <= 1 && request_config.can_use_pd_separation();
     if (prefillTraceLogEnabled()) {
-        RTP_LLM_LOG_INFO(
-            "Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
-            "max_new_tokens=%d num_beams=%d num_return_sequences=%d can_use_pd_separation=%d timeout_ms=%ld",
-            request->request_id(),
-            pd_separation,
-            request->token_ids_size(),
-            request->generate_config().max_new_tokens(),
-            request->generate_config().num_beams(),
-            request->generate_config().num_return_sequences(),
-            request->generate_config().can_use_pd_separation(),
-            static_cast<int64_t>(request->generate_config().timeout_ms()));
+        RTP_LLM_LOG_INFO("Prefill request trace: event=recv request_id=%ld pd_separation=%d token_ids=%d "
+                         "raw_max_new_tokens=%d resolved_max_new_tokens=%d num_beams=%d num_return_sequences=%d "
+                         "can_use_pd_separation=%d timeout_ms=%ld",
+                         request->request_id(),
+                         pd_separation,
+                         request->token_ids_size(),
+                         raw_max_new_tokens,
+                         resolved_max_new_tokens,
+                         request->generate_config().num_beams(),
+                         request->generate_config().num_return_sequences(),
+                         request->generate_config().can_use_pd_separation(),
+                         static_cast<int64_t>(request->generate_config().timeout_ms()));
     }
     if (!pd_separation) {
         if (prefillTraceLogEnabled()) {
@@ -692,19 +721,20 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     }
 
     AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
-    RPCContext     rpc_context{request, writer};
-    auto           prefill_context         = PrefillGenerateContext(&this->resource(),
+    runGenerateStreamCallSetupFailpoint();
+    RPCContext rpc_context{request, writer};
+    auto       prefill_context = PrefillGenerateContext(&this->resource(),
                                                   rpc_context,
                                                   request->generate_config().timeout_ms(),
                                                   server_context,
                                                   metrics_reporter_,
                                                   meta_,
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
-    prefill_context.onflight_requests      = onflight_requests_;
-    prefill_context.loading_cache_requests = loading_cache_requests_;
 
     try {
-        auto status = syncPrefix(prefill_context);
+        prefill_context.onflight_requests      = onflight_requests_;
+        prefill_context.loading_cache_requests = loading_cache_requests_;
+        auto status                            = syncPrefix(prefill_context);
         if (!status.ok()) {
             return status;
         }
@@ -712,6 +742,14 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         if (!status.ok()) {
             return status;
         }
+    } catch (const std::invalid_argument& e) {
+        auto error_msg  = "request [" + prefill_context.request_key + "] catch invalid argument [" + e.what() + "]";
+        auto error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, error_msg);
+        setContextError(prefill_context,
+                        error_info,
+                        serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info));
+        logPrefillFailureTrace("catch_invalid_argument", prefill_context);
+        return prefill_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
@@ -727,6 +765,22 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
 
     return grpc::Status::OK;
+} catch (const std::invalid_argument& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    const auto error_info =
+        ErrorInfo(ErrorCode::INVALID_PARAMS, "request [" + request_key + "] catch invalid argument [" + e.what() + "]");
+    return serializeErrorMsg(request_key, RequestInfo(), error_info);
+} catch (const std::exception& e) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                  "request [" + request_key + "] catch exception [" + std::string(e.what()) + "]"));
+} catch (...) {
+    const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
+    return serializeErrorMsg(
+        request_key,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "request [" + request_key + "] catch unknown exception"));
 }
 
 grpc::Status

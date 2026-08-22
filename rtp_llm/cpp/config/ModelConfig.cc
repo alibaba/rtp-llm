@@ -50,6 +50,17 @@ static std::string mlaOpsTypeToString(MlaOpsType mla_ops_type) {
     }
 }
 
+static std::string hiddenStateCaptureDtypeToString(HiddenStateCaptureDtype capture_dtype) {
+    switch (capture_dtype) {
+        case HiddenStateCaptureDtype::BF16:
+            return "bf16";
+        case HiddenStateCaptureDtype::FP8_E4M3:
+            return "fp8_e4m3";
+        default:
+            return "UNKNOWN(" + std::to_string(static_cast<int>(capture_dtype)) + ")";
+    }
+}
+
 static std::string quantMethodToString(QuantMethod quant_method) {
     switch (quant_method) {
         case QuantMethod::None:
@@ -203,6 +214,16 @@ std::string ModelConfig::to_string() const {
     // Model variant params
     oss << "num_layers: " << num_layers << "\n"
         << "hidden_size: " << hidden_size << "\n"
+        << "hidden_state_capture_layer_ids: [";
+    for (size_t i = 0; i < hidden_state_capture_layer_ids.size(); ++i) {
+        if (i > 0) {
+            oss << ", ";
+        }
+        oss << hidden_state_capture_layer_ids[i];
+    }
+    oss << "]\n"
+        << "hidden_state_capture_dtype: " << hiddenStateCaptureDtypeToString(hidden_state_capture_dtype) << "\n"
+        << "hidden_state_capture_fail_open: " << hidden_state_capture_fail_open << "\n"
         << "attn_config: {\n"
         << attn_config.DebugAttentionConfigStr() << "\n}\n"
         << "mla_ops_type: " << mlaOpsTypeToString(mla_ops_type) << "\n"

@@ -46,6 +46,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["RTP_LLM_TORCHSPEC_HIDDEN_STATE_PUBLISHER_FAIL_OPEN"] = "true"
 
         sys.argv = ["prog"]
 
@@ -59,6 +60,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")
         self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
         self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        self.assertTrue(py_env_configs.model_args.hidden_state_capture_fail_open)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)

@@ -11,6 +11,10 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
 )
+from rtp_llm.models_py.model_desc.hidden_state_capture import (
+    CanonicalHiddenHook,
+    CaptureContext,
+)
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
 from rtp_llm.ops import DeviceResourceConfig
@@ -53,6 +57,31 @@ class GptModelBase(nn.Module):
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
+        self._capture_context = CaptureContext.unsupported()
+
+    def _init_capture_context(
+        self,
+        canonical_layer: CanonicalHiddenHook,
+        canonical_final: CanonicalHiddenHook,
+    ) -> None:
+        self._capture_context = CaptureContext.configured(
+            self.config.hidden_state_capture_layer_ids,
+            canonical_layer,
+            canonical_final,
+        )
+
+    def _init_capture_passthrough(self) -> None:
+        self._capture_context = CaptureContext.passthrough()
+
+    def _disable_capture_context(self) -> None:
+        self._capture_context = CaptureContext.unsupported()
+
+    @property
+    def supports_hidden_state_capture(self) -> bool:
+        return self._capture_context.supported
+
+    def capture_context(self, requested: bool) -> CaptureContext:
+        return self._capture_context.for_forward(requested)
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache

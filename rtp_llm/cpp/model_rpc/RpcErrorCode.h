@@ -10,6 +10,7 @@ namespace rtp_llm {
 inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
     const static std::unordered_map<ErrorCode, grpc::StatusCode> error_code_map = {
         {ErrorCode::CANCELLED, grpc::StatusCode::CANCELLED},
+        {ErrorCode::INVALID_PARAMS, grpc::StatusCode::INVALID_ARGUMENT},
         {ErrorCode::MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::DECODE_MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         // AutoTPM Cancel: victim terminal maps to
@@ -74,6 +75,8 @@ inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
         {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TIMEOUT, ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT},
         {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
          ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
+        {ErrorCodePB::INVALID_PARAMS, ErrorCode::INVALID_PARAMS},
+        {ErrorCodePB::EXECUTION_EXCEPTION, ErrorCode::EXECUTION_EXCEPTION},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -119,6 +122,8 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
         {ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT, ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TIMEOUT},
         {ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
          ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
+        {ErrorCode::INVALID_PARAMS, ErrorCodePB::INVALID_PARAMS},
+        {ErrorCode::EXECUTION_EXCEPTION, ErrorCodePB::EXECUTION_EXCEPTION},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {

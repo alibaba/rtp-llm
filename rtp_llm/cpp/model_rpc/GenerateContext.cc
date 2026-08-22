@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
@@ -38,6 +40,37 @@ bool GenerateContext::cancelled() const {
 
 bool GenerateContext::isRequestCancelled() const {
     return server_context && server_context->IsCancelled();
+}
+
+ErrorInfo GenerateContext::finalErrorInfo() const {
+    if (error_info.hasError()) {
+        return error_info;
+    }
+    if (stream_ && stream_->hasError()) {
+        return stream_->statusInfo();
+    }
+
+    ErrorDetailsPB error_details;
+    if (!error_status.error_details().empty() && error_details.ParseFromString(error_status.error_details())
+        && error_details.error_code() != static_cast<int>(ErrorCode::NONE_ERROR)) {
+        return ErrorInfo(static_cast<ErrorCode>(error_details.error_code()), error_details.error_message());
+    }
+    switch (error_status.error_code()) {
+        case grpc::StatusCode::OK:
+            return ErrorInfo::OkStatus();
+        case grpc::StatusCode::CANCELLED:
+            return ErrorInfo(ErrorCode::CANCELLED, error_status.error_message());
+        case grpc::StatusCode::INVALID_ARGUMENT:
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, error_status.error_message());
+        case grpc::StatusCode::DEADLINE_EXCEEDED:
+            return ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, error_status.error_message());
+        case grpc::StatusCode::RESOURCE_EXHAUSTED:
+            return ErrorInfo(ErrorCode::MALLOC_FAILED, error_status.error_message());
+        case grpc::StatusCode::INTERNAL:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_status.error_message());
+        default:
+            return ErrorInfo(ErrorCode::UNKNOWN_ERROR, error_status.error_message());
+    }
 }
 
 int64_t GenerateContext::executeTimeMs() {

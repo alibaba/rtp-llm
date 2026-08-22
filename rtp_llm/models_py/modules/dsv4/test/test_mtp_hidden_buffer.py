@@ -1,5 +1,7 @@
 import types
 import unittest
+from typing import Any
+from unittest.mock import patch
 
 import torch
 
@@ -8,7 +10,7 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import (
     Dsv4MtpHiddenBufferSpec,
     Dsv4SharedRuntimeBufferStore,
 )
-from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
 
 
 class _RuntimeModule(torch.nn.Module):
@@ -24,6 +26,39 @@ class _RuntimeModule(torch.nn.Module):
 
 
 class MtpHiddenBufferTest(unittest.TestCase):
+    def test_model_constructs_with_nonempty_hidden_state_capture_layers(self) -> None:
+        model_config: Any = types.SimpleNamespace(
+            num_layers=2,
+            vocab_size=17,
+            gen_num_per_cycle=1,
+            hidden_state_capture_layer_ids=[1],
+            capture_aux_hidden_layer_ids=[],
+            inter_size=16,
+            ckpt_path="",
+        )
+        args = V4Args(
+            vocab_size=model_config.vocab_size,
+            dim=8,
+            n_layers=model_config.num_layers,
+            compress_ratios=[0, 0],
+        )
+
+        weights: Any = None
+        with patch(
+            "rtp_llm.models_py.model_desc.deepseek_v4_model._args_from_model_config",
+            return_value=args,
+        ):
+            model = DeepSeekV4Model(
+                model_config,
+                parallelism_config=None,
+                weights=weights,
+                moe_config=None,
+                max_generate_batch_size=1,
+            )
+
+        self.assertTrue(model.supports_hidden_state_capture)
+        self.assertEqual(model._capture_context.layer_ids, (1,))
+
     def setUp(self) -> None:
         Dsv4SharedRuntimeBufferStore._reset_for_test()
 
