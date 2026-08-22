@@ -102,6 +102,17 @@ cc_test(
 )
 
 cc_test(
+    name = "kda_shadow_cache_test",
+    srcs = ["KdaShadowCacheTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kda_shadow_cache",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda12_torch_link_deps,
+)
+
+cc_test(
     name = "cp_slot_mapper_test",
     srcs = [
         "CPSlotMapperTest.cc",
