@@ -12,11 +12,9 @@ from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_reduce,
     get_process_group,
+    reduce_scatter_padded,
 )
-from rtp_llm.models_py.distributed.sequence_parallel import (
-    TokenShardLayout,
-    shard_tokens_with_padding,
-)
+from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
 from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
@@ -256,6 +254,7 @@ class KimiK3KDA(nn.Module):
         mode: KDAExecutionMode,
     ) -> torch.Tensor:
         token_count = output_gate.shape[1]
+        collective_group = getattr(self, "collective_group", Group.TP)
         # Decode and target-verify must use the same numerics. Mixing the fused
         # projection path with this explicit path can change near-tied logits.
         use_explicit_output = mode == "decode"
@@ -285,17 +284,18 @@ class KimiK3KDA(nn.Module):
                 self.weights[W.linear_attn_out_w],
             )
             if self.attn_tp_size > 1:
-                output = all_reduce(output, group=self.collective_group)
                 decode_sp = (
                     sequence_parallel and not is_target_verify and hidden_states.is_cuda
                 )
                 if decode_sp:
-                    output, _ = shard_tokens_with_padding(
-                        output,
-                        token_count,
-                        self.attn_tp_size,
-                        self.attn_tp_rank,
+                    # Each rank contributes its row-parallel output projection
+                    # and retains only its fixed-bucket DP rows. This is
+                    # equivalent to all-reduce + shard, while avoiding the
+                    # replicated output activation and extra NVLink traffic.
+                    return reduce_scatter_padded(
+                        output, group=collective_group
                     )
+                output = all_reduce(output, group=collective_group)
             return output
         use_reduce_scatter = (
             sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
@@ -307,7 +307,7 @@ class KimiK3KDA(nn.Module):
             fused = gemm_reduce_scatter(
                 projection_input,
                 self.weights[W.linear_attn_out_w],
-                get_process_group(self.collective_group),
+                get_process_group(collective_group),
                 pad_rows=pad_reduce_scatter,
             )
             if fused is not None:
@@ -319,7 +319,7 @@ class KimiK3KDA(nn.Module):
             reduce_scatter_tokens=use_reduce_scatter,
             pad_reduce_scatter_tokens=pad_reduce_scatter,
             use_input_dtype_reduce_scatter=(mode == "prefill"),
-            group=self.collective_group,
+            group=collective_group,
         )
 
     def _validate_request(
