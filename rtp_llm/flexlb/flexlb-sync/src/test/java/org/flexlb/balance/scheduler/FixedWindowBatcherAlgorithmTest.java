@@ -58,15 +58,19 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     @Test
-    void dispatchesWhenPredictionReachesThreshold() throws InterruptedException {
+    void capsBatchGrowthAtPredictedExecutionBudget() throws InterruptedException {
         FlexlbConfig config = batchConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        when(predictor.predictBatchMs(anyList())).thenAnswer(invocation ->
-                ((List<?>) invocation.getArgument(0)).size() == 1 ? 499.0 : 500.0);
+        List<Integer> predictedSizes = new ArrayList<>();
+        when(predictor.predictBatchMs(anyList())).thenAnswer(invocation -> {
+            int size = ((List<?>) invocation.getArgument(0)).size();
+            predictedSizes.add(size);
+            return size == 1 ? 499.0 : 500.0;
+        });
 
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
@@ -80,11 +84,11 @@ class FixedWindowBatcherAlgorithmTest {
         ArgumentCaptor<List<BatchItem>> items = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
         verify(handler).onDecisionGroupReady(items.capture(), meta.capture());
-        assertEquals(2, items.getValue().size());
-        assertEquals("predict_threshold", meta.getValue().reason());
-        ArgumentCaptor<List<BatchItem>> predictions = ArgumentCaptor.forClass(List.class);
-        verify(predictor, times(1)).predictBatchMs(predictions.capture());
-        assertEquals(2, predictions.getValue().size());
+        assertEquals(List.of(1L), items.getValue().stream()
+                .map(BatchItem::requestId).toList());
+        assertEquals("predicted_execution_cap", meta.getValue().reason());
+        assertEquals(1, context.size(), "the over-budget member stays queued");
+        assertEquals(List.of(1, 2), predictedSizes);
     }
 
     @Test
@@ -136,9 +140,7 @@ class FixedWindowBatcherAlgorithmTest {
         verify(handler).onDecisionGroupReady(dispatched.capture(), meta.capture());
         assertEquals(32, dispatched.getValue().size());
         assertEquals("batch_full", meta.getValue().reason());
-        ArgumentCaptor<List<BatchItem>> predictions = ArgumentCaptor.forClass(List.class);
-        verify(predictor, times(1)).predictBatchMs(predictions.capture());
-        assertEquals(32, predictions.getValue().size());
+        verify(predictor, times(32)).predictBatchMs(anyList());
     }
 
     @Test
@@ -166,13 +168,12 @@ class FixedWindowBatcherAlgorithmTest {
         verify(handler).onDecisionGroupReady(dispatched.capture(), meta.capture());
         assertEquals(List.of(1L), dispatched.getValue().stream()
                 .map(BatchItem::requestId).toList());
-        assertEquals("predict_threshold", meta.getValue().reason());
+        assertEquals("predicted_execution_cap", meta.getValue().reason());
         verify(predictor, times(1)).predictBatchMs(anyList());
     }
 
     @Test
-    void fullBatchDispatchesLargestFeasibleGroupWithoutScanningPrefixes()
-            throws InterruptedException {
+    void fullBatchDispatchesLargestFeasibleGroup() throws InterruptedException {
         FlexlbConfig config = batchConfig();
         SchedulingTestConfig.useBatchDispatcher(config).setEarlyDispatchPredictedExecutionMs((long) 500);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
@@ -204,13 +205,11 @@ class FixedWindowBatcherAlgorithmTest {
                 .map(BatchItem::requestId).toList());
         assertEquals("batch_full", meta.getValue().reason());
         assertEquals(0, context.size());
-        ArgumentCaptor<List<BatchItem>> predictions = ArgumentCaptor.forClass(List.class);
-        verify(predictor, times(1)).predictBatchMs(predictions.capture());
-        assertEquals(4, predictions.getValue().size());
+        verify(predictor, times(4)).predictBatchMs(anyList());
     }
 
     @Test
-    void timeoutDispatchesLargestFeasibleGroupWithoutSecondPrediction() throws InterruptedException {
+    void timeoutDispatchesLargestFeasibleGroup() throws InterruptedException {
         FlexlbConfig config = batchConfig();
         SchedulingTestConfig.useBatchDispatcher(config).setEarlyDispatchPredictedExecutionMs((long) 500);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10);
@@ -237,11 +236,11 @@ class FixedWindowBatcherAlgorithmTest {
         verify(handler).onDecisionGroupReady(dispatched.capture(), meta.capture());
         assertEquals(2, dispatched.getValue().size());
         assertEquals("fixed_window_timeout", meta.getValue().reason());
-        verify(predictor, times(1)).predictBatchMs(anyList());
+        verify(predictor, times(2)).predictBatchMs(anyList());
     }
 
     @Test
-    void nonMonotonicPredictionDoesNotScanIntermediatePrefixes() throws InterruptedException {
+    void nonMonotonicPredictionCapsAtTheFirstOverBudgetMember() throws InterruptedException {
         FlexlbConfig config = batchConfig();
         SchedulingTestConfig.useBatchDispatcher(config).setEarlyDispatchPredictedExecutionMs((long) 500);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
@@ -251,12 +250,13 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
+        // A cheaper four-member prediction must not tempt the group past the
+        // three-member spike that already exceeds the budget.
+        List<Integer> predictedSizes = new ArrayList<>();
         when(predictor.predictBatchMs(anyList())).thenAnswer(invocation -> {
             int size = ((List<?>) invocation.getArgument(0)).size();
-            if (size != 4) {
-                throw new AssertionError("non-maximum prefix was predicted: " + size);
-            }
-            return 700.0;
+            predictedSizes.add(size);
+            return size == 3 ? 600.0 : 100.0;
         });
 
         long now = System.currentTimeMillis();
@@ -275,11 +275,10 @@ class FixedWindowBatcherAlgorithmTest {
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
         verify(handler).onDecisionGroupReady(
                 dispatched.capture(), any(DecisionGroupMetadata.class));
-        assertEquals(List.of(1L, 2L, 3L, 4L), dispatched.getValue().stream()
+        assertEquals(List.of(1L, 2L), dispatched.getValue().stream()
                 .map(BatchItem::requestId).toList());
-        ArgumentCaptor<List<BatchItem>> predictions = ArgumentCaptor.forClass(List.class);
-        verify(predictor, times(1)).predictBatchMs(predictions.capture());
-        assertEquals(4, predictions.getValue().size());
+        assertEquals(List.of(1, 2, 3), predictedSizes,
+                "growth stops at the spike instead of climbing back to four");
     }
 
     @Test
@@ -319,7 +318,7 @@ class FixedWindowBatcherAlgorithmTest {
                 .map(BatchItem::requestId).toList());
         assertEquals("batch_full", meta.getValue().reason());
         assertEquals(2, context.size());
-        verify(predictor, times(1)).predictBatchMs(anyList());
+        verify(predictor, times(2)).predictBatchMs(anyList());
     }
 
     @Test
@@ -369,7 +368,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         ArgumentCaptor<DecisionGroupMetadata> meta = ArgumentCaptor.forClass(DecisionGroupMetadata.class);
         verify(handler).onDecisionGroupReady(anyList(), meta.capture());
-        assertEquals("predict_threshold", meta.getValue().reason());
+        assertEquals("predicted_execution_cap", meta.getValue().reason());
         verify(endpoint, never()).getInflightBatchCount();
     }
 
@@ -605,7 +604,7 @@ class FixedWindowBatcherAlgorithmTest {
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useBatchDispatcher(config).setEarlyDispatchPredictedExecutionMs((long) 500);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(3);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightBatchesPerPrefillWorker(4);
 
         long now = System.currentTimeMillis();
@@ -637,10 +636,7 @@ class FixedWindowBatcherAlgorithmTest {
             }
             return 0;
         });
-        when(predictor.predictBatchMs(anyList())).thenAnswer(invocation -> {
-            assertEquals(List.of(high, low), invocation.getArgument(0));
-            return 600.0;
-        });
+        when(predictor.predictBatchMs(anyList())).thenReturn(100.0);
 
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = new BatcherContext(
@@ -656,7 +652,7 @@ class FixedWindowBatcherAlgorithmTest {
         assertEquals(List.of(high, low), delivered.getValue());
         assertTrue(context.isActiveEmpty());
         assertEquals(0, context.size());
-        verify(predictor, times(1)).predictBatchMs(anyList());
+        verify(predictor, times(2)).predictBatchMs(anyList());
     }
 
     @Test
@@ -715,7 +711,7 @@ class FixedWindowBatcherAlgorithmTest {
         FlexlbConfig config = batchConfig();
         SchedulingTestConfig.useBatchDispatcher(config).setEarlyDispatchPredictedExecutionMs((long) 500);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(4);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
 
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
@@ -728,14 +724,15 @@ class FixedWindowBatcherAlgorithmTest {
                 "test", endpoint, config, handler, queueWith(first, second),
                 mock(BatchSchedulerReporter.class));
         when(predictor.predictBatchMs(anyList())).thenAnswer(invocation -> {
-            assertEquals(List.of(first, second), invocation.getArgument(0));
-            assertTrue(context.remove(second));
-            return 600.0;
+            if (((List<?>) invocation.getArgument(0)).size() == 2) {
+                assertTrue(context.remove(second));
+            }
+            return 100.0;
         });
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
-        verify(predictor, times(1)).predictBatchMs(anyList());
+        verify(predictor, times(2)).predictBatchMs(anyList());
         verify(handler, never()).onDecisionGroupReady(anyList(), any());
         assertEquals(List.of(first), context.sortedItems());
     }
@@ -770,23 +767,25 @@ class FixedWindowBatcherAlgorithmTest {
                 mock(BatchSchedulerReporter.class));
 
         AtomicInteger predictionCalls = new AtomicInteger();
-        when(predictor.predictBatchMs(anyList())).thenAnswer(ignored -> {
-            int call = predictionCalls.incrementAndGet();
-            // Alternate an offer below and above the priority of the captured
-            // group. Both offers linearize after that decision snapshot and
-            // must wait for a following decision rather than invalidating it.
-            int laterPriority = (call & 1) == 0 ? 1 : 100;
-            BatchItem later = enqueuedItem(
-                    10_000L + call, now + 1_000L + call, 1, laterPriority);
-            queueLock.lock();
-            try {
-                queue.add(later);
-                queueDepth.incrementAndGet();
-                queueVersion.incrementAndGet();
-            } finally {
-                queueLock.unlock();
+        when(predictor.predictBatchMs(anyList())).thenAnswer(invocation -> {
+            if (((List<?>) invocation.getArgument(0)).size() == 1) {
+                int call = predictionCalls.incrementAndGet();
+                // Alternate an offer below and above the priority of the captured
+                // group. Both offers linearize after that decision snapshot and
+                // must wait for a following decision rather than invalidating it.
+                int laterPriority = (call & 1) == 0 ? 1 : 100;
+                BatchItem later = enqueuedItem(
+                        10_000L + call, now + 1_000L + call, 1, laterPriority);
+                queueLock.lock();
+                try {
+                    queue.add(later);
+                    queueDepth.incrementAndGet();
+                    queueVersion.incrementAndGet();
+                } finally {
+                    queueLock.unlock();
+                }
             }
-            return 600.0;
+            return 100.0;
         });
 
         FixedWindowBatcherAlgorithm algorithm = new FixedWindowBatcherAlgorithm();
@@ -801,7 +800,7 @@ class FixedWindowBatcherAlgorithmTest {
         assertEquals(200, delivered.getAllValues().stream().mapToInt(List::size).sum());
         assertEquals(50, context.size());
         assertEquals(50, predictionCalls.get());
-        verify(predictor, times(50)).predictBatchMs(anyList());
+        verify(predictor, times(200)).predictBatchMs(anyList());
     }
 
     @Test
@@ -986,7 +985,7 @@ class FixedWindowBatcherAlgorithmTest {
             // P=[100,100] has padded compute shape 200; equality is rejected
             // by the Engine's strict max_batch_tokens_size gate.
             status.setMaxBatchTokensSize(200);
-            return 600.0;
+            return 100.0;
         });
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         long now = System.currentTimeMillis();
@@ -999,7 +998,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
-        verify(predictor, times(1)).predictBatchMs(anyList());
+        verify(predictor, times(2)).predictBatchMs(anyList());
         verify(handler, never()).onDecisionGroupReady(anyList(), any());
         assertEquals(2, context.size());
     }
@@ -1021,7 +1020,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getPredictor()).thenReturn(predictor);
         when(predictor.predictBatchMs(anyList())).thenAnswer(ignored -> {
             status.getAvailableKvCacheTokens().set(199);
-            return 600.0;
+            return 100.0;
         });
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         long now = System.currentTimeMillis();
@@ -1034,7 +1033,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
-        verify(predictor, times(1)).predictBatchMs(anyList());
+        verify(predictor, times(2)).predictBatchMs(anyList());
         verify(handler, never()).onDecisionGroupReady(anyList(), any());
         assertEquals(2, context.size());
     }

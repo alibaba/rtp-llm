@@ -22,15 +22,20 @@ import java.util.concurrent.TimeUnit;
  *       the worker token capacity, it can never be picked by any batch,
  *       so it is dropped immediately instead of waiting for the deadline.</li>
  *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
- *   <li>Build the largest homogeneous, resource-feasible prefix.</li>
- *   <li>When {@code dispatcher.earlyDispatchPredictedExecutionMs} is configured,
- *       predict that prefix exactly once and dispatch the whole prefix when it
- *       reaches the threshold. A long singleton is the natural one-member case.</li>
- *   <li>Otherwise, batch-full ({@code dispatcher.maxRequests}) and fixed-window
- *       timeout ({@code dispatcher.maxCollectionWaitMs}) are the starvation-safe
- *       fallbacks for that same prefix. The collection window belongs to the
- *       batcher rather than to any single member, so it is measured from the
- *       enqueue time of the longest-waiting queued request.</li>
+ *   <li>Build the largest homogeneous prefix that stays inside every bound on
+ *       batch growth: {@code dispatcher.maxRequests}, the worker compute and KV
+ *       shapes, and — when configured — a predicted execution time below
+ *       {@code dispatcher.earlyDispatchPredictedExecutionMs}. The head is a
+ *       mandatory member, so a single request already over that budget forms
+ *       the whole batch.</li>
+ *   <li>Dispatch as soon as growth stopped at a bound that cannot relax: the
+ *       predicted execution budget or {@code dispatcher.maxRequests}. Compute
+ *       and KV pressure are transient, so they stop growth without dispatching.</li>
+ *   <li>Otherwise dispatch once the collection window
+ *       ({@code dispatcher.maxCollectionWaitMs}) has run out, so a partial batch
+ *       never waits indefinitely for requests that have not arrived. The window
+ *       covers the picked group, whose members are the ones paying for the wait;
+ *       queue age itself is bounded by the absolute request expiration.</li>
  *   <li>Otherwise park briefly and retry.</li>
  * </ol>
  *
@@ -143,8 +148,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        // 1. Engine backpressure: park if the prefill worker already has too
-        //    many batches inflight, to prevent overloading the engine.
+        // Engine backpressure: park if the prefill worker already has too many
+        // batches inflight, to prevent overloading the engine.
         if (deliveryCapacityBlocked(ctx, observedHead)) {
             TimeUnit.MILLISECONDS.sleep(1);
             return;
@@ -206,14 +211,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        fullCandidate = snapshot.items().size() >= batchMaxCount;
-        boolean timeoutReady = windowElapsed(
-                snapshot.oldestEnqueuedAtMs(), nowMs, fixedWaitMs);
-        if (predictThresholdMs <= 0 && !fullCandidate && !timeoutReady) {
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
-        }
-
         PrefillTimePredictor predictor = predictThresholdMs > 0
                 ? ctx.prefillEp().getPredictor() : null;
         batchKvTokens = ctx.batchKvCapacity();
@@ -223,69 +220,55 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         }
         long predictorGeneration = predictor == null ? 0L : predictor.generation();
 
-        // Build the homogeneous, resource-feasible prefix entirely from the
-        // stable snapshot. Never seed from one queue state and fill from another.
+        // Grow the group entirely from the stable snapshot, keeping it inside
+        // every count, resource and predicted-time bound. Never seed from one
+        // queue state and fill from another.
         FixedPick pick = pickWithinCapacity(
-                snapshot, batchMaxCount, batchMaxTokens, batchKvTokens);
+                snapshot, batchMaxCount, batchMaxTokens, batchKvTokens,
+                predictor, predictThresholdMs);
         List<BatchItem> candidates = pick.items();
-
-        // With prediction enabled, evaluate the one maximum feasible prefix
-        // before readiness fallbacks. A singleton long request is simply P of
-        // size one.
-        if (predictor != null) {
-            double predicted = predictor.predictBatchMs(candidates);
-            if (predictor.generation() != predictorGeneration) {
-                // Do not publish a decision made against a model revision that
-                // was replaced while the formula was being evaluated. The next
-                // worker tick retries against the new immutable parameters.
-                return;
-            }
-            if (predicted >= predictThresholdMs) {
-                if (!releaseDecisionGroup(
-                        ctx, candidates, pick.shape(),
-                        "predict_threshold", predictor,
-                        predictorGeneration, pick.queueVersion())) {
-                    TimeUnit.MILLISECONDS.sleep(1);
-                }
-                return;
-            }
+        if (predictor != null && predictor.generation() != predictorGeneration) {
+            // Do not publish a decision made against a model revision that was
+            // replaced while the formula was being evaluated. The next worker
+            // tick retries against the new immutable parameters.
+            return;
         }
 
-        // 2. A homogeneous head-mode prefix reaches batchMaxCount → dispatch
-        //    the largest feasible group. A live
-        //    configuration transition may leave the other delivery mode behind
-        //    the head; it must neither join nor make this group appear full.
-        if (pick.modePrefixSize() >= batchMaxCount) {
-            if (!releaseDecisionGroup(ctx, candidates, pick.shape(),
-                    "batch_full", predictor,
-                    predictorGeneration, pick.queueVersion())) {
+        // Dispatch once growth stopped at a bound that will not relax on its
+        // own — the predicted execution budget, or a homogeneous head-mode
+        // prefix reaching batchMaxCount — or once the collection window has run
+        // out and there is nothing left to wait for. A live configuration
+        // transition may leave the other delivery mode behind the head; it must
+        // neither join this group nor make it appear full. Transient compute/KV
+        // pressure can also limit growth, and until the window elapses the
+        // queue-order behavior is to wait rather than bypass members.
+        String reason = null;
+        if (pick.predictedTimeCapped()) {
+            reason = "predicted_execution_cap";
+        } else if (pick.modePrefixSize() >= batchMaxCount) {
+            reason = "batch_full";
+        } else if (windowElapsed(pick.windowOpenedAtMs(), nowMs, fixedWaitMs)) {
+            reason = "fixed_window_timeout";
+        }
+        if (reason != null) {
+            if (!releaseDecisionGroup(ctx, candidates, pick.shape(), reason,
+                    predictor, predictorGeneration, pick.queueVersion())) {
                 TimeUnit.MILLISECONDS.sleep(1);
             }
             return;
         }
 
-        // 3. Fixed-window timeout is the starvation-safety fallback. Temporary
-        //    compute/KV pressure may prevent further growth; before the timeout
-        //    the existing queue-order behavior is to wait rather than bypass members.
-        if (timeoutReady) {
-            if (!releaseDecisionGroup(
-                    ctx, candidates, pick.shape(),
-                    "fixed_window_timeout", predictor,
-                    predictorGeneration, pick.queueVersion())) {
-                TimeUnit.MILLISECONDS.sleep(1);
-            }
-            return;
-        }
-
-        // 4. Park
         TimeUnit.MILLISECONDS.sleep(1);
     }
 
     /**
      * Whether the collection window opened by {@code windowOpenedAtMs} has run
-     * out. The window belongs to the batcher rather than to any single member,
-     * so it is anchored on the longest-waiting queued request: a later arrival
-     * that sorts ahead of it under PRIORITY ordering cannot reopen it.
+     * out. The window covers a group rather than any single member, so it is
+     * anchored on that group's longest-waiting member. Under PRIORITY ordering a
+     * later arrival sorts ahead of that member but joins the same group, so it
+     * cannot reopen the window.
+     *
+     * <p>{@link Long#MAX_VALUE} means there is no member to wait for.
      */
     private static boolean windowElapsed(long windowOpenedAtMs,
                                          long nowMs,
@@ -312,27 +295,39 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     /**
      * Greedily pick up to {@code maxCount} items in the current queue order
-     * while keeping the batch inside the Engine's compute and KV resource shape.
+     * while keeping the batch inside the Engine's compute and KV resource shape
+     * and, when a predictor is supplied, below {@code predictThresholdMs} of
+     * predicted execution time.
      *
-     * <p>The queue head remains the mandatory first member while shaping;
-     * temporary KV pressure prevents adding more members. The complete picked
-     * shape is revalidated immediately before staging, so even a singleton
-     * waits rather than being published against a newly insufficient budget.
+     * <p>The queue head remains the mandatory first member while shaping, so a
+     * request whose own predicted execution already exceeds the budget forms the
+     * whole batch. Temporary KV pressure prevents adding more members. The
+     * complete picked shape is revalidated immediately before staging, so even a
+     * singleton waits rather than being published against a newly insufficient
+     * budget.
+     *
+     * <p>Each candidate is measured against the group it would join, which makes
+     * the bound well defined for a predictor that is not monotone in batch size.
      */
     private static FixedPick pickWithinCapacity(
             BatcherContext.ActiveQueueSnapshot snapshot,
             int maxCount,
             long batchMaxTokens,
-            long batchKvTokens) {
+            long batchKvTokens,
+            PrefillTimePredictor predictor,
+            long predictThresholdMs) {
         List<BatchItem> orderedItems = snapshot.items();
         BatchItem head = orderedItems.get(0);
         List<BatchItem> picked = new ArrayList<>(
                 Math.min(maxCount, orderedItems.size()));
         picked.add(head);
         BatchShape shape = BatchShape.empty().add(head);
+        long windowOpenedAtMs = head.enqueuedAtMs();
         int modePrefixSize = 1;
         boolean capacityOpen = true;
-        for (int index = 1; index < orderedItems.size(); index++) {
+        boolean predictedTimeCapped = predictor != null
+                && predictor.predictBatchMs(picked) >= predictThresholdMs;
+        for (int index = 1; index < orderedItems.size() && !predictedTimeCapped; index++) {
             BatchItem item = orderedItems.get(index);
             if (item.deliveryMode() != head.deliveryMode()) {
                 break;
@@ -349,21 +344,30 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                 capacityOpen = false;
                 continue;
             }
-            if (!picked.isEmpty() && !candidate.fitsKv(batchKvTokens)) {
+            if (!candidate.fitsKv(batchKvTokens)) {
                 capacityOpen = false;
                 continue;
             }
             picked.add(item);
+            if (predictor != null
+                    && predictor.predictBatchMs(picked) >= predictThresholdMs) {
+                picked.remove(picked.size() - 1);
+                predictedTimeCapped = true;
+                break;
+            }
             shape = candidate;
+            windowOpenedAtMs = Math.min(windowOpenedAtMs, item.enqueuedAtMs());
         }
-        return new FixedPick(
-                picked, modePrefixSize, shape, snapshot.queueVersion());
+        return new FixedPick(picked, modePrefixSize, shape,
+                snapshot.queueVersion(), windowOpenedAtMs, predictedTimeCapped);
     }
 
     private record FixedPick(List<BatchItem> items,
                              int modePrefixSize,
                              BatchShape shape,
-                             long queueVersion) {
+                             long queueVersion,
+                             long windowOpenedAtMs,
+                             boolean predictedTimeCapped) {
     }
 
     private static boolean releaseDecisionGroup(BatcherContext ctx,

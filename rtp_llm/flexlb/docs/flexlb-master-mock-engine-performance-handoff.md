@@ -171,7 +171,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 2000 QPS 包含连续的机器数减半对照：`16/32 -> 8/16 -> 4/8 -> 2/4 -> 1/2`。矩阵中的请求按目标 QPS 均匀分布到纳秒时间点，不会在一秒开始时集中发送。每个 prefill 都是独立的 Netty mock server，Master 会建立真实 engine gRPC 连接；decode 只注册逻辑 endpoint，因为 schedule ACK 之前不会调用 decode RPC。每一格都校验成功率、实际 client/Master QPS、Master P99、Master batch wait 分位数、dispatch ACK、dispatch reason、所有 prefill 收到流量、prefill/decode 路由覆盖全部 endpoint，以及请求无丢失/重复。
 
-这里的排队数据是 Master 的 `batch_wait_ms`（路由提交到 batch dispatch），用于观察 engine 数量减少后每个 batcher 的聚合与等待；它不是 engine 内部计算队列延迟。2000 QPS 场景要求 batch wait P95 非零，并默认要求 P99 不超过 50 ms。输出同时提供 `batch_full` / `fixed_window_timeout` / `predict_threshold` 次数和 `dispatch_ack`，用于区分“成功凑满后提前发送”“等待窗口到期”和“mock worker ACK 变慢”。回归门禁还会根据 `QPS * fixed_window / prefill_count` 推导平均 batch 下限，默认要求达到理论值的 80%。
+这里的排队数据是 Master 的 `batch_wait_ms`（路由提交到 batch dispatch），用于观察 engine 数量减少后每个 batcher 的聚合与等待；它不是 engine 内部计算队列延迟。2000 QPS 场景要求 batch wait P95 非零，并默认要求 P99 不超过 50 ms。输出同时提供 `batch_full` / `fixed_window_timeout` / `predicted_execution_cap` 次数和 `dispatch_ack`，用于区分“成功凑满后发送”“等待窗口到期”“预测执行时间到顶”和“mock worker ACK 变慢”。回归门禁还会根据 `QPS * fixed_window / prefill_count` 推导平均 batch 下限，默认要求达到理论值的 80%。
 
 这个矩阵回答的是“Master 在不同 engine 数量和请求压力下是否退化”，不能单独推导真实 GPU 机器数。真实机器数还依赖单机 batch 处理时间、并发上限、KV 容量和请求完成状态更新；这些参数必须通过 Java mock engine 的处理模型或真实 engine 容量结果输入 `run_online_eval.sh`。
 

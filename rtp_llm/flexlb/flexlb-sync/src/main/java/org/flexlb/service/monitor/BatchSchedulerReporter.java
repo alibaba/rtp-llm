@@ -49,7 +49,7 @@ import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 public class BatchSchedulerReporter {
 
     private static final String[] FIXED_WINDOW_DISPATCH_REASONS = {
-            "batch_full", "fixed_window_timeout", "predict_threshold"
+            "batch_full", "fixed_window_timeout", "predicted_execution_cap"
     };
 
     private final FlexMonitor monitor;

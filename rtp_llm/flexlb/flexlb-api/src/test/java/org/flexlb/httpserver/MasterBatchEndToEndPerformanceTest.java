@@ -440,7 +440,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             double dispatchAckMeanMs = number(dispatchAck, "mean").doubleValue();
             long batchFullCount = dispatchReasonCount("batch_full");
             long windowTimeoutCount = dispatchReasonCount("fixed_window_timeout");
-            long predictThresholdCount = dispatchReasonCount("predict_threshold");
+            long predictedExecutionCapCount = dispatchReasonCount("predicted_execution_cap");
             int activePrefillRoutes = activeScheduledEngineCount(result, RoleType.PREFILL);
             int activeDecodeRoutes = activeScheduledEngineCount(result, RoleType.DECODE);
 
@@ -454,7 +454,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             + "batch_wait_p95=%dms batch_wait_p99=%dms "
                             + "batch_wait_avg=%.3fms dispatch_ack_p99=%dms "
                             + "dispatch_ack_avg=%.3fms engine_batches=%d "
-                            + "batch_full=%d window_timeout=%d predict_threshold=%d "
+                            + "batch_full=%d window_timeout=%d predicted_execution_cap=%d "
                             + "avg_batch=%.2f max_batch=%d%n",
                     prefillEngineCount, decodeEngineCount, targetQps, requestCount,
                     result.qps(), masterQps, serverP50Ms, serverP90Ms, serverP95Ms,
@@ -463,7 +463,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     batchWaitP50Ms, batchWaitP90Ms, batchWaitP95Ms, batchWaitP99Ms,
                     batchWaitMeanMs, dispatchAckP99Ms, dispatchAckMeanMs,
                     batches.batchCount(), batchFullCount, windowTimeoutCount,
-                    predictThresholdCount, batches.averageBatchSize(),
+                    predictedExecutionCapCount, batches.averageBatchSize(),
                     batches.maxBatchSize());
 
             assertEquals(requestCount, number(masterSnapshot, "arrival_count").longValue());
@@ -480,7 +480,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             assertEquals(decodeEngineCount, activeDecodeRoutes,
                     "every decode engine must appear in measured routing decisions");
             assertEquals(batches.batchCount(),
-                    batchFullCount + windowTimeoutCount + predictThresholdCount,
+                    batchFullCount + windowTimeoutCount + predictedExecutionCapCount,
                     "every engine batch must have one recorded dispatch reason");
             assertEquals(0L, activeRequestCounter.getCount());
             assertTrue(result.qps() >= targetQps * minimumQpsRatio,

@@ -93,10 +93,11 @@ sequenceDiagram
 ```
 
 `NON_BATCH` does not run a collection window: each request becomes a decision
-group as soon as it reaches its selected worker queue. `BATCH` dispatches when
-the group reaches `dispatcher.maxRequests`, the oldest member reaches
-`dispatcher.maxCollectionWaitMs`, or the optional predicted execution threshold
-is reached. There is no SLO-budget batching policy.
+group as soon as it reaches its selected worker queue. `BATCH` grows a group up
+to `dispatcher.maxRequests` and, when configured, keeps its predicted execution
+time below `dispatcher.earlyDispatchPredictedExecutionMs`; it dispatches once
+either bound stops growth, or once the group's longest-waiting member reaches
+`dispatcher.maxCollectionWaitMs`. There is no SLO-budget batching policy.
 
 ## Ordering and expiration
 
@@ -158,7 +159,7 @@ rejected otherwise. Omit the whole `preemption` object to disable preemption.
 | `dispatcher.maxRequests` | `BATCH` | `8` | Maximum requests in one decision group |
 | `dispatcher.maxCollectionWaitMs` | `BATCH` | `300` ms | Maximum fixed-window collection wait; zero is allowed |
 | `dispatcher.maxWaitingRequestsPerPrefillWorker` | `BATCH` | `1024` | Hard per-Prefill waiting-queue bound |
-| `dispatcher.earlyDispatchPredictedExecutionMs` | `BATCH` | omitted | Optional positive predictor threshold for early dispatch |
+| `dispatcher.earlyDispatchPredictedExecutionMs` | `BATCH` | omitted | Optional positive predicted-execution budget capping batch growth |
 | `dispatcher.maxInflightBatchesPerPrefillWorker` | `BATCH` | omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
 | `dispatcher.enqueueRpcTimeoutMs` | `BATCH` | `5000` ms | EnqueueBatch RPC timeout |
 | `dispatcher.maxInflightRequestsPerPrefillWorker` | `QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill route-decision cap |

@@ -221,9 +221,10 @@ public class BatcherContext {
     }
 
     /**
-     * When the current collection window opened, i.e. the enqueue time of the
-     * longest-waiting active member. {@link Long#MAX_VALUE} when the active
-     * queue holds nothing.
+     * Enqueue time of the longest-waiting active member. Any group the batcher
+     * picks is a subset of these members, so this never reports a collection
+     * window as younger than it is. {@link Long#MAX_VALUE} when the active queue
+     * holds nothing.
      */
     long oldestActiveEnqueuedAtMs() {
         return queueWaitView().oldestEnqueuedAtMs();
@@ -337,15 +338,6 @@ public class BatcherContext {
         BatchItem head() {
             return items.isEmpty() ? null : items.get(0);
         }
-
-        /** When this snapshot's collection window opened. */
-        long oldestEnqueuedAtMs() {
-            long oldest = Long.MAX_VALUE;
-            for (BatchItem item : items) {
-                oldest = Math.min(oldest, item.enqueuedAtMs());
-            }
-            return oldest;
-        }
     }
 
     /**
@@ -367,7 +359,7 @@ public class BatcherContext {
 
     /**
      * Probe-independent ordering state of the queued work at one queue version:
-     * the ready count that drains first, the collection-window anchor, and the
+     * the ready count that drains first, the oldest active enqueue time, and the
      * active members an incoming probe is positioned against.
      */
     private record QueueWaitView(long version,
@@ -456,9 +448,9 @@ public class BatcherContext {
 
     /**
      * Unelapsed part of the collection window the queued work already sits in.
-     * The window belongs to the batcher rather than to any single member, so it
-     * is anchored on the longest-waiting request: a later arrival that sorts
-     * ahead of it under PRIORITY ordering cannot reopen an elapsed window.
+     * An incoming probe cannot know which group the batcher will pick next, so
+     * the window is measured over the whole active queue: its longest-waiting
+     * member bounds how much of the window any picked group has consumed.
      */
     private long remainingWindowMs(long windowOpenedAtMs, long nowMs) {
         if (windowOpenedAtMs == Long.MAX_VALUE) {
