@@ -74,6 +74,7 @@ public:
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
+    bool            supportsMtpTargetHiddenStates() override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getPythonDebugTensor(const std::string& name, int64_t num_rows);
     torch::Tensor   getPythonDebugKvCache(int64_t layer_idx, int64_t max_blocks);
@@ -142,6 +143,7 @@ private:
     py::object    py_model_;
     py::object    held_attn_pyobj_;
     torch::Tensor last_mtp_target_hidden_states_;
+    bool          supports_mtp_target_hidden_states_{false};
     bool          enable_cuda_graph_{false};
     bool          is_prefill_cuda_graph_mode_{false};
     bool          use_spec_decoding_{false};
@@ -278,6 +280,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    supports_mtp_target_hidden_states_ = py::hasattr(py_model_, "supports_mtp_target_hidden_states")
+                                         && py_model_.attr("supports_mtp_target_hidden_states")().cast<bool>();
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
     if (enable_cuda_graph_ && py_model_class_name == "DeepSeekV4Model" && !params.kv_cache_layer_layout.has_value()) {
         RTP_LLM_LOG_WARNING(

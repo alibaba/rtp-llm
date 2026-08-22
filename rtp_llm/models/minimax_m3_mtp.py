@@ -242,6 +242,15 @@ class MiniMaxM3MTP(MiniMaxM3):
                 f"{target_config.vocab_size} != {draft_config.vocab_size}"
             )
 
+        # Native MTP consumes the target's final pre-norm hidden state. Mark
+        # that producer explicitly so CP prefill can keep it in rank-local
+        # zigzag order instead of restoring and broadcasting a full-sequence
+        # tensor before the draft pass.
+        target_config._minimax_m3_target_hidden_state_layer_ids = (
+            target_config.num_layers,
+        )
+        target_config.hc_mult = 1
+
     @staticmethod
     def _validate_kv_cache_dtype(model_config: ModelConfig) -> None:
         kv_cache_dtype = model_config.attn_config.kv_cache_dtype

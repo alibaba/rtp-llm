@@ -33,9 +33,24 @@ Covered cases:
     cu_seqlens / seqused_k / page-table rows), and segments straddling a
     chunk boundary are split into partial entries.
 """
+import os
 import unittest
+from unittest.mock import patch
 
 import torch
+
+
+class SparsePrefillChunkPolicyTest(unittest.TestCase):
+    def test_chunking_defaults_on_and_allows_explicit_rollback(self):
+        from rtp_llm.models_py.triton_kernels.sparse_msa.prefill import (
+            topk_bt_fused as tbf,
+        )
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("M3_SPARSE_ATTN_CHUNK_ENABLE", None)
+            self.assertTrue(tbf._sparse_attn_chunk_enabled())
+        with patch.dict(os.environ, {"M3_SPARSE_ATTN_CHUNK_ENABLE": "0"}):
+            self.assertFalse(tbf._sparse_attn_chunk_enabled())
 
 
 def _sm100_available() -> bool:
@@ -269,9 +284,7 @@ class SparsePrefillChunkTest(unittest.TestCase):
         torch.cuda.set_device(0)
 
     def test_partial_dtype_defaults_to_bf16(self):
-        self.assertEqual(
-            self.tbf._M3_SPARSE_ATTN_PARTIAL_DTYPE, torch.bfloat16
-        )
+        self.assertEqual(self.tbf._M3_SPARSE_ATTN_PARTIAL_DTYPE, torch.bfloat16)
 
     def _make_inputs(self, segs, device, seed=0, kv_dtype=torch.bfloat16):
         from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100

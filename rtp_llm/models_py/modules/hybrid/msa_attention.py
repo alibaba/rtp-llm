@@ -2714,10 +2714,6 @@ class MSAAttention(nn.Module):
             and paged_base.dtype == torch.float8_e4m3fn
             and self.disable_index_value
             and self.num_idx_heads == self.kv_head_num
-            # Direct HND pages remove the BF16 main-K/V scratch, but the native
-            # sparse-attention partial workspace is still O(total_q) unless
-            # step3 chunking is enabled. Fail closed for production long context.
-            and os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
         )
 
     def _write_cp_suffix_to_bf16_working_pages(
@@ -3140,7 +3136,6 @@ class MSAAttention(nn.Module):
             page_size=self.page_size,
             cp_size=self._cp_size,
             cp_rank=self._cp_rank,
-            debug_label="msa-main-kv",
             gather_plan=gather_plan,
         )
         idx_pages = gather_cp_sharded_prefix_pool(
@@ -3150,7 +3145,6 @@ class MSAAttention(nn.Module):
             page_size=self.page_size,
             cp_size=self._cp_size,
             cp_rank=self._cp_rank,
-            debug_label="msa-idx-k",
             gather_plan=gather_plan,
         )
 
@@ -3211,7 +3205,6 @@ class MSAAttention(nn.Module):
             page_size=self.page_size,
             cp_size=self._cp_size,
             cp_rank=self._cp_rank,
-            debug_label="msa-main-kv-fp8-pages",
             gather_plan=gather_plan,
             restore_logical_order=gather_plan is None,
         )
@@ -3222,7 +3215,6 @@ class MSAAttention(nn.Module):
             page_size=self.page_size,
             cp_size=self._cp_size,
             cp_rank=self._cp_rank,
-            debug_label="msa-idx-k-fp8-pages",
             gather_plan=gather_plan,
             restore_logical_order=gather_plan is None,
         )
@@ -3711,7 +3703,6 @@ class MSAAttention(nn.Module):
                     page_size=self.page_size,
                     cp_size=self._cp_size,
                     cp_rank=self._cp_rank,
-                    debug_label="msa-prefix",
                 )
                 prefix_gather_plans[prefix_plan_key] = prefix_gather_plan
         else:
@@ -3981,6 +3972,14 @@ class MSAAttention(nn.Module):
             k_paged_cache=working_k_pages,
             v_paged_cache=working_v_pages,
         )
+
+        # The sparse kernels are enqueued on the current stream, so allocator
+        # stream ordering makes it safe to release their read-only inputs here.
+        # Do this before o_proj: for long CP prefill, otherwise the logical
+        # paged working set remains live while the projection allocates its
+        # output/workspace. The BF16-flat fallback keeps its process scratch.
+        if use_direct_paged:
+            del q, idx_q, working_k_pages, working_v_pages
 
         return self.o_proj(o.reshape(local_tokens, -1).contiguous())
 

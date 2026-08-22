@@ -63,47 +63,46 @@ class TestMSACpShardedPrefixRestore(unittest.TestCase):
             1, 2, 4, 128, 128, dtype=torch.float8_e4m3fn
         )
 
-        with patch.dict("os.environ", {"M3_SPARSE_ATTN_CHUNK_ENABLE": "1"}):
-            with patch(f"{_MSA_MODULE}._USE_CP_DIRECT_PAGED_PREFILL", False):
+        with patch(f"{_MSA_MODULE}._USE_CP_DIRECT_PAGED_PREFILL", False):
+            self.assertFalse(
+                attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
+            )
+        with patch(f"{_MSA_MODULE}._USE_CP_DIRECT_PAGED_PREFILL", True):
+            self.assertTrue(attn._should_use_cp_direct_paged_prefill(SimpleNamespace()))
+            with patch(f"{_MSA_MODULE}._USE_FUSED_CP_PAGED_WRITE", False):
                 self.assertFalse(
                     attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
                 )
-            with patch(f"{_MSA_MODULE}._USE_CP_DIRECT_PAGED_PREFILL", True):
-                self.assertTrue(
-                    attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
-                )
-                with patch(f"{_MSA_MODULE}._USE_FUSED_CP_PAGED_WRITE", False):
-                    self.assertFalse(
-                        attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
-                    )
-                attn._kv_sharded = False
-                self.assertFalse(
-                    attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
-                )
-                attn._kv_sharded = True
-                attn.disable_index_value = False
-                self.assertFalse(
-                    attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
-                )
-                attn.disable_index_value = True
-                attn.num_idx_heads = 5
-                self.assertFalse(
-                    attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
-                )
-                attn.num_idx_heads = 4
-                attn._paged_kv_base_view = lambda _cache: torch.empty(
-                    1, 2, 4, 128, 128, dtype=torch.bfloat16
-                )
-                self.assertFalse(
-                    attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
-                )
+            attn._kv_sharded = False
+            self.assertFalse(
+                attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
+            )
+            attn._kv_sharded = True
+            attn.disable_index_value = False
+            self.assertFalse(
+                attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
+            )
+            attn.disable_index_value = True
+            attn.num_idx_heads = 5
+            self.assertFalse(
+                attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
+            )
+            attn.num_idx_heads = 4
+            attn._paged_kv_base_view = lambda _cache: torch.empty(
+                1, 2, 4, 128, 128, dtype=torch.bfloat16
+            )
+            self.assertFalse(
+                attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
+            )
 
         attn._paged_kv_base_view = lambda _cache: torch.empty(
             1, 2, 4, 128, 128, dtype=torch.float8_e4m3fn
         )
+        # Sparse-attention chunking is an independent workspace policy and
+        # must not alter direct-paged layout selection.
         with patch.dict("os.environ", {"M3_SPARSE_ATTN_CHUNK_ENABLE": "0"}):
             with patch(f"{_MSA_MODULE}._USE_CP_DIRECT_PAGED_PREFILL", True):
-                self.assertFalse(
+                self.assertTrue(
                     attn._should_use_cp_direct_paged_prefill(SimpleNamespace())
                 )
 

@@ -632,8 +632,12 @@ class _MiniMaxM3ModelMixin:
         self._mtp_target_hidden_layer_ids = tuple(
             getattr(
                 model_config,
-                "_minimax_m3_eagle3_aux_hidden_state_layer_ids",
-                (),
+                "_minimax_m3_target_hidden_state_layer_ids",
+                getattr(
+                    model_config,
+                    "_minimax_m3_eagle3_aux_hidden_state_layer_ids",
+                    (),
+                ),
             )
         )
         self._mtp_target_hidden_layer_slots = {
@@ -657,7 +661,19 @@ class _MiniMaxM3ModelMixin:
     def _begin_mtp_target_hidden_capture(
         self, hidden_states: torch.Tensor
     ) -> Optional[torch.Tensor]:
+        # Drop the previous request's owner before allocating the next capture.
+        # Otherwise a long prompt followed by another long prompt keeps both
+        # [local_tokens, hc_mult * hidden] buffers live for the whole target
+        # forward and can turn allocator high-water into a real OOM.
+        self._mtp_target_hidden_states = None
         if not self._mtp_target_hidden_layer_ids:
+            return None
+        # Native MTP consumes only the final pre-norm hidden state. The fused
+        # final RMSResNorm already writes that exact value into ``residual``;
+        # defer ownership to the post-norm hook instead of allocating and
+        # filling another [local_tokens, hidden] tensor. EAGLE3 still captures
+        # its configured multi-layer tuple in the dedicated buffer below.
+        if self._mtp_target_hidden_layer_ids == (self.layer_num,):
             return None
         capture = hidden_states.new_empty(
             hidden_states.size(0),
@@ -695,6 +711,12 @@ class _MiniMaxM3ModelMixin:
     def _finish_mtp_target_hidden_capture(self, capture: torch.Tensor) -> None:
         self._mtp_target_hidden_states = capture
 
+    def _finish_mtp_target_hidden_capture_after_norm(
+        self, final_residual: torch.Tensor
+    ) -> None:
+        if self._mtp_target_hidden_layer_ids == (self.layer_num,):
+            self._mtp_target_hidden_states = final_residual
+
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden_states = self._mtp_target_hidden_states
         if hidden_states is None or num_tokens < 0:
@@ -705,6 +727,10 @@ class _MiniMaxM3ModelMixin:
                 f"requested={num_tokens}, available={hidden_states.size(0)}"
             )
         return hidden_states.narrow(0, 0, num_tokens)
+
+    def supports_mtp_target_hidden_states(self) -> bool:
+        """Whether every target forward captures rank-local EAGLE3 hidden rows."""
+        return bool(self._mtp_target_hidden_layer_ids)
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False

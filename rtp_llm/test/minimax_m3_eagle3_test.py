@@ -146,9 +146,18 @@ class Eagle3HiddenContractTest(unittest.TestCase):
         actual = _MiniMaxM3ModelMixin.get_mtp_target_hidden_states(model, 3)
         self.assertEqual(tuple(actual.shape), (3, 12))
 
+    def test_target_hidden_capability_depends_on_configured_layers(self):
+        enabled = SimpleNamespace(_mtp_target_hidden_layer_ids=(2, 30, 57))
+        disabled = SimpleNamespace(_mtp_target_hidden_layer_ids=())
+        self.assertTrue(_MiniMaxM3ModelMixin.supports_mtp_target_hidden_states(enabled))
+        self.assertFalse(
+            _MiniMaxM3ModelMixin.supports_mtp_target_hidden_states(disabled)
+        )
+
     def test_target_model_captures_configured_layer_outputs(self):
         hidden = torch.randn(2, 4)
         model = SimpleNamespace(
+            layer_num=2,
             _mtp_target_hidden_layer_ids=(0, 1, 2),
             _mtp_target_hidden_layer_slots={0: 0, 1: 1, 2: 2},
             _mtp_target_hidden_states=None,
@@ -171,6 +180,42 @@ class Eagle3HiddenContractTest(unittest.TestCase):
         torch.testing.assert_close(capture[:, 4:8], layer_1 + residual_1)
         torch.testing.assert_close(capture[:, 8:], layer_2 + residual_2)
         self.assertIs(model._mtp_target_hidden_states, capture)
+
+    def test_target_hidden_capture_releases_previous_request_before_allocating(self):
+        previous = torch.randn(5, 12)
+        model = SimpleNamespace(
+            layer_num=2,
+            _mtp_target_hidden_layer_ids=(0, 1, 2),
+            _mtp_target_hidden_layer_slots={0: 0, 1: 1, 2: 2},
+            _mtp_target_hidden_states=previous,
+        )
+
+        capture = _MiniMaxM3ModelMixin._begin_mtp_target_hidden_capture(
+            model, torch.randn(2, 4)
+        )
+
+        self.assertIsNone(model._mtp_target_hidden_states)
+        self.assertEqual(tuple(capture.shape), (2, 12))
+
+    def test_native_mtp_reuses_final_residual_without_capture_allocation(self):
+        previous = torch.randn(5, 4)
+        model = SimpleNamespace(
+            layer_num=60,
+            _mtp_target_hidden_layer_ids=(60,),
+            _mtp_target_hidden_layer_slots={60: 0},
+            _mtp_target_hidden_states=previous,
+        )
+
+        capture = _MiniMaxM3ModelMixin._begin_mtp_target_hidden_capture(
+            model, torch.randn(5, 4)
+        )
+        final_residual = torch.randn(5, 4)
+        _MiniMaxM3ModelMixin._finish_mtp_target_hidden_capture_after_norm(
+            model, final_residual
+        )
+
+        self.assertIsNone(capture)
+        self.assertIs(model._mtp_target_hidden_states, final_residual)
 
 
 class Eagle3WeightTest(unittest.TestCase):

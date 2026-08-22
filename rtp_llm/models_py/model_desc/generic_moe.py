@@ -826,6 +826,11 @@ class GenericMoeModel(GptModelBase):
     def _finish_mtp_target_hidden_capture(self, capture: torch.Tensor) -> None:
         pass
 
+    def _finish_mtp_target_hidden_capture_after_norm(
+        self, final_residual: torch.Tensor
+    ) -> None:
+        pass
+
     def _layers_for_forward(self) -> nn.ModuleList:
         use_cuda_graph_layers = (
             cuda_graph_capture_forward_enabled() or cuda_graph_warmup_forward_enabled()
@@ -902,6 +907,7 @@ class GenericMoeModel(GptModelBase):
             self._finish_mtp_target_hidden_capture(mtp_target_hidden_capture)
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        self._finish_mtp_target_hidden_capture_after_norm(residual)
         if _rt_on:
             _rt.record("final_norm", hidden_states)
             extra: dict = {

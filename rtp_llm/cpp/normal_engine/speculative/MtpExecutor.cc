@@ -1166,15 +1166,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
     }
     const bool saved_need_all_hidden_states = model_input.need_all_hidden_states;
-    if (cp_enabled) {
-        // CP+MTP prefill feeds the target model's per-token hidden states into
-        // the draft model after updatePrefillPostDraftModelInput(). The regular
-        // CP fast path may return only lm_output_indexes rows when neither
-        // logits nor hidden dumps need the full sequence; that leaves
-        // last_hidden_states as [batch, hidden] while combo_tokens remains full
-        // length and the next CP split rejects the shape. Force the target pass
-        // to materialize full hidden rows for this hand-off, then restore the
-        // caller's flag before sampler/dispatch logic observes it.
+    const bool use_cp_local_mtp_hidden = cp_enabled && !model_input.need_all_logits && !saved_need_all_hidden_states
+                                         && model_->supportsMtpTargetHiddenStates();
+    if (cp_enabled && !use_cp_local_mtp_hidden) {
+        // Generic CP+MTP models feed the target model's per-token output into
+        // the draft model. Force a full hidden result for that hand-off. Models
+        // with a declared rank-local MTP buffer bypass this: their draft input
+        // is already in CP-local layout, so materializing a second global
+        // sequence would only increase peak memory.
         model_input.need_all_hidden_states = true;
     }
 
@@ -1235,8 +1234,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // the draft PyWrappedModel CP path slices it with the same CP planner
         // used for combo_tokens.
         if (cp_enabled) {
-            auto target_mtp_hidden       = model_->getMtpTargetHiddenStates(-1);
-            use_target_mtp_hidden_buffer = target_mtp_hidden.defined() && target_mtp_hidden.numel() > 0;
+            if (use_cp_local_mtp_hidden) {
+                use_target_mtp_hidden_buffer = true;
+            } else {
+                auto target_mtp_hidden       = model_->getMtpTargetHiddenStates(-1);
+                use_target_mtp_hidden_buffer = target_mtp_hidden.defined() && target_mtp_hidden.numel() > 0;
+            }
             if (use_target_mtp_hidden_buffer) {
                 model_input.last_hidden_states = torch::Tensor();
             }

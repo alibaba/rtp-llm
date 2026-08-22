@@ -150,6 +150,14 @@ public:
         return torch::Tensor();
     }
 
+    // Whether the target model guarantees a rank-local MTP hidden buffer for
+    // every forward. CP prefill can use this stable capability to select its
+    // compact output path before the forward starts; probing the tensor itself
+    // would be false on the first request and stale on subsequent requests.
+    virtual bool supportsMtpTargetHiddenStates() {
+        return false;
+    }
+
     // Optional CP-prefill companion: expose one final pre-hc row per request
     // (DSv4: [B, hc*D]) so MTP stream update does not require a full sequence
     // hidden buffer. Passing num_tokens < 0 asks the producer for its last

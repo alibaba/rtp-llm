@@ -727,7 +727,7 @@ class MiniMaxM3MTPForwardTest(unittest.TestCase):
             model.get_mtp_target_hidden_states(3)
 
     def test_speculative_contract_accepts_three_and_rejects_eight(self):
-        target = SimpleNamespace(hidden_size=8, vocab_size=16)
+        target = SimpleNamespace(hidden_size=8, vocab_size=16, num_layers=60)
         draft = SimpleNamespace(
             hidden_size=8,
             vocab_size=16,
@@ -738,6 +738,11 @@ class MiniMaxM3MTPForwardTest(unittest.TestCase):
             target,
             draft,
         )
+        self.assertEqual(
+            target._minimax_m3_target_hidden_state_layer_ids,
+            (target.num_layers,),
+        )
+        self.assertEqual(target.hc_mult, 1)
         with self.assertRaisesRegex(ValueError, "1..7"):
             MiniMaxM3MTP.configure_speculative_model(
                 SimpleNamespace(type=SpeculativeType.MTP, gen_num_per_cycle=8),

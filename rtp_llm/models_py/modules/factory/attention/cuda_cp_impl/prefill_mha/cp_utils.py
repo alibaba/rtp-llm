@@ -1,13 +1,7 @@
-import logging
-import os
-
 import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
 from rtp_llm.ops import KvCacheDataType
-
-logger = logging.getLogger(__name__)
-_LOGGED_SHARDED_PREFIX_LAYOUTS = set()
 
 
 def build_cp_sharded_prefix_gather_plan(
@@ -17,7 +11,6 @@ def build_cp_sharded_prefix_gather_plan(
     page_size: int,
     cp_size: int,
     cp_rank: int,
-    debug_label: str = "prefix",
 ):
     """Build reusable addressing for page-RR-sharded request prefixes.
 
@@ -56,16 +49,10 @@ def build_cp_sharded_prefix_gather_plan(
     from rtp_llm.models_py.modules.dsv4.cp import build_cp_batched_pool_gather_plan
 
     logical_page_counts = []
-    local_page_counts = []
-    local_block_summaries = []
-    debug_enabled = os.environ.get("RTP_LLM_DEBUG_CP_SHARDED_PREFIX", "0") == "1"
     for batch_idx, prefix_len in enumerate(prefix_cpu.tolist()):
         logical_pages = int(prefix_len) // page_size
         logical_page_counts.append(logical_pages)
         if logical_pages == 0:
-            local_page_counts.append(0)
-            if debug_enabled:
-                local_block_summaries.append([])
             continue
         local_pages = (logical_pages + cp_size - 1) // cp_size
         if local_pages > local_block_table.shape[1]:
@@ -73,34 +60,6 @@ def build_cp_sharded_prefix_gather_plan(
                 f"request {batch_idx} needs {local_pages} local prefix pages, "
                 f"but block table has width {local_block_table.shape[1]}"
             )
-        local_page_counts.append(local_pages)
-        if debug_enabled:
-            block_ids = (
-                local_block_table[batch_idx, :local_pages]
-                .detach()
-                .cpu()
-                .to(torch.int64)
-                .tolist()
-            )
-            local_block_summaries.append(
-                block_ids
-                if len(block_ids) <= 16
-                else block_ids[:8] + ["..."] + block_ids[-8:]
-            )
-    debug_key = (debug_label, cp_rank)
-    if debug_enabled and debug_key not in _LOGGED_SHARDED_PREFIX_LAYOUTS:
-        _LOGGED_SHARDED_PREFIX_LAYOUTS.add(debug_key)
-        logger.info(
-            "[cp-sharded-prefix] label=%s cp_rank=%d cp_size=%d "
-            "owner_rule=logical_page%%cp_size prefix_tokens=%s "
-            "local_page_counts=%s local_physical_block_ids_head_tail=%s",
-            debug_label,
-            cp_rank,
-            cp_size,
-            prefix_cpu.tolist(),
-            local_page_counts,
-            local_block_summaries,
-        )
     return build_cp_batched_pool_gather_plan(
         local_block_table,
         tuple(logical_page_counts),
@@ -117,7 +76,6 @@ def gather_cp_sharded_prefix_pool(
     page_size: int,
     cp_size: int,
     cp_rank: int,
-    debug_label: str = "prefix",
     gather_plan=None,
     restore_logical_order: bool = True,
 ) -> torch.Tensor:
@@ -129,7 +87,6 @@ def gather_cp_sharded_prefix_pool(
             page_size=page_size,
             cp_size=cp_size,
             cp_rank=cp_rank,
-            debug_label=debug_label,
         )
     if gather_plan.total_logical_blocks == 0:
         return local_pool[:0]

@@ -41,13 +41,16 @@ _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 # tens of GB at 1M-token prefill. When enabled, step3 splits the query dim into
 # fixed-size chunks (CSR/schedule rebuilt per chunk, causal alignment preserved
 # via per-chunk seqused_k) so the workspace is bounded by the chunk size.
-# Disabled by default; chunk size defaults to 16K queries.
+# Enabled by default; chunk size defaults to 16K queries.  This is an
+# independent sparse-attention workspace policy, not a direct-paged layout
+# prerequisite.  Set M3_SPARSE_ATTN_CHUNK_ENABLE=0 only for controlled A/B or
+# compatibility rollback.
 # Read lazily (not at import) so env set after module import still takes effect.
 _DEFAULT_SPARSE_ATTN_CHUNK_SIZE = 16384
 
 
 def _sparse_attn_chunk_enabled() -> bool:
-    return os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
+    return os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "1") == "1"
 
 
 def _sparse_attn_chunk_size() -> int:

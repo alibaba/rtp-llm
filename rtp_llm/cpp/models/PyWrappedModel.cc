@@ -217,6 +217,10 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
 }
 
+bool PyWrappedModel::supportsMtpTargetHiddenStates() {
+    return supports_mtp_target_hidden_states_;
+}
+
 torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();
@@ -1211,12 +1215,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
         if (device_props_.enable_prefill_cp && has_context_request) {
-            // REBASE CONFLICT CONTEXT(3a29591e6): new base added the
-            // last-hidden-only CP gather fast path; source branch gathered the
-            // MTP pre-norm hidden buffer before normal CP output handling. Run
-            // the MTP buffer gather first, then keep the new base fast path.
+            // Preserve the full-output contract when it is explicitly needed;
+            // otherwise keep both the target output and model-owned MTP hidden
+            // in compact CP-local form.
+            const bool    compact_cp_exit = !inputs.need_all_logits && !inputs.need_all_hidden_states;
             torch::Tensor mtp_hidden_states;
-            if (hidden_states.defined() && hidden_states.dim() == 2 && hidden_states.size(0) > 0) {
+            if (!compact_cp_exit && hidden_states.defined() && hidden_states.dim() == 2 && hidden_states.size(0) > 0) {
                 mtp_hidden_states = getMtpTargetHiddenStates(hidden_states.size(0));
                 if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
                     RTP_LLM_CHECK_WITH_INFO(mtp_hidden_states.dim() == 2,
@@ -1226,6 +1230,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                             "CP MTP pre-norm hidden row count mismatch: mtp_rows=%ld, hidden_rows=%ld",
                                             mtp_hidden_states.size(0),
                                             hidden_states.size(0));
+                    // The compact CP exit keeps this model-owned buffer in its
+                    // rank-local zigzag layout. MtpExecutor feeds it directly
+                    // to the draft model, whose CP input handler accepts local
+                    // rows. Gathering it here would create and retain a full
+                    // [global_tokens, hc_mult * hidden] tensor that is never
+                    // consumed.
                     context_parallel_processor_->handleOutputs(mtp_hidden_states, inputs, cp_params);
                 }
             }
@@ -1234,7 +1244,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // full [seq, hidden] (the 14 GiB block at the 1M-prefill OOM). The
             // gather is a small [num_lm, hidden] all-reduce-sum; see
             // ZigZagProcessor::handleOutputsLastHidden.
-            if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
+            if (compact_cp_exit) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
                 return forwardPostLayersLastHidden(hidden_states, inputs);
             }

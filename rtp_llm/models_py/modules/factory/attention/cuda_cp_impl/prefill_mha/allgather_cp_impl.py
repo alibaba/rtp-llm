@@ -876,7 +876,6 @@ class PCPAllGatherAttnOp:
                     page_size=self.seq_size_per_block,
                     cp_size=self._cp_size,
                     cp_rank=self._cp_rank,
-                    debug_label="dense-kv",
                 )
 
             # Fallback (FA4 disabled): flashinfer paged prefix + ragged extend + LSE merge.
