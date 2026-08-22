@@ -411,7 +411,7 @@ TEST(HybridPoolConfigCreatorTest, KimiKdaPoolUsesExplicitBlockCount) {
     EXPECT_EQ(config.group_block_nums[1], 17u);
 }
 
-TEST(MLAKVCacheSpecTest, KimiCacheTpShardsPrefillComponentsOnly) {
+TEST(MLAKVCacheSpecTest, KimiCacheTpUsesFlatContiguousPrefillShards) {
     const char* previous = std::getenv("KIMI_K3_MLA_CACHE_TP");
     const std::optional<std::string> saved =
         previous == nullptr ? std::nullopt : std::make_optional(std::string(previous));
@@ -423,10 +423,18 @@ TEST(MLAKVCacheSpecTest, KimiCacheTpShardsPrefillComponentsOnly) {
     attn.tokens_per_block = 64;
     ParallelismConfig pc;
     pc.tp_size   = 8;
+    pc.tp_rank   = 0;
     pc.role_type = RoleType::PREFILL;
     MLAKVCacheSpec prefill(attn, pc);
-    EXPECT_EQ(prefill.kv_lora_rank, 64u);
-    EXPECT_EQ(prefill.rope_head_dim, 8u);
+    EXPECT_EQ(prefill.kv_lora_rank, 72u);
+    EXPECT_EQ(prefill.rope_head_dim, 0u);
+    EXPECT_TRUE(prefill.cache_tp_flat_shard);
+
+    pc.tp_rank = 7;
+    MLAKVCacheSpec prefill_rank7(attn, pc);
+    EXPECT_EQ(prefill_rank7.kv_lora_rank, 72u);
+    EXPECT_EQ(prefill_rank7.rope_head_dim, 0u);
+    EXPECT_TRUE(prefill_rank7.cache_tp_flat_shard);
 
     pc.role_type = RoleType::DECODE;
     MLAKVCacheSpec decode(attn, pc);

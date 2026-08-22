@@ -13,19 +13,19 @@ from rtp_llm.models.kimi_k3.pd_mla_shard_fanin import (
 
 class PDMlaShardFanInTest(unittest.TestCase):
     def _full_cache_and_shards(self, token_count: int = 3):
-        latent = torch.arange(token_count * 512, dtype=torch.int64).reshape(
+        latent = torch.arange(token_count * 512, dtype=torch.float32).reshape(
             token_count, 512
-        )
+        ).to(torch.bfloat16)
         suffix = (
-            torch.arange(token_count * 64, dtype=torch.int64).reshape(token_count, 64)
+            torch.arange(token_count * 64, dtype=torch.float32).reshape(token_count, 64)
             + 100000
-        )
+        ).to(torch.bfloat16)
+        full_cache = torch.cat((latent, suffix), dim=-1)
         packed = []
         for rank in range(8):
             layout = MlaCacheShardLayout.fixed(512, 64, 8, rank)
-            local_latent, local_suffix = layout.shard_components(latent, suffix)
-            packed.append(torch.cat((local_latent, local_suffix), dim=-1))
-        return torch.cat((latent, suffix), dim=-1), packed
+            packed.append(layout.shard_full_cache(full_cache))
+        return full_cache, packed
 
     def _metadata(self, rank: int, **overrides) -> MlaShardMetadata:
         values = dict(
@@ -83,12 +83,23 @@ class PDMlaShardFanInTest(unittest.TestCase):
         for replacement, regex in (
             ({"layout_version": 99}, "layout version"),
             ({"target_owner_rank": 8}, "owner rank"),
-            ({"latent_offset": metadata.latent_offset + 1}, "offsets mismatch"),
+            ({"shard_offset": metadata.shard_offset + 1}, "offset mismatch"),
         ):
             payload = metadata.to_wire_dict()
             payload.update(replacement)
             with self.assertRaisesRegex(ValueError, regex):
                 self._fanin().add(MlaShardMetadata(**payload), shards[1])
+
+    def test_rank7_directly_writes_last_72_columns(self) -> None:
+        full_cache, shards = self._full_cache_and_shards()
+        metadata = self._metadata(7)
+        self.assertEqual((metadata.shard_offset, metadata.shard_width), (504, 72))
+        torch.testing.assert_close(shards[7], full_cache[:, 504:576])
+
+    def test_fan_in_rejects_non_bf16_payload(self) -> None:
+        _, shards = self._full_cache_and_shards()
+        with self.assertRaisesRegex(ValueError, "BF16 only"):
+            self._fanin().add(self._metadata(0), shards[0].float())
 
     def test_request_layer_and_token_count_must_match_fan_in(self) -> None:
         _, shards = self._full_cache_and_shards()

@@ -17,7 +17,7 @@ import torch
 from rtp_llm.models.kimi_k3.mla_cache_tp import MlaCacheShardLayout
 
 
-KIMI_K3_MLA_LAYOUT_VERSION = 1
+KIMI_K3_MLA_LAYOUT_VERSION = 2
 KIMI_K3_MLA_CACHE_GROUP = "mla"
 KIMI_K3_MLA_LATENT_WIDTH = 512
 KIMI_K3_MLA_SUFFIX_WIDTH = 64
@@ -31,10 +31,8 @@ class MlaShardMetadata:
     layer_id: int
     shard_rank: int
     shard_count: int
-    latent_offset: int
-    latent_width: int
-    suffix_offset: int
-    suffix_width: int
+    shard_offset: int
+    shard_width: int
     token_count: int
     layout_version: int = KIMI_K3_MLA_LAYOUT_VERSION
 
@@ -62,10 +60,8 @@ class MlaShardMetadata:
             layer_id=layer_id,
             shard_rank=shard_rank,
             shard_count=shard_count,
-            latent_offset=layout.latent_start,
-            latent_width=layout.local_latent,
-            suffix_offset=layout.suffix_start,
-            suffix_width=layout.local_suffix,
+            shard_offset=layout.shard_start,
+            shard_width=layout.local_width,
             token_count=token_count,
         )
 
@@ -91,20 +87,10 @@ class MlaShardMetadata:
             self.shard_count,
             self.shard_rank,
         )
-        actual = (
-            self.latent_offset,
-            self.latent_width,
-            self.suffix_offset,
-            self.suffix_width,
-        )
-        expected = (
-            layout.latent_start,
-            layout.local_latent,
-            layout.suffix_start,
-            layout.local_suffix,
-        )
+        actual = (self.shard_offset, self.shard_width)
+        expected = (layout.shard_start, layout.local_width)
         if actual != expected:
-            raise ValueError(f"MLA shard component offsets mismatch: {actual} != {expected}")
+            raise ValueError(f"MLA flat shard offset mismatch: {actual} != {expected}")
 
     def to_wire_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -237,16 +223,15 @@ class MlaShardFanIn:
             raise ValueError(
                 f"MLA shard does not belong to this fan-in: {identity} != {expected_identity}"
             )
-        expected_shape = (
-            metadata.token_count,
-            metadata.latent_width + metadata.suffix_width,
-        )
+        expected_shape = (metadata.token_count, metadata.shard_width)
         if packed_shard.ndim != 2 or tuple(packed_shard.shape) != expected_shape:
             raise ValueError(
                 f"packed MLA shard shape {tuple(packed_shard.shape)} != {expected_shape}"
             )
         if metadata.shard_rank in self._received:
             raise ValueError(f"duplicate MLA shard rank {metadata.shard_rank}")
+        if packed_shard.dtype != torch.bfloat16:
+            raise ValueError("K3 MLA cache TP fan-in currently supports BF16 only")
 
         if self._output is None:
             self._output = torch.empty(
@@ -260,15 +245,9 @@ class MlaShardFanIn:
         ):
             raise ValueError("all MLA shards must use the same dtype and device")
 
-        local_latent = packed_shard[:, : metadata.latent_width]
-        local_suffix = packed_shard[:, metadata.latent_width :]
         self._output[
-            :, metadata.latent_offset : metadata.latent_offset + metadata.latent_width
-        ].copy_(local_latent)
-        suffix_start = KIMI_K3_MLA_LATENT_WIDTH + metadata.suffix_offset
-        self._output[:, suffix_start : suffix_start + metadata.suffix_width].copy_(
-            local_suffix
-        )
+            :, metadata.shard_offset : metadata.shard_offset + metadata.shard_width
+        ].copy_(packed_shard)
         self._received.add(metadata.shard_rank)
 
     @property

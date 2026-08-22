@@ -40,6 +40,13 @@ class MlaKVCacheWriteOp:
         self.scale = torch.ones((), dtype=torch.float32, device="cuda")
         self.clear_page_on_boundary = clear_page_on_boundary
         self.parallelism_config = parallelism_config
+        if (
+            kv_cache_dtype == KvCacheDataType.FP8
+            and mla_cache_tp_enabled(parallelism_config)
+        ):
+            raise ValueError(
+                "KIMI_K3_MLA_CACHE_TP flat-72 ABI currently supports BF16 only"
+            )
 
     def forward(
         self,
@@ -60,8 +67,10 @@ class MlaKVCacheWriteOp:
         if kv_cache is not None:
             if mla_cache_tp_enabled(self.parallelism_config):
                 layout = kimi_k3_mla_cache_layout(self.parallelism_config)
-                append_ckv_t, key_pe = layout.shard_components(
-                    append_ckv_t, key_pe
+                full_cache = torch.cat((append_ckv_t, key_pe), dim=-1)
+                append_ckv_t = layout.shard_full_cache(full_cache)
+                key_pe = append_ckv_t.new_empty(
+                    (append_ckv_t.shape[0], 0)
                 )
                 if kv_cache.kv_cache_base.shape[-1] != layout.local_width:
                     raise RuntimeError(
