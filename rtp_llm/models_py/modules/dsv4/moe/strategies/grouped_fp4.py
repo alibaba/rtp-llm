@@ -36,7 +36,10 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.utils.math import align, ceil_div
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
+from .._silu_mul_fp8_quant_triton import (
+    silu_mul_fp8_quant_packed,
+    silu_mul_fp8_quant_packed_from_parts,
+)
 from ..warmup_sync import cuda_graph_warmup_forward_enabled
 from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 
@@ -362,202 +365,103 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         indices: torch.Tensor,
         input_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """FlashInfer contiguous groupwise MXFP8 x MXFP4 MoE path.
-
-        FlashInfer requires every ``m_indptr`` entry to be 4-row aligned and
-        every expert's activation-scale segment to be padded independently to
-        128 rows before the 128x4 scale swizzle.  Keeping those two layouts
-        separate is essential: concatenating scales and padding only once lets
-        the kernel read the following expert's scale rows.
-        """
+        """Launch-bounded SM120 path using Triton route scatter/gather."""
         from flashinfer import block_scale_interleave, mxfp8_quantize
         from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
 
         cfg = self.cfg
         n, d = x.shape
-        topk = indices.size(1)
-        num_experts = cfg.n_routed_experts
-        inter = cfg.moe_inter_dim
+        e, inter = cfg.n_routed_experts, cfg.moe_inter_dim
         device = x.device
-
-        flat_experts = indices.reshape(-1)
-        flat_weights = weights.reshape(-1)
-        valid_positions = torch.nonzero(flat_weights != 0, as_tuple=False).flatten()
-        if valid_positions.numel() == 0:
+        routed_ids = torch.where(
+            weights != 0, indices, torch.full_like(indices, -1)
+        )
+        adjusted_ids, counts = recompute_topk_ids_sum_expert_count(
+            routed_ids, current_expert_start_id=0, num_local_experts=e
+        )
+        counts_list = counts.cpu().tolist()
+        aligned_list = [align(int(count), 4) for count in counts_list]
+        total_rows = sum(aligned_list)
+        if total_rows == 0:
             return torch.zeros((n, d), dtype=torch.float32, device=device)
-        valid_experts = flat_experts.index_select(0, valid_positions)
-        valid_order = torch.argsort(valid_experts, stable=True)
-        order = valid_positions.index_select(0, valid_order)
-        sorted_experts = flat_experts.index_select(0, order)
-        counts = torch.bincount(sorted_experts, minlength=num_experts)
-        counts_all = counts.cpu().tolist()
-        active_experts = [i for i, count in enumerate(counts_all) if count]
-        counts_list = [int(counts_all[i]) for i in active_experts]
-        padded_counts = [align(int(count), 4) for count in counts_list]
-        total_rows = int(sum(padded_counts))
 
-        if input_scale is not None:
-            assert x.dtype == torch.float8_e4m3fn
-            assert input_scale.dtype == torch.uint8
-            input_scale = input_scale.reshape(n, d // FP4_BLOCK)
-
-        token_ids = torch.div(order, topk, rounding_mode="floor")
-        routed_x = torch.zeros(total_rows, d, dtype=x.dtype, device=device)
-        routed_input_scale = (
-            torch.zeros(
-                total_rows,
-                d // FP4_BLOCK,
-                dtype=torch.uint8,
-                device=device,
+        aligned = torch.tensor(
+            aligned_list, dtype=torch.int32, pin_memory=True
+        ).to(device, non_blocking=True)
+        indptr = torch.cat(
+            (
+                torch.zeros(1, dtype=torch.int32, device=device),
+                aligned.cumsum(0).to(torch.int32),
             )
-            if input_scale is not None
-            else None
         )
-        valid_rows = torch.empty(order.numel(), dtype=torch.int64, device=device)
-        src_offset = 0
-        dst_offset = 0
-        for count, padded_count in zip(counts_list, padded_counts):
-            count = int(count)
-            if count:
-                dst = torch.arange(dst_offset, dst_offset + count, device=device)
-                source_x = x.index_select(
-                    0, token_ids[src_offset : src_offset + count]
-                )
-                if x.dtype == torch.float8_e4m3fn:
-                    routed_x.view(torch.uint8).index_copy_(
-                        0, dst, source_x.view(torch.uint8)
-                    )
-                else:
-                    routed_x.index_copy_(0, dst, source_x)
-                if routed_input_scale is not None:
-                    routed_input_scale.index_copy_(
-                        0,
-                        dst,
-                        input_scale.index_select(
-                            0, token_ids[src_offset : src_offset + count]
-                        ),
-                    )
-                valid_rows[src_offset : src_offset + count] = dst
-            src_offset += count
-            dst_offset += padded_count
+        expert_start = torch.empty_like(aligned)
+        # ep_scatter's metadata workspace is tiled in 128 rows; routed data
+        # itself remains only 4-row aligned for FlashInfer GEMM efficiency.
+        m_indices = torch.empty(
+            align(total_rows, 128), dtype=torch.int32, device=device
+        )
+        output_index = torch.empty_like(adjusted_ids)
 
-        def interleave_groupwise_scale(
-            inp_scale: torch.Tensor,
-        ) -> list[torch.Tensor]:
-            scale_cols = inp_scale.size(1)
-            scale_chunks = []
-            offset = 0
-            for padded_count in padded_counts:
-                if padded_count:
-                    chunk = block_scale_interleave(
-                        inp_scale[offset : offset + padded_count].contiguous()
-                    ).reshape(-1, scale_cols)
-                    scale_chunks.append(chunk)
-                offset += padded_count
-            return scale_chunks
-
-        def quantize_groupwise(inp: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
-            inp_q, inp_scale = mxfp8_quantize(
-                inp.contiguous(), is_sf_swizzled_layout=False
+        if input_scale is None:
+            x_q, linear_scale = mxfp8_quantize(
+                x.contiguous(), is_sf_swizzled_layout=False
             )
-            # FlashInfer MXFP8 is fixed at one UE8M0 scale per 32 values;
-            # RTP's ``FP8_BLOCK`` is 128 and belongs to the DeepGEMM path.
-            inp_scale = inp_scale.reshape(inp.size(0), inp.size(1) // FP4_BLOCK)
-            return inp_q, interleave_groupwise_scale(inp_scale)
-
-        def run_grouped_gemm(
-            inp_q: torch.Tensor,
-            scale_chunks: list[torch.Tensor],
-            expert_weight: torch.Tensor,
-            expert_scale: torch.Tensor,
-        ) -> torch.Tensor:
-            # FlashInfer's grouped SM120 kernel uses a 128-row SFA tile with
-            # an extra alignment term for every preceding group. Match the
-            # packing formula used by FlashInfer's own group-GEMM tests:
-            #   sf_offset[i] = floor((m_indptr[i] + i * 127) / 128) * 128.
-            indptr_values = [0]
-            for padded_count in padded_counts:
-                indptr_values.append(indptr_values[-1] + padded_count)
-            sf_offsets = [
-                ((offset + i * 127) // 128) * 128
-                for i, offset in enumerate(indptr_values)
-            ]
-            padded_scale_chunks = []
-            for i, chunk in enumerate(scale_chunks):
-                target_rows = sf_offsets[i + 1] - sf_offsets[i]
-                if chunk.size(0) < target_rows:
-                    chunk = torch.cat(
-                        (
-                            chunk,
-                            torch.zeros(
-                                target_rows - chunk.size(0),
-                                chunk.size(1),
-                                dtype=chunk.dtype,
-                                device=device,
-                            ),
-                        ),
-                        dim=0,
-                    )
-                padded_scale_chunks.append(chunk)
-            group_indptr = torch.tensor(
-                indptr_values, dtype=torch.int32, device=device
-            )
-            return group_gemm_mxfp4_nt_groupwise(
-                inp_q,
-                expert_weight,
-                torch.cat(padded_scale_chunks, dim=0),
-                expert_scale,
-                group_indptr,
-                tile_n=128,
-                out_dtype=torch.bfloat16,
-            )
-
-        if routed_input_scale is None:
-            routed_q, routed_scale = quantize_groupwise(routed_x)
+            linear_scale = linear_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
         else:
-            routed_q = routed_x
-            routed_scale = interleave_groupwise_scale(routed_input_scale)
-        active_experts_t = torch.tensor(
-            active_experts, dtype=torch.int64, device=device
+            x_q = x
+            linear_scale = input_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
+        routed_q = torch.empty(total_rows, d, dtype=x_q.dtype, device=device)
+        routed_scale = torch.zeros(
+            total_rows, d // FP4_BLOCK, dtype=torch.uint8, device=device
         )
-        gate_up = run_grouped_gemm(
-            routed_q,
-            routed_scale,
-            self._w13.view(torch.uint8).index_select(0, active_experts_t),
-            self._s13_sm120.index_select(0, active_experts_t),
-        )
-        # SM120 weights are kept in FlashInfer fused-MoE order [up, gate] so
-        # the graph path can reuse them without a second model-sized copy.
-        up = gate_up[:, :inter].float()
-        gate = gate_up[:, inter:].float()
-        if cfg.swiglu_limit > 0:
-            gate.clamp_(max=cfg.swiglu_limit)
-            up.clamp_(min=-cfg.swiglu_limit, max=cfg.swiglu_limit)
-        hidden = (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
-        hidden_q, hidden_scale = quantize_groupwise(hidden)
-        down = run_grouped_gemm(
-            hidden_q,
-            hidden_scale,
-            self._w2.view(torch.uint8).index_select(0, active_experts_t),
-            self._s2_sm120.index_select(0, active_experts_t),
+        ep_scatter(
+            x_q, linear_scale, adjusted_ids, aligned, expert_start,
+            routed_q, routed_scale, m_indices, output_index,
         )
 
-        sorted_out = down.index_select(0, valid_rows)
-        # Accumulate routed rows directly into their token output.  Materialising
-        # [N, topk, D] in fp32 costs 768 MiB for the 8k startup-warmup shape and
-        # leaves no headroom on the 72 GiB SM120 cards.  Chunking also bounds the
-        # temporary created by the BF16 -> FP32 conversion.
-        output = torch.zeros(n, d, dtype=torch.float32, device=device)
-        reduce_chunk_rows = 1024
-        sorted_weights = flat_weights.index_select(0, order)
-        for begin in range(0, sorted_out.size(0), reduce_chunk_rows):
-            end = min(begin + reduce_chunk_rows, sorted_out.size(0))
-            output.index_add_(
-                0,
-                token_ids[begin:end],
-                sorted_out[begin:end].float()
-                * sorted_weights[begin:end].float().unsqueeze(-1),
+        # FlashInfer offsets each group's 128x4 scale layout independently.
+        expert_ids = torch.bucketize(
+            torch.arange(total_rows, device=device), indptr[1:], right=True
+        )
+        group_ids = torch.arange(e + 1, dtype=torch.int32, device=device)
+        sf_offsets = ((indptr + group_ids * 127) // 128) * 128
+        scale_rows = torch.arange(total_rows, device=device) + (
+            sf_offsets[:-1] - indptr[:-1]
+        ).index_select(0, expert_ids)
+        sf_rows = int(sf_offsets[-1].item())
+
+        def pack_scale(linear: torch.Tensor) -> torch.Tensor:
+            padded = torch.zeros(
+                sf_rows, linear.size(1), dtype=torch.uint8, device=device
             )
+            padded.index_copy_(0, scale_rows, linear)
+            return block_scale_interleave(padded).reshape(sf_rows, linear.size(1))
+
+        def gemm(inp_q, inp_scale, expert_weight, expert_scale):
+            return group_gemm_mxfp4_nt_groupwise(
+                inp_q, expert_weight, pack_scale(inp_scale), expert_scale,
+                indptr, tile_n=128, out_dtype=torch.bfloat16,
+            )
+
+        gate_up = gemm(
+            routed_q, routed_scale, self._w13.view(torch.uint8), self._s13_sm120
+        )
+        # Preserve the legacy BF16 rounding point while fusing clamp, SiLU,
+        # multiply and MXFP8 quantization into one launch.  FlashInfer consumes
+        # one linear UE8M0 byte per 32 values; unpack the kernel's four-byte
+        # scale words with one compact layout copy before groupwise swizzling.
+        up, gate = gate_up[:, :inter], gate_up[:, inter:]
+        hidden_q, hidden_scale_packed = silu_mul_fp8_quant_packed_from_parts(
+            gate, up, clamp_limit=cfg.swiglu_limit, group_size=FP4_BLOCK
+        )
+        hidden_scale = hidden_scale_packed.contiguous().view(torch.uint8).reshape(
+            total_rows, inter // FP4_BLOCK
+        )
+        down = gemm(
+            hidden_q, hidden_scale, self._w2.view(torch.uint8), self._s2_sm120
+        )
+        output = torch.empty((n, d), dtype=torch.float32, device=device)
+        ep_gather(down, adjusted_ids, weights, output_index, output)
         return output
 
     def forward_sm120_mxfp8(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import unittest
-
 import torch
 
 from rtp_llm.models_py.modules.dsv4.moe.strategies import (
@@ -103,6 +102,60 @@ def _bench(fn, warmup: int = 5, iters: int = 12, repeats: int = 3) -> float:
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class GroupedFP4StrategyPerfTest(unittest.TestCase):
+    def test_sm120_scatter_matches_groupwise(self):
+        if torch.cuda.get_device_capability()[0] != 12:
+            self.skipTest("SM120 required")
+        from flashinfer import mxfp8_quantize
+
+        torch.manual_seed(20260822)
+        E, D, inter, topk, tokens = 16, 512, 256, 6, 512
+        cfg = _cfg(E, D, inter, topk, tokens)
+        grouped = GroupedFP4Strategy(cfg)
+        grouped.setup_weights(_make_layer_weights(E, D, inter))
+        x, weights, indices = _make_inputs(tokens, D, E, topk)
+        # Mirror EP receive layout: non-local top-k slots retain an index but
+        # carry zero router weight and must not be dispatched to a local GEMM.
+        weights = weights * (indices.remainder(4) == 0)
+        x_q, x_sf = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=False)
+        x_sf = x_sf.reshape(tokens, D // 32).view(torch.uint8)
+        with torch.inference_mode():
+            got = grouped.forward_sm120_mxfp8(x_q, x_sf, weights, indices)
+            got_ms = _bench(
+                lambda: grouped.forward_sm120_mxfp8(x_q, x_sf, weights, indices),
+                warmup=2, iters=3, repeats=2,
+            )
+
+        # Validate the precision-sensitive fused activation/quantization stage
+        # against its explicit BF16-rounding reference.
+        from rtp_llm.models_py.modules.dsv4.moe._silu_mul_fp8_quant_triton import (
+            silu_mul_fp8_quant_packed_from_parts,
+        )
+
+        gate_up = torch.randn(tokens, 2 * inter, dtype=torch.bfloat16, device="cuda")
+        up, gate = gate_up[:, :inter], gate_up[:, inter:]
+        gate_ref = gate.float().clamp(max=cfg.swiglu_limit)
+        up_ref = up.float().clamp(min=-cfg.swiglu_limit, max=cfg.swiglu_limit)
+        hidden_ref = (torch.nn.functional.silu(gate_ref) * up_ref).to(torch.bfloat16)
+        ref_q, ref_sf = mxfp8_quantize(
+            hidden_ref.contiguous(), is_sf_swizzled_layout=False
+        )
+        ref_sf = ref_sf.reshape(tokens, inter // 32).view(torch.uint8)
+        got_q, got_sf_packed = silu_mul_fp8_quant_packed_from_parts(
+            gate, up, clamp_limit=cfg.swiglu_limit, group_size=32
+        )
+        got_sf = got_sf_packed.contiguous().view(torch.uint8).reshape(
+            tokens, inter // 32
+        )
+        ref_deq = ref_q.float() * (ref_sf.to(torch.int32) - 127).float().exp2().repeat_interleave(32, dim=1)
+        got_deq = got_q.float() * (got_sf.to(torch.int32) - 127).float().exp2().repeat_interleave(32, dim=1)
+        rel = _relative_mean_error(ref_deq, got_deq)
+        print(
+            f"[SM120 scatter] scatter={got_ms:.3f}ms "
+            f"activation_quant_rel={rel:.9f}"
+        )
+        self.assertTrue(torch.isfinite(got).all().item())
+        self.assertLess(rel, 0.01)
+
     def test_cuda_graph_capture_bs1_matches_eager(self):
         if torch.cuda.get_device_capability()[0] != 10:
             self.skipTest("SM100 required")
