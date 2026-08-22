@@ -34,12 +34,16 @@ class MegaCSAPoolContext:
     main_cache: torch.Tensor
     indexer_cache: torch.Tensor
     swa_cache: torch.Tensor
+    main_state_block_table: torch.Tensor
+    indexer_state_block_table: torch.Tensor
     indexer_block_table: torch.Tensor
     main_entries: int
     indexer_entries: int
     swa_entries: int
     main_state_entries: int
     indexer_state_entries: int
+    main_state_tokens_per_block: int
+    indexer_state_tokens_per_block: int
     main_stride_bytes: int
     indexer_stride_bytes: int
     swa_stride_bytes: int
@@ -146,6 +150,7 @@ class MegaCSAAdapter:
             "wq_b_proj_gemm_merged_csa": (
                 "indexer_fp8",
                 "idx_cache",
+                "idx_state_block_table",
                 "swa_cache",
                 "iq_dst",
                 "pdl",
@@ -153,6 +158,7 @@ class MegaCSAAdapter:
             "mqa_logits_fp8_decode_out": (
                 "schedule_meta",
                 "comp_state",
+                "comp_state_block_table",
                 "cmp_cache",
                 "query_x",
                 "query_out",
@@ -251,24 +257,34 @@ class MegaCSAAdapter:
         assert indexer_cache is not None
         assert swa_cache is not None
 
-        indexer_block_table = metadata.pool_block_tables.get(INDEXER_KV)
-        if (
-            indexer_block_table is None
-            or int(indexer_block_table.shape[0]) < token_count
-        ):
-            raise RuntimeError("DSV4 mega metadata is missing INDEXER_KV block table")
-        indexer_block_table = indexer_block_table[:token_count]
-        if (
-            indexer_block_table.dtype != torch.int32
-            or not indexer_block_table.is_contiguous()
-        ):
-            raise TypeError("DSV4 mega INDEXER_KV block table must be contiguous int32")
+        def require_block_table(attn_type: int, name: str) -> torch.Tensor:
+            table = metadata.pool_block_tables.get(attn_type)
+            if table is None or int(table.shape[0]) < token_count:
+                raise RuntimeError(f"DSV4 mega metadata is missing {name} block table")
+            table = table[:token_count]
+            if table.dtype != torch.int32 or not table.is_contiguous():
+                raise TypeError(
+                    f"DSV4 mega {name} block table must be contiguous int32"
+                )
+            return table
+
+        main_state_block_table = require_block_table(CSA_STATE, "CSA_STATE")
+        indexer_state_block_table = require_block_table(
+            INDEXER_STATE, "INDEXER_STATE"
+        )
+        indexer_block_table = require_block_table(INDEXER_KV, "INDEXER_KV")
 
         main_entries = attn._pool_entries_per_block(CSA_KV)
         indexer_entries = attn._pool_entries_per_block(INDEXER_KV)
         swa_entries = attn._pool_entries_per_block(SWA_KV)
         main_state_entries = attn._pool_entries_per_block(CSA_STATE)
         indexer_state_entries = attn._pool_entries_per_block(INDEXER_STATE)
+        main_state_tokens_per_block = int(
+            metadata.paged_pool_tokens_per_block.get(CSA_STATE, 0)
+        )
+        indexer_state_tokens_per_block = int(
+            metadata.paged_pool_tokens_per_block.get(INDEXER_STATE, 0)
+        )
         if indexer_entries not in (32, 64, 128):
             raise ValueError(
                 "DSV4 mega INDEXER_KV entries must be 32, 64, or 128, "
@@ -280,6 +296,8 @@ class MegaCSAAdapter:
                 swa_entries,
                 main_state_entries,
                 indexer_state_entries,
+                main_state_tokens_per_block,
+                indexer_state_tokens_per_block,
             )
             <= 0
         ):
@@ -292,12 +310,16 @@ class MegaCSAAdapter:
             main_cache=main_cache,
             indexer_cache=indexer_cache,
             swa_cache=swa_cache,
+            main_state_block_table=main_state_block_table,
+            indexer_state_block_table=indexer_state_block_table,
             indexer_block_table=indexer_block_table,
             main_entries=main_entries,
             indexer_entries=indexer_entries,
             swa_entries=swa_entries,
             main_state_entries=main_state_entries,
             indexer_state_entries=indexer_state_entries,
+            main_state_tokens_per_block=main_state_tokens_per_block,
+            indexer_state_tokens_per_block=indexer_state_tokens_per_block,
             main_stride_bytes=self._pool_stride_bytes(main_cache),
             indexer_stride_bytes=self._pool_stride_bytes(indexer_cache),
             swa_stride_bytes=self._pool_stride_bytes(swa_cache),
@@ -497,6 +519,9 @@ class MegaCSAAdapter:
             idx_state=pools.indexer_state,
             idx_state_row=pools.slots.indexer_state_rows,
             state_ring_entries=pools.indexer_state_entries,
+            idx_state_block_table=pools.indexer_state_block_table,
+            idx_token_to_req=metadata.req_id_per_token[:m],
+            idx_state_tokens_per_block=pools.indexer_state_tokens_per_block,
             win_y2=workspace.window_y,
             win_norm=self.weights.window_norm,
             q_y=workspace.front_out[:, : g.q_lora_rank],
@@ -536,6 +561,9 @@ class MegaCSAAdapter:
             comp_state=pools.main_state,
             comp_state_row=pools.slots.main_state_rows,
             comp_state_ring_entries=pools.main_state_entries,
+            comp_state_block_table=pools.main_state_block_table,
+            comp_token_to_req=metadata.req_id_per_token[:m],
+            comp_state_tokens_per_block=pools.main_state_tokens_per_block,
             cmp_cache=pools.main_cache,
             cmp_dst=pools.slots.main_destinations,
             cmp_entries_per_block=pools.main_entries,
