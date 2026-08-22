@@ -259,6 +259,7 @@ class MegaHCAWeightsTest(unittest.TestCase):
             hc_reduce_fuse_out=lambda: None,
             front_mixed_gemm_hca=lambda: None,
             wq_b_proj_gemm_merged_hca=lambda: None,
+            q_rmsnorm_rope_cuda_=lambda: None,
             mla_o_inv_rope_quant=lambda: None,
         )
         adapter = MegaHCAAdapter.__new__(MegaHCAAdapter)
