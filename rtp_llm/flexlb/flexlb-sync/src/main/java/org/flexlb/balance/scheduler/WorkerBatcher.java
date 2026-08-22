@@ -21,11 +21,12 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Per-worker scheduling queue that owns request grouping and delivery staging,
- * delegating grouping decisions to a pluggable {@link BatcherAlgorithm}.
+ * delegating grouping decisions to a {@link BatcherAlgorithm}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and grouped by the configured algorithm. A group
- * may be delivered through EnqueueBatch or as individual route decisions.
+ * {@link #offer(BatchItem)} and grouped by the algorithm, whose bounds come
+ * from the configured dispatcher. A group may be delivered through
+ * EnqueueBatch or as individual route decisions.
  *
  * <p>The context-owned active queue and ready-delivery backlog together are
  * the single source of truth for pending requests. PRIORITY ordering uses
@@ -99,9 +100,7 @@ public class WorkerBatcher {
         Comparator<BatchItem> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         this.queue = new PriorityBlockingQueue<>(11, queueOrder);
-        this.algorithm = cfg.isBatchDispatch()
-                ? new FixedWindowBatcherAlgorithm()
-                : new ImmediateNonBatchAlgorithm();
+        this.algorithm = new FixedWindowBatcherAlgorithm();
         this.ctx = new BatcherContext(
                 key, prefillEp, cfg, decisionHandler, queue, queueDepth, queueVersion, queueLock,
                 queueOrder, reporter);

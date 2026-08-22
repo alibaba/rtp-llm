@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.PrefillTimePredictor;
-import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 
@@ -10,8 +9,11 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Fixed-window batching algorithm with batch-full early dispatch, optional
- * predictor-based early dispatch, request-expiration drop, and resource-shape filtering.
+ * Decision algorithm behind every worker queue. It grows the largest group the
+ * live bounds allow and releases it to the queue's configured delivery, which
+ * is the only thing the delivery mode changes. A dispatcher that permits one
+ * request per group therefore decides each arrival on its own, and whatever it
+ * cannot decide yet stays queued.
  *
  * <h3>Algorithm</h3>
  * <ol>
@@ -19,34 +21,33 @@ import java.util.concurrent.TimeUnit;
  *       before backpressure to ensure stale requests are cleared even when
  *       the engine is under sustained backpressure.</li>
  *   <li>Oversized request rejection: if the head request's seqLen exceeds
- *       the worker token capacity, it can never be picked by any batch,
+ *       the worker token capacity, it can never be picked by any group,
  *       so it is dropped immediately instead of waiting for the deadline.</li>
  *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
  *   <li>Build the largest homogeneous prefix that stays inside every bound on
- *       batch growth: {@code dispatcher.maxRequests}, the worker compute and KV
- *       shapes, and — when configured — a predicted execution time below
- *       {@code dispatcher.earlyDispatchPredictedExecutionMs}. The head is a
- *       mandatory member, so a single request already over that budget forms
- *       the whole batch.</li>
+ *       group growth: the dispatcher's largest decision group, the worker
+ *       compute and KV shapes, and — when configured — a predicted execution
+ *       time below the dispatcher's budget. The head is a mandatory member, so
+ *       a single request already over that budget forms the whole group.</li>
  *   <li>Dispatch as soon as growth stopped at a bound that cannot relax: the
- *       predicted execution budget or {@code dispatcher.maxRequests}. Compute
+ *       predicted execution budget or the largest decision group. Compute
  *       and KV pressure are transient, so they stop growth without dispatching.</li>
- *   <li>Otherwise dispatch once the collection window
- *       ({@code dispatcher.maxCollectionWaitMs}) has run out, so a partial batch
- *       never waits indefinitely for requests that have not arrived. The window
- *       covers the picked group, whose members are the ones paying for the wait;
- *       queue age itself is bounded by the absolute request expiration.</li>
+ *   <li>Otherwise dispatch once the collection window has run out, so an
+ *       incomplete group never waits indefinitely for requests that have not
+ *       arrived. The window covers the picked group, whose members are the ones
+ *       paying for the wait; queue age itself is bounded by the absolute
+ *       request expiration.</li>
  *   <li>Otherwise park briefly and retry.</li>
  * </ol>
  *
  * <h3>Resource-shape filtering</h3>
- * When picking items for a batch, requests whose padded compute shape would
- * exceed the worker/fallback token capacity, or whose combined sequence length
- * would exceed the latest worker-reported KV budget, remain in the queue for
- * a later batch.
+ * When picking items, requests whose padded compute shape would exceed the
+ * worker/fallback token capacity, or whose combined sequence length would
+ * exceed the latest worker-reported KV budget, remain in the queue for a later
+ * decision.
  * <p>
  * However, a request whose own seqLen already exceeds
- * that capacity can never be picked by any batch. Such
+ * that capacity can never be picked at all. Such
  * oversized requests are rejected immediately when they reach the head of
  * the queue (see step 0.5 below), rather than waiting for the queue
  * request expiration.
@@ -56,9 +57,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     @Override
     public long queueWaitMs(BatcherContext ctx) {
-        BatchDispatcherConfig batch = ctx.cfg().batchDispatcher();
-        long fixedWaitMs = batch.getMaxCollectionWaitMs();
-        int batchMaxCount = Math.max(1, batch.getMaxRequests());
+        long fixedWaitMs = ctx.collectionWindowMs();
+        int batchMaxCount = ctx.maxDecisionRequests();
 
         // The charged-depth read is lock-free and covers the overwhelmingly
         // common empty-queue routing path. Fall back to the physical active
@@ -122,12 +122,9 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         }
 
         long nowMs = ctx.now();
-        BatchDispatcherConfig batch = ctx.cfg().batchDispatcher();
-        long fixedWaitMs = batch.getMaxCollectionWaitMs();
-        int batchMaxCount = Math.max(1, batch.getMaxRequests());
-        Long configuredPredictThresholdMs = batch.getEarlyDispatchPredictedExecutionMs();
-        long predictThresholdMs = configuredPredictThresholdMs == null
-                ? 0 : configuredPredictThresholdMs;
+        long fixedWaitMs = ctx.collectionWindowMs();
+        int batchMaxCount = ctx.maxDecisionRequests();
+        long predictThresholdMs = ctx.predictedExecutionBudgetMs();
         long batchMaxTokens = ctx.batchTokenCapacity();
 
         // The caller's absolute request expiry is the only queue-age limit.
@@ -177,7 +174,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // is the decision's linearization point: a later offer belongs to the
         // next decision, while removal of any picked member makes atomic stage
         // reject the whole group. Prediction runs without holding queueLock.
-        BatcherContext.ActiveQueueSnapshot snapshot = ctx.snapshotActiveQueue();
+        BatcherContext.ActiveQueueSnapshot snapshot = ctx.snapshotActiveQueue(batchMaxCount);
         BatchItem head = snapshot.head();
         if (head == null) {
             return;
@@ -187,12 +184,9 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // Re-evaluate every hard gate against the stable snapshot head before
         // prediction or release.
         nowMs = ctx.now();
-        batch = ctx.cfg().batchDispatcher();
-        fixedWaitMs = batch.getMaxCollectionWaitMs();
-        batchMaxCount = Math.max(1, batch.getMaxRequests());
-        configuredPredictThresholdMs = batch.getEarlyDispatchPredictedExecutionMs();
-        predictThresholdMs = configuredPredictThresholdMs == null
-                ? 0 : configuredPredictThresholdMs;
+        fixedWaitMs = ctx.collectionWindowMs();
+        batchMaxCount = ctx.maxDecisionRequests();
+        predictThresholdMs = ctx.predictedExecutionBudgetMs();
         batchMaxTokens = ctx.batchTokenCapacity();
         if (head.ctx().requestExpired(nowMs)) {
             Logger.debug("flexlb_batch_drop request_id={} reason=request_expired "
@@ -282,10 +276,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         if (head.deliveryMode() != DeliveryMode.BATCH_ENQUEUE) {
             return false;
         }
-        Integer configuredMaxInflight = ctx.cfg().batchDispatcher()
-                .getMaxInflightBatchesPerPrefillWorker();
-        int maxInflightBatches = configuredMaxInflight == null
-                ? 0 : configuredMaxInflight;
+        int maxInflightBatches = ctx.maxInflightBatches();
         return maxInflightBatches > 0
                 && ctx.prefillEp().getInflightBatchCount()
                 >= maxInflightBatches;
@@ -387,10 +378,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             return false;
         }
         if (head.deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
-            Integer configuredMaxInflight = ctx.cfg().batchDispatcher()
-                    .getMaxInflightBatchesPerPrefillWorker();
-            int maxInflightBatches = configuredMaxInflight == null
-                    ? 0 : configuredMaxInflight;
+            int maxInflightBatches = ctx.maxInflightBatches();
             if (maxInflightBatches > 0
                     && ctx.prefillEp().getInflightBatchCount()
                     >= maxInflightBatches) {

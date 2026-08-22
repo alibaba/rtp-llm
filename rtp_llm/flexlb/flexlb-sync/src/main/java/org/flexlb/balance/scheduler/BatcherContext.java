@@ -168,17 +168,37 @@ public class BatcherContext {
         return cfg.getInternalRuntime().getNonBatchWaitingRequestsPerPrefillWorker();
     }
 
+    /**
+     * Largest decision group this dispatcher may release at once. NON_BATCH
+     * decides one request at a time, so its group is complete on arrival.
+     */
     int maxDecisionRequests() {
         return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
                 ? Math.max(1, batch.getMaxRequests())
                 : 1;
     }
 
-    /** Collection window length; NON_BATCH dispatch collects nothing. */
+    /**
+     * How long an incomplete group may wait for the arrivals that would
+     * complete it. A single-request group is never incomplete, so it has no
+     * window to spend.
+     */
     long collectionWindowMs() {
         return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
                 ? Math.max(0L, batch.getMaxCollectionWaitMs())
                 : 0L;
+    }
+
+    /**
+     * Predicted-execution budget capping group growth, or {@code 0} when no
+     * budget applies. A single-request group has nothing to cap.
+     */
+    long predictedExecutionBudgetMs() {
+        if (!(cfg.getDispatcher() instanceof BatchDispatcherConfig batch)) {
+            return 0L;
+        }
+        Long configured = batch.getEarlyDispatchPredictedExecutionMs();
+        return configured == null ? 0L : configured;
     }
 
     BatchSchedulerReporter reporter() {
@@ -313,13 +333,24 @@ public class BatcherContext {
      * Capture one stable, ordered active-queue snapshot for a batching
      * decision. The version and identities are linearized under the same lock;
      * prediction intentionally runs after the lock is released.
+     *
+     * <p>{@code maxItems} is the largest group the decision can release. A
+     * single-request group needs only the ordering head, which the queue
+     * already exposes without a copy.
      */
-    ActiveQueueSnapshot snapshotActiveQueue() {
+    ActiveQueueSnapshot snapshotActiveQueue(int maxItems) {
         long version;
         List<BatchItem> items;
         queueLock.lock();
         try {
             version = queueVersion.get();
+            if (maxItems <= 1) {
+                // The ordering head is the queue's own least element, so a
+                // single-request decision needs neither a copy nor a sort.
+                BatchItem head = queue.peek();
+                return new ActiveQueueSnapshot(
+                        version, head == null ? List.of() : List.of(head));
+            }
             if (queue.isEmpty()) {
                 return new ActiveQueueSnapshot(version, List.of());
             }
@@ -549,6 +580,18 @@ public class BatcherContext {
                 ? nonBatch.getMaxInflightRequestsPerPrefillWorker()
                 : null;
         return prefillEp.availableRequestSlots(maximum == null ? 0 : maximum);
+    }
+
+    /**
+     * Largest number of groups the batch delivery may keep inflight, or
+     * {@code 0} for unlimited. Route deliveries are capped per request by
+     * {@link #availableDeliverySlots()} instead.
+     */
+    int maxInflightBatches() {
+        Integer maximum = cfg.getDispatcher() instanceof BatchDispatcherConfig batch
+                ? batch.getMaxInflightBatchesPerPrefillWorker()
+                : null;
+        return maximum == null ? 0 : maximum;
     }
 
     /** Delivery-unit inflight count used only for decision diagnostics. */
@@ -1157,8 +1200,6 @@ public class BatcherContext {
         if (ema > 0) {
             return Math.max(1, Math.round(ema));
         }
-        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
-                ? Math.max(1, batch.getMaxCollectionWaitMs())
-                : 1;
+        return Math.max(1, collectionWindowMs());
     }
 }

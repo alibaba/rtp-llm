@@ -33,7 +33,6 @@ classDiagram
     }
     class PriorityAdmissionScheduler
     class WorkerBatcher
-    class ImmediateNonBatchAlgorithm
     class FixedWindowBatcherAlgorithm
     class RouteDecisionDelivery
     class BatchEnqueueDelivery
@@ -46,8 +45,7 @@ classDiagram
     PriorityScheduler --> DefaultRouter : FIFO placement
     PriorityScheduler --> PriorityAdmissionScheduler : PRIORITY placement/preemption
     PriorityScheduler --> WorkerBatcher : per-Prefill queue
-    WorkerBatcher --> ImmediateNonBatchAlgorithm : NON_BATCH
-    WorkerBatcher --> FixedWindowBatcherAlgorithm : BATCH
+    WorkerBatcher --> FixedWindowBatcherAlgorithm : NON_BATCH and BATCH
     PriorityScheduler --> RouteDecisionDelivery : NON_BATCH
     PriorityScheduler --> BatchEnqueueDelivery : BATCH
     BatchEnqueueDelivery --> BatchDispatcher : EnqueueBatch RPC
@@ -78,7 +76,7 @@ sequenceDiagram
         S->>S: admit, order, and place
         S->>W: enqueue selected Prefill work
         alt dispatcher.type = NON_BATCH
-            W-->>S: immediate one-request decision
+            W-->>S: one-request decision group
             S-->>F: route decision, enqueued_by_master=false
             F->>E: GenerateStream(request)
         else dispatcher.type = BATCH
@@ -92,12 +90,17 @@ sequenceDiagram
     end
 ```
 
-`NON_BATCH` does not run a collection window: each request becomes a decision
-group as soon as it reaches its selected worker queue. `BATCH` grows a group up
-to `dispatcher.maxRequests` and, when configured, keeps its predicted execution
-time below `dispatcher.earlyDispatchPredictedExecutionMs`; it dispatches once
-either bound stops growth, or once the group's longest-waiting member reaches
-`dispatcher.maxCollectionWaitMs`. There is no SLO-budget batching policy.
+The two dispatchers differ only in who delivers the request — the frontend calls
+`GenerateStream` itself, or the master calls `EnqueueBatch` — and both run the
+same decision algorithm on the selected worker queue. `NON_BATCH` decides one
+request at a time, so its group is complete on arrival; a request the worker
+cannot take yet, because of KV pressure or engine backpressure, waits in the
+queue. `BATCH` grows a group up to `dispatcher.maxRequests` and, when configured,
+keeps its predicted execution time below
+`dispatcher.earlyDispatchPredictedExecutionMs`; it dispatches once either bound
+stops growth, or once the picked group's longest-waiting member reaches
+`dispatcher.maxCollectionWaitMs`. A single-request group is never incomplete, so
+`NON_BATCH` has no window to spend. There is no SLO-budget batching policy.
 
 ## Ordering and expiration
 
