@@ -5,7 +5,7 @@ import typing
 import torch
 
 __all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
-                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
+                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT', 'RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MAX', 'RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MIN', 'RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT', 'RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MAX', 'RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MIN', 'RdmaDeviceHealthFaultHandler', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
 class ActivationType:
@@ -190,7 +190,10 @@ class CacheStoreConfig:
     p2p_cancel_broadcast_timeout_ms: int
     cache_store_tcp_anet_rpc_thread_num: int
     cache_store_tcp_anet_rpc_queue_num: int
-
+    rdma_device_health_check_enabled: bool
+    rdma_device_health_fault_handler: RdmaDeviceHealthFaultHandler
+    rdma_device_health_probe_interval_ms: int
+    rdma_device_health_fault_confirm_count: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1453,6 +1456,43 @@ class QuantMethod:
     @property
     def value(self) -> int:
         ...
+class RdmaDeviceHealthFaultHandler:
+    """
+    Members:
+
+      LOG
+
+      ABORT
+    """
+    ABORT: typing.ClassVar[RdmaDeviceHealthFaultHandler]
+    LOG: typing.ClassVar[RdmaDeviceHealthFaultHandler]
+    __members__: typing.ClassVar[dict[str, RdmaDeviceHealthFaultHandler]]
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class RoleSpecialTokens:
     eos_token_ids: list[int]
     token_ids: list[int]
@@ -1834,4 +1874,10 @@ ALL_GATHER: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER: 1>
 ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>
 DISABLED: CPRotateMethod  # value = <CPRotateMethod.DISABLED: 0>
 PREFILL_CP: CPRotateMethod  # value = <CPRotateMethod.PREFILL_CP: 4>
+RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT: int
+RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MAX: int
+RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MIN: int
+RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT: int
+RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MAX: int
+RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MIN: int
 UNKNOWN: CPRotateMethod  # value = <CPRotateMethod.UNKNOWN: 5>

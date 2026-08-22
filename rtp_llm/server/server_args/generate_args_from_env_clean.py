@@ -12,8 +12,6 @@ from typing import Any, List, Tuple
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.server.server_args.server_args import EnvArgumentParser
-from rtp_llm.server.server_args.util import str2bool
-from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 
 def get_all_arguments_from_parser(
@@ -49,6 +47,26 @@ def get_all_arguments_from_parser(
     return all_args
 
 
+def convert_env_value(env_value: str, arg_type: Any) -> Any:
+    """
+    按 argparse 的 type 转换环境变量字符串
+
+    自定义 type（如 int_in_range 返回的闭包、str2bool）也走这条路径，否则会被当成
+    字符串，随后在 format_argument_pair 里被"跳过字符串"规则丢掉。
+    转换结果不是标量（例如枚举）时无法直接拼回 --xx value，仍按字符串处理并沿用既有跳过语义。
+    """
+    if arg_type == bool:
+        return env_value.lower() in ("true", "1", "yes", "on")
+    if arg_type in (int, float):
+        return arg_type(env_value)
+    if arg_type is not str and callable(arg_type):
+        converted = arg_type(env_value)
+        if type(converted) in (bool, int, float):
+            return converted
+        return str(env_value)
+    return str(env_value)
+
+
 def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
     """
     从环境变量读取值，如果环境变量不存在则返回默认值
@@ -61,16 +79,8 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
         return default_value
 
     try:
-        # 根据类型转换环境变量值
-        if arg_type == bool:
-            return env_value.lower() in ("true", "1", "yes", "on")
-        elif arg_type == int:
-            return int(env_value)
-        elif arg_type == float:
-            return float(env_value)
-        else:
-            return str(env_value)
-    except (ValueError, TypeError):
+        return convert_env_value(env_value, arg_type)
+    except (ValueError, TypeError, argparse.ArgumentTypeError):
         # 如果转换失败，返回默认值
         return default_value
 
@@ -138,29 +148,14 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
                 env_value_str = os.getenv(env_name)
                 if env_value_str is not None:
                     try:
-                        # 根据类型转换环境变量值
-                        if arg_type == bool:
-                            env_value = env_value_str.lower() in (
-                                "true",
-                                "1",
-                                "yes",
-                                "on",
-                            )
-                        elif arg_type == int:
-                            env_value = int(env_value_str)
-                        elif arg_type == float:
-                            env_value = float(env_value_str)
-                        elif arg_type == str2bool:
-                            env_value = str2bool(env_value_str)
-                        else:
-                            env_value = str(env_value_str)
+                        env_value = convert_env_value(env_value_str, arg_type)
 
                         # 跳过空字符串参数
                         if isinstance(env_value, str) and env_value == "":
                             continue
 
                         args_list.extend(format_argument_pair(long_option, env_value))
-                    except (ValueError, TypeError):
+                    except (ValueError, TypeError, argparse.ArgumentTypeError):
                         # 如果转换失败，跳过这个参数
                         continue
         else:

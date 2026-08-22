@@ -1,4 +1,17 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.ops import (
+    RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT,
+    RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MAX,
+    RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MIN,
+    RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT,
+    RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MAX,
+    RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MIN,
+    RdmaDeviceHealthFaultHandler,
+)
+from rtp_llm.server.server_args.util import (
+    int_in_range,
+    str2_rdma_device_health_fault_handler,
+    str2bool,
+)
 
 
 def init_cache_store_group_args(parser, cache_store_config):
@@ -59,6 +72,61 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=int,
         default=2,
         help="为 cache store RDMA 连接设置每个连接的底层QP数量。",
+    )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_device_health_check_enabled",
+        env_name="CACHE_STORE_RDMA_DEVICE_HEALTH_CHECK_ENABLED",
+        bind_to=(cache_store_config, "rdma_device_health_check_enabled"),
+        type=str2bool,
+        default=False,
+        help="是否周期检查本地 RDMA 设备与上行端口状态。仅 cache store RDMA 模式生效，"
+        "且需配套支持设备健康探测的 RDMA messager 版本，否则不产生实际探测行为。"
+        "默认关闭；回滚手段：不设置该参数或设置为 false。",
+    )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_device_health_fault_handler",
+        env_name="CACHE_STORE_RDMA_DEVICE_HEALTH_FAULT_HANDLER",
+        bind_to=(cache_store_config, "rdma_device_health_fault_handler"),
+        type=str2_rdma_device_health_fault_handler,
+        default=RdmaDeviceHealthFaultHandler.LOG,
+        metavar="{LOG,ABORT}",
+        help="确认所有本地 RDMA 设备不可用后的处理模式：LOG 只记录故障快照，ABORT 记录后终止进程。",
+    )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_device_health_probe_interval_ms",
+        env_name="CACHE_STORE_RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS",
+        bind_to=(cache_store_config, "rdma_device_health_probe_interval_ms"),
+        type=int_in_range(
+            RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MIN,
+            RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MAX,
+            "RDMA device health probe interval (ms)",
+        ),
+        default=RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT,
+        # type 为闭包而非内置类型，argparse 不会自动补 metavar
+        metavar="INT",
+        help="本地 RDMA 设备健康检查周期，单位为毫秒，范围为 "
+        f"[{RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MIN}, "
+        f"{RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MAX}]；"
+        "关闭探测请使用 --cache_store_rdma_device_health_check_enabled=false。",
+    )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_device_health_fault_confirm_count",
+        env_name="CACHE_STORE_RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT",
+        bind_to=(cache_store_config, "rdma_device_health_fault_confirm_count"),
+        type=int_in_range(
+            RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MIN,
+            RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MAX,
+            "RDMA device health fault confirm count",
+        ),
+        default=RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT,
+        metavar="INT",
+        help="设备故障触发 fault handler 前需要连续确认的次数，范围为 "
+        f"[{RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MIN}, "
+        f"{RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MAX}]。",
     )
 
     cache_store_group.add_argument(
