@@ -31,6 +31,13 @@ DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
 
 
+class HealthCheckFatalError(Exception):
+    """Raised by a registered check_ready_fn when retrying can never succeed
+    (e.g. the monitored process explicitly reported startup failure). The
+    health check worker stops polling and marks the check failed instead of
+    retrying forever."""
+
+
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 
@@ -880,6 +887,12 @@ class ProcessManager:
                         self.health_check_status[process_name]["checked"] = True
                     logging.info(f"{process_name} is ready")
                     return
+            except HealthCheckFatalError as e:
+                with self.health_check_lock:
+                    self.health_check_status[process_name]["ready"] = False
+                    self.health_check_status[process_name]["checked"] = True
+                logging.error(f"{process_name} health check fatal failure: {e}")
+                return
             except Exception as e:
                 logging.debug(f"{process_name} health check exception: {str(e)}")
             time.sleep(retry_interval)

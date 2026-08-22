@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -139,6 +140,34 @@ class StartupRealWarmupTest(unittest.TestCase):
             ),
             1048568,
         )
+
+
+class StartupHealthCheckTimeoutTest(unittest.TestCase):
+    def test_default_timeout_when_env_absent(self):
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop(start_server.STARTUP_HEALTH_CHECK_TIMEOUT_ENV, None)
+            self.assertEqual(
+                start_server._get_startup_health_check_timeout_s(),
+                start_server.STARTUP_HEALTH_CHECK_TIMEOUT_DEFAULT_S,
+            )
+
+    def test_env_override(self):
+        with patch.dict(
+            "os.environ",
+            {start_server.STARTUP_HEALTH_CHECK_TIMEOUT_ENV: "120"},
+        ):
+            self.assertEqual(start_server._get_startup_health_check_timeout_s(), 120.0)
+
+    def test_invalid_env_falls_back_to_default(self):
+        for bad_value in ("abc", "0", "-5"):
+            with patch.dict(
+                "os.environ",
+                {start_server.STARTUP_HEALTH_CHECK_TIMEOUT_ENV: bad_value},
+            ):
+                self.assertEqual(
+                    start_server._get_startup_health_check_timeout_s(),
+                    start_server.STARTUP_HEALTH_CHECK_TIMEOUT_DEFAULT_S,
+                )
 
 
 if __name__ == "__main__":

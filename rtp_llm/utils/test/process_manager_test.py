@@ -14,6 +14,7 @@ from rtp_llm.utils.process_manager import (
     DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
+    HealthCheckFatalError,
     ProcessManager,
 )
 
@@ -1812,6 +1813,67 @@ class TestFailureShutdownPaths(unittest.TestCase):
             self.manager.failure_detected,
             "graceful path should not flip failure_detected",
         )
+
+
+class _FakeHealthProcess:
+    def __init__(self, alive=True):
+        self._alive = alive
+        self.pid = 1234
+
+    def is_alive(self):
+        return self._alive
+
+
+class HealthCheckFatalErrorTest(unittest.TestCase):
+    """A terminal check_ready_fn failure must fail the health check fast
+    instead of being retried forever (which hangs the parent behind the
+    startup warmup health gate)."""
+
+    def test_fatal_error_fails_check_without_retrying(self):
+        manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
+        calls = []
+
+        def fatal_fn():
+            calls.append(1)
+            raise HealthCheckFatalError("backend reported startup failure")
+
+        manager.register_health_check(
+            processes=[_FakeHealthProcess()],
+            process_name="backend_server",
+            check_ready_fn=fatal_fn,
+            retry_interval_seconds=0.01,
+        )
+        with _watchdog(10, "fatal health check error retried forever"):
+            self.assertFalse(manager.run_health_checks(timeout=5))
+
+        self.assertEqual(len(calls), 1)
+        status = manager.health_check_status["backend_server"]
+        self.assertTrue(status["checked"])
+        self.assertFalse(status["ready"])
+
+    def test_transient_exception_keeps_retrying_until_ready(self):
+        manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
+        attempts = {"count": 0}
+
+        def flaky_fn():
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise RuntimeError("transient probe error")
+            return True
+
+        manager.register_health_check(
+            processes=[_FakeHealthProcess()],
+            process_name="backend_server",
+            check_ready_fn=flaky_fn,
+            retry_interval_seconds=0.01,
+        )
+        with _watchdog(10, "transient health check error never recovered"):
+            self.assertTrue(manager.run_health_checks(timeout=5))
+
+        status = manager.health_check_status["backend_server"]
+        self.assertTrue(status["checked"])
+        self.assertTrue(status["ready"])
+        self.assertGreaterEqual(attempts["count"], 3)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import traceback
+from typing import Any, Dict
 
 import requests
 import torch
@@ -24,6 +25,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
+    HealthCheckFatalError,
     ProcessManager,
 )
 from rtp_llm.utils.warmup import configure_warmup
@@ -51,6 +53,12 @@ STARTUP_REAL_WARMUP_ENV = "STARTUP_REAL_WARMUP"
 # Caps the largest warmup request; defaults to model max_seq_len. Long-context
 # deployments can cap to the real traffic length to bound startup cost.
 STARTUP_REAL_WARMUP_MAX_TOKEN_LEN_ENV = "STARTUP_REAL_WARMUP_MAX_TOKEN_LEN"
+# Overall timeout for the startup health checks before the parent gives up and
+# exits non-zero. The startup warmup health gate keeps /health at 503 until
+# the parent passes these checks, so a silent hang here leaves the instance
+# unready until the platform kills it.
+STARTUP_HEALTH_CHECK_TIMEOUT_ENV = "STARTUP_HEALTH_CHECK_TIMEOUT_S"
+STARTUP_HEALTH_CHECK_TIMEOUT_DEFAULT_S = 3600.0
 # Model types whose serving roles run real-request warmup before ready.
 STARTUP_REAL_WARMUP_MODEL_TYPES = frozenset(
     {
@@ -66,6 +74,25 @@ STARTUP_REAL_WARMUP_MODEL_TYPES = frozenset(
 
 class StartupRealWarmupAddressResolutionError(RuntimeError):
     pass
+
+
+def _get_startup_health_check_timeout_s() -> float:
+    raw = os.environ.get(STARTUP_HEALTH_CHECK_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return STARTUP_HEALTH_CHECK_TIMEOUT_DEFAULT_S
+    try:
+        timeout_s = float(raw)
+    except ValueError:
+        timeout_s = -1.0
+    if timeout_s <= 0:
+        logging.warning(
+            "invalid %s=%s, fallback to %.0fs",
+            STARTUP_HEALTH_CHECK_TIMEOUT_ENV,
+            raw,
+            STARTUP_HEALTH_CHECK_TIMEOUT_DEFAULT_S,
+        )
+        return STARTUP_HEALTH_CHECK_TIMEOUT_DEFAULT_S
+    return timeout_s
 
 
 def check_server_health(server_port, path="/health"):
@@ -153,18 +180,62 @@ def start_backend_server_impl(
 
     # Create check_ready_fn for pipe-based health check
     max_wait_seconds = 60 * 60
-    startup_status = {"ready": False, "error": None}
+    startup_status: Dict[str, Any] = {
+        "ready": False,
+        "error": None,
+        "pipe_lost": False,
+        "begin": time.monotonic(),
+    }
+
+    def _backend_grpc_health_ok() -> bool:
+        # Same readiness gate the frontend uses before serving: gRPC
+        # CheckHealth on the backend rpc_server_port.
+        import asyncio
+
+        from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+
+        wrapper = GrpcClientWrapper(
+            int(py_env_configs.server_config.rpc_server_port)
+        )
+
+        async def _probe() -> bool:
+            try:
+                result = await wrapper.health_check()
+                return result.get("status") == "ok"
+            finally:
+                await wrapper.close()
+
+        try:
+            return asyncio.run(_probe())
+        except Exception:
+            return False
 
     def check_backend_ready():
-        """Check if backend server is ready via pipe communication"""
+        """Check if backend server is ready.
+
+        The primary ready signal travels a pipe chain (parent <-
+        backend_manager <- rank processes); a broken link can lose the
+        success message even when the backend is already serving. As a
+        fallback, probe the same gRPC CheckHealth gate the frontend uses
+        before serving, so a lost pipe signal cannot stall startup forever
+        behind the warmup health gate. Terminal failures raise
+        HealthCheckFatalError so the health check worker fails fast instead
+        of retrying forever.
+        """
         if startup_status["ready"]:
             return True
 
         if startup_status["error"]:
-            raise Exception(startup_status["error"])
+            raise HealthCheckFatalError(startup_status["error"])
+
+        elapsed = time.monotonic() - startup_status["begin"]
+        if elapsed > max_wait_seconds:
+            raise HealthCheckFatalError(
+                f"backend server not ready within {max_wait_seconds:.0f}s"
+            )
 
         # Non-blocking check if data is available
-        if pipe_reader.poll(timeout=0):
+        if not startup_status["pipe_lost"] and pipe_reader.poll(timeout=0):
             try:
                 status_msg = pipe_reader.recv()
                 if status_msg.get("status") == "success":
@@ -174,22 +245,38 @@ def start_backend_server_impl(
                     startup_status["ready"] = True
                     pipe_reader.close()
                     return True
-                else:
-                    # Startup failed
-                    error_msg = status_msg.get("message", "Unknown error")
-                    traceback_info = status_msg.get("traceback", "")
-                    if traceback_info:
-                        logging.error(f"Traceback: {traceback_info}")
+                # Startup failed: the backend reported an explicit error, no
+                # retry can ever succeed.
+                error_msg = status_msg.get("message", "Unknown error")
+                traceback_info = status_msg.get("traceback", "")
+                if traceback_info:
+                    logging.error(f"Traceback: {traceback_info}")
 
-                    error = f"Backend server start failed: {error_msg}"
-                    startup_status["error"] = error
-                    pipe_reader.close()
-                    raise Exception(error)
-            except EOFError:
-                error = "Backend server pipe closed unexpectedly"
+                error = f"Backend server start failed: {error_msg}"
                 startup_status["error"] = error
                 pipe_reader.close()
-                raise Exception(error)
+                raise HealthCheckFatalError(error)
+            except EOFError:
+                # Pipe closed without a status message: the ready signal was
+                # lost on the manager/rank pipe chain. The gRPC health probe
+                # below decides readiness from now on.
+                logging.warning(
+                    "backend ready pipe closed without status; "
+                    "relying on grpc health probe on rpc_server_port=%s",
+                    py_env_configs.server_config.rpc_server_port,
+                )
+                startup_status["pipe_lost"] = True
+                pipe_reader.close()
+
+        # Fallback readiness gate: backend gRPC CheckHealth. It only returns
+        # ok once the backend is actually serving, so probing it alongside
+        # the pipe cannot mark an unready backend ready.
+        if _backend_grpc_health_ok():
+            logging.info(
+                "backend server ready confirmed via grpc health probe"
+            )
+            startup_status["ready"] = True
+            return True
 
         return False
 
@@ -726,7 +813,9 @@ def start_server(py_env_configs: PyEnvConfigs):
                 )
 
         # Start parallel health checks and wait for completion
-        if not process_manager.run_health_checks():
+        if not process_manager.run_health_checks(
+            timeout=_get_startup_health_check_timeout_s()
+        ):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
