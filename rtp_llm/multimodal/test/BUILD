@@ -87,3 +87,23 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "mm_ingress_test",
+    srcs = [
+        "mm_ingress_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "mm_output_transport_test",
+    srcs = [
+        "mm_output_transport_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)

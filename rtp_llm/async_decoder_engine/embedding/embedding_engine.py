@@ -6,9 +6,10 @@ from typing_extensions import override
 
 from rtp_llm.async_decoder_engine.base_engine import BaseEngine
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.multimodal.mm_ingress import should_create_local_mm_process_engine
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
-from rtp_llm.ops import RtpEmbeddingOp, VitSeparation
+from rtp_llm.ops import RtpEmbeddingOp
 
 
 class EmbeddingCppEngine(BaseEngine):
@@ -44,11 +45,7 @@ class EmbeddingCppEngine(BaseEngine):
     @override
     def _start(self):
         self.mm_process_engine = None
-        if (
-            self.model.is_multimodal()
-            and self.model.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_LOCAL
-        ):
+        if should_create_local_mm_process_engine(self.model, self.engine_config):
             self.mm_process_engine = (
                 MultimodalMixinFactory.create_multimodal_process_engine(
                     model_config=self.model.model_config,

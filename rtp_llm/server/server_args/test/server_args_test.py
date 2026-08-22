@@ -1,8 +1,10 @@
 import importlib
+import io
 import json
 import os
 import pickle
 import sys
+from contextlib import redirect_stderr
 from unittest import TestCase, main
 
 
@@ -618,6 +620,152 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.terminate_without_stop_token, True)
         self.assertEqual(g.num_workers, 7)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
+
+
+class ServerArgsMMRdmaConfigTest(TestCase):
+    def setUp(self):
+        environ_backup = os.environ.copy()
+        argv_backup = sys.argv.copy()
+
+        def _restore():
+            os.environ.clear()
+            os.environ.update(environ_backup)
+            sys.argv = argv_backup
+
+        self.addCleanup(_restore)
+        os.environ.clear()
+        sys.argv = ["prog"]
+
+    def _setup(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args.setup_args().vit_config
+
+    def test_defaults_match_vit_config(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+
+        parsed = self._setup()
+        expected = VitConfig()
+        self.assertEqual(parsed.output_transport.mode, expected.output_transport.mode)
+        self.assertEqual(
+            vars(parsed.output_transport.control),
+            vars(expected.output_transport.control),
+        )
+        self.assertEqual(
+            vars(parsed.output_transport.rdma), vars(expected.output_transport.rdma)
+        )
+
+    def test_cli_binding(self):
+        sys.argv = [
+            "prog",
+            "--mm_transport_mode", "grpc",
+            "--mm_rdma_bind_ip", "127.0.0.8",
+            "--mm_rdma_port", "12001",
+            "--mm_rdma_connect_timeout_ms", "201",
+            "--mm_rdma_read_timeout_ms", "2002",
+            "--mm_rdma_release_timeout_ms", "303",
+            "--mm_rdma_slot_gc_timeout_ms", "4004",
+            "--mm_rdma_max_inflight_bytes", "5005",
+            "--mm_rdma_max_slot_bytes", "6006",
+        ]
+
+        config = self._setup()
+        transport = config.output_transport
+        control = transport.control
+        rdma = transport.rdma
+        self.assertEqual(transport.mode, "grpc")
+        self.assertEqual(rdma.bind_ip, "127.0.0.8")
+        self.assertEqual(rdma.port, 12001)
+        self.assertEqual(rdma.connect_timeout_ms, 201)
+        self.assertEqual(rdma.read_timeout_ms, 2002)
+        self.assertEqual(control.release_timeout_ms, 303)
+        self.assertEqual(rdma.slot_gc_timeout_ms, 4004)
+        self.assertEqual(rdma.max_inflight_bytes, 5005)
+        self.assertEqual(rdma.max_slot_bytes, 6006)
+
+    def test_env_binding(self):
+        values = {
+            "MM_TRANSPORT_MODE": "grpc",
+            "MM_RDMA_BIND_IP": "127.0.0.9",
+            "MM_RDMA_PORT": "13001",
+            "MM_RDMA_CONNECT_TIMEOUT_MS": "211",
+            "MM_RDMA_READ_TIMEOUT_MS": "2112",
+            "MM_RDMA_RELEASE_TIMEOUT_MS": "313",
+            "MM_RDMA_SLOT_GC_TIMEOUT_MS": "4114",
+            "MM_RDMA_MAX_INFLIGHT_BYTES": "5115",
+            "MM_RDMA_MAX_SLOT_BYTES": "6116",
+        }
+        os.environ.update(values)
+
+        config = self._setup()
+        transport = config.output_transport
+        control = transport.control
+        rdma = transport.rdma
+        self.assertEqual(transport.mode, "grpc")
+        self.assertEqual(rdma.bind_ip, "127.0.0.9")
+        self.assertEqual(rdma.port, 13001)
+        self.assertEqual(rdma.connect_timeout_ms, 211)
+        self.assertEqual(rdma.read_timeout_ms, 2112)
+        self.assertEqual(control.release_timeout_ms, 313)
+        self.assertEqual(rdma.slot_gc_timeout_ms, 4114)
+        self.assertEqual(rdma.max_inflight_bytes, 5115)
+        self.assertEqual(rdma.max_slot_bytes, 6116)
+
+    def test_invalid_numeric_values_from_env_exit(self):
+        # Without a type-level guard these land in VitConfig unchecked and only show up much
+        # later as a deadline that never fires or an export that always falls back.
+        cases = (
+            ("MM_RDMA_PORT", "70000"),
+            ("MM_RDMA_PORT", "-1"),
+            ("MM_RDMA_CONNECT_TIMEOUT_MS", "0"),
+            ("MM_RDMA_READ_TIMEOUT_MS", "-5"),
+            ("MM_RDMA_RELEASE_TIMEOUT_MS", "0"),
+            ("MM_RDMA_SLOT_GC_TIMEOUT_MS", "-1"),
+            ("MM_RDMA_MAX_INFLIGHT_BYTES", "-1"),
+            ("MM_RDMA_MAX_SLOT_BYTES", "-1024"),
+            ("MM_RDMA_MAX_SLOT_BYTES", "not_a_number"),
+        )
+        for env_name, value in cases:
+            with self.subTest(env_name=env_name, value=value):
+                os.environ.clear()
+                os.environ[env_name] = value
+                sys.argv = ["prog"]
+                with self.assertRaises(SystemExit) as raised, redirect_stderr(
+                    io.StringIO()
+                ):
+                    self._setup()
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_zero_is_accepted_where_it_is_meaningful(self):
+        # 0 means "auto port" / "unlimited", so the guards must not reject it.
+        os.environ.update(
+            {
+                "MM_RDMA_PORT": "0",
+                "MM_RDMA_MAX_INFLIGHT_BYTES": "0",
+                "MM_RDMA_MAX_SLOT_BYTES": "0",
+            }
+        )
+
+        config = self._setup()
+        rdma = config.output_transport.rdma
+        self.assertEqual(rdma.port, 0)
+        self.assertEqual(rdma.max_inflight_bytes, 0)
+        self.assertEqual(rdma.max_slot_bytes, 0)
+
+    def test_invalid_transport_mode_from_env_exits(self):
+        # Both argv shapes end in argparse's SystemExit(2): the env fill-in turns the
+        # ArgumentTypeError into ArgumentParser.error(), so nothing derived from
+        # Exception is raised and the message only reaches stderr.
+        for argv in (["prog"], ["prog", "--warm_up", "0"]):
+            with self.subTest(argv=argv):
+                os.environ["MM_TRANSPORT_MODE"] = "invalid"
+                sys.argv = argv
+                stderr = io.StringIO()
+                with self.assertRaises(SystemExit) as raised, redirect_stderr(stderr):
+                    self._setup()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("invalid mm_transport_mode", stderr.getvalue())
 
 
 if __name__ == "__main__":

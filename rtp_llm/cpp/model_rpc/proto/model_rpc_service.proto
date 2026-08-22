@@ -176,6 +176,42 @@ message MultimodalInputPB {
 
 message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
+    // LLM can receive the output through GPUDirect RDMA.
+    bool support_rdma = 2;
+}
+
+// Remote key for one encoder NIC.
+message MMRdmaNicRKeyPB {
+    uint32 nicid = 1;
+    uint32 rkey = 2;
+}
+
+// One tensor in an RDMA slot.
+message MMRdmaTensorPB {
+    enum Role {
+        ROLE_UNSPECIFIED = 0;   // invalid on the wire
+        EMBEDDING   = 1;        // ordered embedding row chunk
+        POS_ID      = 2;        // concatenated position ids
+        EXTRA_INPUT = 3;        // one tensor per image
+    }
+    Role role = 1;
+    repeated int64 shape = 2;
+    TensorPB.DataType data_type = 3;
+    uint64 offset = 4;                        // byte offset of this tensor within the slot
+    uint64 nbytes = 5;                        // byte length of this tensor's payload
+}
+
+// One registered GPU slot and its tensor manifest.
+message MMRdmaDescPB {
+    uint64 addr = 1;                          // remote (encoder) virtual address of the slot
+    repeated MMRdmaNicRKeyPB nic_rkeys = 2;   // per-NIC remote keys for the slot
+    // Cluster-unique credential used to route release to the issuing encoder.
+    string handle = 3;
+    // Data-plane address of the issuing encoder, not the ViT proxy.
+    string rdma_ip = 4;
+    uint32 rdma_port = 5;
+    uint64 nbytes = 6;                        // total byte length of the slot payload
+    repeated MMRdmaTensorPB tensors = 7;      // manifest of every packed tensor, in role order
 }
 
 message MultimodalOutputPB {
@@ -183,6 +219,12 @@ message MultimodalOutputPB {
     TensorPB multimodal_pos_id = 2;
     repeated TensorPB multimodal_extra_input = 3;
     repeated int32 split_size = 4;
+    // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
+    repeated MMRdmaDescPB output_rdma_slots = 5;
+}
+
+message ReleaseEmbeddingPB {
+    repeated string handle = 1;
 }
 
 message RequestInfoPB {
@@ -305,6 +347,7 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    MM_NOT_SUPPORTED_ERROR = 26;
 }
 
 // transfer between prefill and decode
@@ -858,4 +901,6 @@ service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    // Best-effort release after the LLM finishes reading remote slots.
+    rpc ReleaseMultimodalEmbedding(ReleaseEmbeddingPB) returns (EmptyPB);
 }

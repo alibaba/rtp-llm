@@ -57,6 +57,15 @@ py_test(
 )
 
 py_test(
+    name = "vit_rpc_server_test",
+    srcs = ["vit_rpc_server_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
     name = "recent_cache_key_window_test",
     srcs = ["recent_cache_key_window_test.py"],
     deps = [

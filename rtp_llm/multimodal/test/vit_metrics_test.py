@@ -7,25 +7,29 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     TensorPB,
 )
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_output_transport.base import MMOutputResult
+from rtp_llm.multimodal.mm_output_transport.grpc.backend import TRANSPORT_BYTES
+from rtp_llm.multimodal.mm_output_transport.metrics import report_output_metrics
+from rtp_llm.multimodal.mm_output_transport.rdma.backend import TRANSPORT_RDMA
 from rtp_llm.multimodal.vit_metrics import (
     collect_vit_preprocess_metrics,
     record_vit_preprocess_value,
     video_resized_pixel_count,
     vit_preprocess_timer,
 )
-from rtp_llm.server.vit_rpc_server import _report_output_metrics, _tensor_pb_bytes
+
+
+def _result(transport: str, receipt: MultimodalOutputPB, **payload) -> MMOutputResult:
+    return MMOutputResult(
+        receipt=receipt,
+        transport=transport,
+        payload_embedding_bytes=payload.get("embedding", 0),
+        payload_pos_bytes=payload.get("pos", 0),
+        payload_extra_bytes=payload.get("extra", 0),
+    )
 
 
 class VitMetricsTest(TestCase):
-    def test_tensor_pb_bytes_counts_data_fields(self):
-        tensor = TensorPB(
-            fp32_data=b"1234",
-            int32_data=b"12",
-            fp16_data=b"1",
-            bf16_data=b"",
-        )
-        self.assertEqual(_tensor_pb_bytes(tensor), 7)
-
     def test_multimodal_output_bytes_and_split_size_are_available(self):
         output = MultimodalOutputPB(
             multimodal_embedding=TensorPB(bf16_data=b"1234"),
@@ -34,18 +38,21 @@ class VitMetricsTest(TestCase):
         self.assertGreater(output.ByteSize(), 0)
         self.assertEqual(sum(output.split_size), 8)
 
-    def test_report_output_metrics_counts_extra_input_bytes(self):
-        output = MultimodalOutputPB(
+    def test_report_output_metrics_takes_payload_bytes_from_the_result(self):
+        # The reporter no longer inspects the receipt to work out how many payload bytes went
+        # out: each backend hands them over, because only the implementation can count them.
+        receipt = MultimodalOutputPB(
             multimodal_embedding=TensorPB(bf16_data=b"1234"),
             multimodal_pos_id=TensorPB(int32_data=b"12345678"),
             split_size=[3, 5],
         )
-        output.multimodal_extra_input.extend(
-            [TensorPB(fp16_data=b"12"), TensorPB(bf16_data=b"123")]
-        )
 
-        with patch("rtp_llm.server.vit_rpc_server.kmonitor.report") as report:
-            _report_output_metrics(output, {"source": "test"})
+        with patch(
+            "rtp_llm.multimodal.mm_output_transport.metrics.kmonitor.report"
+        ) as report:
+            report_output_metrics(
+                _result(TRANSPORT_BYTES, receipt, embedding=4, pos=8, extra=5)
+            )
 
         samples = {call.args[0]: call.args[1] for call in report.call_args_list}
         self.assertEqual(report.call_count, 5)
@@ -54,6 +61,30 @@ class VitMetricsTest(TestCase):
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 8)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 5)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 8)
+        for call in report.call_args_list:
+            self.assertEqual(
+                call.args[2], {"source": "vit_server", "transport": TRANSPORT_BYTES}
+            )
+
+    def test_transport_tag_comes_from_the_result_not_the_receipt_shape(self):
+        # On the RDMA path VIT_RPC_RESPONSE_BYTES still covers only the receipt's wire size,
+        # and the tag is stated by the backend rather than inferred from output_rdma_slots.
+        receipt = MultimodalOutputPB(split_size=[2])
+        receipt.output_rdma_slots.add(handle="one", nbytes=35)
+
+        with patch(
+            "rtp_llm.multimodal.mm_output_transport.metrics.kmonitor.report"
+        ) as report:
+            report_output_metrics(
+                _result(TRANSPORT_RDMA, receipt, embedding=16, pos=8, extra=11)
+            )
+
+        values = [(call.args[1], call.args[2]) for call in report.call_args_list]
+        rdma_tags = {"source": "vit_server", "transport": TRANSPORT_RDMA}
+        self.assertIn((16, rdma_tags), values)
+        self.assertIn((8, rdma_tags), values)
+        self.assertIn((11, rdma_tags), values)
+        self.assertIn((receipt.ByteSize(), rdma_tags), values)
 
     def test_collect_vit_preprocess_metrics_records_values_and_timers(self):
         with collect_vit_preprocess_metrics() as metrics:

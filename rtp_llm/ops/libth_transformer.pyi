@@ -3,7 +3,7 @@ from __future__ import annotations
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
+__all__: list[str] = ['EmbeddingCppOutput', 'MMRdmaEncoderOp', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -11,6 +11,15 @@ class EmbeddingCppOutput:
     def setMapOutput(self, arg0: list[dict[str, torch.Tensor]]) -> None:
         ...
     def setTensorOutput(self, arg0: torch.Tensor) -> None:
+        ...
+class MMRdmaEncoderOp:
+    def __init__(self, rdma_config: typing.Any) -> None:
+        ...
+    def enabled(self) -> bool:
+        ...
+    def export_embedding(self, embedding: torch.Tensor, pos_id: typing.Optional[torch.Tensor], extra_inputs: list[torch.Tensor]) -> list[bytes]:
+        ...
+    def release(self, handles: list[str]) -> None:
         ...
 class RtpEmbeddingOp:
     def __init__(self) -> None:

@@ -333,9 +333,38 @@ struct SpeculativeExecutionConfig {
     static std::string     to_string(SpeculativeType type);
 };
 
+struct MMRdmaConfig {
+    // Empty bind IP enables automatic detection.
+    std::string bind_ip;
+    int         port               = 0;
+    int         connect_timeout_ms = 250;
+    // Per-read limit, capped by the remaining request deadline.
+    int64_t read_timeout_ms = 3000;
+    // Reclaim exported slots that were not released.
+    int64_t slot_gc_timeout_ms = 60 * 1000;
+    // Soft cap for live slot allocations; zero disables it.
+    int64_t max_inflight_bytes = 8L * 1024 * 1024 * 1024;
+    // Larger outputs are split across slots.
+    int64_t max_slot_bytes = 1024L * 1024 * 1024;
+};
+
+struct MMControlConfig {
+    // Best-effort release RPC deadline.
+    int64_t release_timeout_ms = 1000;
+};
+
+struct MMTransportConfig {
+    // Open-source builds fall back to inline gRPC bytes.
+    std::string     mode = "auto";
+    MMControlConfig control;
+    MMRdmaConfig    rdma;
+};
+
 struct VitConfig {
-    VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string   to_string() const;
+    VitSeparation     vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
+    MMTransportConfig output_transport;
+
+    std::string to_string() const;
 };
 
 struct CacheStoreConfig {

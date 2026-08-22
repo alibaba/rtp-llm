@@ -1,22 +1,16 @@
 #pragma once
 
-#include <chrono>
-#include <functional>
-#include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 #include <torch/python.h>
-#include "absl/status/statusor.h"
-#include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
-#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
-#include "rtp_llm/cpp/utils/ErrorCode.h"
-#include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/pybind/PyUtils.h"
-#include "rtp_llm/cpp/model_rpc/RPCPool.h"
-#include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
-#include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/model_rpc/MMRpcCodec.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
+#include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransportFactory.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace py = pybind11;
 
@@ -26,89 +20,22 @@ class RemoteMultimodalProcessor: public MultimodalProcessor {
 public:
     RemoteMultimodalProcessor(const MMModelConfig&         mm_model_config,
                               int64_t                      max_seq_len,
+                              const MMTransportConfig&     transport_config,
                               kmonitor::MetricsReporterPtr metrics_reporter = nullptr):
-        MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter) {}
+        MultimodalProcessor(py::none(), mm_model_config, max_seq_len, metrics_reporter),
+        output_transport_(createMMRemoteOutputTransport(transport_config, metrics_reporter)) {}
 
-private:
-    MultimodalRpcPool pool_;
-    std::string       vit_cluster_name_;
-
-    void reportRpcClientError(const std::string& ip_port,
-                              const std::string& reason,
-                              const std::string& grpc_code = "") const {
-        if (!metrics_reporter_) {
-            return;
-        }
-        kmonitor::MetricsTags error_tags;
-        error_tags.AddTag("source", "inference_client");
-        error_tags.AddTag("target", ip_port);
-        error_tags.AddTag("reason", reason);
-        if (!grpc_code.empty()) {
-            error_tags.AddTag("grpc_code", grpc_code);
-        }
-        metrics_reporter_->report(1, "rtp_llm_vit_rpc_client_error_qps", kmonitor::MetricType::QPS, &error_tags, true);
-    }
-
-    void reportRpcMetrics(const std::string&  ip_port,
-                          int64_t             cost_us,
-                          int64_t             request_bytes,
-                          int64_t             response_bytes,
-                          const grpc::Status* status = nullptr) const {
-        if (!metrics_reporter_) {
-            return;
-        }
-
-        kmonitor::MetricsTags tags;
-        tags.AddTag("source", "inference_client");
-        tags.AddTag("target", ip_port);
-        metrics_reporter_->report(cost_us, "rtp_llm_vit_rpc_client_rt_us", kmonitor::MetricType::GAUGE, &tags, true);
-        metrics_reporter_->report(
-            request_bytes, "rtp_llm_vit_rpc_request_bytes", kmonitor::MetricType::GAUGE, &tags, true);
-        metrics_reporter_->report(
-            response_bytes, "rtp_llm_vit_rpc_response_bytes", kmonitor::MetricType::GAUGE, &tags, true);
-
-        if (status != nullptr && !status->ok()) {
-            reportRpcClientError(ip_port, "grpc_error", std::to_string(static_cast<int>(status->error_code())));
-        }
-    }
-
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+    ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs, std::string ip_port = "") override {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
         }
-        auto connection_status = pool_.getConnection(ip_port);
-        if (!connection_status.ok()) {
-            reportRpcClientError(ip_port, "connection_error");
-            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, connection_status.status().ToString());
-        }
-        auto&               connection = connection_status.value();
-        auto                stub       = connection.stub;
-        MultimodalOutputPB  output_pb;
-        grpc::ClientContext context;
-        auto                request_pb    = QueryConverter::transMMInputsPB(mm_inputs);
-        const int64_t       request_bytes = request_pb.ByteSizeLong();
-        const auto          start         = std::chrono::steady_clock::now();
-        auto                status        = stub->RemoteMultimodalEmbedding(&context, request_pb, &output_pb);
-        const int64_t       cost_us =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
-        reportRpcMetrics(ip_port, cost_us, request_bytes, output_pb.ByteSizeLong(), &status);
-
-        if (!status.ok()) {
-            if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
-                return *error_info;
-            }
-            if (status.error_code() == grpc::StatusCode::UNAVAILABLE
-                || status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                return ErrorInfo(ErrorCode::MM_REMOTE_RPC_FAILED, status.error_message());
-            }
-            RTP_LLM_LOG_WARNING("unclassified multimodal RPC error is not retryable, grpc code [%d], message [%s]",
-                                static_cast<int>(status.error_code()),
-                                status.error_message().c_str());
-            return ErrorInfo(ErrorCode::UNKNOWN_ERROR, status.error_message());
-        }
-        return QueryConverter::transMMOutput(&output_pb);
+        auto request_pb = MMRpcCodec::transMMInputsPB(mm_inputs);
+        return output_transport_->fetch(ip_port, request_pb);
     }
+
+private:
+    std::unique_ptr<MMRemoteOutputTransport> output_transport_;
 };
 
 }  // namespace rtp_llm

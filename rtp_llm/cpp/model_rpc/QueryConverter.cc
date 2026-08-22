@@ -6,6 +6,7 @@
 #include <numeric>
 
 #include "RPCPool.h"
+#include "rtp_llm/cpp/model_rpc/MMRpcCodec.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -256,24 +257,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
-            auto               mm_input             = &input->multimodal_inputs(i);
-            auto               mm_preprocess_config = &mm_input->mm_preprocess_config();
-            std::vector<float> crop_positions;
-            for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
-                crop_positions.push_back(crop_position);
-            }
-            mm_inputs.emplace_back(mm_input->multimodal_url(),
-                                   torch::empty(1),
-                                   mm_input->multimodal_type(),
-                                   mm_preprocess_config->width(),
-                                   mm_preprocess_config->height(),
-                                   mm_preprocess_config->min_pixels(),
-                                   mm_preprocess_config->max_pixels(),
-                                   mm_preprocess_config->fps(),
-                                   mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames(),
-                                   crop_positions,
-                                   mm_preprocess_config->mm_timeout_ms());
+            mm_inputs.emplace_back(
+                MMRpcCodec::transMMInputElement(input->multimodal_inputs(i), torch::empty(1)));
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -313,99 +298,9 @@ std::vector<RoleAddr> QueryConverter::getRoleAddrs(const GenerateConfigPB* confi
     return role_addrs;
 }
 
-std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputsPB* mm_inputs) {
-    std::vector<MultimodalInput> inputs_vec;
-    for (int i = 0; i < mm_inputs->multimodal_inputs_size(); i++) {
-        auto mm_input             = &mm_inputs->multimodal_inputs(i);
-        auto mm_preprocess_config = &mm_input->mm_preprocess_config();
 
-        std::vector<float> crop_positions;
-        for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
-            crop_positions.push_back(crop_position);
-        }
 
-        // tensor should also converted from input pb, however it is only used in some embedding model, so just empty
-        // for now
-        inputs_vec.emplace_back(mm_input->multimodal_url(),
-                                torch::empty(1),
-                                mm_input->multimodal_type(),
-                                mm_preprocess_config->width(),
-                                mm_preprocess_config->height(),
-                                mm_preprocess_config->min_pixels(),
-                                mm_preprocess_config->max_pixels(),
-                                mm_preprocess_config->fps(),
-                                mm_preprocess_config->min_frames(),
-                                mm_preprocess_config->max_frames(),
-                                crop_positions,
-                                mm_preprocess_config->mm_timeout_ms());
-    }
-    return inputs_vec;
-}
 
-MultimodalInputsPB QueryConverter::transMMInputsPB(const std::vector<MultimodalInput> mm_inputs) {
-    MultimodalInputsPB mm_inputs_pb;
-    for (auto& mm_input : mm_inputs) {
-        auto now_input = mm_inputs_pb.add_multimodal_inputs();
-        now_input->set_multimodal_url(mm_input.url);
-        now_input->set_multimodal_type(mm_input.mm_type);
-        transTensorPB(now_input->mutable_multimodal_tensor(), mm_input.tensor);
-        transMMPreprocessConfig(now_input->mutable_mm_preprocess_config(), mm_input.mm_preprocess_config);
-    }
-    return mm_inputs_pb;
-}
-
-void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, const MMPreprocessConfig& config) {
-    config_pb->set_width(config.width);
-    config_pb->set_height(config.height);
-    config_pb->set_min_pixels(config.min_pixels);
-    config_pb->set_max_pixels(config.max_pixels);
-    config_pb->set_fps(config.fps);
-    config_pb->set_min_frames(config.min_frames);
-    config_pb->set_max_frames(config.max_frames);
-    config_pb->set_mm_timeout_ms(config.mm_timeout_ms);
-    for (const float& crop_position : config.crop_positions) {
-        config_pb->add_crop_positions(crop_position);
-    }
-}
-
-MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
-    torch::Tensor mm_embedding        = transTensor(output_pb->multimodal_embedding()), mm_position_id;
-    bool          contain_pos         = output_pb->has_multimodal_pos_id();
-    bool          contain_extra_input = output_pb->multimodal_extra_input_size() > 0;
-    if (contain_pos) {
-        mm_position_id = transTensor(output_pb->multimodal_pos_id());
-    }
-    MultimodalOutput     mm_output;
-    std::vector<int64_t> split_sizes;
-    for (auto split_size : output_pb->split_size()) {
-        split_sizes.push_back(split_size);
-    }
-    const int64_t split_total = std::accumulate(split_sizes.begin(), split_sizes.end(), int64_t{0});
-    RTP_LLM_CHECK_WITH_INFO(!split_sizes.empty() && split_total == mm_embedding.size(0),
-                            "split_sizes sum=%ld does not match mm_embedding.size(0)=%ld",
-                            split_total,
-                            mm_embedding.size(0));
-    mm_output.mm_features = mm_embedding.split(split_sizes, 0);
-    if (contain_pos) {
-        RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),
-                                "split_sizes sum=%ld does not match mm_position_id.size(0)=%ld",
-                                split_total,
-                                mm_position_id.size(0));
-        mm_output.mm_position_ids = mm_position_id.split(split_sizes, 0);
-    }
-
-    if (contain_extra_input) {
-        // Each extra-input is an opaque flat 1-D tensor (one per image), reshaped by the
-        // model-specific consumer; no split needed here.
-        std::vector<torch::Tensor> extra_inputs;
-        extra_inputs.reserve(output_pb->multimodal_extra_input_size());
-        for (const auto& extra_input_pb : output_pb->multimodal_extra_input()) {
-            extra_inputs.emplace_back(transTensor(extra_input_pb));
-        }
-        mm_output.mm_extra_input = std::move(extra_inputs);
-    }
-    return mm_output;
-}
 
 torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
     return TensorPbConvert::pbToTorch(tensor_pb);

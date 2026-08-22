@@ -9,9 +9,10 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.frontend.token_processor import TokenProcessor
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
+from rtp_llm.multimodal.mm_ingress import should_create_local_mm_process_engine
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
-from rtp_llm.ops import RoleType, TaskType, VitSeparation
+from rtp_llm.ops import TaskType
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -42,16 +43,7 @@ class LanguageCppEngine(BaseEngine):
             self.tokenizer, self.model.model_config.special_tokens
         )
         self.mm_process_engine = None
-        if (
-            self.model.is_multimodal()
-            and self.model.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_LOCAL
-            and engine_config.parallelism_config.tp_rank == 0
-            and (
-                engine_config.pd_sep_config.role_type == RoleType.PREFILL
-                or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
-            )
-        ):
+        if should_create_local_mm_process_engine(self.model, engine_config):
             self.mm_process_engine = (
                 MultimodalMixinFactory.create_multimodal_process_engine(
                     model_config=self.model.model_config,

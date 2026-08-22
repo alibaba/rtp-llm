@@ -144,7 +144,11 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
     return name
 
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
-               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
+               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False,
+               assert_log_patterns=[]):
+    """assert_log_patterns: substrings that must each appear in some server log after the run.
+    Golden-data comparison alone cannot tell a fast path from its silent fallback, so a case that
+    exercises an optional data plane declares the marker its path is expected to emit."""
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
                                path + '/*.jpg',
@@ -187,6 +191,11 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
 
     kvcm_envs_str = "[" + ",".join(["\\\"" + x + "\\\"" for x in kvcm_envs]) + "]"
 
+    # Repeated flag rather than one joined string: a marker may contain spaces or quotes.
+    assert_log_args = []
+    for pattern in assert_log_patterns:
+        assert_log_args = assert_log_args + ["--assert_log_pattern", pattern]
+
     local_srcs = native.glob(["*.py", "mainse/*.py"])
     has_entry = bool([f for f in local_srcs if f == "entry.py" or f.endswith("/entry.py")])
     if has_entry:
@@ -225,7 +234,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "--sleep_time_qr", str(sleep_time_qr),
             "--kill_remote", str(kill_remote),
             "--concurrency_test", str(concurrency_test),
-        ],
+        ] + assert_log_args,
         exec_properties = {
             'gpu':gpu_type[0],
             'gpu_count': str(gpu_count),

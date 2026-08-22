@@ -222,7 +222,8 @@ def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
 
 # Frontend not related
 class EmptyClass:
-    def __init__(self, **kwargs):
+    # Match constructors that accept positional arguments.
+    def __init__(self, *args, **kwargs):
         pass
 
 
@@ -240,6 +241,7 @@ _COMPUTE_SYMBOLS = {
 }
 _ENGINE_SYMBOLS = {
     "EmbeddingCppOutput",
+    "MMRdmaEncoderOp",
     "MultimodalInputCpp",
     "RtpEmbeddingOp",
     "RtpLLMOp",
@@ -300,9 +302,22 @@ def _load_compute_ops(required: bool = False) -> None:
         _compute_ops_loaded = True
 
 
+class DisabledMMRdmaEncoderOp(EmptyClass):
+    """Stand-in for MMRdmaEncoderOp when libth_transformer is unavailable.
+
+    The ViT server asks enabled() right after construction and falls back to inline bytes
+    when it is False, so answering False here makes the degraded path report "RDMA
+    unavailable" instead of an attribute/argument error from the generic EmptyClass.
+    """
+
+    def enabled(self) -> bool:
+        return False
+
+
 def _set_engine_fallbacks() -> None:
     globals()["MultimodalInputCpp"] = EmptyClass
     globals()["EmbeddingCppOutput"] = EmptyClass
+    globals()["MMRdmaEncoderOp"] = DisabledMMRdmaEncoderOp
     globals()["RtpEmbeddingOp"] = EmptyClass
     globals()["RtpLLMOp"] = EmptyClass
 
@@ -325,9 +340,10 @@ def _load_engine_ops(required: bool = False) -> None:
             # (libth_transformer_config) in this build; alias it here so
             # callers keep using the historical MultimodalInputCpp name.
             from libth_transformer_config import MultimodalInput as MultimodalInputCpp
-            from libth_transformer import RtpEmbeddingOp, RtpLLMOp
+            from libth_transformer import MMRdmaEncoderOp, RtpEmbeddingOp, RtpLLMOp
 
             globals()["EmbeddingCppOutput"] = EmbeddingCppOutput
+            globals()["MMRdmaEncoderOp"] = MMRdmaEncoderOp
             globals()["MultimodalInputCpp"] = MultimodalInputCpp
             globals()["RtpEmbeddingOp"] = RtpEmbeddingOp
             globals()["RtpLLMOp"] = RtpLLMOp
