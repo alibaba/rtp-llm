@@ -1,6 +1,6 @@
 # DSV4 Mega CSA/HCA TP1 接入状态与后续方案
 
-更新日期：2026-08-20
+更新日期：2026-08-22
 
 ## 1. 当前结论
 
@@ -20,8 +20,9 @@ python wrapper 按张量形状 dispatch；HCA 算子自始就带双几何。RTP 
 2026-08-18 起，HCA（`compress_ratio == 128`）层的同型接入也已完成并通过单层对照，由独立
 开关 `DSV4_MEGA_HCA` 控制。HCA 没有 indexer/TopK/MQA 阶段：opA/opB 两个融合 GEMM 覆盖
 front 投影、state 环 FRONT-EMIT、mHC post/comb tail、q_b 投影、128-token 边界压缩写
-HCA_KV 和 window 写 SWA_KV；query RMSNorm+RoPE 保持框架 `fused_rmsnorm_rope`，稠密
-compressed index 直接复用每 step 已构建的 `topk_total_by_ratio[128]`。CSA+HCA 同开时
+HCA_KV 和 window 写 SWA_KV；query RMSNorm+RoPE 使用 extension CUDA 算子
+`q_rmsnorm_rope_cuda_`，稠密 compressed index 直接复用每 step 已构建的
+`topk_total_by_ratio[128]`。CSA+HCA 同开时
 Mega 覆盖 DSV4-Pro 全部 61 个 attention 层（30 CSA + 31 HCA）。
 
 当前实现遵循“完整 attention sublayer 单独选路”，没有逐个替换普通算子：
@@ -42,7 +43,7 @@ Block.forward_decode
   │    mHC pre + attention RMSNorm
   │    -> front mixed GEMM（FRONT-EMIT 写 kv|gate state 环 + mHC post/comb tail）
   │    -> WQ-B + 边界 compressor 写 HCA_KV + window 写 SWA_KV
-  │    -> 框架 fused_rmsnorm_rope（q RMSNorm + 部分 RoPE，原地）
+  │    -> CUDA q_rmsnorm_rope_cuda_（q RMSNorm + 部分 RoPE）
   │    -> metadata 稠密 compressed index（topk_total_by_ratio[128]）
   │    -> RTP 原生 FlashMLA 路径（SWA_KV + HCA_KV）
   │    -> CUDA inverse-RoPE + FP8 quant
@@ -90,7 +91,7 @@ MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
 | `fp8/test/test_mega_csa_adapter.py` | 覆盖选路、PDFUSION、权重布局、ABI 和 runtime 生命周期 |
 | `fp8/test/test_mega_csa_rtp_eager.py` | 用真实 `AttentionFP8`/`KVCache` 对照原 attention 子层，并覆盖 eager、graph、cache/state 和性能 |
 | `fp8/decode/mega_hca_weights.py` | HCA 层 fused 布局：`front_fp8=[wq_a;wkv]`、`front_bf16=[comp_wkv;comp_wgate]`、`wq_b`，约 130 MiB/层 × 31 层 ≈ 4 GiB |
-| `fp8/decode/mega_hca_adapter.py` | HCA 编排：front/WQ-B 两个融合 GEMM、框架 `fused_rmsnorm_rope`、稠密 idx、原生 FlashMLA、共享 o-proj producer |
+| `fp8/decode/mega_hca_adapter.py` | HCA 编排：front/WQ-B 两个融合 GEMM、CUDA `q_rmsnorm_rope_cuda_`、稠密 idx、原生 FlashMLA、共享 o-proj producer |
 | `fp8/decode/mega_csa_runtime.py`（扩展） | 新增 HCA workspace 缓存与 HCA 三组 slot（HCA_STATE/HCA_KV/SWA_KV）int64 直传校验，`begin_decode`/rope 表与 CSA 共享 |
 | `dsv4/block.py`（扩展） | `enable_mega_hca`（仅 ratio==128），`forward_decode` 统一 `_mega_csa_adapter or _mega_hca_adapter` 选路 |
 | `fp8/test/test_mega_hca_adapter.py` | HCA 选路、双开关、权重布局、geometry/ABI、runtime slot 生命周期 |
@@ -444,11 +445,47 @@ logits 级定量（`run_e2e_logits.py`，服务器返回**最后一步** logits�
 （137.9 vs 137.8 ms）。裁层 Pro 4 层约 `-19%`。注意 eager 口径放大了 kernel
 launch 节省，生产 CUDA Graph + batch 口径需按 §6 缺口 6 另测。
 
+### 2026-08-22：compressor state 正确性修复与精度对齐
+
+本轮对应 RTP `c24dbcde6..4ca774e0c` 与 `cuda_extension@360b83f..2d6261a`，主要完成
+两类收口：
+
+1. **Compressor state pool 正确性**：框架为 CSA/Indexer state pool 每个 request 固定
+   分配两个物理 block，并通过 256-logical-token 页的 block table 映射；每个物理 block
+   内仍只保存 8 个 state ring entry。旧 Mega 实现假设 compressor 的 8-token 窗口都属于
+   当前物理 block，因此窗口跨过 256-token 页边界时会读错 state。RTP 现将 CSA_STATE、
+   INDEXER_STATE block table、token-to-request 映射和每页 token 数传给 opB/MQA，extension
+   对窗口中的每个 logical position 分别解析物理 block；页边界与非连续 destination 测试已补齐。
+2. **精度语义对齐**：CUDA inverse-RoPE + FP8 quant 保持 FP32 RoPE 结果到量化前，并按
+   Triton 语义处理 FP8 scale 下限；CSA Indexer/main compressor 与 HCA compressor 对齐
+   RMSNorm、RoPE 和 BF16 rounding 的先后顺序及 scale floor；HCA query RMSNorm+RoPE 切换
+   到 CUDA 实现并复用模型级 RoPE table cache；CSA/HCA mHC tail 在 `--use_fast_math` 下恢复
+   normal-precision `expf` 语义，并按 TileLang 的顺序做 Sinkhorn warp 规约。相应的
+   CUDA-vs-Triton 单测和 forced-prefix baseline/HCA/CSA/full-Mega 验证脚本已加入。
+
+mHC 的 `post`/`comb` 系数仍不与源路径逐位一致，原因已经定位在生成这两个系数之前的
+24 维 `mix` split-K 归约：两边都由同一个 DeepGEMM GEMM 产生 split partial，但源路径的
+TileLang `pre_big_fuse` 对每个 `mix` 元素按 split 顺序串行累加，Mega 的
+`hc_reduce_fuse_out` 则让 warp lanes 分摊 partial 后用 shuffle tree 归约。两种 FP32 求和的
+结合顺序不同，因此得到略有差异的 `mix`；`post` 的 sigmoid 和 `comb` 的 20 轮 Sinkhorn
+继承该差异。此前已经对齐 normal-precision exp 和 Sinkhorn shuffle 顺序，剩余差异不来自
+这些计算，也不来自 mHC post 算子本身：Mega 与源路径最终调用的是同一个
+`block.attn_hc.post`。
+
+针对 `2+2=` case 的 block-stage 对拍进一步确认了边界：除 mHC pre 的 `attn_in` 存在低于
+噪声门限的浮点尾差外，Q/KV、attention、inverse-RoPE/quant 和 O-proj 链路均对齐，送入
+mHC post 的 `attn_out` 完全一致（CSA-only 首个 CSA block 与 HCA-only 首个 HCA block 的
+`max_abs` 均为 0）；差异第一次出现在 mHC post 输出 `attn_residual`，对应 `max_abs` 分别为
+`4.882812e-04` 和 `1.953125e-03`。这说明 attention 主体没有引入差异，`attn_residual` 的
+差异仅来自 Mega mHC pre 生成的 `post`/`comb` 系数。若要 bitwise 对齐，需要把 Mega 的
+mix 归约重写为 TileLang 的串行 split 累加，会牺牲当前归约并行度且没有正确性收益；现有
+误差在验收门限内，因此本轮保留实现，也不将其列为剩余缺口。
+
 ## 6. 端到端剩余缺口
 
 按阻塞顺序还需要：
 
-1. 发布 `9f4c3fe` 对应的 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
+1. 发布 `2d6261a` 对应的 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
 2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool
    fixture（本地 serving e2e 已实际走真实 allocator，但缺 bazel 内可回归的形式）；
 3. ~~校验 normal prefill -> Mega decode~~ 已在裁层 Pro 与全量 Flash serving 中覆盖
