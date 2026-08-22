@@ -3,6 +3,7 @@
 #include <chrono>
 #include <future>
 #include <mutex>
+#include <type_traits>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -10,6 +11,7 @@
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 using namespace ::testing;
@@ -37,6 +39,10 @@ public:
         return pollStreamOutput(nullptr, "request", writer, stream);
     }
 
+    ErrorInfo prepare(const GenerateInputPB& input, std::shared_ptr<GenerateInput>& output) {
+        return prepareInput(input, output);
+    }
+
     ErrorInfo collect(std::shared_ptr<GenerateStream>& stream) {
         GenerateOutputs last_outputs;
         return collectStreamOutput(nullptr, stream, nullptr, last_outputs);
@@ -44,6 +50,10 @@ public:
 
     std::future<void> cancellationChecked() {
         return cancellation_checked_.get_future();
+    }
+
+    void setEngineForTest(const std::shared_ptr<EngineBase>& engine) {
+        engine_ = engine;
     }
 
     std::atomic<bool> cancelled{false};
@@ -57,6 +67,60 @@ protected:
 private:
     mutable std::once_flag     cancellation_check_once_;
     mutable std::promise<void> cancellation_checked_;
+};
+
+enum class EngineFailureMode {
+    THROW_STD_EXCEPTION,
+    THROW_UNKNOWN_EXCEPTION,
+    BATCH_SIZE_MISMATCH,
+};
+
+class FailingEngine: public EngineBase {
+public:
+    explicit FailingEngine(EngineFailureMode mode): EngineBase(EngineInitParams()), mode_(mode) {}
+
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        if (mode_ == EngineFailureMode::THROW_STD_EXCEPTION) {
+            throw std::runtime_error("injected engine enqueue failure");
+        }
+        if (mode_ == EngineFailureMode::THROW_UNKNOWN_EXCEPTION) {
+            throw 42;
+        }
+        return streams.empty() ? nullptr : streams.front();
+    }
+
+    void enqueue(std::shared_ptr<GenerateStream>&) override {}
+
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
+        if (mode_ == EngineFailureMode::THROW_STD_EXCEPTION) {
+            throw std::runtime_error("injected engine enqueue failure");
+        }
+        if (mode_ == EngineFailureMode::THROW_UNKNOWN_EXCEPTION) {
+            throw 42;
+        }
+        if (streams.size() != inputs.size() + 1) {
+            throw std::runtime_error("batch-size mismatch engine requires one extra prebuilt stream");
+        }
+        return {std::vector<bool>(streams.size(), true), streams};
+    }
+
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in LocalRpcServerTest");
+    }
+
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+    std::vector<GenerateStreamPtr> streams;
+
+private:
+    EngineFailureMode mode_;
 };
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
@@ -129,6 +193,264 @@ ErrorCode expectedStreamError(WakeReason reason) {
         return ErrorCode::GENERATE_TIMEOUT;
     }
     return ErrorCode::CANCELLED;
+}
+
+TEST(LocalRpcServerTest, PrepareInputReturnsInvalidParamsMappedToInvalidArgument) {
+    TestLocalRpcServer server;
+    GenerateInputPB    input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->set_max_new_tokens(-1);
+    auto output = std::make_shared<GenerateInput>();
+
+    ErrorInfo result;
+    EXPECT_NO_THROW(result = server.prepare(input, output));
+
+    EXPECT_EQ(result.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_THAT(result.ToString(), HasSubstr("max_new_tokens"));
+    EXPECT_EQ(output, nullptr);
+    EXPECT_EQ(transErrorCodeToGrpc(result.code()), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(LocalRpcServerTest, PrepareInputRejectsInvalidRoleAsInvalidArgument) {
+    TestLocalRpcServer server;
+    GenerateInputPB    input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->add_role_addrs()->set_role_str("INVALID_ROLE");
+    std::shared_ptr<GenerateInput> output;
+
+    ErrorInfo result;
+    EXPECT_NO_THROW(result = server.prepare(input, output));
+    EXPECT_EQ(result.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_THAT(result.ToString(), HasSubstr("unknown RoleAddrPB role_str"));
+    EXPECT_EQ(output, nullptr);
+
+    grpc::ServerContext context;
+    const auto          status = server.GenerateStreamCall(&context, &input, nullptr);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST(LocalRpcServerTest, GenerateStreamCallQueryConversionFailureUsesInvalidArgumentWithDetails) {
+    TestLocalRpcServer server;
+    GenerateInputPB    input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->set_max_new_tokens(-1);
+    grpc::ServerContext context;
+
+    const auto status = server.GenerateStreamCall(&context, &input, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_THAT(error_details.error_message(), HasSubstr("max_new_tokens"));
+}
+
+TEST(LocalRpcServerTest, GenerateStreamCallSerializesUnexpectedEngineExceptions) {
+    for (const auto mode : {EngineFailureMode::THROW_STD_EXCEPTION, EngineFailureMode::THROW_UNKNOWN_EXCEPTION}) {
+        TestLocalRpcServer server;
+        server.setEngineForTest(std::make_shared<FailingEngine>(mode));
+        GenerateInputPB input;
+        input.set_request_id(123);
+        input.add_token_ids(0);
+        grpc::ServerContext context;
+
+        // enqueue() throws before GenerateStreamCall can dereference the writer. Aligned storage supplies a
+        // non-null opaque pointer without constructing grpc::ServerWriter, whose constructor is gRPC-internal.
+        using WriterStorage = std::aligned_storage_t<sizeof(grpc::ServerWriter<GenerateOutputsPB>),
+                                                     alignof(grpc::ServerWriter<GenerateOutputsPB>)>;
+        WriterStorage writer_storage;
+        auto*         writer = reinterpret_cast<grpc::ServerWriter<GenerateOutputsPB>*>(&writer_storage);
+
+        grpc::Status status;
+        EXPECT_NO_THROW(status = server.GenerateStreamCall(&context, &input, writer));
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+        ErrorDetailsPB error_details;
+        ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+        EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::EXECUTION_EXCEPTION));
+        EXPECT_THAT(error_details.error_message(),
+                    HasSubstr(mode == EngineFailureMode::THROW_STD_EXCEPTION ? "injected engine enqueue failure" :
+                                                                               "unknown exception"));
+    }
+}
+
+TEST(LocalRpcServerTest, BatchGenerateCallSerializesUnexpectedEngineExceptions) {
+    for (const auto mode : {EngineFailureMode::THROW_STD_EXCEPTION, EngineFailureMode::THROW_UNKNOWN_EXCEPTION}) {
+        TestLocalRpcServer server;
+        server.setEngineForTest(std::make_shared<FailingEngine>(mode));
+        BatchGenerateInputPB request;
+        for (int i = 0; i < 3; ++i) {
+            auto* input = request.add_inputs();
+            input->set_request_id(123 + i);
+            input->add_token_ids(i);
+        }
+        grpc::ServerContext    context;
+        BatchGenerateOutputsPB response;
+
+        grpc::Status status;
+        EXPECT_NO_THROW(status = server.BatchGenerateCall(&context, &request, &response));
+        EXPECT_TRUE(status.ok());
+        ASSERT_EQ(response.results_size(), request.inputs_size());
+        for (const auto& result : response.results()) {
+            ASSERT_TRUE(result.has_error_info());
+            EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::EXECUTION_EXCEPTION);
+            EXPECT_THAT(result.error_info().error_message(),
+                        HasSubstr(mode == EngineFailureMode::THROW_STD_EXCEPTION ? "injected engine enqueue failure" :
+                                                                                   "unknown exception"));
+        }
+    }
+}
+
+TEST(LocalRpcServerTest, GenerateHandlersRejectNullRpcArgumentsWithoutDereferencingThem) {
+    TestLocalRpcServer  server;
+    grpc::ServerContext context;
+
+    auto stream_status = server.GenerateStreamCall(&context, nullptr, nullptr);
+    EXPECT_EQ(stream_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB stream_details;
+    ASSERT_TRUE(stream_details.ParseFromString(stream_status.error_details()));
+    EXPECT_EQ(stream_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_THAT(stream_details.error_message(), HasSubstr("must not be null"));
+
+    BatchGenerateOutputsPB response;
+    auto                   batch_status = server.BatchGenerateCall(&context, nullptr, &response);
+    EXPECT_EQ(batch_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+
+    BatchGenerateInputPB request;
+    batch_status = server.BatchGenerateCall(&context, &request, nullptr);
+    EXPECT_EQ(batch_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(LocalRpcServerTest, EmptyBatchIsRejectedAndClearsResponse) {
+    TestLocalRpcServer     server;
+    BatchGenerateInputPB   request;
+    BatchGenerateOutputsPB response;
+    response.add_results();
+    grpc::ServerContext context;
+
+    const auto status = server.BatchGenerateCall(&context, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_THAT(error_details.error_message(), HasSubstr("at least one input"));
+    EXPECT_EQ(response.results_size(), 0);
+}
+
+TEST(LocalRpcServerTest, GenerateStreamCallRejectsNullWriterBeforeEngineAccess) {
+    TestLocalRpcServer server;
+    GenerateInputPB    input;
+    input.set_request_id(123);
+    input.add_token_ids(1);
+    grpc::ServerContext context;
+
+    const auto status = server.GenerateStreamCall(&context, &input, nullptr);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_THAT(details.error_message(), HasSubstr("writer must not be null"));
+}
+
+TEST(RpcErrorCodeTest, InvalidParamsUsesDeclaredRpcEnum) {
+    EXPECT_EQ(transErrorCodeToRPC(ErrorCode::INVALID_PARAMS), ErrorCodePB::INVALID_PARAMS);
+    EXPECT_EQ(transRPCErrorCode(ErrorCodePB::INVALID_PARAMS), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(static_cast<int>(ErrorCodePB::INVALID_PARAMS), static_cast<int>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST(LocalRpcServerTest, UninitializedServerRejectsValidBatchRequests) {
+    TestLocalRpcServer  server;
+    grpc::ServerContext context;
+
+    BatchGenerateInputPB batch_input;
+    batch_input.add_inputs()->add_token_ids(1);
+    batch_input.add_inputs()->add_token_ids(2);
+    BatchGenerateOutputsPB batch_output;
+    const auto             batch_status = server.BatchGenerateCall(&context, &batch_input, &batch_output);
+    EXPECT_TRUE(batch_status.ok());
+    ASSERT_EQ(batch_output.results_size(), batch_input.inputs_size());
+    for (const auto& result : batch_output.results()) {
+        ASSERT_TRUE(result.has_error_info());
+        EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::EXECUTION_EXCEPTION);
+        EXPECT_THAT(result.error_info().error_message(), HasSubstr("engine is not initialized"));
+    }
+}
+
+TEST(LocalRpcServerTest, BatchPrepareInputFailurePreservesCardinalityAndInvalidParams) {
+    TestLocalRpcServer   server;
+    BatchGenerateInputPB request;
+    for (int i = 0; i < 3; ++i) {
+        auto* input = request.add_inputs();
+        input->add_token_ids(i);
+        input->mutable_generate_config()->set_max_new_tokens(1);
+    }
+    auto* invalid_config = request.mutable_inputs(1)->mutable_generate_config();
+    invalid_config->set_max_new_tokens(0);
+    invalid_config->set_prefill_only(true);
+    invalid_config->set_min_new_tokens(1);
+
+    grpc::ServerContext    context;
+    BatchGenerateOutputsPB response;
+    const auto             status = server.BatchGenerateCall(&context, &request, &response);
+
+    EXPECT_TRUE(status.ok());
+    ASSERT_EQ(response.results_size(), request.inputs_size());
+    for (int i = 0; i < response.results_size(); ++i) {
+        SCOPED_TRACE(i);
+        const auto& result = response.results(i);
+        ASSERT_TRUE(result.has_error_info());
+        EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::INVALID_PARAMS);
+        EXPECT_EQ(transRPCErrorCode(result.error_info().error_code()), ErrorCode::INVALID_PARAMS);
+        EXPECT_THAT(result.error_info().error_message(), Not(HasSubstr("multimodal")));
+        if (i == 1) {
+            EXPECT_THAT(result.error_info().error_message(), HasSubstr("min_new_tokens"));
+        } else {
+            EXPECT_THAT(result.error_info().error_message(), HasSubstr("invalid parameters at index 1"));
+        }
+    }
+}
+
+TEST(LocalRpcServerTest, BatchGenerateCallCancelsEnqueuedStreamsOnOuterExceptionAndPreservesCardinality) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<FailingEngine>(EngineFailureMode::BATCH_SIZE_MISMATCH);
+    for (int i = 0; i < 4; ++i) {
+        engine->streams.push_back(createMockStream());
+    }
+    engine->streams.front()->reportEvent(StreamEvents::GenerateDone);
+    server.setEngineForTest(engine);
+
+    BatchGenerateInputPB request;
+    for (int i = 0; i < 3; ++i) {
+        auto* input = request.add_inputs();
+        input->set_request_id(100 + i);
+        input->add_token_ids(i);
+    }
+    BatchGenerateOutputsPB response;
+    response.add_results();
+    grpc::ServerContext context;
+
+    grpc::Status status;
+    EXPECT_NO_THROW(status = server.BatchGenerateCall(&context, &request, &response));
+    EXPECT_TRUE(status.ok());
+    ASSERT_EQ(response.results_size(), request.inputs_size());
+    for (const auto& result : response.results()) {
+        ASSERT_TRUE(result.has_error_info());
+        EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::EXECUTION_EXCEPTION);
+        EXPECT_THAT(result.error_info().error_message(), HasSubstr("enqueueMultiple returned"));
+    }
+    ASSERT_EQ(engine->streams.size(), request.inputs_size() + 1);
+    ASSERT_NE(engine->streams.front(), nullptr);
+    EXPECT_FALSE(engine->streams.front()->hasError());
+    EXPECT_TRUE(engine->streams.front()->hasEvent(StreamEvents::GenerateDone));
+    for (size_t i = 1; i < engine->streams.size(); ++i) {
+        ASSERT_NE(engine->streams[i], nullptr);
+        EXPECT_TRUE(engine->streams[i]->hasError());
+        EXPECT_EQ(engine->streams[i]->statusInfo().code(), ErrorCode::CANCELLED);
+    }
 }
 
 TEST(LocalRpcServerTest, PollChecksCancellationBeforeHandlingEveryWakeReason) {

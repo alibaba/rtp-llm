@@ -46,6 +46,11 @@ public:
     int64_t num_layers  = 0;
     int64_t hidden_size = 0;
 
+    // Startup-only target-prefill capture profile. An empty layer list disables capture.
+    std::vector<int64_t>    hidden_state_capture_layer_ids = {};
+    HiddenStateCaptureDtype hidden_state_capture_dtype     = HiddenStateCaptureDtype::BF16;
+    bool                    hidden_state_capture_fail_open = false;
+
     // Attention configuration - contains all attention-related params
     AttentionConfigs      attn_config;
     LinearAttentionConfig linear_attention_config;

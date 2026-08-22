@@ -4,11 +4,13 @@
 #include <optional>
 
 #include <numeric>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -20,16 +22,15 @@ namespace rtp_llm {
 namespace {
 
 RoleType checkedRoleType(int value, const char* field_name) {
-    RTP_LLM_CHECK_WITH_INFO(value >= static_cast<int>(RoleType::PDFUSION)
-                                && value <= static_cast<int>(RoleType::FRONTEND),
-                            "unknown RoleAddrPB %s value: %d",
-                            field_name,
-                            value);
+    if (value < static_cast<int>(RoleType::PDFUSION) || value > static_cast<int>(RoleType::FRONTEND)) {
+        throw std::invalid_argument("unknown RoleAddrPB " + std::string(field_name)
+                                    + " value: " + std::to_string(value));
+    }
     return static_cast<RoleType>(value);
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -49,17 +50,17 @@ RoleType checkedRoleString(const std::string& value) {
     if (role == "FRONTEND") {
         return RoleType::FRONTEND;
     }
-    RTP_LLM_FAIL("unknown RoleAddrPB role_str: %s", value.c_str());
+    throw std::invalid_argument("unknown RoleAddrPB role_str: " + value);
 }
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
-        RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
-                                "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
-                                source,
-                                resolved.has_value() ? static_cast<int>(*resolved) : -1,
-                                static_cast<int>(candidate));
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
+        if (resolved.has_value() && *resolved != candidate) {
+            throw std::invalid_argument("conflicting RoleAddrPB role from " + std::string(source)
+                                        + ": resolved=" + std::to_string(static_cast<int>(*resolved))
+                                        + " candidate=" + std::to_string(static_cast<int>(candidate)));
+        }
         resolved = candidate;
     };
 
@@ -77,10 +78,32 @@ RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
 
 }  // namespace
 
+int QueryConverter::resolveMaxNewTokens(const GenerateConfigPB& config_proto) {
+    const int wire_max_new_tokens = config_proto.max_new_tokens();
+    if (config_proto.prefill_only()) {
+        if (wire_max_new_tokens != 0) {
+            throw std::invalid_argument("prefill_only requires max_new_tokens to be 0, got "
+                                        + std::to_string(wire_max_new_tokens));
+        }
+        if (config_proto.return_prompt_logits()) {
+            throw std::invalid_argument("prefill_only cannot be combined with return_prompt_logits");
+        }
+    }
+    if (wire_max_new_tokens < 0) {
+        throw std::invalid_argument("max_new_tokens must be greater than or equal to 0, got "
+                                    + std::to_string(wire_max_new_tokens));
+    }
+    if (config_proto.return_prompt_logits()) {
+        return 1;
+    }
+    return wire_max_new_tokens;
+}
+
 std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const GenerateConfigPB* config_proto) {
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
     generate_config->global_request_id              = config_proto->global_request_id();
-    generate_config->max_new_tokens                 = config_proto->max_new_tokens();
+    const int resolved_max_new_tokens               = resolveMaxNewTokens(*config_proto);
+    generate_config->max_new_tokens                 = resolved_max_new_tokens;
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
     generate_config->variable_num_beams.resize(config_proto->variable_num_beams_size());
@@ -219,6 +242,14 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         generate_config->banned_combo_token_ids.push_back(std::move(combo));
     }
 
+    if (generate_config->return_prompt_logits) {
+        generate_config->max_new_tokens        = resolved_max_new_tokens;
+        generate_config->is_streaming          = false;
+        generate_config->reuse_cache           = false;
+        generate_config->can_use_pd_separation = false;
+    }
+
+    generate_config->validatePrefillOnly();
     return generate_config;
 }
 

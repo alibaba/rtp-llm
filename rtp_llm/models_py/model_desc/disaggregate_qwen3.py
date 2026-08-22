@@ -288,6 +288,8 @@ class Qwen3GemmModel(DisaggregateModelBase):
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
+        self.capture_hidden_states = False
+        self.capture_hidden_states_by_attn_rank = [False] * len(self.attn_dp_rank)
         lm_head_weights = {W.lm_head: weights.get_global_weight(W.lm_head)}
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -299,16 +301,38 @@ class Qwen3GemmModel(DisaggregateModelBase):
             quant_config,
             self.py_hw_kernel_config,
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return self.norm(hidden_states)
 
     def recv_micro_batch_split_info(self) -> Tuple[List[torch.Tensor], BatchSplitInfo]:
         dp_num = len(self.attn_dp_rank)
         micro_batch_split_info = torch.empty(
-            [dp_num, self.micro_batch_size], dtype=torch.int64, device=self.device
+            [dp_num, self.micro_batch_size + 1],
+            dtype=torch.int64,
+            device=self.device,
         )
         for idx, rank in enumerate(self.attn_dp_rank):
             recv(micro_batch_split_info[idx], rank, Group.DP_AND_TP)
+        micro_batch_split_info = micro_batch_split_info.cpu()
+        capture_flags = micro_batch_split_info[:, -1].tolist()
+        self.capture_hidden_states_by_attn_rank = [
+            bool(capture_flag) for capture_flag in capture_flags
+        ]
+        self.capture_hidden_states = any(self.capture_hidden_states_by_attn_rank)
         mirco_batch_sizes_list: List[List[int]] = (
-            micro_batch_split_info.cpu().transpose(0, 1).tolist()
+            micro_batch_split_info[:, :-1].transpose(0, 1).tolist()
         )
         total_micro_batch_sizes: List[int] = [
             sum(sizes) for sizes in mirco_batch_sizes_list
@@ -330,10 +354,21 @@ class Qwen3GemmModel(DisaggregateModelBase):
             total_micro_batch_sizes, mirco_batch_sizes_list
         )
 
-    def send_to_attention(self, t: torch.Tensor, micro_batch_size_list: List[int]):
+    def send_to_attention(
+        self,
+        t: torch.Tensor,
+        micro_batch_size_list: List[int],
+        captured_hidden_states: Optional[torch.Tensor] = None,
+    ):
         offset = 0
         for idx, size in enumerate(micro_batch_size_list):
-            tensor_slice = t[offset : offset + size]
+            tensor_to_send = (
+                captured_hidden_states
+                if captured_hidden_states is not None
+                and self.capture_hidden_states_by_attn_rank[idx]
+                else t
+            )
+            tensor_slice = tensor_to_send[offset : offset + size]
             send(tensor_slice, self.attn_dp_rank[idx], Group.DP_AND_TP)
             offset += size
 
@@ -349,7 +384,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
                 * self.config.attn_config.size_per_head,
             ],
             device=self.device,
-            dtype=torch.half,
+            dtype=self.config.compute_dtype,
         )
 
         for idx, size in enumerate(mirco_batch_size_list):
@@ -361,6 +396,9 @@ class Qwen3GemmModel(DisaggregateModelBase):
         input_ids_list, batch_split_info = self.recv_micro_batch_split_info()
         micro_batch_inputs: List[torch.Tensor] = []
         residuals: List[torch.Tensor] = []
+        capture_contexts = [
+            self.capture_context(self.capture_hidden_states) for _ in input_ids_list
+        ]
         for batch_idx, input_ids in enumerate(input_ids_list):
             hidden_states, residual = self.pre_layer(input_ids)
             residuals.append(residual)
@@ -369,7 +407,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
                 hidden_states, batch_split_info.mirco_batch_sizes_list[batch_idx]
             )
 
-        for layer in self.layers:
+        for layer_idx, layer in enumerate(self.layers):
             next_residuals = []
             for batch_idx, input in enumerate(micro_batch_inputs):
                 residual = residuals[batch_idx]
@@ -379,9 +417,23 @@ class Qwen3GemmModel(DisaggregateModelBase):
                 )
                 out, next_residual = layer(residual, attn_out)
                 next_residuals.append(next_residual)
+                capture = capture_contexts[batch_idx]
+                capture.capture_layer(layer_idx, next_residual)
+                packed_hidden_states = None
+                if layer_idx == self.layer_num - 1:
+                    finalized_hidden_states = capture.finalize(
+                        next_residual
+                    ).hidden_states
+                    if capture.enabled:
+                        packed_hidden_states = finalized_hidden_states
+                        out = finalized_hidden_states[..., -next_residual.shape[-1] :]
+                    else:
+                        out = finalized_hidden_states
 
                 self.send_to_attention(
-                    out, batch_split_info.mirco_batch_sizes_list[batch_idx]
+                    out,
+                    batch_split_info.mirco_batch_sizes_list[batch_idx],
+                    packed_hidden_states,
                 )
                 # send res to attention model
             residuals = next_residuals
@@ -419,16 +471,32 @@ class Qwen3AttnModel(DisaggregateModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
 
-    def send_mirco_batch_split_info(self, micro_batch_split_info: List[PyModelInputs]):
+    def send_mirco_batch_split_info(
+        self, micro_batch_split_info: List[PyModelInputs]
+    ) -> bool:
         size_list = [input.input_ids.shape[0] for input in micro_batch_split_info]
-        tensor_to_send = torch.tensor(size_list, device=self.device)
+        capture_flags = [
+            bool(input.capture_hidden_states) for input in micro_batch_split_info
+        ]
+        check_with_info(
+            not capture_flags or len(set(capture_flags)) == 1,
+            "capture_hidden_states must be consistent within an attention DP rank",
+        )
+        capture_hidden_states = capture_flags[0] if capture_flags else False
+        tensor_to_send = torch.tensor(
+            size_list + [int(capture_hidden_states)],
+            dtype=torch.int64,
+            device=self.device,
+        )
         send(
             tensor_to_send,
             self.ffn_service_rank,
             Group.DP_AND_TP,
         )
         for input in micro_batch_split_info:
-            send(input.input_ids, self.ffn_service_rank, Group.DP_AND_TP)
+            if input.input_ids.numel() > 0:
+                send(input.input_ids, self.ffn_service_rank, Group.DP_AND_TP)
+        return capture_hidden_states
 
     def recv_from_ffn_service(self, token_num: int) -> torch.Tensor:
         t = torch.empty(
@@ -441,19 +509,24 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 * self.config.attn_config.size_per_head,
             ],
             device=self.device,
-            dtype=torch.half,
+            dtype=self.config.compute_dtype,
         )
         recv(t, self.ffn_service_rank, Group.DP_AND_TP)
         return t
 
-    def recv_final_from_ffn_service(self, token_num: int) -> torch.Tensor:
+    def recv_final_from_ffn_service(
+        self, token_num: int, capture_hidden_states: bool
+    ) -> torch.Tensor:
+        hidden_width = self.config.hidden_size
+        if capture_hidden_states:
+            hidden_width *= len(self.config.hidden_state_capture_layer_ids) + 1
         t = torch.empty(
             [
                 token_num,
-                self.config.hidden_size,
+                hidden_width,
             ],
             device=self.device,
-            dtype=torch.half,
+            dtype=self.config.compute_dtype,
         )
         recv(t, self.ffn_service_rank, Group.DP_AND_TP)
         return t
@@ -464,7 +537,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
     def forward_micro_batch(
         self, mirco_batch_inputs: List[PyModelInputs]
     ) -> List[PyModelOutputs]:
-        self.send_mirco_batch_split_info(mirco_batch_inputs)
+        capture_hidden_states = self.send_mirco_batch_split_info(mirco_batch_inputs)
         for i, layer in enumerate(self.attention_layers[: self.layer_num]):
             for idx, mirco_batch_input in enumerate(mirco_batch_inputs):
                 inputs = self.recv_from_ffn_service(
@@ -489,7 +562,9 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 self.send_to_ffn_service(out)
         outputs: List[PyModelOutputs] = []
         for idx, mirco_batch_input in enumerate(mirco_batch_inputs):
-            out = self.recv_final_from_ffn_service(mirco_batch_input.input_ids.shape[0])
+            out = self.recv_final_from_ffn_service(
+                mirco_batch_input.input_ids.shape[0], capture_hidden_states
+            )
             outputs.append(PyModelOutputs(out))
         return outputs
 
@@ -532,6 +607,7 @@ class Qwen3DisaggregateModel(GptModelBase):
                 max_generate_batch_size=max_generate_batch_size,
                 device_resource_config=device_resource_config,
             )
+        self._init_capture_passthrough()
 
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps

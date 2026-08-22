@@ -8,6 +8,7 @@
 #define protected public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -86,8 +87,110 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     TensorHolder holder;
     auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
+    EXPECT_FALSE(model_input->skip_lm_head);
+    EXPECT_FALSE(model_input->capture_hidden_states);
     EXPECT_FALSE(model_input->kv_cache_block_id.defined());
     EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, prefillOnlySkipsLmHeadAndDispatchesOneEmptyOutput) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 128;
+    model_config.vocab_size       = 128;
+    model_config.input_vocab_size = 128;
+    model_config.num_layers       = 1;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    auto make_stream = [&](std::vector<int32_t> tokens) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer(std::move(tokens));
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 0;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    auto                                                    stream1  = make_stream({1, 2});
+    auto                                                    stream2  = make_stream({3, 4, 5});
+    const std::vector<std::pair<GenerateStreamPtr, size_t>> expected = {{stream1, stream1->seqLength()},
+                                                                        {stream2, stream2->seqLength()}};
+    StreamGroups                                            stream_groups({stream1, stream2});
+    NormalBatchStreamProcessor                              processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+
+    TensorHolder holder;
+    auto         model_input = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(model_input.ok());
+    EXPECT_TRUE(model_input->skip_lm_head);
+    EXPECT_TRUE(model_input->capture_hidden_states);
+    EXPECT_EQ(model_input->combo_tokens.numel(), 5);
+
+    ASSERT_TRUE(processor.dispatchPrefillOnly(stream_groups).ok());
+    ASSERT_TRUE(processor.dispatchPrefillOnly(stream_groups).ok());
+    for (const auto& [stream, input_length] : expected) {
+        auto output = stream->nextOutput();
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        EXPECT_TRUE(output.value().generate_outputs[0].finished);
+        EXPECT_EQ(output.value().generate_outputs[0].output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+        EXPECT_EQ(stream->seqLength(), input_length);
+        EXPECT_FALSE(stream->hasOutput());
+
+        auto finished = stream->nextOutput();
+        ASSERT_FALSE(finished.ok());
+        EXPECT_EQ(finished.status().code(), ErrorCode::FINISHED);
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, mixedExecutionModesReportRequestErrorsWithoutShortCircuitingGather) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 128;
+    model_config.vocab_size       = 128;
+    model_config.input_vocab_size = 128;
+    model_config.num_layers       = 1;
+    RuntimeConfig               runtime_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+
+    auto make_stream = [&](std::vector<int32_t> tokens, int max_new_tokens) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = hostIntBuffer(std::move(tokens));
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = max_new_tokens;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+
+    for (bool generation_first : {false, true}) {
+        SCOPED_TRACE(generation_first ? "generation-first" : "prefill-first");
+        auto         prefill_only = make_stream({1, 2}, 0);
+        auto         generation   = make_stream({3, 4}, 1);
+        StreamGroups stream_groups(generation_first ? std::list<GenerateStreamPtr>{generation, prefill_only} :
+                                                      std::list<GenerateStreamPtr>{prefill_only, generation});
+
+        TensorHolder holder;
+        auto         model_input = processor.gatherModelInput(stream_groups, holder);
+        // gather must remain shape-valid so all TP ranks can reach the executor's
+        // subsequent collective, while every real request receives an error.
+        ASSERT_TRUE(model_input.ok());
+        EXPECT_EQ(model_input->combo_tokens.numel(), 4);
+        for (const auto& stream : {prefill_only, generation}) {
+            EXPECT_TRUE(stream->hasError());
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->stopReason(), kMixedExecutionModeBatchError);
+        }
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {

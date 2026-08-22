@@ -304,12 +304,12 @@ private:
 
 class RtpLLMSchedulerMetricsCollector final {
 public:
-    int64_t wait_stream_size           = 0;
-    int64_t running_stream_size        = 0;
-    int64_t remote_running_stream_size = 0;
-    int64_t loading_cache_stream_size  = 0;
-    int64_t pending_decode_stream_size = 0;
-    int64_t decode_since_prefill       = 0;
+    int64_t wait_stream_size            = 0;
+    int64_t running_stream_size         = 0;
+    int64_t remote_running_stream_size  = 0;
+    int64_t loading_cache_stream_size   = 0;
+    int64_t pending_decode_stream_size  = 0;
+    int64_t decode_since_prefill        = 0;
     int64_t admitted_context_batch_size = 0;
     int64_t admitted_context_token_size = 0;
     int64_t waiting_oldest_age_us       = 0;
@@ -322,12 +322,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* pending_decode_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* decode_since_prefill_metric       = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* pending_decode_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* decode_since_prefill_metric        = nullptr;
     kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
     kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
     kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
@@ -349,6 +349,90 @@ public:
 
 public:
     kmonitor::MutableMetric* step_latency_us_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMHiddenStateCaptureMetricsCollector final {
+public:
+    bool batch_qps                  = false;
+    bool publish_success_qps        = false;
+    bool failure_qps                = false;
+    bool initialization_failure_qps = false;
+    bool layout_failure_qps         = false;
+    bool prepare_failure_qps        = false;
+    bool quantize_failure_qps       = false;
+    bool store_failure_qps          = false;
+    bool shutdown_failure_qps       = false;
+    bool hard_contract_failure_qps  = false;
+    bool request_error_failure_qps  = false;
+    bool operational_failure_qps    = false;
+    bool duplicate_request_id_qps   = false;
+    bool fail_open_disable_qps      = false;
+    bool disabled_skip_qps          = false;
+    bool broken_rejection_qps       = false;
+    bool bf16_publish_qps           = false;
+    bool fp8_publish_qps            = false;
+
+    bool    has_publish_latency       = false;
+    bool    has_quantize_latency      = false;
+    bool    has_store_put_latency     = false;
+    bool    has_publish_payload       = false;
+    bool    has_capture_status        = false;
+    int64_t publish_latency_us        = 0;
+    int64_t quantize_latency_us       = 0;
+    int64_t store_put_latency_us      = 0;
+    int64_t publish_request_count     = 0;
+    int64_t publish_token_count       = 0;
+    int64_t publish_payload_bytes     = 0;
+    int64_t publish_input_ids_bytes   = 0;
+    int64_t publish_aux_hidden_bytes  = 0;
+    int64_t publish_last_hidden_bytes = 0;
+    int64_t publish_scale_bytes       = 0;
+    int64_t capture_enabled           = 0;
+    int64_t capture_broken            = 0;
+    int64_t fail_open_enabled         = 0;
+};
+
+class RtpLLMHiddenStateCaptureMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMHiddenStateCaptureMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* batch_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* publish_success_qps_metric        = nullptr;
+    kmonitor::MutableMetric* failure_qps_metric                = nullptr;
+    kmonitor::MutableMetric* initialization_failure_qps_metric = nullptr;
+    kmonitor::MutableMetric* layout_failure_qps_metric         = nullptr;
+    kmonitor::MutableMetric* prepare_failure_qps_metric        = nullptr;
+    kmonitor::MutableMetric* quantize_failure_qps_metric       = nullptr;
+    kmonitor::MutableMetric* store_failure_qps_metric          = nullptr;
+    kmonitor::MutableMetric* shutdown_failure_qps_metric       = nullptr;
+    kmonitor::MutableMetric* hard_contract_failure_qps_metric  = nullptr;
+    kmonitor::MutableMetric* request_error_failure_qps_metric  = nullptr;
+    kmonitor::MutableMetric* operational_failure_qps_metric    = nullptr;
+    kmonitor::MutableMetric* duplicate_request_id_qps_metric   = nullptr;
+    kmonitor::MutableMetric* fail_open_disable_qps_metric      = nullptr;
+    kmonitor::MutableMetric* disabled_skip_qps_metric          = nullptr;
+    kmonitor::MutableMetric* broken_rejection_qps_metric       = nullptr;
+    kmonitor::MutableMetric* bf16_publish_qps_metric           = nullptr;
+    kmonitor::MutableMetric* fp8_publish_qps_metric            = nullptr;
+
+    kmonitor::MutableMetric* publish_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* quantize_latency_us_metric       = nullptr;
+    kmonitor::MutableMetric* store_put_latency_us_metric      = nullptr;
+    kmonitor::MutableMetric* publish_request_count_metric     = nullptr;
+    kmonitor::MutableMetric* publish_token_count_metric       = nullptr;
+    kmonitor::MutableMetric* publish_payload_bytes_metric     = nullptr;
+    kmonitor::MutableMetric* publish_input_ids_bytes_metric   = nullptr;
+    kmonitor::MutableMetric* publish_aux_hidden_bytes_metric  = nullptr;
+    kmonitor::MutableMetric* publish_last_hidden_bytes_metric = nullptr;
+    kmonitor::MutableMetric* publish_scale_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* capture_enabled_metric           = nullptr;
+    kmonitor::MutableMetric* capture_broken_metric            = nullptr;
+    kmonitor::MutableMetric* fail_open_enabled_metric         = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1370,7 +1454,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
 
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric            = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric           = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_qps_metric             = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_failed_qps_metric      = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_task_latency_metric         = nullptr;

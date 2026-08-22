@@ -247,6 +247,7 @@ class V4Transformer(nn.Module):
         # with 0-based layer ids (V4-Flash uses 40/41/42); the empty tuple is
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
+        self.hidden_state_capture_layer_ids: tuple[int, ...] = ()
 
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.

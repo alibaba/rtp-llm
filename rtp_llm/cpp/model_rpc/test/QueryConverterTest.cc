@@ -2,6 +2,7 @@
 #include <array>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <tuple>
 
 #define private public
@@ -19,6 +20,172 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* config_pb = input.mutable_generate_config();
+    config_pb->set_max_new_tokens(0);
+    config_pb->set_prefill_only(true);
+    config_pb->set_reuse_cache(true);
+
+    const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+    EXPECT_EQ(QueryConverter::resolveMaxNewTokens(*config_pb), 0);
+    EXPECT_EQ(config->max_new_tokens, 0);
+    EXPECT_TRUE(config->isPrefillOnly());
+    EXPECT_TRUE(config->reuse_cache);
+}
+
+TEST_F(QueryConverterTest, BareProtoAbsentOrZeroMaxNewTokensPreservesInternalZero) {
+    for (const bool assign_zero : std::array<bool, 2>{false, true}) {
+        SCOPED_TRACE(assign_zero ? "explicit legacy zero" : "absent");
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        if (assign_zero) {
+            config_pb->set_max_new_tokens(0);
+        }
+        ASSERT_EQ(config_pb->max_new_tokens(), 0);
+        ASSERT_FALSE(config_pb->prefill_only());
+
+        const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+        EXPECT_EQ(QueryConverter::resolveMaxNewTokens(*config_pb), 0);
+        EXPECT_EQ(config->max_new_tokens, 0);
+        EXPECT_TRUE(config->isPrefillOnly());
+    }
+}
+
+TEST_F(QueryConverterTest, RawGrpcPromptScoringAlwaysNormalizesGenerationSettings) {
+    for (const int wire_max_new_tokens : {0, 7}) {
+        SCOPED_TRACE(wire_max_new_tokens);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        config_pb->set_max_new_tokens(wire_max_new_tokens);
+        ASSERT_FALSE(config_pb->prefill_only());
+        config_pb->set_return_prompt_logits(true);
+        config_pb->set_is_streaming(true);
+        config_pb->set_reuse_cache(true);
+        config_pb->set_can_use_pd_separation(true);
+
+        const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+        EXPECT_EQ(QueryConverter::resolveMaxNewTokens(*config_pb), 1);
+        EXPECT_TRUE(config->return_prompt_logits);
+        EXPECT_EQ(config->max_new_tokens, 1);
+        EXPECT_FALSE(config->isPrefillOnly());
+        EXPECT_FALSE(config->is_streaming);
+        EXPECT_FALSE(config->reuse_cache);
+        EXPECT_FALSE(config->can_use_pd_separation);
+    }
+}
+
+TEST_F(QueryConverterTest, PrefillOnlyFlagRejectsReturnPromptLogits) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* config_pb = input.mutable_generate_config();
+    config_pb->set_max_new_tokens(0);
+    config_pb->set_prefill_only(true);
+    config_pb->set_return_prompt_logits(true);
+
+    for (const bool convert_query : std::array<bool, 2>{false, true}) {
+        SCOPED_TRACE(convert_query ? "converter" : "resolver");
+        try {
+            if (convert_query) {
+                QueryConverter::transQuery(&input);
+            } else {
+                QueryConverter::resolveMaxNewTokens(*config_pb);
+            }
+            FAIL() << "prefill_only with return_prompt_logits should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("prefill_only"), std::string::npos);
+            EXPECT_NE(std::string(error.what()).find("return_prompt_logits"), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, PrefillOnlyFlagRejectsNonZeroMaxNewTokens) {
+    for (const int max_new_tokens : {7, -1}) {
+        SCOPED_TRACE(max_new_tokens);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config_pb = input.mutable_generate_config();
+        config_pb->set_max_new_tokens(max_new_tokens);
+        config_pb->set_prefill_only(true);
+
+        try {
+            QueryConverter::transQuery(&input);
+            FAIL() << "prefill_only with nonzero max_new_tokens should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find("prefill_only"), std::string::npos);
+            EXPECT_NE(std::string(error.what()).find("max_new_tokens"), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, PositiveMaxNewTokensRemainsNormalGeneration) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->set_max_new_tokens(7);
+
+    const auto config = QueryConverter::transQuery(&input)->generate_config;
+
+    EXPECT_EQ(QueryConverter::resolveMaxNewTokens(input.generate_config()), 7);
+    EXPECT_EQ(config->max_new_tokens, 7);
+    EXPECT_FALSE(config->isPrefillOnly());
+}
+
+TEST_F(QueryConverterTest, PrefillOnlyUnsupportedConfigsAreRejectedDuringConversion) {
+    struct InvalidConfigCase {
+        const char* name;
+        void (*configure)(GenerateConfigPB*);
+    };
+    const std::array<InvalidConfigCase, 11> cases{{
+        {"min_new_tokens", [](GenerateConfigPB* config) { config->set_min_new_tokens(1); }},
+        {"num_beams", [](GenerateConfigPB* config) { config->set_num_beams(2); }},
+        {"variable_num_beams", [](GenerateConfigPB* config) { config->add_variable_num_beams(1); }},
+        {"num_return_sequences", [](GenerateConfigPB* config) { config->set_num_return_sequences(2); }},
+        {"return_logits", [](GenerateConfigPB* config) { config->set_return_logits(true); }},
+        {"calculate_loss", [](GenerateConfigPB* config) { config->set_calculate_loss(1); }},
+        {"return_softmax_probs", [](GenerateConfigPB* config) { config->set_return_softmax_probs(true); }},
+        {"return_all_probs", [](GenerateConfigPB* config) { config->set_return_all_probs(true); }},
+        {"return_cum_log_probs", [](GenerateConfigPB* config) { config->set_return_cum_log_probs(true); }},
+        {"return_hidden_states", [](GenerateConfigPB* config) { config->set_return_hidden_states(true); }},
+        {"return_all_hidden_states", [](GenerateConfigPB* config) { config->set_return_all_hidden_states(true); }},
+    }};
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        GenerateInputPB input;
+        input.add_token_ids(0);
+        auto* config = input.mutable_generate_config();
+        config->set_max_new_tokens(0);
+        config->set_prefill_only(true);
+        test_case.configure(config);
+
+        try {
+            QueryConverter::transQuery(&input);
+            FAIL() << test_case.name << " should be rejected for max_new_tokens == 0";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(test_case.name), std::string::npos);
+        }
+    }
+}
+
+TEST_F(QueryConverterTest, NegativeMaxNewTokensIsRejected) {
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    input.mutable_generate_config()->set_max_new_tokens(-1);
+
+    try {
+        QueryConverter::transQuery(&input);
+        FAIL() << "negative max_new_tokens should be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("max_new_tokens"), std::string::npos);
+    }
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
     input.mutable_request_info()->set_frontend_ip("10.0.0.1");
@@ -32,6 +199,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config_pb = input.mutable_generate_config();
     generate_config_pb->set_min_new_tokens(4);
     generate_config_pb->set_max_new_tokens(5);
+    ASSERT_FALSE(generate_config_pb->prefill_only());
     generate_config_pb->set_num_beams(1);
     generate_config_pb->set_num_return_sequences(1);
     generate_config_pb->set_top_k(6);
@@ -67,6 +235,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
+    ASSERT_FALSE(generate_config->isPrefillOnly());
     ASSERT_EQ(generate_config->num_beams, 1);
     ASSERT_EQ(generate_config->num_return_sequences, 1);
     ASSERT_EQ(generate_config->top_k, 6);
@@ -158,7 +327,18 @@ TEST_F(QueryConverterTest, RoleAddrPreservesPdfusionDefaultAndRejectsConflicts) 
     auto*            conflicting = conflict.add_role_addrs();
     conflicting->set_role(RoleAddrPB::PREFILL);
     conflicting->set_role_str("DECODE");
-    EXPECT_THROW(QueryConverter::getRoleAddrs(&conflict), std::runtime_error);
+    EXPECT_THROW(QueryConverter::getRoleAddrs(&conflict), std::invalid_argument);
+
+    GenerateConfigPB invalid_string;
+    invalid_string.add_role_addrs()->set_role_str("INVALID_ROLE");
+    EXPECT_THROW(QueryConverter::getRoleAddrs(&invalid_string), std::invalid_argument);
+
+    GenerateConfigPB invalid_numeric;
+    auto*            invalid_role = invalid_numeric.add_role_addrs();
+    const auto*      role_field   = invalid_role->GetDescriptor()->FindFieldByName("role");
+    ASSERT_NE(role_field, nullptr);
+    invalid_role->GetReflection()->SetEnumValue(invalid_role, role_field, 99);
+    EXPECT_THROW(QueryConverter::getRoleAddrs(&invalid_numeric), std::invalid_argument);
 
     GenerateConfigPB omitted_legacy_default;
     omitted_legacy_default.add_role_addrs();
@@ -359,6 +539,7 @@ TEST_F(QueryConverterTest, GrammarWithMultipleSequencesIsRejectedByFactory) {
         GenerateInputPB input;
         input.add_token_ids(0);
         auto* config = input.mutable_generate_config();
+        config->set_max_new_tokens(1);
         config->mutable_regex()->set_value("[a-z]+");
         test_case.configure(config);
 

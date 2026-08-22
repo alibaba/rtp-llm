@@ -114,6 +114,82 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, prefillOnlyValidationPreservesCacheSetting) {
+    GenerateConfig config;
+    config.max_new_tokens = 0;
+    config.reuse_cache    = true;
+
+    EXPECT_NO_THROW(config.validatePrefillOnly());
+    EXPECT_TRUE(config.reuse_cache);
+}
+
+TEST_F(GenerateStreamTest, promptScoringNormalizesGenerationSettingsDuringConstruction) {
+    for (const int initial_max_new_tokens : {0, 7}) {
+        SCOPED_TRACE(initial_max_new_tokens);
+        auto input                                    = std::make_shared<GenerateInput>();
+        input->generate_config                        = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens        = initial_max_new_tokens;
+        input->generate_config->return_prompt_logits  = true;
+        input->generate_config->is_streaming          = true;
+        input->generate_config->reuse_cache           = true;
+        input->generate_config->can_use_pd_separation = true;
+        input->begin_time_us                          = autil::TimeUtility::currentTimeInMicroSeconds();
+        input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+        ModelConfig model_config;
+        model_config.max_seq_len = 2048;
+        model_config.vocab_size  = 1024;
+        RuntimeConfig   runtime_config;
+        ResourceContext resource_context;
+
+        GenerateStreamPtr stream;
+        EXPECT_NO_THROW(stream = std::make_shared<NormalGenerateStream>(
+                            input, model_config, runtime_config, resource_context, nullptr));
+        ASSERT_NE(stream, nullptr);
+        EXPECT_EQ(stream->generateConfig()->max_new_tokens, 1);
+        EXPECT_TRUE(stream->generateConfig()->return_prompt_logits);
+        EXPECT_FALSE(stream->generateConfig()->isPrefillOnly());
+        EXPECT_FALSE(stream->generateConfig()->is_streaming);
+        EXPECT_FALSE(stream->generateConfig()->reuse_cache);
+        EXPECT_FALSE(stream->generateConfig()->can_use_pd_separation);
+    }
+}
+
+TEST_F(GenerateStreamTest, prefillOnlyValidationRejectsUnsupportedConfigWithoutMutation) {
+    struct UnsupportedConfig {
+        const char* name;
+        void (*set)(GenerateConfig&);
+    };
+    constexpr UnsupportedConfig fields[] = {
+        {"min_new_tokens", +[](GenerateConfig& config) { config.min_new_tokens = 1; }},
+        {"num_beams", +[](GenerateConfig& config) { config.num_beams = 2; }},
+        {"variable_num_beams", +[](GenerateConfig& config) { config.variable_num_beams = {1}; }},
+        {"num_return_sequences", +[](GenerateConfig& config) { config.num_return_sequences = 2; }},
+        {"return_logits", +[](GenerateConfig& config) { config.return_logits = true; }},
+        {"calculate_loss", +[](GenerateConfig& config) { config.calculate_loss = 1; }},
+        {"return_softmax_probs", +[](GenerateConfig& config) { config.return_softmax_probs = true; }},
+        {"return_all_probs", +[](GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"return_cum_log_probs", +[](GenerateConfig& config) { config.return_cum_log_probs = true; }},
+        {"return_hidden_states", +[](GenerateConfig& config) { config.return_hidden_states = true; }},
+        {"return_all_hidden_states", +[](GenerateConfig& config) { config.return_all_hidden_states = true; }},
+    };
+    for (const auto& field : fields) {
+        SCOPED_TRACE(field.name);
+        GenerateConfig config;
+        config.max_new_tokens = 0;
+        config.reuse_cache    = true;
+        field.set(config);
+
+        try {
+            config.validatePrefillOnly();
+            FAIL() << field.name << " should be rejected";
+        } catch (const std::invalid_argument& error) {
+            EXPECT_NE(std::string(error.what()).find(field.name), std::string::npos);
+        }
+        EXPECT_TRUE(config.reuse_cache);
+    }
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
@@ -127,6 +203,15 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
 
     // flip back to true and verify
     stream->generate_input_->generate_config->reuse_cache = true;
+    ASSERT_TRUE(stream->reuseCache());
+
+    // prefill-only disables effective reuse without mutating the requested setting
+    stream->generate_input_->generate_config->max_new_tokens = 0;
+    ASSERT_TRUE(stream->generate_input_->generate_config->reuse_cache);
+    ASSERT_FALSE(stream->reuseCache());
+
+    // the same config object restores effective reuse for positive generation
+    stream->generate_input_->generate_config->max_new_tokens = 1;
     ASSERT_TRUE(stream->reuseCache());
 }
 

@@ -80,6 +80,7 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/config:config_modules",

@@ -27,6 +27,26 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             prefill_cp_size};
 }
 
+class TestDecodeRpcService final: public RpcService::Service {
+public:
+    TestDecodeRpcService() {
+        server_.meta_ = meta_;
+    }
+
+    grpc::Status RemoteGenerate(grpc::ServerContext*                                            context,
+                                grpc::ServerReaderWriter<GenerateOutputsPB, GenerateRequestPB>* stream) override {
+        return server_.RemoteGenerate(context, stream);
+    }
+
+    EngineScheduleInfo scheduleInfo() const {
+        return meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    }
+
+private:
+    std::shared_ptr<RpcServerRuntimeMeta> meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeRpcServer                       server_;
+};
+
 GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->tag                = tag;
@@ -44,6 +64,179 @@ GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
 }
 
 }  // namespace
+
+TEST(DecodeRpcServerTest, invalidQueryUsesInvalidArgumentWithDetails) {
+    TestDecodeRpcService service;
+    int                  listen_port = 0;
+    grpc::ServerBuilder  builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+    builder.RegisterService(&service);
+    auto grpc_server = builder.BuildAndStart();
+    ASSERT_NE(grpc_server, nullptr);
+    ASSERT_NE(listen_port, 0);
+
+    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
+    auto stub    = RpcService::NewStub(channel);
+    grpc::ClientContext context;
+    auto                stream = stub->RemoteGenerate(&context);
+    GenerateRequestPB   request;
+    request.set_stage(RemoteStage::ALLOCATE);
+    request.set_client_id("test");
+    request.set_request_id(1);
+    request.mutable_input()->add_token_ids(0);
+    request.mutable_input()->mutable_generate_config()->set_max_new_tokens(-1);
+
+    EXPECT_TRUE(stream->Write(request));
+    stream->WritesDone();
+    GenerateOutputsPB response;
+    EXPECT_FALSE(stream->Read(&response));
+    const auto status = stream->Finish();
+    grpc_server->Shutdown();
+    grpc_server->Wait();
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(error_details.error_message().find("max_new_tokens"), std::string::npos);
+
+    const auto schedule_info = service.scheduleInfo();
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().request_id, 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_code,
+              static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST(DecodeRpcServerTest, zeroRequestIdWithInvalidStageReportsExactlyOnce) {
+    TestDecodeRpcService service;
+    int                  listen_port = 0;
+    grpc::ServerBuilder  builder;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+    builder.RegisterService(&service);
+    auto grpc_server = builder.BuildAndStart();
+    ASSERT_NE(grpc_server, nullptr);
+    ASSERT_NE(listen_port, 0);
+
+    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
+    auto stub    = RpcService::NewStub(channel);
+    grpc::ClientContext context;
+    auto                stream = stub->RemoteGenerate(&context);
+    GenerateRequestPB   request;
+    request.set_stage(RemoteStage::LOAD);
+    request.set_client_id("test");
+    request.set_request_id(0);
+
+    EXPECT_TRUE(stream->Write(request));
+    stream->WritesDone();
+    GenerateOutputsPB response;
+    EXPECT_FALSE(stream->Read(&response));
+    const auto status = stream->Finish();
+    grpc_server->Shutdown();
+    grpc_server->Wait();
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB error_details;
+    ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
+    EXPECT_EQ(error_details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+
+    const auto schedule_info = service.scheduleInfo();
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().request_id, 0);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_code,
+              static_cast<int64_t>(ErrorCode::INVALID_PARAMS));
+}
+
+TEST(DecodeRpcServerTest, reportEarlyFinishTaskToleratesMissingRuntimeMeta) {
+    DecodeRpcServer              server;
+    DecodeRpcContext             rpc_context{nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 0, &server_context, metrics_reporter, nullptr);
+    decode_context.request_id         = 1;
+    decode_context.request_id_present = true;
+    decode_context.error_info         = ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid parameters");
+    decode_context.error_status       = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "invalid parameters");
+
+    EXPECT_NO_THROW(server.reportEarlyFinishTask(decode_context));
+    EXPECT_FALSE(decode_context.early_finish_reported);
+}
+
+TEST(DecodeRpcServerTest, reportEarlyFinishTaskReportsSerializedErrorExactlyOnce) {
+    DecodeRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+
+    DecodeRpcContext             rpc_context{nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 0, &server_context, metrics_reporter, server.meta_);
+    decode_context.request_id         = 42;
+    decode_context.request_id_present = true;
+    decode_context.request_key        = "test_request_id_42";
+
+    ErrorDetailsPB error_details;
+    error_details.set_error_code(static_cast<int>(ErrorCode::LOAD_CACHE_TIMEOUT));
+    error_details.set_error_message("load cache timeout");
+    std::string serialized_error_details;
+    ASSERT_TRUE(error_details.SerializeToString(&serialized_error_details));
+    decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "load failed", serialized_error_details);
+
+    server.reportEarlyFinishTask(decode_context);
+    server.reportEarlyFinishTask(decode_context);
+
+    const auto schedule_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().request_id, 42);
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_code,
+              static_cast<int64_t>(ErrorCode::LOAD_CACHE_TIMEOUT));
+    EXPECT_EQ(schedule_info.finished_task_info_list.front().error_message, "load cache timeout");
+}
+
+TEST(DecodeRpcServerTest, reportEarlyFinishTaskMapsBareGrpcErrorsExactlyOnce) {
+    DecodeRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+
+    struct TestCase {
+        int64_t          request_id;
+        grpc::StatusCode grpc_code;
+        const char*      message;
+        ErrorCode        expected_error_code;
+    };
+    const TestCase test_cases[] = {
+        {0, grpc::StatusCode::INTERNAL, "read failed", ErrorCode::EXECUTION_EXCEPTION},
+        {1, grpc::StatusCode::INTERNAL, "write failed", ErrorCode::EXECUTION_EXCEPTION},
+        {2, grpc::StatusCode::CANCELLED, "cancelled", ErrorCode::CANCELLED},
+        {3, grpc::StatusCode::DEADLINE_EXCEEDED, "timeout", ErrorCode::DEADLINE_EXCEEDED},
+    };
+
+    DecodeRpcContext             rpc_context{nullptr};
+    grpc::ServerContext          server_context;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    {
+        DecodeGenerateContext missing_id_context(rpc_context, 0, &server_context, metrics_reporter, server.meta_);
+        missing_id_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "read failed before first frame");
+        server.reportEarlyFinishTask(missing_id_context);
+    }
+
+    for (const auto& test_case : test_cases) {
+        DecodeGenerateContext decode_context(rpc_context, 0, &server_context, metrics_reporter, server.meta_);
+        decode_context.request_id         = test_case.request_id;
+        decode_context.request_id_present = true;
+        decode_context.request_key        = "test_request_id_" + std::to_string(test_case.request_id);
+        decode_context.error_status       = grpc::Status(test_case.grpc_code, test_case.message);
+
+        server.reportEarlyFinishTask(decode_context);
+        server.reportEarlyFinishTask(decode_context);
+    }
+
+    const auto schedule_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(schedule_info.finished_task_info_list.size(), std::size(test_cases));
+    for (size_t i = 0; i < std::size(test_cases); ++i) {
+        EXPECT_EQ(schedule_info.finished_task_info_list[i].request_id, test_cases[i].request_id);
+        EXPECT_EQ(schedule_info.finished_task_info_list[i].error_code,
+                  static_cast<int64_t>(test_cases[i].expected_error_code));
+        EXPECT_EQ(schedule_info.finished_task_info_list[i].error_message, test_cases[i].message);
+    }
+}
 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     const auto* broadcast = BroadcastLoadRequestPB::descriptor();

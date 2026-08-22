@@ -480,6 +480,9 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
+    if (stream_->generateConfig()->isPrefillOnly()) {
+        return false;
+    }
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return false;
     }
@@ -650,6 +653,9 @@ bool StreamCacheResource::enableTieredMemoryCache() const {
 
 void StreamCacheResource::loadCacheSync() {
     RTP_LLM_PROFILE_FUNCTION();
+    if (stream_->generateConfig()->isPrefillOnly()) {
+        return;
+    }
     if (!resource_context_.cache_manager || !resource_context_.cache_manager->hasActiveConnectors()) {
         return;
     }
