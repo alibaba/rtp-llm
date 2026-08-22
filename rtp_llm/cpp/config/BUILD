@@ -39,6 +39,26 @@ cc_library(
 )
 
 cc_library(
+    name = "mm_transport_config_extract",
+    hdrs = ["MMTransportConfigExtract.h"],
+    deps = [
+        ":config_modules",
+        "//:rtp_compute_ops",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+# Python VitConfig to C++ VitConfig mapping.
+cc_library(
+    name = "vit_config_extract",
+    hdrs = ["VitConfigExtract.h"],
+    deps = [":mm_transport_config_extract"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "special_tokens",
     hdrs = ["SpecialTokens.h"],
     visibility = ["//visibility:public"],

@@ -565,6 +565,35 @@ def h20_oss_suites():
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*.jpg']),
             ),
+            # Same task and server args as qwen3_vl above, differing only in transport: the pair
+            # is a same-task/different-transport comparison. assert_log_patterns is what makes
+            # this case discriminating -- golden output is byte-identical whether the ViT output
+            # arrived over RDMA or silently fell back to inline gRPC bytes, so the case only
+            # fails if the consumer never logged a hit.
+            # Deliberately does NOT lower mm_rdma_max_slot_bytes. Only the embedding is
+            # row-splittable; pos_id and each extra_input must each fit one slot, and Qwen3-VL's
+            # flattened deepstack extra_input is ~40 MiB, so shrinking the cap to force chunking
+            # instead fails the whole export and silently falls back to inline bytes. Slot
+            # planning and manifest reassembly are covered by mm_rdma_transport_test; this case
+            # exists to prove the end-to-end RDMA path engages at all.
+            # Requires a build linking the real transport (the OSS no-op registry returns
+            # nullptr and never emits the marker).
+            smoke_test(
+                name="qwen3_vl_rdma",
+                task_info="data/model/qwen_vl/q_r_3.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1"
+                },
+                envs={
+                    "llm": ["MM_TRANSPORT_MODE=auto"],
+                    "vit": ["MM_TRANSPORT_MODE=auto"],
+                },
+                gpu_type=["H20"],
+                data=native.glob(['data/model/llava/*.jpg']),
+                # Emitted by RemoteMultimodalProcessor on a successful one-sided READ.
+                assert_log_patterns=["[MM-RDMA-HIT]"],
+            ),
             smoke_test(
                 name="qwen3_vl_cp2",
                 task_info="data/model/qwen_vl/q_r_3_cp2.json",

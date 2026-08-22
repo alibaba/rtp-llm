@@ -49,6 +49,40 @@ def get_runner_type(
             raise Exception(f"unknow env_args for runner selection: {env_args}")
 
 
+def assert_log_patterns(output_dir: str, patterns: List[str]) -> None:
+    """Fail unless every pattern appears in at least one server log under output_dir.
+
+    Golden-data comparison passes identically whether an optional fast path was taken or
+    silently fell back, so a case exercising one declares the marker it must emit.
+    """
+    if not patterns:
+        return
+    log_files = [
+        path
+        for path in glob.glob(os.path.join(output_dir, "**", "*"), recursive=True)
+        if os.path.isfile(path)
+    ]
+    missing = []
+    for pattern in patterns:
+        hit = None
+        for path in log_files:
+            try:
+                with open(path, "r", errors="ignore") as f:
+                    if any(pattern in line for line in f):
+                        hit = path
+                        break
+            except OSError:
+                continue
+        if hit is None:
+            missing.append(pattern)
+        else:
+            logging.info("log assertion satisfied: %r found in %s", pattern, hit)
+    assert not missing, (
+        f"expected log pattern(s) {missing} not found in any of the "
+        f"{len(log_files)} log file(s) under {output_dir}"
+    )
+
+
 def _parse_kv_list(raw: str) -> Dict[str, str]:
     """Parse a JSON list of 'KEY=VALUE' strings into a dict."""
     items = json.loads(raw)
@@ -81,6 +115,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--concurrency_test", type=str, default="False", help="concurrent request mode"
+    )
+    parser.add_argument(
+        "--assert_log_pattern",
+        action="append",
+        default=[],
+        help="substring that must appear in some server log; repeatable",
     )
     args, _ = parser.parse_known_args()
 
@@ -165,3 +205,4 @@ if __name__ == "__main__":
 
     logging.info("raw info: %s", str(task_states))
     assert task_states.ret == True, f"smoke task run failed\n{task_states}"
+    assert_log_patterns(output_dir, args.assert_log_pattern)

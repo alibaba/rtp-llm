@@ -1,66 +1,46 @@
-import logging
 import time
 from concurrent import futures
-from typing import Dict
 
 import grpc
-import torch
 
-from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import (
     ExceptionCategory,
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.log_config import setup_logging
-from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
-    MMPreprocessConfigPB,
+    EmptyPB,
     MultimodalInputsPB,
-    MultimodalOutputPB,
+    ReleaseEmbeddingPB,
     StatusVersionPB,
     WorkerStatusPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceServicer,
-    add_MultimodalRpcServiceServicer_to_server,
 )
-from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_error_messages import format_mm_rpc_error
+from rtp_llm.multimodal.mm_output_transport import create_mm_output_transport
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerOverloadError,
     MMSchedulerRequestTooLargeError,
     MMSchedulerTimeoutError,
 )
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
-from rtp_llm.server.server_args.server_args import setup_args
-from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 
 
 def _now_us() -> int:
     return time.monotonic_ns() // 1000
 
 
-def _tensor_pb_bytes(tensor_pb) -> int:
-    return (
-        len(tensor_pb.fp32_data)
-        + len(tensor_pb.int32_data)
-        + len(tensor_pb.fp16_data)
-        + len(tensor_pb.bf16_data)
-    )
-
-
 _EXCEPTION_CATEGORY_TO_GRPC_STATUS = {
     ExceptionCategory.BAD_REQUEST: grpc.StatusCode.INVALID_ARGUMENT,
     ExceptionCategory.TOO_LONG: grpc.StatusCode.INVALID_ARGUMENT,
-    ExceptionCategory.UNSUPPORTED: grpc.StatusCode.INVALID_ARGUMENT,
+    # Keep this mapping aligned with transErrorCodeToGrpc().
+    ExceptionCategory.UNSUPPORTED: grpc.StatusCode.FAILED_PRECONDITION,
     ExceptionCategory.CAPACITY: grpc.StatusCode.RESOURCE_EXHAUSTED,
     ExceptionCategory.TIMEOUT: grpc.StatusCode.DEADLINE_EXCEEDED,
     ExceptionCategory.CANCELLED: grpc.StatusCode.CANCELLED,
@@ -79,57 +59,10 @@ def _runtime_exception_reason(error: FtRuntimeException) -> str:
     return f"runtime_{error.exception_type.category.value}"
 
 
-def _report_output_metrics(output_pb: MultimodalOutputPB, tags: Dict[str, str]) -> None:
-    kmonitor.report(
-        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC, output_pb.ByteSize(), tags
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC,
-        _tensor_pb_bytes(output_pb.multimodal_embedding),
-        tags,
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC,
-        _tensor_pb_bytes(output_pb.multimodal_pos_id),
-        tags,
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC,
-        sum(_tensor_pb_bytes(extra) for extra in output_pb.multimodal_extra_input),
-        tags,
-    )
-    kmonitor.report(
-        GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC, sum(output_pb.split_size), tags
-    )
-
-
-def trans_output(res: MMEmbeddingRes):
-    # Guard against empty embeddings (e.g. error path where mm_embedding_rpc
-    # returns no tensors). torch.concat on an empty list raises RuntimeError.
-    if not res.embeddings:
-        return MultimodalOutputPB()
-
-    contain_pos = (res.position_ids is not None) and (len(res.position_ids) > 0)
-    contain_extra_input = (res.extra_input is not None) and (len(res.extra_input) > 0)
-
-    output_pb = MultimodalOutputPB(
-        multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
-        split_size=[e.shape[0] for e in res.embeddings],
-    )
-    if contain_pos:
-        output_pb.multimodal_pos_id.CopyFrom(
-            trans_from_tensor(torch.concat(res.position_ids))
-        )
-    if contain_extra_input:
-        # Each extra-input is an opaque flat 1-D tensor (one per image).
-        for extra in res.extra_input:
-            output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
-    return output_pb
-
-
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
-    def __init__(self, mm_process_engine: MMProcessEngine):
+    def __init__(self, mm_process_engine: MMProcessEngine, transport_config=None):
         self.engine = mm_process_engine
+        self._transport = create_mm_output_transport(transport_config)
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         tags = {"source": "vit_server"}
@@ -163,20 +96,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 tags,
             )
             res: MMEmbeddingRes = self.engine.mm_embedding_rpc(multimodal_inputs)
-            output_pb = trans_output(res)
+            output_pb = self._transport.transfer(multimodal_inputs, res)
             kmonitor.report(
                 GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
                 _now_us() - start_us,
                 tags,
             )
-            _report_output_metrics(output_pb, tags)
             return output_pb
         except MMSchedulerOverloadError as e:
-            # Backpressure, not a server fault: map to a defined, ret/backoff-able
-            # status instead of a generic error. abort() raises to end the call.
-            # NOTE: overload is returned directly to the client here; forwarding to
-            # another (untried) worker in the proxy is intentionally NOT done for
-            # now — the client/caller decides whether to retry or back off.
+            # Backpressure is returned to the caller without worker failover.
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
                 1,
@@ -189,7 +117,6 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 ),
             )
         except MMSchedulerTimeoutError as e:
-            # Scheduler wait exceeded its embedding timeout.
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
                 1,
@@ -202,8 +129,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 ),
             )
         except MMSchedulerRequestTooLargeError as e:
-            # Client asked for more than a single request may carry -> a caller
-            # error, so INVALID_ARGUMENT rather than UNKNOWN.
+            # This is a caller error, not a server failure.
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
                 1,
@@ -234,6 +160,10 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             if not callback_added:
                 _report_lifecycle()
 
+    def ReleaseMultimodalEmbedding(self, request: ReleaseEmbeddingPB, context):
+        self._transport.release(request)
+        return EmptyPB()
+
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()
         worker_status.role = "VIT"
@@ -246,6 +176,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
     def stop(self):
         self.engine.stop()
+        self._transport.close()
 
 
 def create_rpc_server():
