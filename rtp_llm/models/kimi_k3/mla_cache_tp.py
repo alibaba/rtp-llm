@@ -1,10 +1,10 @@
 """K3 Prefill MLA cache dimension-sharding contracts.
 
-The compute path remains ordinary MLA TP. Only resident cache components are
-sharded: each rank stores a contiguous 512/TP latent slice followed by a
-contiguous 64/TP suffix slice. Keeping the two component boundaries explicit
-is required because a naive split of the packed 576 dimension would mix latent
-and suffix offsets during P->D fan-in.
+The compute path remains ordinary MLA TP.  The resident cache ABI first packs
+``[latent512 | rope64]`` and then slices that 576-wide row into contiguous,
+equal shards.  For TP8 rank 7 therefore owns the final eight latent values and
+all 64 RoPE values.  Rank-major collectives must explicitly transpose/repack
+before a consumer treats the result as token-major full-576 cache.
 """
 
 from __future__ import annotations
@@ -54,32 +54,44 @@ class MlaCacheShardLayout:
             raise ValueError(
                 f"MLA cache dimensions must be positive, got {full_latent}+{full_suffix}"
             )
-        if full_latent % tp_size or full_suffix % tp_size:
+        if (full_latent + full_suffix) % tp_size:
             raise ValueError(
-                "MLA cache TP requires TP to divide latent and suffix independently; "
+                "MLA cache TP requires TP to divide packed cache width; "
                 f"got latent={full_latent}, suffix={full_suffix}, TP={tp_size}"
             )
         return cls(full_latent, full_suffix, tp_size, tp_rank)
 
     @property
+    def full_width(self) -> int:
+        return self.full_latent + self.full_suffix
+
+    @property
     def local_latent(self) -> int:
-        return self.full_latent // self.tp_size
+        return max(0, min(self.shard_stop, self.full_latent) - self.shard_start)
 
     @property
     def local_suffix(self) -> int:
-        return self.full_suffix // self.tp_size
+        return self.local_width - self.local_latent
 
     @property
     def local_width(self) -> int:
-        return self.local_latent + self.local_suffix
+        return self.full_width // self.tp_size
+
+    @property
+    def shard_start(self) -> int:
+        return self.tp_rank * self.local_width
+
+    @property
+    def shard_stop(self) -> int:
+        return self.shard_start + self.local_width
 
     @property
     def latent_start(self) -> int:
-        return self.tp_rank * self.local_latent
+        return min(self.shard_start, self.full_latent)
 
     @property
     def suffix_start(self) -> int:
-        return self.tp_rank * self.local_suffix
+        return max(0, self.shard_start - self.full_latent)
 
     def shard_components(
         self, compressed_kv: torch.Tensor, suffix: torch.Tensor
@@ -101,6 +113,14 @@ class MlaCacheShardLayout:
         ).contiguous()
         return local_latent, local_suffix
 
+    def shard_full_cache(self, full_cache: torch.Tensor) -> torch.Tensor:
+        if full_cache.shape[-1] != self.full_width:
+            raise ValueError(
+                f"full MLA cache width must be {self.full_width}, "
+                f"got {full_cache.shape[-1]}"
+            )
+        return full_cache.narrow(-1, self.shard_start, self.local_width).contiguous()
+
     def reconstruct_rank_major(
         self, rank_major_shards: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -120,21 +140,17 @@ class MlaCacheShardLayout:
                 f"shape={tuple(rank_major_shards.shape)} TP={self.tp_size} "
                 f"local_width={self.local_width}"
             )
-        latent = torch.cat(
-            [
-                rank_major_shards[rank, :, : self.local_latent]
-                for rank in range(self.tp_size)
-            ],
-            dim=-1,
+        # [rank, token, shard] -> [token, rank, shard] -> [token, 576].
+        # A direct reshape of the rank-major input would interleave tokens.
+        full_cache = (
+            rank_major_shards.permute(1, 0, 2)
+            .contiguous()
+            .reshape(rank_major_shards.shape[1], self.full_width)
         )
-        suffix = torch.cat(
-            [
-                rank_major_shards[rank, :, self.local_latent :]
-                for rank in range(self.tp_size)
-            ],
-            dim=-1,
+        return (
+            full_cache[:, : self.full_latent],
+            full_cache[:, self.full_latent :],
         )
-        return latent, suffix
 
 
 def kimi_k3_mla_cache_layout(parallelism_config: Any) -> MlaCacheShardLayout:

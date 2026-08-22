@@ -11,30 +11,29 @@
 namespace rtp_llm {
 
 // Wire/layout contract for K3 Prefill MLA cache dimension sharding.  The
-// physical Prefill block is token-major [tokens, 576 / TP].  It must therefore
-// be loaded into rank-local staging buffers and repacked into the Decode
-// owner's token-major [tokens, 576] block; the two component ranges are not
-// contiguous across tokens and cannot be represented by two pointer offsets.
+// physical Prefill block is token-major [tokens, 576 / TP].  Each rank owns a
+// flat contiguous range of the packed [latent512 | rope64] row, so P->D fan-in
+// can write rank r directly to columns [r*localWidth, (r+1)*localWidth).
 struct K3MlaCacheTpLayout {
     static constexpr int kFullLatent   = 512;
     static constexpr int kFullSuffix   = 64;
     static constexpr int kFullWidth    = kFullLatent + kFullSuffix;
-    static constexpr int kLayoutVersion = 1;
+    static constexpr int kLayoutVersion = 2;
 
     explicit K3MlaCacheTpLayout(int shard_count): shard_count(shard_count) {
-        if (shard_count <= 1 || kFullLatent % shard_count != 0 || kFullSuffix % shard_count != 0) {
-            throw std::invalid_argument("K3 MLA cache TP shard_count must divide 512 and 64");
+        if (shard_count <= 1 || kFullWidth % shard_count != 0) {
+            throw std::invalid_argument("K3 MLA cache TP shard_count must divide packed width 576");
         }
     }
 
-    int localLatent() const {
-        return kFullLatent / shard_count;
-    }
-    int localSuffix() const {
-        return kFullSuffix / shard_count;
-    }
     int localWidth() const {
-        return localLatent() + localSuffix();
+        return kFullWidth / shard_count;
+    }
+    int shardOffset(int rank) const {
+        if (rank < 0 || rank >= shard_count) {
+            throw std::invalid_argument("K3 MLA cache TP shard rank is outside the group");
+        }
+        return rank * localWidth();
     }
 
     void validateShard(const torch::Tensor& shard, int64_t token_count) const {
@@ -62,10 +61,7 @@ struct K3MlaCacheTpLayout {
         for (int rank = 0; rank < shard_count; ++rank) {
             const auto& shard = rank_major_shards[rank];
             validateShard(shard, token_count);
-            destination.narrow(1, rank * localLatent(), localLatent())
-                .copy_(shard.narrow(1, 0, localLatent()));
-            destination.narrow(1, kFullLatent + rank * localSuffix(), localSuffix())
-                .copy_(shard.narrow(1, localLatent(), localSuffix()));
+            destination.narrow(1, shardOffset(rank), localWidth()).copy_(shard);
         }
     }
 
