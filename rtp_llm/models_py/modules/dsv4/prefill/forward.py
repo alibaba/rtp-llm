@@ -111,7 +111,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     clear_prefill_meta_shared_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_rows,
+)
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -371,7 +374,7 @@ def forward_layers(
         write_cache_store_impl = create_write_cache_store_impl(attn_inputs, kv_cache)
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids)  # [T_total, dim]
+        h = v4.embed_full(input_ids)  # [T_total, dim]
         if _rt_on:
             _rt.record("prefill_embed_out", h)
         h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
@@ -470,12 +473,22 @@ def forward_layers(
             # once for the whole prefill forward. The bound ``_prefill_ws_full_rows>0``
             # is the canonical signal that CP is active at workspace bind time.
             reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
+            q_rows, full_rows = resolve_prefill_workspace_rows(
+                v4._prefill_ws_q_rows,
+                v4._prefill_ws_full_rows,
+                int(input_ids.numel()),
+                int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+                allow_dynamic_growth=os.environ.get(
+                    "DSV4_SM120_DYNAMIC_PREFILL_WORKSPACE", "0"
+                )
+                == "1",
+            )
             ws = PrefillWorkspace(
                 input_ids.device,
-                q_rows=v4._prefill_ws_q_rows,
+                q_rows=q_rows,
                 q_dim=v4._prefill_ws_q_dim,
                 reserve_cp=reserve_cp,
-                cp_rows=v4._prefill_ws_full_rows,
+                cp_rows=full_rows,
                 main_w=v4._prefill_ws_main_w,
                 idx_w=v4._prefill_ws_idx_w,
             )

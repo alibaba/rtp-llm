@@ -181,8 +181,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        # Mega requires EP > 1, SM100, dist-init — all checked by
-        # ``_mega_moe_enabled()`` except ep_size > 1, which we check here.
+        import torch
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
+            return False
         return cfg.ep_size > 1 and _mega_moe_enabled()
 
     def setup_weights(self, layer_weights: Dict) -> None:

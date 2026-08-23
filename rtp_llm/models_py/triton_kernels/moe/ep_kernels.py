@@ -39,6 +39,7 @@ def _fwd_kernel_ep_scatter_1(
         tl.store(
             m_indices_start_ptr + start_m_i64 + off_expert,
             cur_expert.to(tl.int32),
+            mask=start_m_i64 + off_expert < cur_expert_token_num,
         )
 
 
@@ -131,11 +132,7 @@ def ep_scatter(
     hidden_size = recv_x.shape[1]
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
-    scale_hidden_size = hidden_size // BLOCK_D
-    if scale_ue8m0:
-        # ue8m0 scales are packed here (4 scales per int32),
-        # hence the effective size of this dimension is divided by 4.
-        scale_hidden_size = ceil_div(scale_hidden_size, 4)
+    scale_hidden_size = recv_x_scale.shape[1]
 
     assert m_indices.shape[0] % BLOCK_E == 0
     assert recv_x_scale.dtype == output_tensor_scale.dtype

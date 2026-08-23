@@ -122,6 +122,7 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            tp_size=tp_size,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
         )

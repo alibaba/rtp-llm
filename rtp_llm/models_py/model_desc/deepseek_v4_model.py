@@ -570,7 +570,13 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        tp_size = max(int(self._v4_args.tp_size), 1)
+        n_heads = int(self._v4_args.n_heads)
+        if n_heads % tp_size:
+            raise ValueError(
+                f"n_heads ({n_heads}) must be divisible by tp_size ({tp_size})"
+            )
+        q_dim = (n_heads // tp_size) * int(self._v4_args.head_dim)
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
@@ -805,14 +811,15 @@ class DeepSeekV4Model(GptModelBase):
                 _topk_len_swa = _torch.tensor(
                     [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
                 )
-                _flash_mla_sparse_fwd(
-                    q=_q_swa,
-                    kv=_kv_swa,
-                    indices=_idx_swa,
-                    sm_scale=float(_swa_attn.softmax_scale),
-                    attn_sink=_swa_attn.attn_sink,
-                    topk_length=_topk_len_swa,
-                )
+                if _torch.cuda.get_device_capability(device_str)[0] < 12:
+                    _flash_mla_sparse_fwd(
+                        q=_q_swa,
+                        kv=_kv_swa,
+                        indices=_idx_swa,
+                        sm_scale=float(_swa_attn.softmax_scale),
+                        attn_sink=_swa_attn.attn_sink,
+                        topk_length=_topk_len_swa,
+                    )
                 logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
             except Exception:
                 logging.exception(
@@ -1044,7 +1051,7 @@ class DeepSeekV4Model(GptModelBase):
         overrides with the e_proj/h_proj fusion stage."""
         B = meta.batch_size
         q_len = meta.q_len_per_req
-        h = self.v4.embed(input_ids).view(B, q_len, -1)
+        h = self.v4.embed_full(input_ids).view(B, q_len, -1)
         return h.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
     def _prepare_prefill_hidden(
@@ -1054,7 +1061,7 @@ class DeepSeekV4Model(GptModelBase):
     ) -> torch.Tensor:
         """Build the flat ``[T_total, hc, dim]`` hidden tensor that feeds
         the layer loop on the prefill path.  Default = embed+repeat."""
-        h = self.v4.embed(input_ids)
+        h = self.v4.embed_full(input_ids)
         return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
     def prepare_fmha_impl(

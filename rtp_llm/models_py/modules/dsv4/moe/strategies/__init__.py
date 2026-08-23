@@ -1,22 +1,4 @@
 # isort: skip_file
-"""DeepSeek-V4 MoE routed-expert strategies.
-
-Each strategy implements the ``RoutedExpertsStrategy`` interface from
-``base.py``. ``select_strategy`` picks one based on (ep_size, env-vars,
-kernel availability).
-
-Importing this package populates the strategy registry (each
-``@register_strategy``-decorated class registers itself on import). Order
-of import below = priority for ``select_strategy(forced=None)`` auto-pick.
-EP>1 is special-cased to require Mega and fail fast when it is unavailable.
-
-NOTE: ``# isort: skip_file`` above is REQUIRED. The import order here is the
-priority order, and it is load-bearing: ``deepep`` transitively imports
-``local_loop`` (DeepEP falls back to it), so ``grouped_fp4`` MUST be imported
-before ``deepep``/``local_loop`` or the EP=1 auto-pick would register (and pick)
-``local_loop`` ahead of ``grouped_fp4``. Alphabetical isort reordering breaks
-this — see ``test_ep1_with_grouped_kernel_picks_grouped``.
-"""
 
 from .base import (
     MoeCfg,
