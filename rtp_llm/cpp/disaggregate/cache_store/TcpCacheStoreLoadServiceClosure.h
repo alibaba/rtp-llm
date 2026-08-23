@@ -19,7 +19,8 @@ public:
                                     CacheLoadResponse*                                           response,
                                     CacheStoreLoadDoneCallback                                   callback,
                                     const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
-                                    int                                                          device_id):
+                                    int                                                          device_id,
+                                    CacheStoreAbortToken                                         abort_token = nullptr):
         memory_util_(memory_util),
         request_block_buffer_(request_block_buffer),
         controller_(controller),
@@ -27,7 +28,8 @@ public:
         response_(response),
         callback_(callback),
         collector_(collector),
-        device_id_(device_id) {}
+        device_id_(device_id),
+        abort_token_(abort_token) {}
 
     ~TcpCacheStoreLoadServiceClosure();
 
@@ -46,6 +48,7 @@ private:
     CacheStoreLoadDoneCallback                            callback_{nullptr};
     std::shared_ptr<CacheStoreClientLoadMetricsCollector> collector_;
     int                                                   device_id_{-1};
+    CacheStoreAbortToken                                  abort_token_{nullptr};
 };
 
 }  // namespace rtp_llm

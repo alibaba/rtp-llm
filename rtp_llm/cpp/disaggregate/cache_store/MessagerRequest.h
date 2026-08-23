@@ -16,6 +16,7 @@ struct LoadRequest {
     uint32_t                            timeout_ms;
     int                                 partition_count;
     int                                 partition_id;
+    CacheStoreAbortToken                abort_token;
     LoadRequest(const std::string&                         ip,
                 uint32_t                                   port,
                 uint32_t                                   rdma_port,
@@ -23,7 +24,8 @@ struct LoadRequest {
                 CacheStoreLoadDoneCallback                 callback,
                 uint32_t                                   timeout_ms,
                 int                                        partition_count,
-                int                                        partition_id):
+                int                                        partition_id,
+                CacheStoreAbortToken                       abort_token = nullptr):
         ip(ip),
         port(port),
         rdma_port(rdma_port),
@@ -31,7 +33,8 @@ struct LoadRequest {
         callback(callback),
         timeout_ms(timeout_ms),
         partition_count(partition_count),
-        partition_id(partition_id) {}
+        partition_id(partition_id),
+        abort_token(abort_token) {}
 };
 
 struct TransferRequest {

@@ -55,6 +55,10 @@ protected:
     std::condition_variable cond_;
     int                     expect_layer_cnt_ = 0;
     std::atomic_int         done_layer_cnt_   = 0;
+
+    // set once waitDone finishes abnormally (timeout/cancel/layer failure), tells the
+    // transport layer to stop retrying and never write into the (already released) blocks
+    CacheStoreAbortToken abort_token_ = std::make_shared<std::atomic<bool>>(false);
 };
 
 class LoadContext: public SyncContext {

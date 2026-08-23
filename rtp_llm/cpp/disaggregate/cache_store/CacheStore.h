@@ -27,7 +27,8 @@ public:
                       uint32_t                                   rdma_port,
                       uint32_t                                   timeout_ms      = 1000,
                       int                                        partition_count = 1,
-                      int                                        partition_id    = 0) = 0;
+                      int                                        partition_id    = 0,
+                      const CacheStoreAbortToken&                abort_token     = nullptr) = 0;
 
     virtual std::shared_ptr<LoadContext>
     loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,

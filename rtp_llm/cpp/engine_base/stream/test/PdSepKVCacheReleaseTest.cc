@@ -88,7 +88,8 @@ public:
               uint32_t,
               uint32_t = 1000,
               int      = 1,
-              int      = 0) override {
+              int      = 0,
+              const CacheStoreAbortToken& = nullptr) override {
         bool ok = true;
         for (const auto& [key, block] : request_block_buffer->getBlocks()) {
             auto it = stored_blocks_.find(key);

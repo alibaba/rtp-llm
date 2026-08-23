@@ -83,6 +83,12 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
 void TcpMessager::doLoadAttempt(const std::shared_ptr<LoadRequest>&                          request,
                                 const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
                                 int64_t                                                      deadline_ms) {
+    if (isCacheStoreAborted(request->abort_token)) {
+        // request already finished (timeout/cancel/failure), its blocks may have been
+        // reallocated, neither retry nor write is allowed anymore
+        RTP_LLM_LOG_WARNING("messager client load aborted, ip %s, port %u", request->ip.c_str(), request->port);
+        return;
+    }
     int64_t remaining_ms = deadline_ms - autil::TimeUtility::currentTimeInMilliSeconds();
     if (remaining_ms <= 0) {
         RTP_LLM_LOG_WARNING("messager client load gave up, no budget left, ip %s, port %u",
@@ -112,8 +118,10 @@ void TcpMessager::doLoadAttempt(const std::shared_ptr<LoadRequest>&             
 
     CacheLoadResponse* load_response = new CacheLoadResponse;
     auto               wrapped_callback = [this, request, collector, deadline_ms](bool success, CacheStoreErrorCode ec) {
-        if (success || !isTransportLoadError(ec)) {
-            request->callback(success, ec);
+        if (isCacheStoreAborted(request->abort_token) || success || !isTransportLoadError(ec)) {
+            if (!isCacheStoreAborted(request->abort_token)) {
+                request->callback(success, ec);
+            }
             return;
         }
         scheduleRetryOrFail(request, collector, deadline_ms, ec, CacheStoreErrorCodeToString(ec));
@@ -125,7 +133,8 @@ void TcpMessager::doLoadAttempt(const std::shared_ptr<LoadRequest>&             
                                                         load_response,
                                                         wrapped_callback,
                                                         collector,
-                                                        init_params_.device_id);
+                                                        init_params_.device_id,
+                                                        request->abort_token);
 
     collector->markRequestCallBegin();
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
@@ -138,6 +147,9 @@ void TcpMessager::scheduleRetryOrFail(const std::shared_ptr<LoadRequest>&       
                                       int64_t                                                      deadline_ms,
                                       CacheStoreErrorCode                                          ec,
                                       const std::string&                                           reason) {
+    if (isCacheStoreAborted(request->abort_token)) {
+        return;
+    }
     // transport-level failure may come from a zombie channel, drop it so the retry reconnects
     tcp_client_->invalidateChannel(request->ip, request->port);
 

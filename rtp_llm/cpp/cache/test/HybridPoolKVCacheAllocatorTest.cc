@@ -284,7 +284,8 @@ public:
               uint32_t,
               uint32_t,
               int,
-              int) override {
+              int,
+              const CacheStoreAbortToken&) override {
         if (callback) {
             callback(false, CacheStoreErrorCode::InvalidParams);
         }

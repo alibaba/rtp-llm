@@ -6,8 +6,19 @@
 #include <unistd.h>
 #include <map>
 #include <sstream>
+#include <atomic>
+#include <memory>
 
 namespace rtp_llm {
+
+// shared abort flag for async load: set by the owner (LoadContext) once the request
+// is finished by timeout/cancel/failure, transport layer must stop retrying and must
+// not write into blocks that may already be released and reallocated to other requests
+using CacheStoreAbortToken = std::shared_ptr<std::atomic<bool>>;
+
+inline bool isCacheStoreAborted(const CacheStoreAbortToken& abort_token) {
+    return abort_token != nullptr && abort_token->load(std::memory_order_acquire);
+}
 
 enum class CacheStoreErrorCode {
     None = 0,

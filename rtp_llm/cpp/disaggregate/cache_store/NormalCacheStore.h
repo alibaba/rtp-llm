@@ -31,7 +31,8 @@ public:
               uint32_t                                   rdma_port,
               uint32_t                                   timeout_ms      = 1000,
               int                                        partition_count = 1,
-              int                                        partition_id    = 0) override;
+              int                                        partition_id    = 0,
+              const CacheStoreAbortToken&                abort_token     = nullptr) override;
 
     std::shared_ptr<LoadContext>
     loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
@@ -74,7 +75,8 @@ private:
                      uint32_t                                                     timeout_ms,
                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collelctor,
                      int                                                          partition_count,
-                     int                                                          partition_id);
+                     int                                                          partition_id,
+                     const CacheStoreAbortToken&                                  abort_token);
 
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 

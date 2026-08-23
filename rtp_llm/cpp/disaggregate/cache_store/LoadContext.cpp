@@ -79,6 +79,10 @@ void SyncContext::waitDone() {
     auto                         once_time_ms = 30;
     while (true) {
         if (done_layer_cnt_ == expect_layer_cnt_) {
+            if (!error_info_.ok()) {
+                // some layer failed, the request is over: stop any in-flight transport work
+                abort_token_->store(true, std::memory_order_release);
+            }
             return;
         }
 
@@ -86,6 +90,8 @@ void SyncContext::waitDone() {
             auto error_code = ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
             timed_out_      = true;
+            // blocks will be released after this return, in-flight loads must not write them
+            abort_token_->store(true, std::memory_order_release);
             RTP_LLM_LOG_INFO("load context wait done on timeout");
             return;
         }
@@ -93,6 +99,7 @@ void SyncContext::waitDone() {
         if (check_cancel_func_ != nullptr && check_cancel_func_()) {
             auto error_code = ErrorCode::CANCELLED;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
+            abort_token_->store(true, std::memory_order_release);
             RTP_LLM_LOG_INFO("load context wait done on cancelled");
             return;
         }
@@ -170,7 +177,8 @@ bool LoadContext::doCall(const std::shared_ptr<RequestBlockBuffer>& request_bloc
                       rdma_port_,
                       timeout_ms,
                       partition_count_,
-                      partition_id_);
+                      partition_id_,
+                      abort_token_);
     return true;
 }
 

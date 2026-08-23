@@ -46,6 +46,15 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
+    if (isCacheStoreAborted(abort_token_)) {
+        // the request has already finished by timeout/cancel/failure, its blocks may have
+        // been reallocated to other requests, writing them would corrupt other streams
+        RTP_LLM_LOG_WARNING("cache load request aborted before copy, request is %s",
+                            request_block_buffer_->getRequestId().c_str());
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
+    }
+
     for (int i = 0; i < response_->blocks_size(); i++) {
         const auto& block        = response_->blocks(i);
         auto        unload_block = request_block_buffer_->getBlock(block.key());
