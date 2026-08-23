@@ -80,6 +80,7 @@ public:
     int32_t                  mla_cache_layout_version          = 0;
     int32_t                  mla_cache_shard_count             = 0;
     int32_t                  mla_cache_owner_rank              = -1;
+    uint64_t                 generation_epoch                 = 0;
 
     // for debug, will delete in future
     TimeInfo time_info;

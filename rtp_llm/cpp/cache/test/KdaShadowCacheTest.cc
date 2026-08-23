@@ -11,12 +11,13 @@ namespace {
 
 class FakeShadowAllocator final: public KdaShadowBlockAllocator {
 public:
-    bool reserve(int seq_len, BlockIndicesType& blocks) override {
+    bool reserve(int seq_len, BlockIndicesType& blocks, BlockIndicesType& kernel_blocks) override {
         ++reserve_calls;
         if (fail_reserve) {
             return false;
         }
-        blocks = {next_block++, next_block++};
+        blocks        = {next_block++, next_block++};
+        kernel_blocks = {next_kernel_block++, next_kernel_block++};
         live_blocks += blocks.size();
         last_seq_len = seq_len;
         return true;
@@ -40,6 +41,7 @@ public:
 
 private:
     BlockIdxType next_block{100};
+    BlockIdxType next_kernel_block{1000};
 };
 
 KdaShadowCommand command(KdaShadowCommandType type, KdaShadowKey key, int seq_len = 0) {
@@ -55,6 +57,7 @@ TEST(KdaShadowCacheTest, HappyPathAndIdempotency) {
     ASSERT_TRUE(reserve.success);
     EXPECT_EQ(reserve.state, KdaShadowState::RESERVED);
     EXPECT_EQ(reserve.blocks, (BlockIndicesType{100, 101}));
+    EXPECT_EQ(reserve.kernel_blocks, (BlockIndicesType{1000, 1001}));
     EXPECT_EQ(allocator->last_seq_len, 128);
 
     auto duplicate_reserve = registry.apply(command(KdaShadowCommandType::RESERVE, key, 128));
@@ -73,6 +76,9 @@ TEST(KdaShadowCacheTest, HappyPathAndIdempotency) {
     EXPECT_EQ(rows[0], (BlockIndicesType{100, 101}));
     EXPECT_TRUE(rows[1].empty());
     EXPECT_EQ(rows[2], (BlockIndicesType{100, 101}));
+    auto kernel_rows = registry.buildReadyKernelBlockRows({key, std::nullopt, key});
+    EXPECT_EQ(kernel_rows[0], (BlockIndicesType{1000, 1001}));
+    EXPECT_TRUE(kernel_rows[1].empty());
 
     auto release = registry.apply(command(KdaShadowCommandType::RELEASE, key));
     EXPECT_TRUE(release.success);
@@ -102,6 +108,68 @@ TEST(KdaShadowCacheTest, GenerationEpochPreventsStaleRelease) {
     EXPECT_EQ(current->blocks, (BlockIndicesType{102, 103}));
     EXPECT_EQ(registry.liveRecordCount(), 1);
     EXPECT_EQ(allocator->live_blocks, 2);
+}
+
+TEST(KdaShadowCacheTest, AdoptedOwnerBlocksAreNeverFreedByShadowRegistry) {
+    auto              allocator = std::make_shared<FakeShadowAllocator>();
+    KdaShadowRegistry registry(allocator);
+    KdaShadowKey      key{51, 7};
+
+    KdaShadowCommand adopt{KdaShadowCommandType::ADOPT, key, 128};
+    adopt.adopted_blocks        = {7, 8};
+    adopt.adopted_kernel_blocks = {70, 80};
+    auto adopted = registry.apply(adopt);
+    ASSERT_TRUE(adopted.success);
+    EXPECT_EQ(adopted.state, KdaShadowState::RESERVED);
+    EXPECT_EQ(adopted.blocks, (BlockIndicesType{7, 8}));
+    EXPECT_EQ(adopted.kernel_blocks, (BlockIndicesType{70, 80}));
+    EXPECT_EQ(allocator->reserve_calls, 0);
+
+    auto duplicate = registry.apply(adopt);
+    EXPECT_TRUE(duplicate.success);
+    EXPECT_TRUE(duplicate.idempotent);
+
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::LOAD, key)).success);
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::COMMIT, key)).success);
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::RELEASE, key)).success);
+    EXPECT_EQ(allocator->release_calls, 0);
+    EXPECT_EQ(allocator->live_blocks, 0);
+    EXPECT_EQ(registry.liveRecordCount(), 0);
+}
+
+TEST(KdaShadowCacheTest, AdoptRollbackDoesNotFreeOwnerBlocks) {
+    auto              allocator = std::make_shared<FakeShadowAllocator>();
+    KdaShadowRegistry registry(allocator);
+    KdaShadowKey      key{52, 9};
+
+    KdaShadowCommand adopt{KdaShadowCommandType::ADOPT, key, 64};
+    adopt.adopted_blocks        = {9};
+    adopt.adopted_kernel_blocks = {90};
+    ASSERT_TRUE(registry.apply(adopt).success);
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::LOAD, key)).success);
+    auto fail  = command(KdaShadowCommandType::FAIL, key);
+    fail.error = "injected owner load failure";
+    ASSERT_TRUE(registry.apply(fail).success);
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::ROLLBACK, key)).success);
+    EXPECT_EQ(allocator->release_calls, 0);
+    EXPECT_EQ(registry.record(key)->state, KdaShadowState::RELEASED);
+}
+
+TEST(KdaShadowCacheTest, PartialCommitRollbackReleasesReadyShard) {
+    auto              allocator = std::make_shared<FakeShadowAllocator>();
+    KdaShadowRegistry registry(allocator);
+    KdaShadowKey      key{53, 10};
+
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::RESERVE, key, 96)).success);
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::LOAD, key)).success);
+    ASSERT_TRUE(registry.apply(command(KdaShadowCommandType::COMMIT, key)).success);
+    ASSERT_EQ(registry.record(key)->state, KdaShadowState::READY);
+
+    auto rollback = registry.apply(command(KdaShadowCommandType::ROLLBACK, key));
+    EXPECT_TRUE(rollback.success);
+    EXPECT_EQ(rollback.state, KdaShadowState::RELEASED);
+    EXPECT_EQ(allocator->release_calls, 1);
+    EXPECT_EQ(allocator->live_blocks, 0);
 }
 
 TEST(KdaShadowCacheTest, FailureRollbackAndAllocationFailureDoNotLeak) {

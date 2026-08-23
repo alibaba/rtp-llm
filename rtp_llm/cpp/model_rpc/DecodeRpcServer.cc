@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
@@ -14,6 +15,7 @@
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/KdaShadowCache.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -71,6 +73,12 @@ bool hasSegmentedLinearCacheGroup(const CacheConfig& cache_config) {
     return std::any_of(cache_config.cache_specs.begin(), cache_config.cache_specs.end(), [](const auto& spec) {
         return dynamic_cast<const LinearKVCacheSpec*>(spec.get()) != nullptr;
     });
+}
+
+bool kdaKtpDecodeEnabled(const ParallelismConfig& config) {
+    const char* value = std::getenv("KIMI_K3_DECODE_KTP");
+    return value != nullptr && std::strcmp(value, "1") == 0 && config.ktp_size > 1
+           && config.role_type == RoleType::DECODE;
 }
 
 }  // namespace
@@ -163,6 +171,13 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                               && decode_context.mla_cache_owner_rank < decode_context.mla_cache_shard_count,
                           grpc::StatusCode::INVALID_ARGUMENT,
                           "K3 MLA cache owner rank is outside the Decode TP group");
+        if (kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
+            GRPC_RET_IF_ERROR(
+                decode_context,
+                decode_context.mla_cache_owner_rank == maga_init_params_.parallelism_config.dp_rank,
+                grpc::StatusCode::INVALID_ARGUMENT,
+                "explicit MLA owner must match the Decode DP route; cross-rank owner override is forbidden");
+        }
     }
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
@@ -275,6 +290,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         input->generate_config->gen_timeline = true;
     }
     auto generate_stream              = engine_->makeStream(input);
+    decode_context.generation_epoch   = static_cast<uint64_t>(generate_stream->schedulerEnqueueTimeUs());
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
     // Set CanRun event so that handleWaiting() will execute initKVBlock()
@@ -430,6 +446,37 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
+    if (kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
+        const auto& cache_keys = generate_stream->cacheKeys(0);
+        const auto& groups     = generate_stream->kvCachePtr()->groupBlocks(0);
+        LoadKVCacheContext release_context{decode_context.request_id,
+                                           decode_context.request_key,
+                                           decode_context.peer_addrs,
+                                           {},
+                                           cache_keys,
+                                           groups,
+                                           generate_stream->reuseBlockSize(),
+                                           LOAD_TIMEOUT_MS,
+                                           1,
+                                           0,
+                                           decode_context.server_context,
+                                           decode_context.prefill_cp_size,
+                                           generate_stream->forceDisableSpRun(),
+                                           decode_context.mla_cache_owner_rank,
+                                           decode_context.mla_cache_layout_version,
+                                           decode_context.mla_cache_shard_count,
+                                           decode_context.generation_epoch,
+                                           -1,
+                                           generate_stream->seqLength(),
+                                           groups};
+        auto release_status =
+            loadCacheAsyncForTp(decode_context, release_context, KDA_SHADOW_RELEASE);
+        if (!release_status.ok()) {
+            RTP_LLM_LOG_ERROR("request [%s] failed to release KDA shadow cache: %s",
+                              decode_context.request_key.c_str(),
+                              release_status.ToString().c_str());
+        }
+    }
     meta_->dequeue(decode_context.request_id, decode_context.getStream());
 
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
@@ -448,6 +495,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_mla_cache_owner_rank(load_context.mla_cache_owner_rank);
     request.set_mla_cache_layout_version(load_context.mla_cache_layout_version);
     request.set_mla_cache_shard_count(load_context.mla_cache_shard_count);
+    request.set_generation_epoch(load_context.generation_epoch);
+    request.set_kda_target_rank(index);
+    request.set_kda_seq_len(load_context.kda_seq_len);
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     const bool  segmented_linear_cache =
@@ -508,6 +558,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
             }
         }
     }
+    for (const auto& group_block : load_context.kernel_block_ids_by_group) {
+        auto* row = request.add_group_kernel_block_ids();
+        for (const auto block_id : group_block->kernelBlocks()) {
+            row->add_values(block_id);
+        }
+    }
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
 }
@@ -521,6 +577,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
     request.set_force_disable_sp_run(load_context.force_disable_sp_run);
+    request.set_generation_epoch(load_context.generation_epoch);
+    request.set_kda_target_rank(index);
+    request.set_kda_seq_len(load_context.kda_seq_len);
     const auto& cache_config        = engine_->resourceContext().cache_manager->cacheConfig();
     const bool  k3_hybrid_cache     = cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config);
     const int   decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
@@ -583,6 +642,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             for (const auto& block_id : group_block->blocks()) {
                 row->add_values(block_id);
             }
+        }
+    }
+    for (const auto& group_block : load_context.kernel_block_ids_by_group) {
+        auto* row = request.add_group_kernel_block_ids();
+        for (const auto block_id : group_block->kernelBlocks()) {
+            row->add_values(block_id);
         }
     }
     request.set_timeout_ms(load_context.timeout_ms);
@@ -657,7 +722,11 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     generate_stream->forceDisableSpRun(),
                                     decode_context.mla_cache_owner_rank,
                                     decode_context.mla_cache_layout_version,
-                                    decode_context.mla_cache_shard_count};
+                                    decode_context.mla_cache_shard_count,
+                                    decode_context.generation_epoch,
+                                    -1,
+                                    generate_stream->seqLength(),
+                                    *block_ids_by_group};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -670,11 +739,30 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         }
     }
 
-    return loadCacheAsyncForTp(decode_context, load_context);
+    if (!kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
+        return loadCacheAsyncForTp(decode_context, load_context);
+    }
+    auto status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_RESERVE);
+    if (status.ok()) {
+        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_LOAD);
+    }
+    if (status.ok()) {
+        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_COMMIT);
+    }
+    if (!status.ok()) {
+        auto rollback = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_ROLLBACK);
+        if (!rollback.ok()) {
+            RTP_LLM_LOG_ERROR("request [%s] KDA shadow rollback also failed: %s",
+                              decode_context.request_key.c_str(),
+                              rollback.ToString().c_str());
+        }
+    }
+    return status;
 }
 
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
-                                               LoadKVCacheContext&    load_context) {
+                                               LoadKVCacheContext&    load_context,
+                                               KdaShadowCommandPB     command) {
     RTP_LLM_PROFILE_FUNCTION();
     int64_t load_cache_begin_time_us = currentTimeUs();
 
@@ -718,6 +806,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
         }
+        load_request.set_kda_shadow_command(command);
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
             rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
         reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
@@ -1515,7 +1604,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
+    const bool kda_shadow_request = request->kda_shadow_command() != KDA_SHADOW_NONE;
+    if (!kda_shadow_request && request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
     }
@@ -1529,9 +1619,125 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         block_ids_holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
         block_ids_by_group.push_back(std::move(block_ids_holder));
     }
+    GroupBlockIds kernel_block_ids_by_group;
+    kernel_block_ids_by_group.reserve(static_cast<size_t>(request->group_kernel_block_ids_size()));
+    for (int i = 0; i < request->group_kernel_block_ids_size(); ++i) {
+        const auto& row              = request->group_kernel_block_ids(i);
+        auto        block_ids_holder = std::make_shared<BlockIds>();
+        block_ids_holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
+        kernel_block_ids_by_group.push_back(std::move(block_ids_holder));
+    }
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
     std::vector<std::string> mla_peer_addrs(request->mla_peer_addrs().begin(), request->mla_peer_addrs().end());
+
+    if (kda_shadow_request) {
+        const auto& parallelism = maga_init_params_.parallelism_config;
+        RTP_LLM_CHECK_WITH_INFO(kdaKtpDecodeEnabled(parallelism),
+                                "received KDA shadow command while Decode KTP is disabled");
+        RTP_LLM_CHECK_WITH_INFO(request->kda_target_rank() == parallelism.ktp_rank,
+                                "KDA shadow command target rank %d reached KTP rank %ld",
+                                request->kda_target_rank(),
+                                parallelism.ktp_rank);
+        auto cache_manager = engine_->resourceContext().cache_manager;
+        auto registry      = cache_manager->kdaShadowRegistry();
+        RTP_LLM_CHECK_WITH_INFO(registry != nullptr, "Decode KTP shadow registry is not initialized");
+        const int  kda_group_id = cache_manager->kdaShadowGroupId();
+        const bool is_owner     = parallelism.dp_rank == request->mla_cache_owner_rank();
+        KdaShadowKey key{request->request_id(), request->generation_epoch()};
+        KdaShadowResult shadow_result;
+
+        switch (request->kda_shadow_command()) {
+            case KDA_SHADOW_RESERVE: {
+                if (is_owner) {
+                    RTP_LLM_CHECK_WITH_INFO(
+                        kda_group_id >= 0 && kda_group_id < static_cast<int>(block_ids_by_group.size())
+                            && kda_group_id < static_cast<int>(kernel_block_ids_by_group.size()),
+                        "owner KDA shadow adoption is missing physical/kernel group rows");
+                    KdaShadowCommand command{KdaShadowCommandType::ADOPT, key, request->kda_seq_len()};
+                    command.adopted_blocks = block_ids_by_group[kda_group_id]->blocks();
+                    command.adopted_kernel_blocks = kernel_block_ids_by_group[kda_group_id]->blocks();
+                    shadow_result = registry->apply(command);
+                } else {
+                    shadow_result = registry->apply(
+                        {KdaShadowCommandType::RESERVE, key, request->kda_seq_len(), {}});
+                }
+                break;
+            }
+            case KDA_SHADOW_LOAD: {
+                shadow_result = registry->apply({KdaShadowCommandType::LOAD, key, 0, {}});
+                if (shadow_result.success) {
+                    const auto group_count = cache_manager->cacheConfig().groupNums();
+                    GroupBlockIds local_groups;
+                    local_groups.reserve(group_count);
+                    for (size_t gid = 0; gid < group_count; ++gid) {
+                        if (static_cast<int>(gid) == kda_group_id) {
+                            auto ids = std::make_shared<BlockIds>();
+                            ids->assign(shadow_result.blocks);
+                            local_groups.push_back(std::move(ids));
+                        } else if (is_owner && gid < block_ids_by_group.size()) {
+                            local_groups.push_back(block_ids_by_group[gid]);
+                        } else {
+                            local_groups.push_back(std::make_shared<BlockIds>());
+                        }
+                    }
+                    LoadKVCacheContext context{request->request_id(),
+                                               request->request_key(),
+                                               peer_addrs,
+                                               std::move(mla_peer_addrs),
+                                               cache_keys,
+                                               local_groups,
+                                               request->reuse_block_size(),
+                                               request->timeout_ms(),
+                                               request->partition_count(),
+                                               request->partition_id(),
+                                               server_context,
+                                               std::max(1, request->prefill_cp_size()),
+                                               request->force_disable_sp_run(),
+                                               request->mla_cache_owner_rank(),
+                                               request->mla_cache_layout_version(),
+                                               request->mla_cache_shard_count(),
+                                               request->generation_epoch(),
+                                               request->kda_target_rank(),
+                                               request->kda_seq_len()};
+                    auto load_status = loadCache(context);
+                    if (!load_status.ok()) {
+                        KdaShadowCommand fail{KdaShadowCommandType::FAIL, key};
+                        fail.error = load_status.ToString();
+                        registry->apply(fail);
+                        response->mutable_error_info()->set_error_code(transErrorCodeToRPC(load_status.code()));
+                        response->mutable_error_info()->set_error_message(load_status.ToString());
+                        response->set_done_time_us(currentTimeUs());
+                        return grpc::Status::OK;
+                    }
+                }
+                break;
+            }
+            case KDA_SHADOW_COMMIT:
+                shadow_result = registry->apply({KdaShadowCommandType::COMMIT, key});
+                break;
+            case KDA_SHADOW_ROLLBACK:
+                shadow_result = registry->apply({KdaShadowCommandType::ROLLBACK, key});
+                break;
+            case KDA_SHADOW_RELEASE:
+                shadow_result = registry->apply({KdaShadowCommandType::RELEASE, key});
+                break;
+            case KDA_SHADOW_NONE:
+                RTP_LLM_FAIL("unreachable KDA shadow command");
+            default:
+                RTP_LLM_FAIL("unknown KDA shadow protobuf command: %d",
+                             static_cast<int>(request->kda_shadow_command()));
+        }
+        if (!shadow_result.success) {
+            response->mutable_error_info()->set_error_code(
+                transErrorCodeToRPC(ErrorCode::LOAD_KV_CACHE_FAILED));
+            response->mutable_error_info()->set_error_message(shadow_result.error);
+        } else {
+            response->mutable_error_info()->set_error_code(ErrorCodePB::NONE_ERROR);
+        }
+        response->set_done_time_us(currentTimeUs());
+        return grpc::Status::OK;
+    }
 
     // TODO(xinfei.sxf) add retry
     auto error_info = loadCache({request->request_id(),
@@ -1549,7 +1755,11 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->force_disable_sp_run(),
                                  request->mla_cache_owner_rank(),
                                  request->mla_cache_layout_version(),
-                                 request->mla_cache_shard_count()});
+                                 request->mla_cache_shard_count(),
+                                 request->generation_epoch(),
+                                 request->kda_target_rank(),
+                                 request->kda_seq_len(),
+                                 std::move(kernel_block_ids_by_group)});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());

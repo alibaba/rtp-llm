@@ -357,6 +357,15 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths_host;
     torch::Tensor sequence_lengths_host;
     torch::Tensor input_lengths_host;
+    torch::Tensor request_ids_host;
+    torch::Tensor generation_epochs_host;
+    // READY rank-local KDA shadow-cache snapshot. Keys are [N,2] int64;
+    // physical/kernel tables are [N,max_blocks] int32 and may use different
+    // local block ids on every KTP rank.
+    torch::Tensor kda_shadow_keys_host;
+    torch::Tensor kda_shadow_block_ids_host;
+    torch::Tensor kda_shadow_kernel_block_ids_host;
+    int           kda_shadow_group_id{-1};
     // Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id_host;

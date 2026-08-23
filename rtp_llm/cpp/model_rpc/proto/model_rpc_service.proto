@@ -377,6 +377,20 @@ message BroadcastLoadRequestPB {
     int32 mla_cache_owner_rank = 16;
     int32 mla_cache_layout_version = 17;
     int32 mla_cache_shard_count = 18;
+    uint64 generation_epoch = 19;
+    KdaShadowCommandPB kda_shadow_command = 20;
+    int32 kda_target_rank = 21;
+    int32 kda_seq_len = 22;
+    repeated IntVector group_kernel_block_ids = 23;
+}
+
+enum KdaShadowCommandPB {
+    KDA_SHADOW_NONE = 0;
+    KDA_SHADOW_RESERVE = 1;
+    KDA_SHADOW_LOAD = 2;
+    KDA_SHADOW_COMMIT = 3;
+    KDA_SHADOW_ROLLBACK = 4;
+    KDA_SHADOW_RELEASE = 5;
 }
 
 message BroadcastLoadResponsePB {

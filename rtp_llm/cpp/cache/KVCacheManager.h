@@ -23,6 +23,7 @@ class CacheStore;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
 class PrefillCacheHitMetricsReporter;
+class KdaShadowRegistry;
 
 class KVCacheManager {
 public:
@@ -128,6 +129,14 @@ public:
         return coordinator_;
     }
 
+    std::shared_ptr<KdaShadowRegistry> kdaShadowRegistry() const {
+        return kda_shadow_registry_;
+    }
+
+    int kdaShadowGroupId() const {
+        return kda_shadow_group_id_;
+    }
+
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
@@ -166,6 +175,8 @@ private:
     std::thread       metrics_reporter_thread_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
+    std::shared_ptr<KdaShadowRegistry>            kda_shadow_registry_;
+    int                                           kda_shadow_group_id_{-1};
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;

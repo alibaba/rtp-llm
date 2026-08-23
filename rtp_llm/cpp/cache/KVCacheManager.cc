@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/KdaShadowCache.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -157,6 +158,27 @@ bool KVCacheManager::init() {
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
+
+    const char* decode_ktp_env = std::getenv("KIMI_K3_DECODE_KTP");
+    if (pd_sep_config_.role_type == RoleType::DECODE && parallelism_config_.ktp_size > 1
+        && decode_ktp_env != nullptr && std::strcmp(decode_ktp_env, "1") == 0) {
+        auto hybrid_allocator = std::dynamic_pointer_cast<HybridKVCacheAllocator>(allocator_);
+        RTP_LLM_CHECK_WITH_INFO(hybrid_allocator != nullptr,
+                                "Decode KTP shadow cache requires a hybrid cache allocator");
+        for (size_t gid = 0; gid < config_.group_types.size(); ++gid) {
+            if (config_.group_types[gid] == CacheGroupType::LINEAR) {
+                RTP_LLM_CHECK_WITH_INFO(kda_shadow_group_id_ < 0,
+                                        "Decode KTP currently supports exactly one LINEAR cache group");
+                kda_shadow_group_id_ = static_cast<int>(gid);
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(kda_shadow_group_id_ >= 0,
+                                "Decode KTP did not find a LINEAR KDA cache group");
+        kda_shadow_registry_ = std::make_shared<KdaShadowRegistry>(
+            std::make_shared<HybridKdaShadowBlockAllocator>(hybrid_allocator, kda_shadow_group_id_));
+        RTP_LLM_LOG_INFO("Decode KTP shadow registry initialized for local LINEAR group %d",
+                         kda_shadow_group_id_);
+    }
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);

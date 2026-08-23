@@ -316,6 +316,42 @@ class KtpBatchPlan:
             device=device,
         )
 
+    @property
+    def valid_physical_indices(self) -> tuple[int, ...]:
+        return tuple(
+            index
+            for index, key in enumerate(self.request_keys)
+            if key is not None
+        )
+
+    def compact_valid_rows(self, value: torch.Tensor) -> torch.Tensor:
+        """Drop fixed-bucket padding rows without ever touching request cache."""
+
+        if value.ndim == 0 or int(value.shape[0]) != self.physical_rows:
+            raise ValueError(
+                "KTP physical rows do not match rank-major layout: "
+                f"shape={tuple(value.shape)}, expected={self.physical_rows}"
+            )
+        indices = torch.tensor(
+            self.valid_physical_indices, dtype=torch.int64, device=value.device
+        )
+        return value.index_select(0, indices).contiguous()
+
+    def expand_valid_rows(self, value: torch.Tensor) -> torch.Tensor:
+        """Restore zero padding rows before fixed-count ReduceScatter."""
+
+        if value.ndim == 0 or int(value.shape[0]) != self.valid_rows:
+            raise ValueError(
+                "KTP valid rows do not match the rendezvous plan: "
+                f"shape={tuple(value.shape)}, expected={self.valid_rows}"
+            )
+        expanded = value.new_zeros([self.physical_rows] + list(value.shape[1:]))
+        indices = torch.tensor(
+            self.valid_physical_indices, dtype=torch.int64, device=value.device
+        )
+        expanded.index_copy_(0, indices, value)
+        return expanded.contiguous()
+
     def pad_local_rows(self, value: torch.Tensor) -> torch.Tensor:
         if value.ndim == 0 or int(value.shape[0]) != self.local_batch:
             raise ValueError(
@@ -353,6 +389,121 @@ class KtpBatchPlan:
                 f"shape={tuple(global_partial.shape)}, expected={self.physical_rows}"
             )
         return self.trim_local_rows(reduce_scatter(global_partial, group=Group.KTP))
+
+
+def _snapshot_block_rows(
+    attention_inputs: PyAttentionInputs,
+    plan: KtpBatchPlan,
+    *,
+    kernel: bool,
+) -> torch.Tensor:
+    key_name = "kda_shadow_keys_host"
+    table_name = (
+        "kda_shadow_kernel_block_ids_host"
+        if kernel
+        else "kda_shadow_block_ids_host"
+    )
+    keys = getattr(attention_inputs, key_name, None)
+    table = getattr(attention_inputs, table_name, None)
+    if plan.valid_rows == 0:
+        if table is not None and table.ndim == 2:
+            return table.narrow(0, 0, 0).contiguous()
+        return torch.empty((0, 0), dtype=torch.int32)
+    if keys is None or table is None or not keys.numel() or not table.numel():
+        raise RuntimeError(
+            "KTP Decode requires a READY KDA shadow-cache snapshot from C++"
+        )
+    if keys.ndim != 2 or int(keys.shape[1]) != 2 or table.ndim != 2:
+        raise ValueError(
+            f"invalid KDA shadow snapshot keys={tuple(keys.shape)} "
+            f"table={tuple(table.shape)}"
+        )
+    lookup = {
+        (int(keys[row, 0]), int(keys[row, 1])): row
+        for row in range(int(keys.shape[0]))
+    }
+    rows = []
+    for key in plan.request_keys:
+        if key is None:
+            continue
+        if key not in lookup:
+            raise RuntimeError(f"KDA shadow shard is not READY for request key {key}")
+        rows.append(table[lookup[key]])
+    if not rows:
+        return table.new_empty((0, int(table.shape[1])))
+    return torch.stack(rows, dim=0).contiguous()
+
+
+def build_ktp_attention_inputs(
+    attention_inputs: PyAttentionInputs,
+    plan: KtpBatchPlan,
+    *,
+    device: torch.device,
+) -> PyAttentionInputs:
+    """Build rank-local block maps and globally ordered KDA Decode metadata.
+
+    Padding participates in descriptor/activation collectives but is compacted
+    before KDA.  Consequently fake rows never execute a recurrent-state write.
+    """
+
+    if attention_inputs.is_prefill:
+        raise ValueError("KTP attention metadata is Decode-only")
+    local_input = attention_inputs.input_lengths
+    local_sequence = attention_inputs.sequence_lengths
+    if plan.local_batch == 0 and bool(
+        getattr(attention_inputs, "is_fake_stream", False)
+    ):
+        local_input = local_input.narrow(0, 0, 0)
+        local_sequence = local_sequence.narrow(0, 0, 0)
+    if int(local_input.numel()) != plan.local_batch or int(local_sequence.numel()) != plan.local_batch:
+        raise ValueError(
+            "local Decode lengths do not match the KTP descriptor: "
+            f"input={local_input.numel()} sequence={local_sequence.numel()} "
+            f"local_batch={plan.local_batch}"
+        )
+    global_input = plan.compact_valid_rows(plan.all_gather_rows(local_input))
+    global_sequence = plan.compact_valid_rows(plan.all_gather_rows(local_sequence))
+
+    result = copy.copy(attention_inputs)
+    result.input_lengths = global_input
+    result.sequence_lengths = global_sequence
+    result.sequence_lengths_plus_1_d = global_sequence + 1
+    result.input_lengths_host = global_input.detach().cpu()
+    result.sequence_lengths_host = global_sequence.detach().cpu()
+    result.prefix_lengths = global_input.new_empty((0,))
+    result.prefix_lengths_host = result.input_lengths_host.new_empty((0,))
+    result.cu_seqlens = torch.arange(
+        plan.valid_rows + 1, dtype=torch.int32, device=device
+    )
+    result.decode_cu_seqlens_d = result.cu_seqlens
+    result.cu_kv_seqlens = torch.zeros_like(result.cu_seqlens)
+    result.padding_offset = torch.empty((0,), dtype=torch.int32, device=device)
+    result.total_tokens = plan.valid_rows
+
+    physical = _snapshot_block_rows(attention_inputs, plan, kernel=False)
+    kernel = _snapshot_block_rows(attention_inputs, plan, kernel=True)
+    group_id = int(getattr(attention_inputs, "kda_shadow_group_id", -1))
+    if group_id < 0:
+        raise RuntimeError("KTP Decode is missing the KDA shadow cache group id")
+    result.kv_cache_block_id_host = physical
+    result.kv_cache_kernel_block_id_host = kernel
+    result.kv_cache_kernel_block_id_device = kernel.to(device=device, non_blocking=True)
+    result.kv_cache_block_id_host_by_group = [
+        physical.new_empty((0, 0)) for _ in range(group_id + 1)
+    ]
+    result.kv_cache_kernel_block_id_host_by_group = [
+        kernel.new_empty((0, 0)) for _ in range(group_id + 1)
+    ]
+    result.kv_cache_kernel_block_id_device_by_group = [
+        result.kv_cache_kernel_block_id_device.new_empty((0, 0))
+        for _ in range(group_id + 1)
+    ]
+    result.kv_cache_block_id_host_by_group[group_id] = physical
+    result.kv_cache_kernel_block_id_host_by_group[group_id] = kernel
+    result.kv_cache_kernel_block_id_device_by_group[group_id] = (
+        result.kv_cache_kernel_block_id_device
+    )
+    return result
 
 
 def rendezvous_ktp_step(
@@ -530,6 +681,7 @@ __all__ = [
     "KtpStepDescriptor",
     "KdaParallelContext",
     "build_owner_attention_inputs",
+    "build_ktp_attention_inputs",
     "decode_ktp_enabled",
     "logical_tp1_parallelism",
     "rendezvous_ktp_step",

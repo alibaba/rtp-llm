@@ -41,7 +41,11 @@ public:
                            bool                             force_disable_sp_run = false,
                            int32_t                          mla_cache_owner_rank = -1,
                            int32_t                          mla_cache_layout_version = 0,
-                           int32_t                          mla_cache_shard_count = 0):
+                           int32_t                          mla_cache_shard_count = 0,
+                           uint64_t                         generation_epoch = 0,
+                           int32_t                          kda_target_rank = -1,
+                           int32_t                          kda_seq_len = 0,
+                           GroupBlockIds                    kernel_block_ids_by_group = {}):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
@@ -57,7 +61,11 @@ public:
             force_disable_sp_run(force_disable_sp_run),
             mla_cache_owner_rank(mla_cache_owner_rank),
             mla_cache_layout_version(mla_cache_layout_version),
-            mla_cache_shard_count(mla_cache_shard_count) {}
+            mla_cache_shard_count(mla_cache_shard_count),
+            generation_epoch(generation_epoch),
+            kda_target_rank(kda_target_rank),
+            kda_seq_len(kda_seq_len),
+            kernel_block_ids_by_group(std::move(kernel_block_ids_by_group)) {}
         int64_t                          request_id;
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
@@ -75,6 +83,10 @@ public:
         int32_t              mla_cache_owner_rank;
         int32_t              mla_cache_layout_version;
         int32_t              mla_cache_shard_count;
+        uint64_t             generation_epoch;
+        int32_t              kda_target_rank;
+        int32_t              kda_seq_len;
+        GroupBlockIds        kernel_block_ids_by_group;
     };
 
 private:
@@ -87,7 +99,9 @@ private:
 
     ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
-    ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
+                                               LoadKVCacheContext&    load_context,
+                                               KdaShadowCommandPB     command = KDA_SHADOW_NONE);
     ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,

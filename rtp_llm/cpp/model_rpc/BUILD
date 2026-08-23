@@ -72,6 +72,7 @@ cc_library(
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:kda_shadow_cache",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",

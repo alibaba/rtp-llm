@@ -260,6 +260,31 @@ class KtpBatchRendezvousTest(unittest.TestCase):
         self.assertEqual((idle.valid_rows, idle.physical_rows), (0, 8))
         self.assertFalse(idle.valid_mask(torch.device("cpu")).any())
 
+    def test_compact_and_expand_never_execute_padding_rows(self):
+        plan = KtpBatchPlan(
+            self._descriptors([0, 1, 0, 2, 0, 1, 0, 2], bucket=2), rank=3
+        )
+        physical = torch.arange(16, dtype=torch.float32).reshape(16, 1)
+        compact = plan.compact_valid_rows(physical)
+        self.assertEqual(compact.flatten().tolist(), [2.0, 6.0, 7.0, 10.0, 14.0, 15.0])
+
+        expanded = plan.expand_valid_rows(compact)
+        self.assertEqual(tuple(expanded.shape), (16, 1))
+        self.assertTrue(
+            torch.equal(expanded[list(plan.valid_physical_indices)], compact)
+        )
+        padding = expanded[~plan.valid_mask(torch.device("cpu"))]
+        self.assertTrue(torch.equal(padding, torch.zeros_like(padding)))
+
+    def test_all_idle_compacts_to_zero_rows_and_expands_zero_padding(self):
+        plan = KtpBatchPlan(self._descriptors([0] * 8, bucket=2), rank=5)
+        physical = torch.ones(16, 3)
+        compact = plan.compact_valid_rows(physical)
+        self.assertEqual(tuple(compact.shape), (0, 3))
+        expanded = plan.expand_valid_rows(compact)
+        self.assertEqual(tuple(expanded.shape), (16, 3))
+        self.assertFalse(expanded.any())
+
     def test_activation_padding_all_gather_and_reduce_scatter_trim(self):
         plan = KtpBatchPlan(
             self._descriptors([1, 2, 3, 4, 1, 2, 3, 4]), rank=2

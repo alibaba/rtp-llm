@@ -38,6 +38,7 @@ enum class KdaShadowState : uint8_t {
 
 enum class KdaShadowCommandType : uint8_t {
     RESERVE = 0,
+    ADOPT,
     LOAD,
     COMMIT,
     FAIL,
@@ -50,6 +51,8 @@ struct KdaShadowCommand {
     KdaShadowKey         key;
     int                  seq_len{0};
     std::string          error;
+    BlockIndicesType     adopted_blocks;
+    BlockIndicesType     adopted_kernel_blocks;
 };
 
 struct KdaShadowRecord {
@@ -57,6 +60,8 @@ struct KdaShadowRecord {
     KdaShadowState    state{KdaShadowState::ABSENT};
     int               seq_len{0};
     BlockIndicesType  blocks;
+    BlockIndicesType  kernel_blocks;
+    bool              owns_blocks{true};
     std::string       error;
 };
 
@@ -65,13 +70,14 @@ struct KdaShadowResult {
     bool              idempotent{false};
     KdaShadowState    state{KdaShadowState::ABSENT};
     BlockIndicesType  blocks;
+    BlockIndicesType  kernel_blocks;
     std::string       error;
 };
 
 class KdaShadowBlockAllocator {
 public:
     virtual ~KdaShadowBlockAllocator() = default;
-    virtual bool reserve(int seq_len, BlockIndicesType& blocks) = 0;
+    virtual bool reserve(int seq_len, BlockIndicesType& blocks, BlockIndicesType& kernel_blocks) = 0;
     virtual bool release(const BlockIndicesType& blocks)         = 0;
 };
 
@@ -80,7 +86,7 @@ class HybridKdaShadowBlockAllocator final: public KdaShadowBlockAllocator {
 public:
     HybridKdaShadowBlockAllocator(HybridKVCacheAllocatorPtr allocator, int group_id);
 
-    bool reserve(int seq_len, BlockIndicesType& blocks) override;
+    bool reserve(int seq_len, BlockIndicesType& blocks, BlockIndicesType& kernel_blocks) override;
     bool release(const BlockIndicesType& blocks) override;
 
 private:
@@ -104,6 +110,9 @@ public:
     // block-table row.  Every real row must reference a READY record.
     std::vector<BlockIndicesType>
     buildReadyBlockRows(const std::vector<std::optional<KdaShadowKey>>& rank_major_keys) const;
+    std::vector<BlockIndicesType>
+    buildReadyKernelBlockRows(const std::vector<std::optional<KdaShadowKey>>& rank_major_keys) const;
+    std::vector<KdaShadowRecord> readyRecords() const;
 
     size_t liveRecordCount() const;
     size_t liveBlockCount() const;
