@@ -26,8 +26,10 @@ class PrefillRequestLedgerApiTest {
                 .collect(Collectors.toSet());
 
         assertEquals(Set.of(
-                "tryAcquire", "release", "protect", "unprotect", "observe", "settle",
-                "available", "count", "mutationVersion", "estimate", "evict", "maxAge"),
+                "registerDirectRequest", "retireDirectRequests",
+                "acquireCapacityReservation", "release",
+                "protect", "unprotect", "observe", "settle", "available", "count",
+                "queueRouteCount", "mutationVersion", "estimate", "evict", "maxAge"),
                 exposedMethods);
     }
 
@@ -46,15 +48,15 @@ class PrefillRequestLedgerApiTest {
         PrefillRequestLedger ledger = new PrefillRequestLedger(
                 notifications::incrementAndGet, clock::get, ignored -> {});
 
-        assertTrue(ledger.tryAcquire(1L, 100, 1));
+        assertTrue(commitQueueRoute(ledger, 1L, 100, 1));
         assertTrue(ledger.release(1L));
         assertFalse(ledger.release(1L));
 
-        assertTrue(ledger.tryAcquire(2L, 100, 1));
+        assertTrue(commitQueueRoute(ledger, 2L, 100, 1));
         assertTrue(ledger.settle(2L));
         assertFalse(ledger.settle(2L));
 
-        assertTrue(ledger.tryAcquire(3L, 100, 1));
+        assertTrue(commitQueueRoute(ledger, 3L, 100, 1));
         clock.incrementAndGet();
         assertEquals(1, ledger.evict(0));
         assertEquals(0, ledger.evict(0));
@@ -62,5 +64,27 @@ class PrefillRequestLedgerApiTest {
         assertEquals(3, notifications.get());
         assertEquals(0, ledger.count());
         assertEquals(1, ledger.available(1));
+    }
+
+    private static boolean commitQueueRoute(
+            PrefillRequestLedger ledger,
+            long requestId,
+            long predictedMs,
+            int maximumInflightRequests) {
+        PrefillRequestLedger.RequestCapacityReservationAcquisition acquisition =
+                ledger.acquireCapacityReservation(
+                        requestId, predictedMs, maximumInflightRequests);
+        if (acquisition.status()
+                != PrefillRequestLedger.RequestCapacityReservationAcquisition.Status.ACQUIRED) {
+            return false;
+        }
+        PrefillRequestLedger.RequestCapacityReservation reservation =
+                acquisition.reservation();
+        if (!reservation.prepareForDelivery()) {
+            reservation.release();
+            return false;
+        }
+        reservation.completePreparedDeliveryTransfer();
+        return true;
     }
 }

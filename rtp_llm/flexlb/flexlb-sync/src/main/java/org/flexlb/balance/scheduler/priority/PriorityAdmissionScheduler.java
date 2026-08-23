@@ -1612,7 +1612,7 @@ public class PriorityAdmissionScheduler {
         }
         // N2/P1-1: the queued-phase mark is set BEFORE the commit (schedule /
         // placeAfterDecodeEviction) — marking here raced the dispatch side's
-        // tryMarkEngineMayHaveSeen for items that dispatched immediately.
+        // EngineDispatchPermit.commit for items that dispatched immediately.
         // §19.1 plan_type: eviction paths set their label before this point.
         if (ctx.getPlanType() == null || ctx.getPlanType().isEmpty()) {
             ctx.setPlanType("normal");

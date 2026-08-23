@@ -626,7 +626,7 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void offer_failure_releases_decode_reservation_and_fails_explicitly() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(1);
         SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 

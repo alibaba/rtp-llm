@@ -86,10 +86,6 @@ public final class PreemptionAttempt {
 
     public synchronized State state() { return state; }
 
-    public synchronized VictimState victimState(long requestId) {
-        return requireVictim(requestId);
-    }
-
     public synchronized boolean claimAll() {
         if (state != State.PLANNED) {
             return false;
@@ -163,12 +159,6 @@ public final class PreemptionAttempt {
         victimStates.put(requestId, VictimState.CANCELED_SETTLED);
         advanceReadyIfSettled();
         return true;
-    }
-
-    public synchronized boolean hasNonCommittedOutcome() {
-        return victimStates.values().stream().anyMatch(value ->
-                value == VictimState.NOT_FOUND_STALE
-                        || value == VictimState.CANCEL_UNKNOWN);
     }
 
     public synchronized boolean markCommitted() {

@@ -74,6 +74,7 @@ import static org.mockito.Mockito.when;
  *   <li>{@code flexlb.perf.decode-workers} (default 1)</li>
  *   <li>{@code flexlb.perf.target-qps} (default 3000)</li>
  *   <li>{@code flexlb.perf.autotpm.requests} (default max(1024, target QPS))</li>
+ *   <li>{@code flexlb.perf.max-predicted-execution-ms} (default disabled)</li>
  * </ul>
  *
  * <p>DIRECT + BATCH is rejected by the public config validator and is therefore
@@ -92,6 +93,8 @@ class AutoTpmSchedulingOverheadPerfTest {
             Integer.getInteger("flexlb.perf.target-qps", 3_000);
     private static final int REQUEST_COUNT = Integer.getInteger(
             "flexlb.perf.autotpm.requests", Math.max(1_024, TARGET_QPS));
+    private static final Long MAX_PREDICTED_EXECUTION_MS =
+            Long.getLong("flexlb.perf.max-predicted-execution-ms");
     private static final long PHASE_TIMEOUT_SECONDS =
             Long.getLong("flexlb.perf.phase-timeout-seconds", 20L);
     private static Logger flexlbLogger;
@@ -124,8 +127,11 @@ class AutoTpmSchedulingOverheadPerfTest {
         assertTrue(REQUEST_COUNT > 0, "request count must be positive");
 
         System.out.printf(
-                "Scheduling config matrix: target_qps=%d requests=%d topology=%dP/%dD%n",
-                TARGET_QPS, REQUEST_COUNT, PREFILL_WORKERS, DECODE_WORKERS);
+                "Scheduling config matrix: target_qps=%d requests=%d topology=%dP/%dD "
+                        + "max_predicted_execution_ms=%s%n",
+                TARGET_QPS, REQUEST_COUNT, PREFILL_WORKERS, DECODE_WORKERS,
+                MAX_PREDICTED_EXECUTION_MS == null
+                        ? "disabled" : MAX_PREDICTED_EXECUTION_MS);
         System.out.printf("%-42s %-12s %-12s %-12s %-12s %-12s%n",
                 "mode", "actual_qps", "e2e_p50_ms", "e2e_p90_ms",
                 "e2e_p99_ms", "e2e_avg_ms");
@@ -382,10 +388,12 @@ class AutoTpmSchedulingOverheadPerfTest {
                     configService, router, endpointRegistry, dispatcher, reporter,
                     priorityScheduler, null, new UnsupportedEngineCancelChannel()) {
                 @Override
-                public void onDecisionGroupReady(
-                        List<BatchItem> items, DecisionGroupMetadata metadata) {
-                    maxDecisionGroupSize.accumulateAndGet(items.size(), Math::max);
-                    super.onDecisionGroupReady(items, metadata);
+                public void onDecisionGroupAdmitted(
+                        org.flexlb.balance.scheduler.AdmittedDecisionGroup group,
+                        DecisionGroupMetadata metadata) {
+                    maxDecisionGroupSize.accumulateAndGet(
+                            group.requests().size(), Math::max);
+                    super.onDecisionGroupAdmitted(group, metadata);
                 }
             };
             schedulerRef.set(scheduler);
@@ -412,10 +420,10 @@ class AutoTpmSchedulingOverheadPerfTest {
             config.queueScheduler().getLifecycle()
                     .setMaxDeliveredNotAcceptedRequestsGlobal(requestedCapacity);
             if (mode.fixedWindow) {
-                SchedulingTestConfig.useFixedWindowDecision(config)
-                        .setMaxCollectionWaitMs(10L);
-                SchedulingTestConfig.useFixedWindowDecision(config)
-                        .setMaxRequests(16);
+                var fixedWindow = SchedulingTestConfig.useFixedWindowDecision(config);
+                fixedWindow.setMaxCollectionWaitMs(10L);
+                fixedWindow.setMaxRequests(16);
+                fixedWindow.setMaxPredictedExecutionMs(MAX_PREDICTED_EXECUTION_MS);
             }
         }
 

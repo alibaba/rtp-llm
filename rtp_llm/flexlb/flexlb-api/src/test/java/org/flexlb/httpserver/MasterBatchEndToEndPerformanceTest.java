@@ -194,9 +194,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = super.createConfig();
-        cfg.batchDispatcher().setMaxCollectionWaitMs(10L);
-        cfg.batchDispatcher().setMaxRequests(16);
-        cfg.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(4_096);
+        cfg.fixedWindowDecision().setMaxCollectionWaitMs(10L);
+        cfg.fixedWindowDecision().setMaxRequests(16);
+        cfg.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(4_096);
         cfg.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(20_000);
         cfg.getRouter().getRoles().getPrefill().getAvailability()
                 .setMaxPendingRequests(1_000_000L);
@@ -501,10 +501,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 assertTrue(batchWaitP95Ms > 0,
                         "2k QPS queueing scenario must observe non-zero batch wait");
                 double arrivalsPerWindowPerPrefill = targetQps
-                        * config.batchDispatcher().getMaxCollectionWaitMs()
+                        * config.fixedWindowDecision().getMaxCollectionWaitMs()
                         / 1_000.0 / prefillEngineCount;
                 double expectedBatchSize = Math.min(
-                        config.batchDispatcher().getMaxRequests(), arrivalsPerWindowPerPrefill);
+                        config.fixedWindowDecision().getMaxRequests(), arrivalsPerWindowPerPrefill);
                 double minimumAverageBatchSize = Math.max(1.0, expectedBatchSize * 0.8);
                 assertTrue(batches.averageBatchSize() >= minimumAverageBatchSize,
                         () -> String.format(

@@ -171,10 +171,11 @@ public class LearningPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public synchronized void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
+    public synchronized LearningResult learn(
+            PrefillBatchFeatures features, long predictedMs, long actualMs) {
         this.itemBatch.add(new BatchUpdateItem(features, actualMs));
         if (this.itemBatch.size() < this.batchSize) {
-            return;
+            return LearningResult.MODEL_UNCHANGED;
         }
         ModelSnapshot oldModel = this.modelRef.get();
         double[] oldWeights = oldModel.weights();
@@ -223,6 +224,7 @@ public class LearningPredictor implements PrefillTimePredictor {
         if (logger.isDebugEnabled()) {
             logger.debug("t: {}, learn predictor param: {}", this.t, formulaStringParam(newWeights));
         }
+        return LearningResult.MODEL_UPDATED;
     }
 
     private String formulaStringParam(double[] weights) {

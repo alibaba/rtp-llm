@@ -27,8 +27,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -46,8 +50,34 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
-    private final ThreadPoolExecutor dispatchExecutor;
+    private final CapacitySignalingExecutor dispatchExecutor;
     private final MeterRegistry meterRegistry;
+    private final Object admissionLifecycle = new Object();
+    private final CopyOnWriteArraySet<Runnable> capacityListeners =
+            new CopyOnWriteArraySet<>();
+    private final DeliveryCapacityAdmission.CapacityAvailability capacityAvailability =
+            new DeliveryCapacityAdmission.CapacityAvailability() {
+                @Override
+                public boolean isAvailable() {
+                    synchronized (admissionLifecycle) {
+                        // "Available" means the rejecting condition changed and
+                        // the active head must retry admission. Shutdown is such
+                        // a change: the retry returns a typed terminal failure.
+                        return !acceptingSubmissions || executorHasCapacity();
+                    }
+                }
+
+                @Override
+                public void addListener(Runnable listener) {
+                    capacityListeners.add(listener);
+                }
+
+                @Override
+                public void removeListener(Runnable listener) {
+                    capacityListeners.remove(listener);
+                }
+            };
+    private boolean acceptingSubmissions = true;
 
     @Autowired
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
@@ -67,12 +97,13 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         this.meterRegistry = meterRegistry;
         Logger.info("FlexLB dispatch executor config: poolSize={}, queueSize={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
                 poolSize, queueSize);
-        this.dispatchExecutor = new ThreadPoolExecutor(
+        this.dispatchExecutor = new CapacitySignalingExecutor(
                 poolSize, poolSize,
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(queueSize),
                 new NamedThreadFactory("flexlb-dispatch-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
+                new ThreadPoolExecutor.AbortPolicy(),
+                this::signalCapacityAvailable);
         registerMetrics();
     }
 
@@ -119,19 +150,195 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     }
 
     @Override
-    public void dispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
-                         long batchId, long predMs, String reason, DispatchCallback callback) {
-        try {
-            dispatchExecutor.execute(() -> doDispatch(items, prefillEp, batchId, predMs, reason, callback));
-        } catch (RejectedExecutionException e) {
-            Logger.warn("FlexLB batch dispatch rejected by executor, failing {} items", items.size());
-            failItems(items, prefillEp, batchId, e, callback);
+    public SubmissionReservationResult tryReserveSubmission() {
+        ReservedDispatch reservedDispatch = new ReservedDispatch();
+        synchronized (admissionLifecycle) {
+            if (!acceptingSubmissions) {
+                return new SubmissionAdmissionFailed(
+                        new IllegalStateException("batch dispatcher is shut down"));
+            }
+            try {
+                // The accepted task itself is the permit. No later execute()
+                // call exists on the admitted path, so executor saturation
+                // cannot appear after a request leaves ACTIVE.
+                dispatchExecutor.execute(reservedDispatch);
+            } catch (RejectedExecutionException capacityFull) {
+                if (!acceptingSubmissions || dispatchExecutor.isShutdown()) {
+                    return new SubmissionAdmissionFailed(
+                            new IllegalStateException(
+                                    "batch dispatcher stopped during admission",
+                                    capacityFull));
+                }
+                return new SubmissionCapacityUnavailable(capacityAvailability);
+            }
         }
+        return new SubmissionReserved(reservedDispatch);
     }
 
     @PreDestroy
     public void shutdown() {
-        dispatchExecutor.shutdownNow();
+        synchronized (admissionLifecycle) {
+            if (!acceptingSubmissions) {
+                return;
+            }
+            acceptingSubmissions = false;
+            // Every previously returned permit already owns a task in this
+            // executor. Graceful shutdown preserves those tasks; submit() only
+            // fills their payload and never calls execute() again.
+            dispatchExecutor.shutdown();
+        }
+        signalCapacityAvailable();
+    }
+
+    private boolean executorHasCapacity() {
+        return !dispatchExecutor.isShutdown()
+                && (dispatchExecutor.getPoolSize() < dispatchExecutor.getMaximumPoolSize()
+                || dispatchExecutor.getQueue().remainingCapacity() > 0);
+    }
+
+    private void signalCapacityAvailable() {
+        for (Runnable listener : capacityListeners) {
+            try {
+                listener.run();
+            } catch (Throwable listenerFailure) {
+                Logger.error("Batch dispatcher capacity listener failed", listenerFailure);
+            }
+        }
+    }
+
+    /** Accepted executor task whose delivery payload is supplied after admission. */
+    private final class ReservedDispatch implements SubmissionPermit, Runnable {
+
+        private enum State {
+            RESERVED,
+            SUBMITTED,
+            RELEASED
+        }
+
+        private State state = State.RESERVED;
+        private DispatchTask task;
+
+        @Override
+        public void submit(List<BatchItem> items,
+                           PrefillEndpoint prefillEndpoint,
+                           long batchId,
+                           long predictedMs,
+                           String reason,
+                           DispatchCallback callback) {
+            DispatchTask submittedTask = new DispatchTask(
+                    items, prefillEndpoint, batchId, predictedMs, reason, callback);
+            synchronized (this) {
+                if (state != State.RESERVED) {
+                    throw new IllegalStateException(
+                            "batch submission permit was already resolved");
+                }
+                task = submittedTask;
+                state = State.SUBMITTED;
+                notifyAll();
+            }
+        }
+
+        @Override
+        public void release() {
+            synchronized (this) {
+                if (state == State.RELEASED) {
+                    return;
+                }
+                if (state != State.RESERVED) {
+                    throw new IllegalStateException(
+                            "submitted batch task cannot be released as unused");
+                }
+                state = State.RELEASED;
+                notifyAll();
+            }
+            if (dispatchExecutor.remove(this)) {
+                signalCapacityAvailable();
+            }
+        }
+
+        @Override
+        public void run() {
+            DispatchTask submittedTask;
+            boolean interrupted = false;
+            synchronized (this) {
+                while (state == State.RESERVED) {
+                    try {
+                        wait();
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
+                }
+                submittedTask = state == State.SUBMITTED ? task : null;
+            }
+            try {
+                if (submittedTask != null) {
+                    doDispatch(
+                            submittedTask.items(),
+                            submittedTask.prefillEndpoint(),
+                            submittedTask.batchId(),
+                            submittedTask.predictedMs(),
+                            submittedTask.reason(),
+                            submittedTask.callback());
+                }
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+    }
+
+    private record DispatchTask(List<BatchItem> items,
+                                PrefillEndpoint prefillEndpoint,
+                                long batchId,
+                                long predictedMs,
+                                String reason,
+                                DispatchCallback callback) {
+        private DispatchTask {
+            items = List.copyOf(items);
+            if (items.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "batch submission requires at least one request");
+            }
+            java.util.Objects.requireNonNull(prefillEndpoint, "prefillEndpoint");
+            java.util.Objects.requireNonNull(reason, "reason");
+            java.util.Objects.requireNonNull(callback, "callback");
+        }
+    }
+
+    /** Signals both task completion and the earlier queue-slot release on dequeue. */
+    private static final class CapacitySignalingExecutor extends ThreadPoolExecutor {
+
+        private final Runnable capacityAvailableSignal;
+
+        private CapacitySignalingExecutor(
+                int corePoolSize,
+                int maximumPoolSize,
+                long keepAliveTime,
+                TimeUnit unit,
+                BlockingQueue<Runnable> workQueue,
+                ThreadFactory threadFactory,
+                RejectedExecutionHandler handler,
+                Runnable capacityAvailableSignal) {
+            super(corePoolSize, maximumPoolSize, keepAliveTime, unit,
+                    workQueue, threadFactory, handler);
+            this.capacityAvailableSignal = capacityAvailableSignal;
+        }
+
+        @Override
+        protected void beforeExecute(Thread thread, Runnable task) {
+            super.beforeExecute(thread, task);
+            capacityAvailableSignal.run();
+        }
+
+        @Override
+        protected void afterExecute(Runnable task, Throwable failure) {
+            try {
+                super.afterExecute(task, failure);
+            } finally {
+                capacityAvailableSignal.run();
+            }
+        }
     }
 
     // ==================== Internal: dispatch pipeline (runs on executor thread) ====================

@@ -288,9 +288,9 @@ class PriorityConcurrencyStressTest {
             PrioritySchedulerReporter priorityReporter = mock(PrioritySchedulerReporter.class);
 
             // 快速 dispatch 制造 accepted 流转；小队列制造 queue-full 驱逐竞争
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(4);
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10);
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(16);
+            SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(4);
+            SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10);
+            SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(16);
             SchedulingTestConfig.usePriorityQueue(config);
             SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
             SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);

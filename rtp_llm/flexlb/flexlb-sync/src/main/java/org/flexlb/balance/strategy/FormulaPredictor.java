@@ -21,9 +21,9 @@ import java.util.List;
  * <p>Construction is cheap — the formula is parsed once and the AST is shared
  * across all evaluations.
  *
- * <p>An optional {@link #learn(List, long, long)} callback is invoked on each batch
- * completion to feed back the actual-vs-predicted timing. The current
- * implementation is a stub — the learning logic is to be added.
+ * <p>{@link #learn(PrefillBatchFeatures, long, long)} observes each eligible
+ * batch completion. This immutable implementation records the sample without
+ * changing the model generation.
  */
 public class FormulaPredictor implements PrefillTimePredictor {
 
@@ -61,9 +61,11 @@ public class FormulaPredictor implements PrefillTimePredictor {
     }
 
     @Override
-    public void learn(PrefillBatchFeatures features, long predictedMs, long actualMs) {
+    public LearningResult learn(
+            PrefillBatchFeatures features, long predictedMs, long actualMs) {
         logger.debug("learn sample: batchSize={} predictedMs={} actualMs={}",
                 features != null ? features.batchSize() : 0, predictedMs, actualMs);
+        return LearningResult.MODEL_UNCHANGED;
     }
 
     String immutableFormulaKey() {

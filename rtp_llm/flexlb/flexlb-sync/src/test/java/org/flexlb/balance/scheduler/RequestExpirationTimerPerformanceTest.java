@@ -4,25 +4,16 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
-import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.ConfigValidationException;
-import org.flexlb.config.DirectSchedulerConfig;
-import org.flexlb.config.FifoOrderingConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.NonBatchDispatcherConfig;
-import org.flexlb.config.PriorityOrderingConfig;
-import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestFactory;
 import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
@@ -31,140 +22,22 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * Regression and low-jitter performance coverage for the public scheduling
- * mode matrix and its single absolute request-expiration timer.
+ * Low-jitter performance coverage for the shared absolute request-expiration
+ * timer.
  */
 @Tag("performance-regression")
-class SchedulingConfigAndExpirationPerformanceTest {
+class RequestExpirationTimerPerformanceTest {
 
     private static final int TIMER_REQUEST_COUNT = 512;
     private static final int EARLY_COMPLETION_COUNT = TIMER_REQUEST_COUNT / 2;
-
-    @TestFactory
-    Stream<DynamicTest> parsesSupportedSchedulingModeMatrix() {
-        return List.of(
-                new ModeCase("direct_non_batch", """
-                        {
-                          "schemaVersion": 1,
-                          "scheduler": {"type": "DIRECT"},
-                          "dispatcher": {"type": "NON_BATCH"}
-                        }
-                        """, true, false, false),
-                new ModeCase("queue_fifo_batch", """
-                        {
-                          "schemaVersion": 1,
-                          "scheduler": {
-                            "type": "QUEUE",
-                            "ordering": {"type": "FIFO"}
-                          },
-                          "dispatcher": {"type": "BATCH", "maxRequests": 11}
-                        }
-                        """, false, false, true),
-                new ModeCase("queue_fifo_non_batch", """
-                        {
-                          "schemaVersion": 1,
-                          "scheduler": {
-                            "type": "QUEUE",
-                            "ordering": {"type": "FIFO"}
-                          },
-                          "dispatcher": {
-                            "type": "NON_BATCH",
-                            "maxInflightRequestsPerPrefillWorker": 19
-                          }
-                        }
-                        """, false, false, false),
-                new ModeCase("queue_priority_batch", """
-                        {
-                          "schemaVersion": 1,
-                          "scheduler": {
-                            "type": "QUEUE",
-                            "ordering": {"type": "PRIORITY", "defaultPriority": 73}
-                          },
-                          "dispatcher": {"type": "BATCH", "maxRequests": 11}
-                        }
-                        """, false, true, true),
-                new ModeCase("queue_priority_non_batch", """
-                        {
-                          "schemaVersion": 1,
-                          "scheduler": {
-                            "type": "QUEUE",
-                            "ordering": {"type": "PRIORITY", "defaultPriority": 73}
-                          },
-                          "dispatcher": {
-                            "type": "NON_BATCH",
-                            "maxInflightRequestsPerPrefillWorker": 19
-                          }
-                        }
-                        """, false, true, false))
-                .stream()
-                .map(mode -> DynamicTest.dynamicTest(mode.name(), () -> assertMode(mode)));
-    }
-
-    @Test
-    void rejectsInvalidModeCombinationsAndInactiveTaggedUnionFields() {
-        List<String> invalidDocuments = List.of(
-                """
-                        {
-                          "scheduler": {"type": "DIRECT"},
-                          "dispatcher": {"type": "BATCH"}
-                        }
-                        """,
-                """
-                        {
-                          "scheduler": {"type": "DIRECT"},
-                          "dispatcher": {
-                            "type": "NON_BATCH",
-                            "maxInflightRequestsPerPrefillWorker": 19
-                          }
-                        }
-                        """,
-                """
-                        {
-                          "scheduler": {
-                            "type": "DIRECT",
-                            "ordering": {"type": "FIFO"}
-                          },
-                          "dispatcher": {"type": "NON_BATCH"}
-                        }
-                        """,
-                """
-                        {
-                          "scheduler": {
-                            "type": "QUEUE",
-                            "ordering": {"type": "FIFO", "defaultPriority": 73}
-                          },
-                          "dispatcher": {"type": "BATCH"}
-                        }
-                        """,
-                """
-                        {
-                          "scheduler": {
-                            "type": "QUEUE",
-                            "ordering": {"type": "PRIORITY"}
-                          },
-                          "dispatcher": {
-                            "type": "NON_BATCH",
-                            "maxRequests": 11
-                          }
-                        }
-                        """);
-
-        for (String document : invalidDocuments) {
-            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(document));
-        }
-    }
 
     @Test
     @Timeout(15)
@@ -174,7 +47,8 @@ class SchedulingConfigAndExpirationPerformanceTest {
                 {
                   "scheduler": {
                     "type": "QUEUE",
-                    "ordering": {"type": "PRIORITY", "defaultPriority": 50}
+                    "ordering": {"type": "PRIORITY", "defaultPriority": 50},
+                    "decision": {"type": "SINGLE"}
                   },
                   "dispatcher": {"type": "NON_BATCH"}
                 }
@@ -271,45 +145,6 @@ class SchedulingConfigAndExpirationPerformanceTest {
         }
     }
 
-    private static void assertMode(ModeCase mode) {
-        FlexlbConfig config = ConfigService.parse(mode.document());
-
-        assertEquals(mode.direct(), config.isDirect());
-        assertEquals(!mode.direct(), config.isQueue());
-        assertEquals(mode.priority(), config.isPriorityOrdering());
-        assertEquals(mode.batch(), config.isBatchDispatch());
-
-        if (mode.direct()) {
-            assertInstanceOf(DirectSchedulerConfig.class, config.getScheduler());
-        } else {
-            QueueSchedulerConfig queue = assertInstanceOf(
-                    QueueSchedulerConfig.class, config.getScheduler());
-            if (mode.priority()) {
-                PriorityOrderingConfig priority = assertInstanceOf(
-                        PriorityOrderingConfig.class, queue.getOrdering());
-                assertEquals(73, priority.getDefaultPriority());
-            } else {
-                assertInstanceOf(FifoOrderingConfig.class, queue.getOrdering());
-            }
-        }
-
-        if (mode.batch()) {
-            BatchDispatcherConfig batch = assertInstanceOf(
-                    BatchDispatcherConfig.class, config.getDispatcher());
-            assertEquals(11, batch.getMaxRequests());
-            assertTrue(config.isBatchDispatch());
-        } else {
-            NonBatchDispatcherConfig nonBatch = assertInstanceOf(
-                    NonBatchDispatcherConfig.class, config.getDispatcher());
-            if (mode.direct()) {
-                assertNull(nonBatch.getMaxInflightRequestsPerPrefillWorker());
-            } else {
-                assertEquals(19, nonBatch.getMaxInflightRequestsPerPrefillWorker());
-            }
-            assertFalse(config.isBatchDispatch());
-        }
-    }
-
     private static BalanceContext context(long requestId, long expiresAtMs) {
         Request request = new Request();
         request.setRequestId(requestId);
@@ -333,14 +168,6 @@ class SchedulingConfigAndExpirationPerformanceTest {
             Thread.sleep(1);
         }
         assertTrue(condition.getAsBoolean(), "condition did not become true before timeout");
-    }
-
-    private record ModeCase(
-            String name,
-            String document,
-            boolean direct,
-            boolean priority,
-            boolean batch) {
     }
 
     /** Avoid Mockito interception in the submit hot path measured by this regression. */

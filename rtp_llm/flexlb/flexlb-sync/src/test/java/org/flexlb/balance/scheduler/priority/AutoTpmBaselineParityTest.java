@@ -74,7 +74,7 @@ class AutoTpmBaselineParityTest {
     void decodeAcceptedWorkerStatusClosesLeaseAndReopensAdmissionCapacity() throws Exception {
         Harness h = new Harness(cfg -> {
             Harness.enableAll(cfg);
-            SchedulingTestConfig.useBatchDispatcher(cfg).setMaxRequests(1);
+            SchedulingTestConfig.useFixedWindowDecision(cfg).setMaxRequests(1);
             cfg.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
             cfg.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
         });
@@ -104,7 +104,7 @@ class AutoTpmBaselineParityTest {
             throws Exception {
         Harness h = new Harness(cfg -> {
             Harness.enableAll(cfg);
-            SchedulingTestConfig.useBatchDispatcher(cfg).setMaxRequests(1);
+            SchedulingTestConfig.useFixedWindowDecision(cfg).setMaxRequests(1);
             cfg.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
             cfg.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
         });
@@ -219,7 +219,7 @@ class AutoTpmBaselineParityTest {
             // Keep Decode routable; this case is deliberately a Prefill
             // FIFO/queue-capacity rejection, not a Decode slot rejection.
             cfg.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100));
-            SchedulingTestConfig.useBatchDispatcher(cfg).setMaxWaitingRequestsPerPrefillWorker(1);
+            SchedulingTestConfig.useQueueCapacity(cfg).setMaxWaitingRequestsPerPrefillWorker(1);
         });
         try {
             DecodeEndpoint decodeEp = on.endpointRegistry.getDecode(DECODE_IP_PORT);
@@ -312,9 +312,9 @@ class AutoTpmBaselineParityTest {
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
 
             // park 模式：队列驻留不派发，便于确定性观测队列序
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
-            SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+            SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
+            SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
+            SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
             config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100));
             customize.accept(config);
             when(configService.loadBalanceConfig()).thenReturn(config);

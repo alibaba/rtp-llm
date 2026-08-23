@@ -48,6 +48,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
     private final AtomicLong inflightExpectedKvReservedTotal = new AtomicLong(0);
     private final AtomicLong reportedKvAvailable = new AtomicLong();
+    private final AtomicLong reportedKvTotal = new AtomicLong();
     private volatile int confirmedRunningCount;
     private final InflightEvictor<Long, RequestInflight> requestEvictor;
 
@@ -110,10 +111,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * oversell, but must not count against the decode concurrency limit:
      * counting them produced the shadow-saturation 8400 storm (root cause C —
      * queued reservations saturating {@code getTotalLoad()} while the engine
-     * sat idle). Marked at plan commit ({@code markQueuedPhase}), unmarked at
-     * batch dispatch ({@code tryMarkEngineMayHaveSeen}); release/calibrate prune
-     * it alongside {@code inflightRequests}. Legacy/DIRECT paths never mark,
-     * so their accounting is unchanged.
+     * sat idle). Queue schedulers mark before queue publication
+     * ({@code markQueuedPhase}) and unmark through an acquired
+     * {@link EngineDispatchPermit}; release/calibrate prune it
+     * alongside {@code inflightRequests}. DIRECT paths never mark, so their
+     * accounting is unchanged.
      */
     private final java.util.Set<Long> queuedPhase = ConcurrentHashMap.newKeySet();
 
@@ -121,7 +123,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * O(1) mirror of {@code |queuedPhase ∩ inflightRequests|} (PR-C):
      * incremented when a reservation is marked queued and decremented when
      * it is dispatched / released / calibrated out, so {@link #getEngineLoad}
-     * avoids the per-call O(n) scan of the legacy formula. Read lock-free;
+     * avoids the per-call O(n) scan of the former full-scan formula. Read lock-free;
      * written under {@link #admissionLock}.
      */
     private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
@@ -133,16 +135,52 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong queuedExpectedKvReservedTotal = new AtomicLong(0);
 
     /**
-     * Serializes admission-state mutations (reserve / release / calibrate /
-     * expired eviction) so that {@link #tryReleaseVictimsAndReserveIncoming}
-     * can validate-then-apply atomically against {@link #admissionVersion}
-     * (design doc 11.5/17.2). Reads stay lock-free.
+     * Decode slots reserved before a queued request is irreversibly exposed to
+     * its Prefill/Decode delivery path. The request remains in
+     * {@link #queuedPhase}, so {@link #getEngineLoad()} continues to describe
+     * only engine-facing work. Capacity acquisition instead uses
+     * {@code getEngineLoad() + activeEngineDispatchPermitCount} under
+     * {@link #admissionLock}.
+     *
+     * <p>Each entry carries both the immutable reservation identity and a
+     * monotonic token. The pair fences request-id reuse while the slot is
+     * reserved. A successful commit removes the lease permanently: committed
+     * Decode ownership is never rolled back by a delivery token.
+     */
+    private final Map<Long, EngineDispatchPermitLease> engineDispatchPermits =
+            new ConcurrentHashMap<>();
+    /** Hard prompt KV already committed to acquired pre-delivery permits. */
+    private final AtomicLong engineDispatchPermitHardKvReservedTotal = new AtomicLong();
+    /** Expected KV already committed to acquired pre-delivery permits. */
+    private final AtomicLong engineDispatchPermitExpectedKvReservedTotal = new AtomicLong();
+    /** Permit tokens invalidated specifically by this endpoint generation retiring. */
+    private final Set<Long> retiredEngineDispatchPermitTokens = new HashSet<>();
+    /** Mutated under admissionLock; volatile for the lock-free waiter predicate. */
+    private volatile int activeEngineDispatchPermitCount;
+    /** Closed under admissionLock and read lock-free by blocked capacity waiters. */
+    private volatile boolean acceptingEngineDispatchPermits = true;
+    /** Guarded by {@link #admissionLock}; zero is never issued. */
+    private long nextEngineDispatchPermitToken = 1L;
+    /**
+     * Prefill workers currently routing to this Decode endpoint. Listeners are
+     * invoked only after dropping {@link #admissionLock}.
+     */
+    private final Set<Runnable> engineDispatchCapacityListeners =
+            ConcurrentHashMap.newKeySet();
+
+    /**
+     * Serializes admission-state mutations (reserve / release / dispatch
+     * permit / calibrate / expired eviction) so that
+     * {@link #tryReleaseVictimsAndReserveIncoming} can validate-then-apply
+     * atomically against {@link #admissionVersion} (design doc 11.5/17.2).
+     * Reads stay lock-free.
      */
     private final ReentrantLock admissionLock = new ReentrantLock();
 
     /**
      * Monotonic admission version bumped on every mutation of the local
-     * admission state (reserve / release / calibrate / expired eviction).
+     * admission state (reserve / release / dispatch permit / calibrate /
+     * expired eviction).
      * Captured in Auto-TPM cluster snapshots (after this scheduler's own
      * reserve) and re-checked at plan commit time to detect interference.
      */
@@ -150,12 +188,48 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
+        this.reportedKvAvailable.set(status.getAvailableKvCacheTokens().get());
+        this.reportedKvTotal.set(status.getTotalKvCacheTokens().get());
         this.requestEvictor = InflightEvictor.withKeyCallback(
                 inflightRequests, (requestId, req) -> {
                     removeQueuedPhaseLocked(requestId, req);
                     inflightKvReservedTotal.addAndGet(-req.kvTokens());
                     inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
                 });
+    }
+
+    /** Stop this exact endpoint generation from admitting new engine dispatches. */
+    @Override
+    public void close() {
+        boolean capacityStateChanged = false;
+        admissionLock.lock();
+        try {
+            if (!acceptingEngineDispatchPermits) {
+                return;
+            }
+            acceptingEngineDispatchPermits = false;
+            for (EngineDispatchPermitLease lease : engineDispatchPermits.values()) {
+                retiredEngineDispatchPermitTokens.add(lease.token());
+            }
+            if (!engineDispatchPermits.isEmpty()) {
+                engineDispatchPermits.clear();
+                activeEngineDispatchPermitCount = 0;
+                engineDispatchPermitHardKvReservedTotal.set(0);
+                engineDispatchPermitExpectedKvReservedTotal.set(0);
+            }
+            admissionVersion.incrementAndGet();
+            capacityStateChanged = true;
+        } finally {
+            admissionLock.unlock();
+        }
+        if (capacityStateChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+    }
+
+    /** A blocked worker treats retirement as a wakeup and retries for a typed failure. */
+    public boolean isRetired() {
+        return !acceptingEngineDispatchPermits;
     }
 
     public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
@@ -172,23 +246,33 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         int priority) {
         admissionLock.lock();
         try {
-            RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens, priority);
-            // A (re-)reserve puts the request back into the pre-queue state.
-            removeQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
-            RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
-            if (prev != null) {
-                // requestId already exists — subtract the old kvTokens before overwriting,
-                // otherwise the old value is silently lost and the counter stays inflated.
-                inflightKvReservedTotal.addAndGet(-prev.kvTokens());
-                inflightExpectedKvReservedTotal.addAndGet(-prev.expectedKvTokens());
-                inflightRequests.put(requestId, newRi);
-            }
-            inflightKvReservedTotal.addAndGet(kvTokens);
-            inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
-            admissionVersion.incrementAndGet();
+            reserveLocked(requestId, kvTokens, expectedKvTokens, priority);
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    /** Caller holds admissionLock. */
+    private void reserveLocked(long requestId,
+                               long kvTokens,
+                               long expectedKvTokens,
+                               int priority) {
+        // A re-reserve starts a new request-id generation. Invalidate any
+        // pre-delivery capacity owned by the previous immutable reservation.
+        removeEngineDispatchPermitLocked(requestId);
+        RequestInflight previous = inflightRequests.get(requestId);
+        removeQueuedPhaseLocked(requestId, previous);
+
+        RequestInflight newReservation =
+                new RequestInflight(kvTokens, expectedKvTokens, priority);
+        previous = inflightRequests.put(requestId, newReservation);
+        if (previous != null) {
+            inflightKvReservedTotal.addAndGet(-previous.kvTokens());
+            inflightExpectedKvReservedTotal.addAndGet(-previous.expectedKvTokens());
+        }
+        inflightKvReservedTotal.addAndGet(kvTokens);
+        inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
+        admissionVersion.incrementAndGet();
     }
 
     /**
@@ -200,9 +284,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                               long expectedKvTokens, int priority) {
         admissionLock.lock();
         try {
-            // Reentrant by design: reserve owns all counter/version updates,
-            // while this outer critical section keeps the queued mark atomic.
-            reserve(requestId, kvTokens, expectedKvTokens, priority);
+            reserveLocked(requestId, kvTokens, expectedKvTokens, priority);
             addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
         } finally {
             admissionLock.unlock();
@@ -210,20 +292,56 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public void release(long requestId) {
+        boolean capacityChanged;
         admissionLock.lock();
         try {
-            boolean protectionRemoved = clearEngineFenceProtectionLocked(requestId);
-            RequestInflight removed = inflightRequests.remove(requestId);
-            removeQueuedPhaseLocked(requestId, removed);
-            if (removed != null) {
-                inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
-            }
-            if (removed != null || protectionRemoved) {
-                admissionVersion.incrementAndGet();
-            }
+            capacityChanged = releaseLocked(requestId);
         } finally {
             admissionLock.unlock();
+        }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+    }
+
+    /** Remove every local owner for one request. Caller holds admissionLock. */
+    private boolean releaseLocked(long requestId) {
+        boolean changed = removeEngineDispatchPermitLocked(requestId);
+        changed = clearEngineFenceProtectionLocked(requestId) || changed;
+        RequestInflight removed = inflightRequests.remove(requestId);
+        changed = removeQueuedPhaseLocked(requestId, removed) || changed;
+        if (removed != null) {
+            inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+            inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+            changed = true;
+        }
+        if (changed) {
+            admissionVersion.incrementAndGet();
+        }
+        return changed;
+    }
+
+    /** Register a stable worker wakeup for Decode dispatch-capacity changes. */
+    public void addEngineDispatchCapacityListener(Runnable listener) {
+        if (listener != null) {
+            engineDispatchCapacityListeners.add(listener);
+        }
+    }
+
+    /** Remove a worker wakeup when its Prefill batcher shuts down. */
+    public void removeEngineDispatchCapacityListener(Runnable listener) {
+        if (listener != null) {
+            engineDispatchCapacityListeners.remove(listener);
+        }
+    }
+
+    private void notifyEngineDispatchCapacityListeners() {
+        for (Runnable listener : engineDispatchCapacityListeners) {
+            try {
+                listener.run();
+            } catch (Throwable listenerFailure) {
+                logger.warn("Decode capacity listener failed", listenerFailure);
+            }
         }
     }
 
@@ -244,6 +362,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (expectedReservation == null) {
             return false;
         }
+        boolean released = false;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             if (inflightRequests.get(requestId) != expectedReservation
@@ -251,16 +371,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || preemptionClaims.containsKey(requestId)) {
                 return false;
             }
+            removeEngineDispatchPermitLocked(requestId);
             inflightRequests.remove(requestId);
             removeQueuedPhaseLocked(requestId, expectedReservation);
             inflightKvReservedTotal.addAndGet(-expectedReservation.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(
                     -expectedReservation.expectedKvTokens());
             admissionVersion.incrementAndGet();
-            return true;
+            released = true;
+            capacityChanged = true;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return released;
     }
 
     /**
@@ -318,16 +444,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * @return {@code true} only when a live generic protection was removed
      */
     public boolean endEngineFenceProtection(long requestId) {
+        boolean removed = false;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             if (!clearEngineFenceProtectionLocked(requestId)) {
                 return false;
             }
             admissionVersion.incrementAndGet();
-            return true;
+            removed = true;
+            capacityChanged = true;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return removed;
     }
 
     /**
@@ -348,17 +481,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *         tombstone for the first time, otherwise {@code false}
      */
     public boolean settleTombstonedRequest(long requestId) {
+        boolean changed;
+        boolean capacityChanged;
         admissionLock.lock();
         try {
-            boolean changed = settleRequestAccountingLocked(
+            changed = settleRequestAccountingLocked(
                     requestId, System.currentTimeMillis(), true);
             if (changed) {
                 admissionVersion.incrementAndGet();
             }
-            return changed;
+            capacityChanged = changed;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return changed;
     }
 
     // ==================== Auto-TPM decode reserved-only eviction ====================
@@ -391,6 +530,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority,
             long expectedAdmissionVersion) {
+        ReleaseReserveResult result;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             if (admissionVersion.get() != expectedAdmissionVersion) {
@@ -405,13 +546,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
             }
             for (Long victimId : victimIds) {
-                release(victimId);
+                releaseLocked(victimId);
             }
-            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority);
-            return ReleaseReserveResult.SUCCESS;
+            reserveLocked(incomingRequestId, kvTokens, expectedKvTokens, priority);
+            capacityChanged = true;
+            result = ReleaseReserveResult.SUCCESS;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return result;
     }
 
     /**
@@ -423,6 +569,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * contract 5.3 forbids terminal operations on dispatched requests).
      */
     public boolean releaseIfHeld(long requestId) {
+        boolean released = false;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             RequestInflight held = inflightRequests.get(requestId);
@@ -431,11 +579,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || engineFenceProtections.containsKey(requestId)) {
                 return false;
             }
-            release(requestId);
-            return true;
+            released = releaseLocked(requestId);
+            capacityChanged = released;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return released;
     }
 
     /** Result of {@link #tryReleaseVictimsIfHeldAndReserveIncoming}. */
@@ -457,22 +609,34 @@ public class DecodeEndpoint extends WorkerEndpoint {
             List<Long> victimIds,
             long incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority) {
+        PresenceEvictionOutcome outcome;
+        boolean capacityChanged;
         admissionLock.lock();
         try {
             List<Long> freed = new ArrayList<>(victimIds.size());
             for (Long victimId : victimIds) {
-                if (releaseIfHeld(victimId)) {
+                RequestInflight held = inflightRequests.get(victimId);
+                if (held != null && queuedPhase.contains(victimId)
+                        && !preemptionClaims.containsKey(victimId)
+                        && !engineFenceProtections.containsKey(victimId)
+                        && releaseLocked(victimId)) {
                     freed.add(victimId);
                 }
             }
             if (freed.size() < victimIds.size()) {
-                return new PresenceEvictionOutcome(false, List.copyOf(freed));
+                outcome = new PresenceEvictionOutcome(false, List.copyOf(freed));
+            } else {
+                reserveLocked(incomingRequestId, kvTokens, expectedKvTokens, priority);
+                outcome = new PresenceEvictionOutcome(true, List.copyOf(freed));
             }
-            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority);
-            return new PresenceEvictionOutcome(true, List.copyOf(freed));
+            capacityChanged = !freed.isEmpty();
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return outcome;
     }
 
     /**
@@ -612,9 +776,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
             // Provisional incoming ownership closes the free-pool race while
             // Cancel runs.  It is not visible to the prefill queue yet.
-            reserve(incomingRequestId, incomingKvTokens, incomingExpectedKvTokens,
+            reserveLocked(incomingRequestId, incomingKvTokens, incomingExpectedKvTokens,
                     incomingPriority);
             for (Map.Entry<Long, ClaimOwner> entry : owners.entrySet()) {
+                // Normally impossible because an acquired permit keeps its
+                // reservation queued and therefore ineligible above. Keep the
+                // cleanup local to the ownership transition as a hard invariant.
+                removeEngineDispatchPermitLocked(entry.getKey());
                 RequestInflight shadow = inflightRequests.get(entry.getKey());
                 ConfirmedTask confirmed = trackedConfirmed.get(entry.getKey());
                 long hardKv = shadow != null ? shadow.kvTokens()
@@ -691,6 +859,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Cancel; duplicate observations are a token-fenced no-op.
      */
     public boolean settlePriorityCanceled(long attemptToken, long requestId) {
+        boolean settled = false;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -699,10 +869,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         && claim.state != ClaimState.CANCEL_UNKNOWN)) {
                 return false;
             }
-            return settlePriorityClaimLocked(attemptToken, requestId, claim);
+            settled = settlePriorityClaimLocked(attemptToken, requestId, claim);
+            capacityChanged = settled;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return settled;
     }
 
     /**
@@ -714,6 +889,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * accounting as typed CANCELED without waiting for WorkerStatus.</p>
      */
     public boolean settlePriorityTombstoned(long attemptToken, long requestId) {
+        boolean settled = false;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -723,10 +900,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         && claim.state != ClaimState.CANCEL_UNKNOWN)) {
                 return false;
             }
-            return settlePriorityClaimLocked(attemptToken, requestId, claim);
+            settled = settlePriorityClaimLocked(attemptToken, requestId, claim);
+            capacityChanged = settled;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return settled;
     }
 
     /**
@@ -759,17 +941,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Authoritative terminal settlement for an exact transferred fence generation. */
     public boolean settleEngineFenceClaim(long attemptToken, long requestId) {
+        boolean settled = false;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
             if (claim == null || claim.attemptToken != attemptToken
-                    || claim.state != ClaimState.ENGINE_FENCE) {
+                        || claim.state != ClaimState.ENGINE_FENCE) {
                 return false;
             }
-            return settlePriorityClaimLocked(attemptToken, requestId, claim);
+            settled = settlePriorityClaimLocked(attemptToken, requestId, claim);
+            capacityChanged = settled;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return settled;
     }
 
     /**
@@ -778,6 +967,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * the live confirmed or shadow accounting remains in its original layer.
      */
     public boolean releaseEngineFenceClaimActive(long attemptToken, long requestId) {
+        boolean released = false;
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -788,10 +978,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             releaseHeldKv(claim);
             preemptionClaims.remove(requestId);
             admissionVersion.incrementAndGet();
-            return true;
+            released = true;
         } finally {
             admissionLock.unlock();
         }
+        if (released) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return released;
     }
 
     /** Called with {@link #admissionLock} held. */
@@ -801,6 +995,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         boolean genericFenceRetainsAccounting =
                 transferPriorityAccountingToEngineFenceLocked(requestId, claim);
         if (claim.owner == ClaimOwner.SHADOW_IN_FLIGHT) {
+            removeEngineDispatchPermitLocked(requestId);
             RequestInflight removed = inflightRequests.remove(requestId);
             if (removed != null) {
                 inflightKvReservedTotal.addAndGet(-removed.kvTokens());
@@ -859,13 +1054,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * fence.
      */
     public void abortPriorityPreemption(long attemptToken) {
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             EndpointPreemptionAttempt attempt = preemptionAttempts.remove(attemptToken);
             if (attempt == null) {
                 return;
             }
-            release(attempt.incomingRequestId);
+            releaseLocked(attempt.incomingRequestId);
             for (Long victimId : attempt.victimIds) {
                 PreemptionClaim claim = preemptionClaims.get(victimId);
                 if (claim == null || claim.attemptToken != attemptToken) {
@@ -878,13 +1074,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
             }
             admissionVersion.incrementAndGet();
+            capacityChanged = true;
         } finally {
             admissionLock.unlock();
+        }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
         }
     }
 
     /** Fresh active status is the only path that reopens a NOT_FOUND_STALE victim. */
     public boolean reconcilePriorityVictimActive(long requestId) {
+        boolean reconciled = false;
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -894,10 +1095,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             releaseHeldKv(claim);
             preemptionClaims.remove(requestId);
             admissionVersion.incrementAndGet();
-            return true;
+            reconciled = true;
         } finally {
             admissionLock.unlock();
         }
+        if (reconciled) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return reconciled;
     }
 
     /**
@@ -906,11 +1111,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * so the ordinary terminal resumes the pre-existing completion path.
      */
     public boolean reconcilePriorityVictimFinished(long requestId) {
+        boolean reconciled = false;
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
             if (claim == null || (claim.state != ClaimState.NOT_FOUND_STALE
-                    && claim.state != ClaimState.CANCEL_UNKNOWN)) {
+                        && claim.state != ClaimState.CANCEL_UNKNOWN)) {
                 return false;
             }
             // An ordinary finished sample is authoritative. Unlike an
@@ -920,10 +1127,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
             preemptionClaims.remove(requestId);
             settleRequestAccountingLocked(requestId, System.currentTimeMillis(), false);
             admissionVersion.incrementAndGet();
-            return true;
+            reconciled = true;
+            capacityChanged = true;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return reconciled;
     }
 
     private boolean transitionClaim(long attemptToken, long requestId,
@@ -985,10 +1197,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
         }
+        // KV availability and request ownership can change without changing
+        // the aggregate concurrency count. Publish every authoritative Decode
+        // status transition so a blocked lock-free waiter re-evaluates both gates.
+        notifyEngineDispatchCapacityListeners();
     }
 
     private void doCalibrate(Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
         this.reportedKvAvailable.set(status.getAvailableKvCacheTokens().get());
+        this.reportedKvTotal.set(status.getTotalKvCacheTokens().get());
         admissionVersion.incrementAndGet();
 
         // Build one authoritative Decode view.  Claimed victims that disappear
@@ -1005,6 +1222,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         && !settledTombstones.containsKey(requestId)) {
                     actualConfirmed++;
                     RequestInflight removed = inflightRequests.remove(requestId);
+                    removeEngineDispatchPermitLocked(requestId);
                     if (removed != null) {
                         removeQueuedPhaseLocked(requestId, removed);
                         inflightKvReservedTotal.addAndGet(-removed.kvTokens());
@@ -1122,7 +1340,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private boolean settleRequestAccountingLocked(long requestId,
                                                    long settledAtMs,
                                                    boolean explicitTombstoneProof) {
-        boolean changed = false;
+        boolean changed = removeEngineDispatchPermitLocked(requestId);
 
         EngineFenceProtection protection = engineFenceProtections.remove(requestId);
         boolean syntheticSlotRemoved = protection != null && protection.syntheticHeld;
@@ -1355,12 +1573,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * worker unavailable even though none of that work has been dispatched.
      */
     public long engineFacingKvUsed() {
-        long totalCap = status.getTotalKvCacheTokens().get();
-        long avail = status.getAvailableKvCacheTokens().get();
+        long totalCap = reportedKvTotal.get();
+        long avail = reportedKvAvailable.get();
         long reportedUsed = totalCap > 0 ? Math.max(0, totalCap - avail) : 0;
         long localEngineFacing = Math.max(0L,
-                inflightKvReserved() - queuedExpectedKvReservedTotal.get());
-        return reportedUsed + localEngineFacing + engineFenceHeldExpectedKv.get();
+                inflightKvReserved() - queuedExpectedKvReservedTotal.get())
+                + engineDispatchPermitExpectedKvReservedTotal.get();
+        return saturatedAddNonNegative(
+                saturatedAddNonNegative(reportedUsed, localEngineFacing),
+                engineFenceHeldExpectedKv.get());
     }
 
     /**
@@ -1386,8 +1607,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Hard prompt KV available to the next engine dispatch, excluding soft queued holds. */
     public long engineFacingKvAvailable() {
         long localEngineFacing = Math.max(0L,
-                inflightHardKvReserved() - queuedHardKvReservedTotal.get());
-        return Math.max(0, status.getAvailableKvCacheTokens().get()
+                inflightHardKvReserved() - queuedHardKvReservedTotal.get())
+                + engineDispatchPermitHardKvReservedTotal.get();
+        return Math.max(0, reportedKvAvailable.get()
                 - localEngineFacing
                 - priorityPreemptionHeldKv.get()
                 - engineFenceHeldKv.get());
@@ -1435,15 +1657,28 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Evict only endpoint orphans which have no live scheduler generation. */
     public int evictExpiredRequests(long ttlMs,
                                     LongPredicate schedulerOwnsRequest) {
+        int evicted;
+        boolean capacityChanged;
         admissionLock.lock();
         try {
             // A priority claim or generic EngineFence is a stronger accounting
             // owner than age-only cleanup. In particular, an ambiguous
             // ENGINE_MAY_HAVE_SEEN shadow remains charged until reconciliation.
-            int evicted = requestEvictor.evictExpired(
+            evicted = requestEvictor.evictExpired(
                     ttlMs, requestId -> !schedulerOwnsRequest.test(requestId)
                             && !preemptionClaims.containsKey(requestId)
                             && !engineFenceProtections.containsKey(requestId));
+            int permitsRemoved = 0;
+            // InflightEvictor owns only the reservation map/counters. Reconcile
+            // its token-fenced pre-delivery owners under the same admission lock.
+            for (Long requestId : List.copyOf(engineDispatchPermits.keySet())) {
+                EngineDispatchPermitLease permit = engineDispatchPermits.get(requestId);
+                if (permit != null
+                        && inflightRequests.get(requestId) != permit.reservation()
+                        && removeEngineDispatchPermitLocked(requestId)) {
+                    permitsRemoved++;
+                }
+            }
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
             java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedEvictIt =
@@ -1464,13 +1699,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             boolean settledTombstonesPurged = settledTombstones.entrySet()
                     .removeIf(entry -> entry.getValue() < cutoff);
-            if (evicted > 0 || trackedPurged > 0 || settledTombstonesPurged) {
+            if (evicted > 0 || permitsRemoved > 0
+                    || trackedPurged > 0 || settledTombstonesPurged) {
                 admissionVersion.incrementAndGet();
             }
-            return evicted;
+            capacityChanged = evicted > 0 || permitsRemoved > 0 || trackedPurged > 0;
         } finally {
             admissionLock.unlock();
         }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return evicted;
     }
 
     public int getTotalLoad() {
@@ -1489,7 +1729,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * + max(0, inflightRequests.size() − queuedPhaseCount)}. The
      * {@link #queuedPhaseCount} AtomicInteger is maintained incrementally at
      * every queuedPhase mutation point ({@link #markQueuedPhase},
-     * {@link #tryMarkEngineMayHaveSeen}, {@link #reserve}, {@link #release},
+     * {@link EngineDispatchPermit#transferToEngineLifecycle()}, {@link #reserve},
+     * {@link #release},
      * {@link #doCalibrate}, {@link #evictExpiredRequests}) so the hot gate
      * path no longer scans the queued set.
      *
@@ -1512,15 +1753,26 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Mark a reserved request as committed into a prefill queue (N2). Called
-     * by the priority scheduler at plan-commit time; no-op when the id holds
-     * no reservation (legacy paths never call this).
+     * by queue schedulers before queue publication; no-op when the id holds no
+     * reservation (DIRECT paths never call this).
      */
     public void markQueuedPhase(long requestId) {
+        boolean capacityChanged = false;
         admissionLock.lock();
         try {
-            addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
+            RequestInflight reservation = inflightRequests.get(requestId);
+            if (addQueuedPhaseLocked(requestId, reservation)) {
+                // Re-queueing begins a new dispatch round. Invalidate any
+                // pre-delivery lease before publishing that transition.
+                removeEngineDispatchPermitLocked(requestId);
+                admissionVersion.incrementAndGet();
+                capacityChanged = true;
+            }
         } finally {
             admissionLock.unlock();
+        }
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
         }
     }
 
@@ -1548,95 +1800,388 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return true;
     }
 
-    /** Outcome of an engine-dispatch ownership claim. */
-    public enum DispatchClaimResult {
-        /** The request owns a reservation and may be exposed to the engine. */
-        CLAIMED,
-        /** The reservation is still queued, but no engine-facing slot is free yet. */
+    /** Outcome of acquiring a pre-delivery Decode slot. */
+    public enum EngineDispatchPermitAcquireStatus {
+        /** A token-fenced permit now owns one Decode hard-gate slot. */
+        ACQUIRED,
+        /** Concurrency or Decode KV has no unreserved hard capacity. */
         CAPACITY_FULL,
-        /** Release, timeout, or preemption already owns this reservation. */
-        NOT_OWNED
+        /** The request no longer owns a live shadow reservation. */
+        NOT_OWNED,
+        /** The reservation is already engine-facing rather than Prefill-queued. */
+        NOT_QUEUED,
+        /** Another pre-delivery attempt already owns this request's permit. */
+        ALREADY_ACQUIRED,
+        /** This exact Decode endpoint generation no longer accepts delivery. */
+        ENDPOINT_RETIRED
+    }
+
+    /** Outcome of transferring an acquired permit to engine lifecycle ownership. */
+    public enum EngineDispatchPermitTransferStatus {
+        TRANSFERRED,
+        OWNERSHIP_LOST,
+        ENDPOINT_RETIRED
+    }
+
+    /** Explicit result of {@link #acquireEngineDispatchPermit(long, long)}. */
+    public record EngineDispatchPermitAcquisition(
+            EngineDispatchPermitAcquireStatus status,
+            EngineDispatchPermit permit) {
+
+        public EngineDispatchPermitAcquisition {
+            if (status == null) {
+                throw new IllegalArgumentException("permit acquisition status is required");
+            }
+            if ((status == EngineDispatchPermitAcquireStatus.ACQUIRED) != (permit != null)) {
+                throw new IllegalArgumentException(
+                        "only an ACQUIRED result may carry an engine dispatch permit");
+            }
+        }
     }
 
     /**
-     * Atomically move one queued reservation into the engine-facing layer,
-     * subject to the configured Decode concurrency limit.
+     * Token-fenced reservation of one Decode concurrency slot.
      *
-     * <p>The availability check performed while routing cannot be the final
-     * slot fence: queued reservations intentionally do not count in
-     * {@link #getEngineLoad()}, and one Prefill batch can therefore contain
-     * many requests for the same Decode endpoint. Checking and clearing the
-     * queued bit under the same {@link #admissionLock} prevents that batch
-     * from moving the endpoint from (for example) load 4 to load 20 when the
-     * configured limit is 5.
-     *
-     * <p>Legacy/non-queued reservations are already engine-facing. They are
-     * returned as {@link DispatchClaimResult#CLAIMED} without consuming a
-     * second slot, preserving the existing legacy path and making retries
-     * idempotent.
+     * <p>{@link #transferToEngineLifecycle()} atomically converts the still-current queued
+     * reservation into engine-facing ownership without checking capacity again.
+     * {@link #release()} gives up only this token's temporary hard-gate slot;
+     * the reservation stays queued. Both operations are idempotent with respect
+     * to endpoint state, and an old request-id generation cannot affect a newer
+     * permit.
      */
-    public DispatchClaimResult tryClaimEngineDispatch(long requestId,
-                                                       long concurrencyLimit) {
-        return tryClaimEngineDispatch(requestId, concurrencyLimit, -1L);
+    public static final class EngineDispatchPermit {
+
+        private enum Resolution {
+            ACQUIRED,
+            ENGINE_LIFECYCLE_OWNED,
+            RELEASED,
+            INVALIDATED,
+            ENDPOINT_RETIRED
+        }
+
+        private final DecodeEndpoint endpoint;
+        private final long requestId;
+        private final long token;
+        private final RequestInflight reservation;
+        private Resolution resolution = Resolution.ACQUIRED;
+
+        private EngineDispatchPermit(DecodeEndpoint endpoint,
+                                     long requestId,
+                                     long token,
+                                     RequestInflight reservation) {
+            this.endpoint = endpoint;
+            this.requestId = requestId;
+            this.token = token;
+            this.reservation = reservation;
+        }
+
+        public long requestId() {
+            return requestId;
+        }
+
+        /**
+         * Transfer this acquired slot without a second capacity check.
+         *
+         * @return a typed distinction between transfer, prior request-owner
+         *         loss, and endpoint-generation retirement
+         */
+        public synchronized EngineDispatchPermitTransferStatus
+                transferToEngineLifecycle() {
+            if (resolution == Resolution.ENGINE_LIFECYCLE_OWNED) {
+                return EngineDispatchPermitTransferStatus.TRANSFERRED;
+            }
+            if (resolution == Resolution.ENDPOINT_RETIRED) {
+                return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
+            }
+            if (resolution != Resolution.ACQUIRED) {
+                return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
+            }
+            EngineDispatchPermitTransferStatus transfer =
+                    endpoint.transferEngineDispatchPermitToLifecycle(this);
+            if (transfer == EngineDispatchPermitTransferStatus.TRANSFERRED) {
+                resolution = Resolution.ENGINE_LIFECYCLE_OWNED;
+            } else if (transfer == EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED) {
+                resolution = Resolution.ENDPOINT_RETIRED;
+            } else {
+                resolution = Resolution.INVALIDATED;
+            }
+            return transfer;
+        }
+
+        /**
+         * Release this acquired slot while leaving the same reservation queued.
+         *
+         * @return {@code true} only when this invocation removed the live permit;
+         *         repeated or stale releases return {@code false}
+         */
+        public synchronized boolean release() {
+            if (resolution != Resolution.ACQUIRED) {
+                return false;
+            }
+            if (endpoint.releaseEngineDispatchPermit(this)) {
+                resolution = Resolution.RELEASED;
+                return true;
+            }
+            resolution = Resolution.INVALIDATED;
+            return false;
+        }
+
+    }
+
+    /** Immutable endpoint-side fence for one active public permit object. */
+    private record EngineDispatchPermitLease(
+            long token,
+            RequestInflight reservation) {
     }
 
     /**
-     * Claim one queued reservation against both Decode concurrency and KV.
-     * The queued reservation is a soft placement hint until this atomic gate;
-     * only a successful claim converts it into engine-facing demand.
+     * Acquire one pre-delivery Decode slot while the reservation remains queued.
+     * Decode concurrency and KV are validated and occupied under the same
+     * admission lock, so concurrent acquisitions cannot oversell either gate.
      */
-    public DispatchClaimResult tryClaimEngineDispatch(long requestId,
-                                                       long concurrencyLimit,
-                                                       long maxKvUsagePercent) {
+    public EngineDispatchPermitAcquisition acquireEngineDispatchPermit(
+            long requestId, long concurrencyLimit) {
+        return acquireEngineDispatchPermit(requestId, concurrencyLimit, -1L);
+    }
+
+    public EngineDispatchPermitAcquisition acquireEngineDispatchPermit(
+            long requestId,
+            long concurrencyLimit,
+            long maxKvUsagePercent) {
         admissionLock.lock();
         try {
+            if (!acceptingEngineDispatchPermits) {
+                return rejectedEngineDispatchPermit(
+                        EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED);
+            }
             RequestInflight reservation = inflightRequests.get(requestId);
             if (reservation == null || preemptionClaims.containsKey(requestId)) {
-                return DispatchClaimResult.NOT_OWNED;
+                return rejectedEngineDispatchPermit(
+                        EngineDispatchPermitAcquireStatus.NOT_OWNED);
             }
             if (!queuedPhase.contains(requestId)) {
-                return DispatchClaimResult.CLAIMED;
+                return rejectedEngineDispatchPermit(
+                        EngineDispatchPermitAcquireStatus.NOT_QUEUED);
+            }
+            if (engineDispatchPermits.containsKey(requestId)) {
+                return rejectedEngineDispatchPermit(
+                        EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED);
+            }
+            if (isEngineDispatchCapacityFullLocked(
+                    reservation, concurrencyLimit, maxKvUsagePercent)) {
+                return rejectedEngineDispatchPermit(
+                        EngineDispatchPermitAcquireStatus.CAPACITY_FULL);
             }
 
-            int engineFacingInflight = Math.max(0,
-                    inflightRequests.size() - queuedPhaseCount.get());
-            int engineLoad = confirmedRunningCount + engineFacingInflight;
-            if (concurrencyLimit > 0 && engineLoad >= concurrencyLimit) {
-                return DispatchClaimResult.CAPACITY_FULL;
-            }
-
-            long totalKv = status.getTotalKvCacheTokens().get();
-            if (totalKv > 0 && maxKvUsagePercent >= 0) {
-                if (engineFacingKvAvailable() < reservation.kvTokens()) {
-                    return DispatchClaimResult.CAPACITY_FULL;
-                }
-                if (maxKvUsagePercent > 0
-                        && engineFacingKvUsed() * 100.0 / totalKv
-                        >= maxKvUsagePercent) {
-                    return DispatchClaimResult.CAPACITY_FULL;
-                }
-            }
-
-            // queuedPhase membership was checked under this same lock. The
-            // remove must therefore succeed unless the invariant is broken.
-            removeQueuedPhaseLocked(requestId, reservation);
+            long token = nextEngineDispatchPermitTokenLocked();
+            EngineDispatchPermit permit = new EngineDispatchPermit(
+                    this, requestId, token, reservation);
+            engineDispatchPermits.put(
+                    requestId, new EngineDispatchPermitLease(token, reservation));
+            activeEngineDispatchPermitCount++;
+            engineDispatchPermitHardKvReservedTotal.addAndGet(
+                    reservation.kvTokens());
+            engineDispatchPermitExpectedKvReservedTotal.addAndGet(
+                    reservation.expectedKvTokens());
             admissionVersion.incrementAndGet();
-            return DispatchClaimResult.CLAIMED;
+            return new EngineDispatchPermitAcquisition(
+                    EngineDispatchPermitAcquireStatus.ACQUIRED, permit);
         } finally {
             admissionLock.unlock();
         }
     }
 
+    private static EngineDispatchPermitAcquisition rejectedEngineDispatchPermit(
+            EngineDispatchPermitAcquireStatus status) {
+        return new EngineDispatchPermitAcquisition(status, null);
+    }
+
+    private EngineDispatchPermitTransferStatus transferEngineDispatchPermitToLifecycle(
+            EngineDispatchPermit permit) {
+        EngineDispatchPermitTransferStatus transferStatus;
+        boolean capacityIncreased;
+        admissionLock.lock();
+        try {
+            int usageBefore = engineDispatchHardGateUsageLocked();
+            if (retiredEngineDispatchPermitTokens.remove(permit.token)) {
+                return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
+            }
+            if (!isCurrentEngineDispatchPermitLocked(permit)) {
+                return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
+            }
+            if (inflightRequests.get(permit.requestId) != permit.reservation
+                    || !queuedPhase.contains(permit.requestId)
+                    || preemptionClaims.containsKey(permit.requestId)) {
+                removeEngineDispatchPermitLocked(permit.requestId);
+                admissionVersion.incrementAndGet();
+                transferStatus = EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
+            } else {
+                removeEngineDispatchPermitLocked(permit.requestId);
+                // The identity and queued membership were checked while holding the
+                // same lock. Transfer only changes ownership; it never re-reads the cap.
+                removeQueuedPhaseLocked(permit.requestId, permit.reservation);
+                admissionVersion.incrementAndGet();
+                transferStatus = EngineDispatchPermitTransferStatus.TRANSFERRED;
+            }
+            capacityIncreased = engineDispatchHardGateUsageLocked() < usageBefore;
+        } finally {
+            admissionLock.unlock();
+        }
+        if (capacityIncreased) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return transferStatus;
+    }
+
+    private boolean releaseEngineDispatchPermit(EngineDispatchPermit permit) {
+        boolean released = false;
+        admissionLock.lock();
+        try {
+            if (retiredEngineDispatchPermitTokens.remove(permit.token)) {
+                return true;
+            }
+            if (!isCurrentEngineDispatchPermitLocked(permit)) {
+                return false;
+            }
+            removeEngineDispatchPermitLocked(permit.requestId);
+            admissionVersion.incrementAndGet();
+            released = true;
+        } finally {
+            admissionLock.unlock();
+        }
+        if (released) {
+            notifyEngineDispatchCapacityListeners();
+        }
+        return true;
+    }
+
+    private boolean isCurrentEngineDispatchPermitLocked(EngineDispatchPermit permit) {
+        EngineDispatchPermitLease lease = engineDispatchPermits.get(permit.requestId);
+        return lease != null
+                && lease.token() == permit.token
+                && lease.reservation() == permit.reservation;
+    }
+
+    private boolean removeEngineDispatchPermitLocked(long requestId) {
+        EngineDispatchPermitLease removed = engineDispatchPermits.remove(requestId);
+        if (removed == null) {
+            return false;
+        }
+        engineDispatchPermitHardKvReservedTotal.addAndGet(
+                -removed.reservation().kvTokens());
+        engineDispatchPermitExpectedKvReservedTotal.addAndGet(
+                -removed.reservation().expectedKvTokens());
+        decrementActiveEngineDispatchPermitCountLocked();
+        return true;
+    }
+
+    /** Caller holds admissionLock. */
+    private void decrementActiveEngineDispatchPermitCountLocked() {
+        activeEngineDispatchPermitCount--;
+        if (activeEngineDispatchPermitCount < 0) {
+            throw new IllegalStateException("negative active Decode dispatch permit count");
+        }
+    }
+
+    private long nextEngineDispatchPermitTokenLocked() {
+        if (nextEngineDispatchPermitToken <= 0L
+                || nextEngineDispatchPermitToken == Long.MAX_VALUE) {
+            throw new IllegalStateException("Decode dispatch permit token space exhausted");
+        }
+        return nextEngineDispatchPermitToken++;
+    }
+
+    private int engineDispatchHardGateUsageLocked() {
+        int engineFacingInflight = Math.max(0,
+                inflightRequests.size() - queuedPhaseCount.get());
+        return confirmedRunningCount + engineFacingInflight
+                + activeEngineDispatchPermitCount;
+    }
+
+    /** Caller holds admissionLock; this is the authoritative pre-admission gate. */
+    private boolean isEngineDispatchCapacityFullLocked(
+            RequestInflight candidate,
+            long concurrencyLimit,
+            long maxKvUsagePercent) {
+        return isEngineDispatchCapacityFullSnapshot(
+                candidate, concurrencyLimit, maxKvUsagePercent);
+    }
+
     /**
-     * Claim dispatch ownership before the scheduler exposes a request to the
-     * engine. Under the same admission lock used by local victim release, a
-     * queued reservation moves to ENGINE_MAY_HAVE_SEEN; whichever side wins
-     * excludes the other. A legacy/non-queued reservation is already in that
-     * phase and remains dispatchable. Missing, released, or preemption-claimed
-     * reservations return {@code false} and must not be sent.
+     * Common O(1) gate math used by authoritative acquisition and the live
+     * waiter hint. Acquired permits are already included in both the slot and
+     * KV counters; {@code candidate} is still a queued soft reservation and is
+     * projected exactly once here.
      */
-    public boolean tryMarkEngineMayHaveSeen(long requestId) {
-        return tryClaimEngineDispatch(requestId, 0) == DispatchClaimResult.CLAIMED;
+    private boolean isEngineDispatchCapacityFullSnapshot(
+            RequestInflight candidate,
+            long concurrencyLimit,
+            long maxKvUsagePercent) {
+        if (concurrencyLimit > 0
+                && getEngineLoad() + Math.max(0, activeEngineDispatchPermitCount)
+                >= concurrencyLimit) {
+            return true;
+        }
+
+        long totalKv = reportedKvTotal.get();
+        if (maxKvUsagePercent < 0 || totalKv <= 0) {
+            return false;
+        }
+        if (candidate.kvTokens() > engineFacingKvAvailable()) {
+            return true;
+        }
+        if (maxKvUsagePercent == 0) {
+            return false;
+        }
+
+        long projectedExpectedKv = saturatedAddNonNegative(
+                engineFacingKvUsed(), candidate.expectedKvTokens());
+        return (double) projectedExpectedKv * 100.0
+                > (double) maxKvUsagePercent * (double) totalKv;
+    }
+
+    /** Saturating addition for non-negative admission counters. */
+    private static long saturatedAddNonNegative(long left, long right) {
+        if (left < 0 || right < 0) {
+            throw new IllegalArgumentException("KV admission counters must be non-negative");
+        }
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+    }
+
+    /**
+     * Lock-free live predicate for a WorkerBatcher capacity wait.
+     *
+     * <p>The queue condition invokes this method while holding its own lock, so
+     * this method must never acquire {@link #admissionLock}. A torn snapshot can
+     * only cause an extra authoritative acquisition attempt; every capacity or
+     * ownership transition publishes a listener wake after its atomic/volatile
+     * counters are updated. Returning {@code true} for retirement or ownership
+     * loss lets the worker resume and obtain the exact typed acquisition result.
+     */
+    public boolean isEngineDispatchPermitAvailable(
+            long requestId,
+            long concurrencyLimit,
+            long maxKvUsagePercent) {
+        if (!acceptingEngineDispatchPermits) {
+            return true;
+        }
+        RequestInflight candidate = inflightRequests.get(requestId);
+        if (candidate == null
+                || !queuedPhase.contains(requestId)
+                || engineDispatchPermits.containsKey(requestId)) {
+            return true;
+        }
+        return !isEngineDispatchCapacityFullSnapshot(
+                candidate, concurrencyLimit, maxKvUsagePercent);
+    }
+
+    /** Live wait predicate only; permit acquisition remains the authoritative gate. */
+    public boolean hasEngineDispatchCapacity(long concurrencyLimit) {
+        if (concurrencyLimit <= 0) {
+            return true;
+        }
+        return getEngineLoad() + Math.max(0, activeEngineDispatchPermitCount)
+                < concurrencyLimit;
     }
 
     /**

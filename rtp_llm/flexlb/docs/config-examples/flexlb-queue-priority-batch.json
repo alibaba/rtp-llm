@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
     "queueTimeoutMs": 3600000,

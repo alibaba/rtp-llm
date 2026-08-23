@@ -33,8 +33,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
@@ -67,8 +69,8 @@ class ExternalFutureCancellationTest {
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         config = new FlexlbConfig();
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(60_000);
         SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(100);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (100));
         when(configService.loadBalanceConfig()).thenReturn(config);
@@ -114,7 +116,7 @@ class ExternalFutureCancellationTest {
         long requestId = 10_001L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
 
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
 
         assertTrue(batchDispatcher.wasSent());
         long batchId = batchDispatcher.batchId;
@@ -158,7 +160,7 @@ class ExternalFutureCancellationTest {
         assertTrue(scheduler.registerInflight(item));
         decodeEndpoint.reserve(requestId, 128, 136, 50);
         decodeEndpoint.markQueuedPhase(requestId);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
         assertTrue(item.future().cancel(false));
@@ -178,7 +180,7 @@ class ExternalFutureCancellationTest {
     void batchSettlementBeforeProtectionDoesNotPublishEngineFence() {
         long requestId = 10_003L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
 
         long batchId = batchDispatcher.batchId;
         WorkerStatusResponse finished = prefillFinished(requestId, batchId, 500);
@@ -203,19 +205,19 @@ class ExternalFutureCancellationTest {
         long requestId = 10_002L;
         BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
 
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
 
         assertTrue(routeDelivery.wasClaimed());
         RequestLifecycleSnapshot claimed = scheduler.getRequestState(requestId, 0);
         assertEquals(RequestLifecycleState.DISPATCHING, claimed.state());
         assertEquals(DeliveryClaimKind.ROUTE_DECISION, claimed.deliveryClaimKind());
-        assertEquals(1, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(1, prefillEndpoint.getIndividuallyTrackedRequestCount());
 
         assertTrue(item.future().cancel(false));
 
         assertEquals(0, scheduler.getInflightSize());
-        assertEquals(0, prefillEndpoint.getInflightRouteRequestCount());
-        assertEquals(0, prefillEndpoint.getInflightRequestCount());
+        assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
         assertFalse(decodeEndpoint.reservedView().containsKey(requestId));
         assertNull(scheduler.getRequestState(requestId, 0));
         verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
@@ -276,7 +278,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_102L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
         assertNull(scheduler.cancelRequest(
@@ -330,7 +332,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_109L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         WorkerStatusResponse finished = prefillFinished(requestId, batchId, 500);
         prefillEndpoint.onWorkerStatusUpdate(prefillEndpoint.getStatus(), finished);
@@ -356,7 +358,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_110L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         batchDispatcher.callback.onSuccess(item, batchId);
         assertEquals(RequestLifecycleState.ACKNOWLEDGED,
@@ -377,7 +379,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_111L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         scheduler.onWorkerStatusUpdate(runningDecode(requestId, TaskPhase.KV_ALLOCATED));
 
@@ -396,7 +398,7 @@ class ExternalFutureCancellationTest {
     void batchDeadlineSettlesAsTimedOutAfterEngineTombstone() throws Exception {
         long requestId = 10_107L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
         RequestLifecycleSnapshot pending = scheduler.cancelRequest(
@@ -418,7 +420,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_112L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
 
         scheduler.onRequestExpired(requestId, item.future());
@@ -446,6 +448,7 @@ class ExternalFutureCancellationTest {
         long requestId = 10_113L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         long attemptToken = 503L;
+        commitQueuedDecodeDispatch(item);
         prepareNotFoundPreemption(item, attemptToken, 90_001L);
 
         RequestLifecycleSnapshot pending = scheduler.cancelRequest(
@@ -465,7 +468,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_114L;
         BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         routeDelivery.callback.onDelivered(item);
         assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
         long attemptToken = 504L;
@@ -479,14 +482,14 @@ class ExternalFutureCancellationTest {
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(requestId, 0).state());
         assertEquals(0, scheduler.getInflightSize());
-        assertEquals(0, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount());
     }
 
     @Test
     void routeCancelStaysPendingUntilWorkerTerminal() throws Exception {
         long requestId = 10_103L;
         BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         routeDelivery.callback.onDelivered(item);
         assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
 
@@ -495,7 +498,7 @@ class ExternalFutureCancellationTest {
 
         assertEquals(RequestLifecycleState.CANCEL_REQUESTED, pending.state());
         assertEquals(1, scheduler.getInflightSize());
-        assertEquals(1, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(1, prefillEndpoint.getIndividuallyTrackedRequestCount());
         verify(cancelChannel).cancel(any(), eq(requestId), anyLong());
 
         cancelResult.complete(EngineCancelChannel.CancelOutcome.accepted());
@@ -505,7 +508,7 @@ class ExternalFutureCancellationTest {
         assertEquals(RequestLifecycleState.CANCELLED,
                 scheduler.getRequestState(requestId, 0).state());
         assertEquals(0, scheduler.getInflightSize());
-        assertEquals(0, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount());
         assertFalse(decodeEndpoint.reservedView().containsKey(requestId));
     }
 
@@ -513,7 +516,7 @@ class ExternalFutureCancellationTest {
     void completedRouteDeliveryIgnoresLateAdmissionDeadline() throws Exception {
         long requestId = 10_108L;
         BatchItem item = admittedItem(requestId, DeliveryMode.ROUTE_DECISION);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         routeDelivery.callback.onDelivered(item);
         assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
 
@@ -528,7 +531,7 @@ class ExternalFutureCancellationTest {
         assertEquals(RequestLifecycleState.FAILED,
                 scheduler.getRequestState(requestId, 0).state());
         assertEquals(0, scheduler.getInflightSize());
-        assertEquals(0, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount());
     }
 
     @Test
@@ -609,6 +612,7 @@ class ExternalFutureCancellationTest {
         long requestId = 10_118L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
         long attemptToken = 507L;
+        commitQueuedDecodeDispatch(item);
         prepareNotFoundPreemption(item, attemptToken, 90_003L);
 
         scheduler.onRequestExpired(requestId, item.future());
@@ -628,7 +632,7 @@ class ExternalFutureCancellationTest {
         long requestId = 10_119L;
         long attemptToken = 508L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         assertTrue(scheduler.claimForPreemption(
                 requestId, attemptToken, "priority attempt"));
         scheduler.onWorkerStatusUpdate(runningDecode(requestId, TaskPhase.KV_ALLOCATED));
@@ -650,7 +654,7 @@ class ExternalFutureCancellationTest {
         long requestId = 10_120L;
         long attemptToken = 509L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         prepareNotFoundPreemption(item, attemptToken, 90_004L);
         scheduler.onWorkerStatusUpdate(runningDecode(requestId, TaskPhase.KV_ALLOCATED));
 
@@ -676,7 +680,7 @@ class ExternalFutureCancellationTest {
                 workersBlocked.countDown();
                 await(releaseWorkers);
             });
-            scheduler.onDecisionGroupReady(
+            deliverAdmitted(
                     List.of(blocker), new DecisionGroupMetadata("block_completion", 0));
             scheduler.onDelivered(blocker);
         }
@@ -685,11 +689,11 @@ class ExternalFutureCancellationTest {
         BatchItem batch = admittedItem(10_140L, DeliveryMode.BATCH_ENQUEUE);
         BatchItem route = admittedItem(10_141L, DeliveryMode.ROUTE_DECISION);
         try {
-            scheduler.onDecisionGroupReady(
+            deliverAdmitted(
                     List.of(batch), new DecisionGroupMetadata("batch_response_claim", 0));
             long batchId = batchDispatcher.batchId;
             batchDispatcher.callback.onSuccess(batch, batchId);
-            scheduler.onDecisionGroupReady(
+            deliverAdmitted(
                     List.of(route), new DecisionGroupMetadata("route_response_claim", 0));
             scheduler.onDelivered(route);
 
@@ -735,7 +739,7 @@ class ExternalFutureCancellationTest {
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
 
         CompletableFuture<Void> delivery = CompletableFuture.runAsync(() ->
-                scheduler.onDecisionGroupReady(
+                deliverAdmitted(
                         List.of(item), new DecisionGroupMetadata("ttl_delivery_race", 0)));
         assertTrue(dispatchEntered.await(1, TimeUnit.SECONDS));
         CountDownLatch cleanupStarted = new CountDownLatch(1);
@@ -779,7 +783,7 @@ class ExternalFutureCancellationTest {
         BatchItem batch = admittedItem(batchRequestId, DeliveryMode.BATCH_ENQUEUE);
         BatchItem route = admittedItem(routeRequestId, DeliveryMode.ROUTE_DECISION);
 
-        scheduler.onDecisionGroupReady(
+        deliverAdmitted(
                 List.of(batch), new DecisionGroupMetadata("ttl_batch_ack", 0));
         long batchId = batchDispatcher.batchId;
         batchDispatcher.callback.onSuccess(batch, batchId);
@@ -787,7 +791,7 @@ class ExternalFutureCancellationTest {
         scheduler.onWorkerStatusUpdate(
                 runningDecode(batchRequestId, TaskPhase.KV_ALLOCATED));
 
-        scheduler.onDecisionGroupReady(
+        deliverAdmitted(
                 List.of(route), new DecisionGroupMetadata("ttl_route_ack", 0));
         routeDelivery.callback.onDelivered(route);
         assertTrue(route.future().get(1, TimeUnit.SECONDS).isSuccess());
@@ -802,14 +806,14 @@ class ExternalFutureCancellationTest {
                 .cancel(any(), anyLong(), anyLong());
         assertEquals(2, scheduler.getInflightSize());
         assertEquals(1, prefillEndpoint.getInflightBatchCount());
-        assertEquals(1, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(1, prefillEndpoint.getIndividuallyTrackedRequestCount());
         assertTrue(decodeEndpoint.reservedView().containsKey(batchRequestId));
         assertTrue(decodeEndpoint.reservedView().containsKey(routeRequestId));
 
         assertEquals(0, prefillEndpoint.evictExpiredInflight(-1),
                 "pending Engine fences must protect both batch and route ledgers");
         assertEquals(1, prefillEndpoint.getInflightBatchCount());
-        assertEquals(1, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(1, prefillEndpoint.getIndividuallyTrackedRequestCount());
 
         cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
 
@@ -819,7 +823,7 @@ class ExternalFutureCancellationTest {
                 scheduler.getRequestState(routeRequestId, 0).state());
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, prefillEndpoint.getInflightBatchCount());
-        assertEquals(0, prefillEndpoint.getInflightRouteRequestCount());
+        assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount());
         assertFalse(decodeEndpoint.reservedView().containsKey(batchRequestId));
         assertFalse(decodeEndpoint.reservedView().containsKey(routeRequestId));
     }
@@ -829,7 +833,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_121L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         RequestLifecycleSnapshot pending = scheduler.cancelRequest(
                 requestId, batchId, CancelReason.CLIENT_CANCELLED);
@@ -848,7 +852,7 @@ class ExternalFutureCancellationTest {
             throws Exception {
         long requestId = 10_122L;
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
         long batchId = batchDispatcher.batchId;
         RequestLifecycleSnapshot pending = scheduler.cancelRequest(
                 requestId, batchId, CancelReason.DEADLINE_EXCEEDED);
@@ -917,8 +921,9 @@ class ExternalFutureCancellationTest {
 
     private void prepareNotFoundPreemption(
             BatchItem item, long attemptToken, long incomingRequestId) {
-        assertEquals(DecodeEndpoint.DispatchClaimResult.CLAIMED,
-                decodeEndpoint.tryClaimEngineDispatch(item.requestId(), 100));
+        assertFalse(decodeEndpoint.layeredAdmissionView().queued()
+                .contains(item.requestId()));
+        assertTrue(decodeEndpoint.reservedView().containsKey(item.requestId()));
         assertTrue(scheduler.claimForPreemption(
                 item.requestId(), attemptToken, "priority attempt"));
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
@@ -942,6 +947,16 @@ class ExternalFutureCancellationTest {
         assertFalse(decodeEndpoint.reservedView().containsKey(incomingRequestId));
     }
 
+    private void commitQueuedDecodeDispatch(BatchItem item) {
+        DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
+                decodeEndpoint.acquireEngineDispatchPermit(item.requestId(), 100);
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                acquisition.status());
+        assertNotNull(acquisition.permit());
+        assertEquals(TRANSFERRED,
+                acquisition.permit().transferToEngineLifecycle());
+    }
+
     private static WorkerStatusResponse finished(RoleType role,
                                                  long requestId,
                                                  long batchId,
@@ -955,6 +970,15 @@ class ExternalFutureCancellationTest {
         response.setFinishedTaskInfo(Map.of(Long.toString(requestId), task));
         response.setRunningTaskInfo(Map.of());
         return response;
+    }
+
+    private void deliverAdmitted(
+            List<BatchItem> items,
+            DecisionGroupMetadata metadata) {
+        TestCapacityAdmission.runDeliveryCallback(
+                scheduler,
+                TestCapacityAdmission.admit(scheduler, items),
+                metadata);
     }
 
     private static WorkerStatusResponse runningDecode(
@@ -1008,18 +1032,27 @@ class ExternalFutureCancellationTest {
         private CountDownLatch releaseDispatch;
 
         @Override
-        public void dispatch(List<BatchItem> items,
-                             PrefillEndpoint prefillEp,
-                             long batchId,
-                             long predMs,
-                             String reason,
-                             DispatchCallback callback) {
-            this.batchId = batchId;
-            this.callback = callback;
-            if (dispatchEntered != null) {
-                dispatchEntered.countDown();
-                await(releaseDispatch);
-            }
+        public SubmissionReservationResult tryReserveSubmission() {
+            return new SubmissionReserved(new SubmissionPermit() {
+                @Override
+                public void submit(List<BatchItem> items,
+                                   PrefillEndpoint prefillEp,
+                                   long submittedBatchId,
+                                   long predMs,
+                                   String reason,
+                                   DispatchCallback submittedCallback) {
+                    batchId = submittedBatchId;
+                    callback = submittedCallback;
+                    if (dispatchEntered != null) {
+                        dispatchEntered.countDown();
+                        await(releaseDispatch);
+                    }
+                }
+
+                @Override
+                public void release() {
+                }
+            });
         }
 
         private boolean wasSent() {

@@ -325,8 +325,8 @@ public abstract class FlexLBMockTestBase {
      */
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.batchDispatcher().setMaxRequests(1); // single request triggers dispatch
-        cfg.batchDispatcher().setMaxCollectionWaitMs(300);
+        cfg.fixedWindowDecision().setMaxRequests(1); // single request triggers dispatch
+        cfg.fixedWindowDecision().setMaxCollectionWaitMs(300);
         cfg.batchDispatcher().setEnqueueRpcTimeoutMs(5_000L);
         cfg.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(300_000L);
         return cfg;

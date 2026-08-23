@@ -24,8 +24,7 @@ class ConfigServiceTest {
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isBatchDispatch());
         assertTrue(config.isFixedWindowDecision());
-        assertFalse(config.hasExplicitDecisionPolicy());
-        assertEquals(1, config.getSchemaVersion());
+        assertEquals(2, config.getSchemaVersion());
     }
 
     @Test
@@ -35,10 +34,16 @@ class ConfigServiceTest {
     }
 
     @Test
+    void rejects_schema_v1_after_canonical_v2_cutover() {
+        assertThrows(ConfigValidationException.class,
+                () -> ConfigService.parse("{\"schemaVersion\":1}"));
+    }
+
+    @Test
     void parses_complete_responsibility_oriented_document() {
         FlexlbConfig config = ConfigService.parse("""
                 {
-                  "schemaVersion": 1,
+                  "schemaVersion": 2,
                   "scheduler": {
                     "type": "QUEUE",
                     "ordering": {
@@ -70,10 +75,6 @@ class ConfigServiceTest {
                   },
                   "dispatcher": {
                     "type": "BATCH",
-                    "maxRequests": 16,
-                    "maxCollectionWaitMs": 50,
-                    "maxWaitingRequestsPerPrefillWorker": 256,
-                    "earlyDispatchPredictedExecutionMs": 100,
                     "maxInflightBatchesPerPrefillWorker": 2,
                     "enqueueRpcTimeoutMs": 4000
                   },
@@ -162,14 +163,14 @@ class ConfigServiceTest {
                 .getEngineCancellation().getAckTimeoutMs());
         assertEquals(1200, config.priorityOrdering().getPreemption()
                 .getEngineCancellation().getCompletionTimeoutMs());
-        assertTrue(config.hasExplicitDecisionPolicy());
         assertEquals(12, config.fixedWindowDecision().getMaxRequests());
         assertEquals(40L, config.fixedWindowDecision().getMaxCollectionWaitMs());
         assertEquals(90L, config.fixedWindowDecision()
                 .getMaxPredictedExecutionMs().longValue());
         assertEquals(192, config.queueScheduler().getCapacity()
-                .getMaxWaitingRequestsPerPrefillWorker().intValue());
-        assertEquals(16, config.batchDispatcher().getMaxRequests());
+                .getMaxWaitingRequestsPerPrefillWorker());
+        assertEquals(2, config.batchDispatcher()
+                .getMaxInflightBatchesPerPrefillWorker().intValue());
         FormulaEstimatorConfig estimator = assertInstanceOf(FormulaEstimatorConfig.class,
                 config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator());
         assertEquals("sum(computeTokens)", estimator.getExpression());

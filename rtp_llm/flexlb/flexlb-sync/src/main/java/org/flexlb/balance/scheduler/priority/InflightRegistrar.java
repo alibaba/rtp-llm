@@ -7,7 +7,7 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Registers Auto-TPM admitted requests into the priority scheduler's inflight
  * tracking so that dispatch, completion, TTL cleanup and rollback treat them
- * exactly like legacy-path requests.
+ * exactly like ordinary queue-path requests.
  *
  * <p>Implemented by {@code PriorityScheduler}; expressed as an interface to
  * avoid a circular bean dependency with {@code PriorityAdmissionScheduler}.

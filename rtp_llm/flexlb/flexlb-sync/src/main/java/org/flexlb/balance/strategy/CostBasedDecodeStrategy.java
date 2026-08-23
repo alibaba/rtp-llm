@@ -246,8 +246,9 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
-            // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent
-            // over-admission before the engine reports the new load.
+            // Publish a generation-local conservative shadow estimate until
+            // the Engine reports the new load. DIRECT selection is advisory;
+            // only QUEUE admission uses the typed hard-capacity permit.
             //
             // Cap expectedKvTokens to the endpoint's total KV capacity. When
             // maxNewTokens is very large (e.g. 8192), the raw sum seqLen +

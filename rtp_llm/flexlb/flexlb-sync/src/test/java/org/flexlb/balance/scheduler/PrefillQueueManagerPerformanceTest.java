@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -105,15 +104,17 @@ class PrefillQueueManagerPerformanceTest {
     private static WorkerBatcher batcherWithDepth(int depth) {
         FlexlbConfig config = new FlexlbConfig();
         SchedulingTestConfig.usePriorityQueue(config);
-        BatchDispatcherConfig dispatcher = SchedulingTestConfig.useBatchDispatcher(config);
-        dispatcher.setMaxCollectionWaitMs(200);
-        dispatcher.setMaxRequests(32);
-        dispatcher.setMaxWaitingRequestsPerPrefillWorker(1_024);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(200);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(32);
+        SchedulingTestConfig.useQueueCapacity(config)
+                .setMaxWaitingRequestsPerPrefillWorker(1_024);
         WorkerBatcher batcher = new WorkerBatcher(
                 "perf-worker-" + depth,
                 null,
                 config,
                 mock(DecisionGroupHandler.class),
+                TestCapacityAdmission.alwaysAvailable(),
                 mock(BatchSchedulerReporter.class));
         long now = System.currentTimeMillis();
         List<BatchItem> items = new ArrayList<>(depth);

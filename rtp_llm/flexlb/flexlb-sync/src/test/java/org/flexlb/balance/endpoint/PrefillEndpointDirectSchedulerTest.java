@@ -1,8 +1,10 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.AdmittedDecisionGroup;
 import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.DecisionGroupMetadata;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
@@ -26,6 +28,7 @@ class PrefillEndpointDirectSchedulerTest {
 
         PrefillEndpoint endpoint = assertDoesNotThrow(() -> new PrefillEndpoint(
                 workerStatus(), config, noopHandler(),
+                TestCapacityAdmission.alwaysAvailable(),
                 mock(BatchSchedulerReporter.class)));
         endpoint.close();
     }
@@ -42,8 +45,10 @@ class PrefillEndpointDirectSchedulerTest {
     private static DecisionGroupHandler noopHandler() {
         return new DecisionGroupHandler() {
             @Override public void onExpired(BatchItem head) { }
-            @Override public void onDecisionGroupReady(
-                    List<BatchItem> items, DecisionGroupMetadata metadata) { }
+            @Override public void onDecisionGroupAdmitted(
+                    AdmittedDecisionGroup group, DecisionGroupMetadata metadata) {
+                TestCapacityAdmission.complete(group);
+            }
             @Override public void onOfferFailure(BatchItem item, Throwable error) { }
             @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
         };

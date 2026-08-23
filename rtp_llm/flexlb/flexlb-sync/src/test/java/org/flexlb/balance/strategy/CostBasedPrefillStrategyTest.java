@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
@@ -86,15 +87,6 @@ class CostBasedPrefillStrategyTest {
         endpointRegistry.close();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
-    }
-
-    /** Helper: register PrefillEndpoints for all entries in the given worker map. */
-    private void registerPrefillEndpoints(Map<String, WorkerStatus> workerMap) {
-        for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
-            WorkerStatus ws = entry.getValue();
-            ws.setGrpcPort(9090);
-            endpointRegistry.ensureEndpoint(RoleType.PREFILL, entry.getKey(), ws);
-        }
     }
 
     @Test
@@ -461,7 +453,7 @@ class CostBasedPrefillStrategyTest {
         PrefillEndpoint ep1 = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, "10.0.0.1:8080", w1);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, "10.0.0.2:8080", w2);
-        ep1.commitBatch(1L, 4000, List.of(batchItem(1L, 1000, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(ep1, 1L, 4000, List.of(batchItem(1L, 1000, 0)));
 
         ServerStatus result = strategy.select(buildContext(500, 10L), RoleType.PREFILL, null);
 
@@ -539,7 +531,7 @@ class CostBasedPrefillStrategyTest {
         PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
-            ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
+            TestCapacityAdmission.registerQueueBatchLifecycle(ep, 900000L + ip.hashCode(), estimatedWaitMs,
                     List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
         }
         return w;

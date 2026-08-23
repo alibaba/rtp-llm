@@ -191,13 +191,17 @@ Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
 - `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
 - `scheduler.type=QUEUE`: Uses `PriorityScheduler` for lifecycle, capacity, cancellation, and timeout ownership. Queue ordering is `FIFO` or `PRIORITY`.
-- `dispatcher.type=NON_BATCH`: A `WorkerBatcher` dispatches one request immediately.
-- `dispatcher.type=BATCH`: A `WorkerBatcher` collects and dispatches a bounded batch.
+- `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
+- `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
+- `dispatcher.type=NON_BATCH`: The frontend delivers requests from the formed group.
+- `dispatcher.type=BATCH`: Master delivers the formed group with `EnqueueBatch`.
 
 Every QUEUE combination follows the same lifecycle: `RouteService` submits to
 `PriorityScheduler`, the scheduler selects a prefill endpoint, and that endpoint's
 `WorkerBatcher` performs the configured delivery. There is no secondary routing queue or
-resource-unavailable retry loop.
+resource-unavailable retry loop. Decision algorithms return typed outcomes and never
+sleep or poll: the worker waits on the exact capacity event, queue/status generation,
+prediction-model generation, or absolute deadline named by that outcome.
 
 ### Worker Status Synchronization
 
@@ -258,10 +262,11 @@ FlexLB reads configuration from environment variables:
 ### FLEXLB_CONFIG (single public behavior document)
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
-    "ordering": {"type": "FIFO"}
+    "ordering": {"type": "FIFO"},
+    "decision": {"type": "SINGLE"}
   },
   "dispatcher": {"type": "NON_BATCH"}
 }
@@ -349,7 +354,11 @@ Monitoring enhancements:
 - `NO_PDFUSION_WORKER`: No available Pdfusion workers
 - `NO_VIT_WORKER`: No available Vit workers
 
-Worker errors can trigger retry logic in the queue scheduler when resource-unavailable conditions occur.
+When a hard resource is unavailable, only the unchanged `ACTIVE` head waits for
+that exact resource event and attempts admission again. An admitted callback is
+never retried, and an admitted request never returns to the queue. Structural
+admission/publication failure terminalizes the exact reserved prefix once; it is
+not represented as capacity pressure and is never converted into a retry.
 
 ## Commit Message Format
 

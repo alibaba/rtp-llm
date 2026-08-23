@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Objects;
 
 /** Delivers a prepared decision group through the existing EnqueueBatch RPC. */
-final class BatchEnqueueDelivery implements DecisionDelivery<BatchEnqueueDelivery.Plan> {
+final class BatchEnqueueDelivery {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(BatchEnqueueDelivery.class);
 
@@ -53,14 +53,8 @@ final class BatchEnqueueDelivery implements DecisionDelivery<BatchEnqueueDeliver
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
     }
 
-    @Override
-    public void deliver(Plan plan, Callback callback) {
-        Submission submission = prepare(plan, callback);
-        try {
-            submission.submit();
-        } finally {
-            submission.releaseCallbacks();
-        }
+    BatchDispatcher.SubmissionReservationResult tryReserveSubmission() {
+        return dispatcher.tryReserveSubmission();
     }
 
     /**
@@ -68,42 +62,59 @@ final class BatchEnqueueDelivery implements DecisionDelivery<BatchEnqueueDeliver
      * caller explicitly opens the callback gate.
      *
      * <p>The priority scheduler uses this two-step form while it holds its
-     * delivery fence around the final commit-to-transport handoff. A bounded
-     * dispatcher may reject synchronously and invoke its failure callback on
-     * the submitting thread; deferring that callback prevents response-future
-     * continuations from running inside the scheduler-wide fence. Callbacks
-     * arriving after the gate opens take one volatile read and otherwise retain
-     * the existing direct asynchronous path.</p>
+     * delivery fence around the final lifecycle-to-transport handoff. The
+     * dispatcher task was accepted during admission. Callback deferral prevents
+     * an immediately completed transport from running response continuations
+     * inside the scheduler-wide fence.</p>
      */
-    Submission prepare(Plan plan, Callback callback) {
+    Submission prepare(Plan plan,
+                       BatchDispatcher.SubmissionPermit submissionPermit,
+                       DecisionDelivery.Callback callback) {
         Objects.requireNonNull(plan, "plan");
+        Objects.requireNonNull(submissionPermit, "submissionPermit");
         Objects.requireNonNull(callback, "callback");
-        return new Submission(dispatcher, plan, callback);
+        return new Submission(submissionPermit, plan, callback);
     }
 
     /** One allocation owns both the transport invocation and its callback gate. */
     static final class Submission implements DispatchCallback {
-        private final BatchDispatcher dispatcher;
+        private final BatchDispatcher.SubmissionPermit submissionPermit;
         private final Plan plan;
-        private final Callback callback;
+        private final DecisionDelivery.Callback callback;
+        private boolean permitResolved;
         private volatile boolean deferCallbacks = true;
         /** Allocated only when a dispatcher invokes a callback before submit returns. */
         private List<CallbackEvent> deferredCallbacks;
 
-        private Submission(BatchDispatcher dispatcher, Plan plan, Callback callback) {
-            this.dispatcher = dispatcher;
+        private Submission(BatchDispatcher.SubmissionPermit submissionPermit,
+                           Plan plan,
+                           DecisionDelivery.Callback callback) {
+            this.submissionPermit = submissionPermit;
             this.plan = plan;
             this.callback = callback;
         }
 
-        void submit() {
-            dispatcher.dispatch(
+        synchronized void submit() {
+            if (permitResolved) {
+                throw new IllegalStateException(
+                        "batch submission permit was already resolved");
+            }
+            submissionPermit.submit(
                     plan.items(),
                     plan.prefillEndpoint(),
                     plan.batchId(),
                     plan.estimatedPrefillMs(),
                     plan.decisionReason(),
                     this);
+            permitResolved = true;
+        }
+
+        synchronized void releaseUnsubmittedPermit() {
+            if (permitResolved) {
+                return;
+            }
+            permitResolved = true;
+            submissionPermit.release();
         }
 
         void releaseCallbacks() {

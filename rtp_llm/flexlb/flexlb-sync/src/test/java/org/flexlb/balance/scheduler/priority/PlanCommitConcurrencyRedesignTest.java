@@ -192,7 +192,7 @@ class PlanCommitConcurrencyRedesignTest {
      *
      * <p>Deterministic interleaving: {@code reportPlanAge} (which the pre-fix
      * onCommitted invoked right before its late markQueuedPhase) blocks until
-     * the gRPC dispatch — which runs after tryMarkEngineMayHaveSeen — happened;
+     * the gRPC dispatch — which runs after its engine-dispatch permit commits — happened;
      * {@code reportNormalPlacement} (invoked after the pre-fix late mark)
      * releases the assertion. Pre-fix: stale mark ⇒ engineLoad 0 (red).
      * Post-fix: the mark precedes the commit, dispatch clears it ⇒
@@ -370,8 +370,15 @@ class PlanCommitConcurrencyRedesignTest {
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             if (routeCalls.incrementAndGet() == 1) {
-                // Concurrent enqueue between snapshot and commit → version bump
-                assertTrue(batcher.tryOffer(dummyItem(901)));
+                // Publish independently owned work between snapshot and
+                // commit. Capacity-first delivery requires every ACTIVE
+                // fixture to carry real scheduler and Decode ownership.
+                BatchItem unrelated = schedulerOwnedItem(901L);
+                assertTrue(scheduler.registerInflight(unrelated));
+                DecodeEndpoint decode = endpointRegistry.getDecode(DECODE_IP_PORT);
+                decode.reserve(901L, 128, 136, unrelated.priority());
+                decode.markQueuedPhase(901L);
+                assertTrue(batcher.tryOffer(unrelated));
             }
             endpointRegistry.getDecode(DECODE_IP_PORT)
                     .reserve(ctx.getRequestId(), 128, 136,
@@ -395,7 +402,7 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void capacity_fast_rejects_after_primary_and_one_fallback_offer() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(1);
         SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
@@ -513,6 +520,16 @@ class PlanCommitConcurrencyRedesignTest {
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
                 PriorityScheduler.findServer(route, RoleType.DECODE),
                 endpointRegistry.getPrefill(PREFILL_IP_PORT), null,
+                System.currentTimeMillis());
+    }
+
+    private BatchItem schedulerOwnedItem(long requestId) {
+        Response route = successRoute(requestId);
+        return new BatchItem(context(requestId), new CompletableFuture<>(), route,
+                PriorityScheduler.findServer(route, RoleType.PREFILL),
+                PriorityScheduler.findServer(route, RoleType.DECODE),
+                endpointRegistry.getPrefill(PREFILL_IP_PORT),
+                endpointRegistry.getDecode(DECODE_IP_PORT),
                 System.currentTimeMillis());
     }
 

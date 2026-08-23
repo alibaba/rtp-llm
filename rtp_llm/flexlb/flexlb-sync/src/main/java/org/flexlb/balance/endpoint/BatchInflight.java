@@ -5,6 +5,7 @@ import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.strategy.PrefillBatchFeatures;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -14,6 +15,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
 
     private final long predictTimeMs;
     private final List<BatchItem> requests;
+    private final Runnable batchCapacityRelease;
     private final long originalPredictTimeMs;
     private final Set<Long> originalRequestIds;
     private final PrefillBatchFeatures originalFeatures;
@@ -25,16 +27,37 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     private final AtomicBoolean learningEligible;
     private volatile boolean running;
 
-    BatchInflight(long predictTimeMs, List<BatchItem> requests) {
-        this(predictTimeMs, requests, System.currentTimeMillis());
+    BatchInflight(long predictTimeMs,
+                  List<BatchItem> requests,
+                  Runnable batchCapacityRelease) {
+        List<BatchItem> batchRequests = requireBatchRequests(requests);
+        long nowMs = System.currentTimeMillis();
+        this.predictTimeMs = predictTimeMs;
+        this.requests = batchRequests;
+        this.batchCapacityRelease = Objects.requireNonNull(
+                batchCapacityRelease, "batchCapacityRelease");
+        this.originalPredictTimeMs = predictTimeMs;
+        this.originalRequestIds = batchRequests.stream()
+                .map(BatchItem::requestId)
+                .collect(Collectors.toUnmodifiableSet());
+        this.originalFeatures = PrefillBatchFeatures.from(batchRequests);
+        this.createdAtMs = nowMs;
+        this.progressBaseMs = new AtomicLong(nowMs);
+        this.lastObservedAtMs = new AtomicLong(nowMs);
+        this.maxExecutionTimeMs = new AtomicLong();
+        this.successfulCompletionObserved = new AtomicBoolean();
+        this.learningEligible = new AtomicBoolean(true);
+        this.running = false;
     }
 
-    private BatchInflight(long predictTimeMs,
-                          List<BatchItem> requests, long nowMs) {
-        this(predictTimeMs, requests, predictTimeMs,
-                requests.stream().map(BatchItem::requestId).collect(Collectors.toUnmodifiableSet()),
-                PrefillBatchFeatures.from(requests), nowMs,
-                nowMs, nowMs, 0, false, true, false);
+    private static List<BatchItem> requireBatchRequests(List<BatchItem> requests) {
+        List<BatchItem> batchRequests = List.copyOf(
+                Objects.requireNonNull(requests, "requests"));
+        if (batchRequests.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "an inflight batch must contain at least one request");
+        }
+        return batchRequests;
     }
 
     private BatchInflight(long predictTimeMs,
@@ -42,6 +65,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
                           long originalPredictTimeMs,
                           Set<Long> originalRequestIds,
                           PrefillBatchFeatures originalFeatures,
+                          Runnable batchCapacityRelease,
                           long createdAtMs,
                           long progressBaseMs,
                           long lastObservedAtMs,
@@ -50,10 +74,12 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
                           boolean learningEligible,
                           boolean running) {
         this.predictTimeMs = predictTimeMs;
-        this.requests = requests;
+        this.requests = requireBatchRequests(requests);
         this.originalPredictTimeMs = originalPredictTimeMs;
         this.originalRequestIds = originalRequestIds;
         this.originalFeatures = originalFeatures;
+        this.batchCapacityRelease = Objects.requireNonNull(
+                batchCapacityRelease, "batchCapacityRelease");
         this.createdAtMs = createdAtMs;
         this.progressBaseMs = new AtomicLong(progressBaseMs);
         this.lastObservedAtMs = new AtomicLong(lastObservedAtMs);
@@ -69,6 +95,10 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
 
     List<BatchItem> requests() {
         return requests;
+    }
+
+    void releaseCapacitySlot() {
+        batchCapacityRelease.run();
     }
 
     @Override
@@ -143,6 +173,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     BatchInflight repack(long newPredictTimeMs, List<BatchItem> newRequests) {
         return new BatchInflight(newPredictTimeMs, newRequests,
                 originalPredictTimeMs, originalRequestIds, originalFeatures,
+                batchCapacityRelease,
                 createdAtMs, progressBaseMs(), lastObservedAtMs.get(),
                 maxExecutionTimeMs.get(), successfulCompletionObserved.get(),
                 learningEligible.get(), running);

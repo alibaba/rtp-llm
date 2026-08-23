@@ -87,13 +87,13 @@ class DecodeEvictionSchedulerTest {
 
         config = new FlexlbConfig();
         // Large batch + window + SLO keep queued items parked (no dispatch).
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
         // Single decode slot: the second admission always hits slot-full.
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(4);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(4);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // Capacity-aware route stand-in: mirrors the production decode hard

@@ -11,6 +11,7 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -144,9 +145,15 @@ class DecisionDeliveryTest {
         BatchEnqueueDelivery.Plan plan = new BatchEnqueueDelivery.Plan(
                 items, endpoint, 701, 83, "fixed_window");
 
-        delivery.deliver(plan, callback);
+        BatchDispatcher.SubmissionReserved reserved = assertInstanceOf(
+                BatchDispatcher.SubmissionReserved.class,
+                delivery.tryReserveSubmission());
+        BatchEnqueueDelivery.Submission submission = delivery.prepare(
+                plan, reserved.permit(), callback);
+        submission.submit();
 
-        assertEquals(1, dispatcher.callCount);
+        assertEquals(1, dispatcher.reservationCount);
+        assertEquals(1, dispatcher.submissionCount);
         assertSame(items, dispatcher.items);
         assertSame(endpoint, dispatcher.prefillEndpoint);
         assertEquals(701, dispatcher.batchId);
@@ -155,6 +162,9 @@ class DecisionDeliveryTest {
         assertNotSame(callback, dispatcher.callback);
 
         dispatcher.callback.onSuccess(items.get(0), 701);
+        assertEquals(List.of(), callback.delivered,
+                "callbacks remain closed until the lifecycle handoff completes");
+        submission.releaseCallbacks();
         assertEquals(List.of(items.get(0)), callback.delivered);
     }
 
@@ -165,8 +175,15 @@ class DecisionDeliveryTest {
         BatchEnqueueDelivery delivery = new BatchEnqueueDelivery(dispatcher);
         BatchItem item = item(DeliveryMode.BATCH_ENQUEUE, endpoint);
         RecordingCallback callback = new RecordingCallback();
-        delivery.deliver(new BatchEnqueueDelivery.Plan(
-                List.of(item), endpoint, 701, 0, "batch_id_fence"), callback);
+        BatchDispatcher.SubmissionReserved reserved = assertInstanceOf(
+                BatchDispatcher.SubmissionReserved.class,
+                delivery.tryReserveSubmission());
+        BatchEnqueueDelivery.Submission submission = delivery.prepare(
+                new BatchEnqueueDelivery.Plan(
+                        List.of(item), endpoint, 701, 0, "batch_id_fence"),
+                reserved.permit(), callback);
+        submission.submit();
+        submission.releaseCallbacks();
 
         dispatcher.callback.onSuccess(item, 702);
 
@@ -183,8 +200,15 @@ class DecisionDeliveryTest {
         BatchEnqueueDelivery delivery = new BatchEnqueueDelivery(dispatcher);
         BatchItem item = item(DeliveryMode.BATCH_ENQUEUE, endpoint);
         RecordingCallback callback = new RecordingCallback();
-        delivery.deliver(new BatchEnqueueDelivery.Plan(
-                List.of(item), endpoint, 701, 0, "transport_outcomes"), callback);
+        BatchDispatcher.SubmissionReserved reserved = assertInstanceOf(
+                BatchDispatcher.SubmissionReserved.class,
+                delivery.tryReserveSubmission());
+        BatchEnqueueDelivery.Submission submission = delivery.prepare(
+                new BatchEnqueueDelivery.Plan(
+                        List.of(item), endpoint, 701, 0, "transport_outcomes"),
+                reserved.permit(), callback);
+        submission.submit();
+        submission.releaseCallbacks();
         RuntimeException timeout = new RuntimeException("timeout");
         RuntimeException uncertain = new RuntimeException("uncertain");
 
@@ -240,7 +264,8 @@ class DecisionDeliveryTest {
     }
 
     private static final class RecordingBatchDispatcher implements BatchDispatcher {
-        private int callCount;
+        private int reservationCount;
+        private int submissionCount;
         private List<BatchItem> items;
         private PrefillEndpoint prefillEndpoint;
         private long batchId;
@@ -249,19 +274,39 @@ class DecisionDeliveryTest {
         private DispatchCallback callback;
 
         @Override
-        public void dispatch(List<BatchItem> items,
-                             PrefillEndpoint prefillEndpoint,
-                             long batchId,
-                             long predictedMs,
-                             String reason,
-                             DispatchCallback callback) {
-            callCount++;
-            this.items = items;
-            this.prefillEndpoint = prefillEndpoint;
-            this.batchId = batchId;
-            this.predictedMs = predictedMs;
-            this.reason = reason;
-            this.callback = callback;
+        public SubmissionReservationResult tryReserveSubmission() {
+            reservationCount++;
+            return new SubmissionReserved(new SubmissionPermit() {
+                private boolean resolved;
+
+                @Override
+                public void submit(List<BatchItem> submittedItems,
+                                   PrefillEndpoint submittedEndpoint,
+                                   long submittedBatchId,
+                                   long submittedPredictedMs,
+                                   String submittedReason,
+                                   DispatchCallback submittedCallback) {
+                    if (resolved) {
+                        throw new IllegalStateException("submission permit already resolved");
+                    }
+                    resolved = true;
+                    submissionCount++;
+                    items = submittedItems;
+                    prefillEndpoint = submittedEndpoint;
+                    batchId = submittedBatchId;
+                    predictedMs = submittedPredictedMs;
+                    reason = submittedReason;
+                    callback = submittedCallback;
+                }
+
+                @Override
+                public void release() {
+                    if (resolved) {
+                        throw new IllegalStateException("submission permit already resolved");
+                    }
+                    resolved = true;
+                }
+            });
         }
     }
 }

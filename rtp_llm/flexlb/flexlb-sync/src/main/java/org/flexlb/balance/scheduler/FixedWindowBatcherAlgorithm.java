@@ -6,11 +6,11 @@ import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
- * Fixed-window decision policy. It grows the largest group the live bounds
- * allow and releases it to the independently configured delivery policy.
+ * Fixed-window decision policy. It proposes the largest ordered homogeneous
+ * group allowed by the live shape bounds. Capacity admission then makes the
+ * largest reservable prefix the final decision.
  *
  * <h3>Algorithm</h3>
  * <ol>
@@ -20,22 +20,26 @@ import java.util.concurrent.TimeUnit;
  *   <li>Oversized request rejection: if the head request's seqLen exceeds
  *       the worker token capacity, it can never be picked by any group,
  *       so it is dropped immediately instead of waiting for the deadline.</li>
- *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
  *   <li>Build the largest homogeneous prefix that stays inside every bound on
  *       group growth: the decision policy's largest group, the worker
  *       compute and KV shapes, and — when configured — a predicted execution
-     *       time below the active prediction boundary. The head is a mandatory
-     *       member, so a single request already at that boundary forms the whole
-     *       group.</li>
- *   <li>Dispatch as soon as growth stopped at a bound that cannot relax: the
- *       predicted execution budget or the largest decision group. Compute
- *       and KV pressure are transient, so they stop growth without dispatching.</li>
- *   <li>Otherwise dispatch once the collection window has run out, so an
+ *       time within the active prediction boundary. The head is a mandatory
+ *       member, so a single request already at that boundary forms the whole
+ *       group.</li>
+ *   <li>Propose the group as soon as it reaches the predicted execution budget,
+ *       growth would exceed that budget, or the group reaches its maximum
+ *       request count. Compute and KV pressure are transient, so they stop
+ *       growth without dispatching.</li>
+ *   <li>Otherwise propose it once the collection window has run out, so an
  *       incomplete group never waits indefinitely for requests that have not
  *       arrived. The window covers the picked group, whose members are the ones
  *       paying for the wait; queue age itself is bounded by the absolute
  *       request expiration.</li>
- *   <li>Otherwise park briefly and retry.</li>
+ *   <li>Reserve hard delivery capacity in order. A non-empty reservable prefix
+ *       becomes the final decision; its suffix remains active. If the head
+ *       cannot reserve, wait for that exact resource-change event.</li>
+ *   <li>Otherwise wait for a queue/status generation change or the exact
+ *       collection/expiration deadline.</li>
  * </ol>
  *
  * <h3>Resource-shape filtering</h3>
@@ -59,24 +63,24 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     }
 
     @Override
-    public void processQueue(BatcherContext ctx) throws InterruptedException {
+    public BatcherCycleResult processQueue(BatcherContext ctx) {
         if (ctx.isActiveEmpty()) {
-            return;
+            return BatcherCycleResult.Outcome.NO_ACTION;
         }
 
         // Cheap pre-gates avoid copying/sorting the active queue while the
         // worker cannot dispatch. They are advisory only: the authoritative
         // gates below run again against one stable ordered snapshot.
-        BatchItem observedHead = ctx.peek();
+        BatcherContext.ActiveQueueState observedState = ctx.activeQueueState();
+        BatchItem observedHead = observedState.head();
         if (observedHead == null) {
-            return;
+            return BatcherCycleResult.Outcome.NO_ACTION;
         }
 
         long nowMs = ctx.now();
         long fixedWaitMs = ctx.collectionWindowMs();
         int batchMaxCount = ctx.maxDecisionRequests();
         long predictThresholdMs = ctx.predictedExecutionBudgetMs();
-        boolean strictPredictionLimit = ctx.usesStrictPredictedExecutionLimit();
         long batchMaxTokens = ctx.batchTokenCapacity();
 
         // The caller's absolute request expiry is the only queue-age limit.
@@ -86,7 +90,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                             + "expires_at_ms={} now_ms={}",
                     observedHead.requestId(), observedHead.ctx().getRequestExpiresAtMs(), nowMs);
             ctx.dropHead(observedHead);
-            return;
+            return BatcherCycleResult.Outcome.QUEUE_CHANGED;
         }
 
         // The Engine admits a group only when padded context tokens are strictly
@@ -94,23 +98,20 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // it cannot block the FIFO queue or cause an entire group to fast-fail.
         if (!BatchShape.empty().add(observedHead).fitsCompute(batchMaxTokens)) {
             ctx.rejectForBatchTokenCapacity(observedHead, batchMaxTokens);
-            return;
+            return BatcherCycleResult.Outcome.QUEUE_CHANGED;
         }
 
-        // Engine backpressure: park if the prefill worker already has too many
-        // batches inflight, to prevent overloading the engine.
-        if (deliveryCapacityBlocked(ctx, observedHead)) {
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
-        }
-
-        boolean fullCandidate = ctx.activeSize() >= batchMaxCount;
+        boolean fullCandidate = observedState.activeSize() >= batchMaxCount;
         if (predictThresholdMs <= 0 && !fullCandidate
-                && !windowElapsed(ctx.oldestActiveEnqueuedAtMs(), nowMs, fixedWaitMs)) {
+                && !windowElapsed(
+                observedState.oldestEnqueuedAtMs(), nowMs, fixedWaitMs)) {
             // Preserve the disabled-threshold fast path: do not sort or shape
-            // a partial queue until the legacy full/timeout policy can fire.
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
+            // a partial queue until the count/window policy can fire.
+            return awaitCollectionWindow(
+                    ctx, observedHead,
+                    observedState.queueVersion(),
+                    observedState.schedulingInputVersion(),
+                    observedState.oldestEnqueuedAtMs(), fixedWaitMs);
         }
 
         long batchKvTokens = ctx.batchKvCapacity();
@@ -118,18 +119,20 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             // Dynamic KV pressure is a wait condition, not a rejection. Gate
             // it before prediction so an infeasible singleton cannot turn the
             // worker loop into a tight predict/release-fail spin.
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
+            return awaitPrefillKvCapacity(
+                    ctx, observedHead,
+                    observedState.queueVersion(),
+                    observedState.schedulingInputVersion());
         }
 
-        // Capture version + ordered identities together under queueLock. This
-        // is the decision's linearization point: a later offer belongs to the
-        // next decision, while removal of any picked member makes atomic stage
-        // reject the whole group. Prediction runs without holding queueLock.
+        // Capture ordered identities under queueLock. This is the selection
+        // linearization point: a later insertion belongs to the next decision,
+        // while removal of a member that would enter the admitted prefix makes
+        // capacity admission reject that prefix. Prediction runs unlocked.
         BatcherContext.ActiveQueueSnapshot snapshot = ctx.snapshotActiveQueue(batchMaxCount);
         BatchItem head = snapshot.head();
         if (head == null) {
-            return;
+            return BatcherCycleResult.Outcome.NO_ACTION;
         }
 
         // Live config/resources may have changed since the advisory pre-gate.
@@ -139,14 +142,13 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         fixedWaitMs = ctx.collectionWindowMs();
         batchMaxCount = ctx.maxDecisionRequests();
         predictThresholdMs = ctx.predictedExecutionBudgetMs();
-        strictPredictionLimit = ctx.usesStrictPredictedExecutionLimit();
         batchMaxTokens = ctx.batchTokenCapacity();
         if (head.ctx().requestExpired(nowMs)) {
             Logger.debug("flexlb_batch_drop request_id={} reason=request_expired "
                             + "expires_at_ms={} now_ms={}",
                     head.requestId(), head.ctx().getRequestExpiresAtMs(), nowMs);
             ctx.dropHead(head);
-            return;
+            return BatcherCycleResult.Outcome.QUEUE_CHANGED;
         }
         BatchItem expiredMember = firstExpiredMember(
                 snapshot.items(), batchMaxCount, nowMs);
@@ -156,24 +158,22 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                     expiredMember.requestId(),
                     expiredMember.ctx().getRequestExpiresAtMs(), nowMs);
             ctx.dropHead(expiredMember);
-            return;
+            return BatcherCycleResult.Outcome.QUEUE_CHANGED;
         }
         BatchShape headShape = BatchShape.empty().add(head);
         if (!headShape.fitsCompute(batchMaxTokens)) {
             ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
-            return;
-        }
-        if (deliveryCapacityBlocked(ctx, head)) {
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
+            return BatcherCycleResult.Outcome.QUEUE_CHANGED;
         }
 
         PrefillTimePredictor predictor = predictThresholdMs > 0
                 ? ctx.prefillEp().getPredictor() : null;
         batchKvTokens = ctx.batchKvCapacity();
         if (!headShape.fitsKv(batchKvTokens)) {
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
+            return awaitPrefillKvCapacity(
+                    ctx, head,
+                    snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion());
         }
         long predictorGeneration = predictor == null ? 0L : predictor.generation();
 
@@ -182,13 +182,13 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // queue state and fill from another.
         FixedPick pick = pickWithinCapacity(
                 snapshot, batchMaxCount, batchMaxTokens, batchKvTokens,
-                predictor, predictThresholdMs, strictPredictionLimit);
+                predictor, predictThresholdMs);
         List<BatchItem> candidates = pick.items();
         if (predictor != null && predictor.generation() != predictorGeneration) {
             // Do not publish a decision made against a model revision that was
             // replaced while the formula was being evaluated. The next worker
             // tick retries against the new immutable parameters.
-            return;
+            return BatcherCycleResult.Outcome.NO_ACTION;
         }
         // Prediction is deliberately outside queueLock and may be slower than
         // the remaining collection window. Use a fresh clock read so a window
@@ -199,13 +199,13 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // Dispatch once growth stopped at a bound that will not relax on its
         // own — the predicted execution boundary, or the feasible group itself
         // reaching batchMaxCount — or once the collection window has run
-        // out and there is nothing left to wait for. A live configuration
-        // transition may leave the other delivery mode behind the head; it must
+        // out and there is nothing left to wait for. Requests admitted under
+        // different captured delivery modes may share a queue; the other mode must
         // neither join this group nor make it appear full. Transient compute/KV
         // pressure can also limit growth, and until the window elapses the
         // queue-order behavior is to wait rather than bypass members.
         String reason = null;
-        if (pick.predictedTimeCapped()) {
+        if (pick.predictionBoundaryTriggered()) {
             reason = "predicted_execution_cap";
         } else if (candidates.size() >= batchMaxCount) {
             reason = "batch_full";
@@ -213,14 +213,15 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             reason = "fixed_window_timeout";
         }
         if (reason != null) {
-            if (!releaseDecisionGroup(ctx, candidates, pick.shape(), reason,
-                    predictor, predictorGeneration, pick.queueVersion())) {
-                TimeUnit.MILLISECONDS.sleep(1);
-            }
-            return;
+            return admitDecisionGroup(ctx, candidates, pick.shape(), reason,
+                    predictor, predictorGeneration);
         }
 
-        TimeUnit.MILLISECONDS.sleep(1);
+        return awaitCollectionWindow(
+                ctx, head,
+                snapshot.queueVersion(),
+                snapshot.schedulingInputVersion(),
+                pick.windowOpenedAtMs(), fixedWaitMs);
     }
 
     /**
@@ -240,15 +241,36 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                 && nowMs - windowOpenedAtMs >= fixedWaitMs;
     }
 
-    private static boolean deliveryCapacityBlocked(BatcherContext ctx,
-                                                    BatchItem head) {
-        if (head.deliveryMode() == DeliveryMode.ROUTE_DECISION) {
-            return ctx.availableDeliverySlots() == 0;
-        }
-        int maxInflightBatches = ctx.maxInflightBatches();
-        return maxInflightBatches > 0
-                && ctx.prefillEp().getInflightBatchCount()
-                >= maxInflightBatches;
+    private static BatcherCycleResult awaitCollectionWindow(
+            BatcherContext ctx,
+            BatchItem head,
+            long queueVersion,
+            long schedulingInputVersion,
+            long windowOpenedAtMs,
+            long collectionWindowMs) {
+        long collectionDeadline = saturatingAdd(
+                windowOpenedAtMs, Math.max(0L, collectionWindowMs));
+        long wakeAtMs = Math.min(
+                collectionDeadline, head.ctx().getRequestExpiresAtMs());
+        return ctx.awaitingSchedulingChange(
+                head, queueVersion, schedulingInputVersion, wakeAtMs,
+                BatcherCycleResult.SchedulingWaitReason.COLLECTION_WINDOW);
+    }
+
+    private static BatcherCycleResult awaitPrefillKvCapacity(
+            BatcherContext ctx,
+            BatchItem head,
+            long queueVersion,
+            long schedulingInputVersion) {
+        return ctx.awaitingSchedulingChange(
+                head, queueVersion, schedulingInputVersion,
+                head.ctx().getRequestExpiresAtMs(),
+                BatcherCycleResult.SchedulingWaitReason.PREFILL_KV_CAPACITY);
+    }
+
+    private static long saturatingAdd(long left, long right) {
+        return right > 0L && left > Long.MAX_VALUE - right
+                ? Long.MAX_VALUE : left + right;
     }
 
     // ==================== Internal helpers ====================
@@ -256,13 +278,14 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     /**
      * Greedily pick up to {@code maxCount} items in the current queue order
      * while keeping the batch inside the Engine's compute and KV resource shape
-     * and, when a predictor is supplied, below {@code predictThresholdMs} of
-     * predicted execution time.
+     * and, when a predictor is supplied, at or below
+     * {@code predictThresholdMs} of predicted execution time.
      *
      * <p>The queue head remains the mandatory first member while shaping, so a
      * request whose own predicted execution already reaches the active boundary
      * forms the whole batch. Temporary KV pressure prevents adding more members. The
-     * complete picked shape is revalidated immediately before staging, so even a
+     * complete picked shape is revalidated immediately before hard-capacity
+     * admission, so even a
      * singleton waits rather than being published against a newly insufficient
      * budget.
      *
@@ -275,8 +298,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             long batchMaxTokens,
             long batchKvTokens,
             PrefillTimePredictor predictor,
-            long predictThresholdMs,
-            boolean strictPredictionLimit) {
+            long predictThresholdMs) {
         List<BatchItem> orderedItems = snapshot.items();
         BatchItem head = orderedItems.get(0);
         List<BatchItem> picked = new ArrayList<>(
@@ -286,11 +308,12 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long windowOpenedAtMs = head.enqueuedAtMs();
         int modePrefixSize = 1;
         boolean capacityOpen = true;
-        boolean predictedTimeCapped = predictor != null
-                && predictionBoundaryReached(
-                predictor.predictBatchMs(picked), predictThresholdMs,
-                strictPredictionLimit);
-        for (int index = 1; index < orderedItems.size() && !predictedTimeCapped; index++) {
+        boolean predictionBoundaryTriggered = predictor != null
+                && predictionDispatchBoundaryReached(
+                predictor.predictBatchMs(picked), predictThresholdMs);
+        for (int index = 1;
+             index < orderedItems.size() && !predictionBoundaryTriggered;
+             index++) {
             BatchItem item = orderedItems.get(index);
             if (item.deliveryMode() != head.deliveryMode()) {
                 break;
@@ -314,28 +337,41 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             picked.add(item);
             if (predictor != null) {
                 double predictedMs = predictor.predictBatchMs(picked);
-                if (predictionBoundaryReached(
-                        predictedMs, predictThresholdMs, strictPredictionLimit)) {
-                    predictedTimeCapped = true;
+                if (predictionGrowthLimitExceeded(predictedMs, predictThresholdMs)) {
+                    predictionBoundaryTriggered = true;
                     // The head is indivisible, but every additional member that
-                    // reaches the active boundary stays queued for the next
-                    // group. Legacy earlyDispatch uses >=; the explicit strict
-                    // maximum uses >, so equality is allowed only there.
+                    // exceeds the maximum stays queued for the next group.
                     picked.remove(picked.size() - 1);
+                    break;
+                }
+                if (predictionDispatchBoundaryReached(
+                        predictedMs, predictThresholdMs)) {
+                    // Equality is valid for the inclusive maximum, and
+                    // reaching that maximum is also an early-dispatch trigger:
+                    // retain the member that fits exactly and do not spend the
+                    // rest of the collection window waiting for another one.
+                    shape = candidate;
+                    windowOpenedAtMs = Math.min(
+                            windowOpenedAtMs, item.enqueuedAtMs());
+                    predictionBoundaryTriggered = true;
                     break;
                 }
             }
             shape = candidate;
             windowOpenedAtMs = Math.min(windowOpenedAtMs, item.enqueuedAtMs());
         }
-        return new FixedPick(picked, shape,
-                snapshot.queueVersion(), windowOpenedAtMs, predictedTimeCapped);
+        return new FixedPick(picked, shape, windowOpenedAtMs,
+                predictionBoundaryTriggered);
     }
 
-    private static boolean predictionBoundaryReached(double predictedMs,
-                                                      long thresholdMs,
-                                                      boolean strictLimit) {
-        return strictLimit ? predictedMs > thresholdMs : predictedMs >= thresholdMs;
+    private static boolean predictionGrowthLimitExceeded(double predictedMs,
+                                                         long thresholdMs) {
+        return predictedMs > thresholdMs;
+    }
+
+    private static boolean predictionDispatchBoundaryReached(double predictedMs,
+                                                             long thresholdMs) {
+        return predictedMs >= thresholdMs;
     }
 
     private static BatchItem firstExpiredMember(List<BatchItem> orderedItems,
@@ -353,59 +389,56 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     private record FixedPick(List<BatchItem> items,
                              BatchShape shape,
-                             long queueVersion,
                              long windowOpenedAtMs,
-                             boolean predictedTimeCapped) {
+                             boolean predictionBoundaryTriggered) {
     }
 
-    private static boolean releaseDecisionGroup(BatcherContext ctx,
-                                                List<BatchItem> picked,
-                                                BatchShape shape,
-                                                String reason,
-                                                PrefillTimePredictor predictor,
-                                                long expectedPredictorGeneration,
-                                                long expectedQueueVersion) {
+    private static BatcherCycleResult admitDecisionGroup(
+            BatcherContext ctx,
+            List<BatchItem> picked,
+            BatchShape shape,
+            String reason,
+            PrefillTimePredictor predictor,
+            long expectedPredictorGeneration) {
         BatchItem head = picked.get(0);
-        // WorkerStatus resource counters can change independently of the
-        // queue version while prediction is running. Re-check the exact shape
-        // immediately before the version-atomic stage; a later tick will
-        // rebuild P against the new capacities.
+        // WorkerStatus resource counters can change while prediction is
+        // running. Re-check the exact shape immediately before capacity
+        // admission; a later tick rebuilds the candidates against new values.
         if (!shape.fitsCompute(ctx.batchTokenCapacity())
                 || !shape.fitsKv(ctx.batchKvCapacity())) {
-            return false;
-        }
-        if (deliveryCapacityBlocked(ctx, head)) {
-            return false;
+            return BatcherCycleResult.Outcome.NO_ACTION;
         }
         // LearningPredictor publishes immutable weights under a generation.
-        // Recheck identity and generation after all resource gates and as
-        // close as possible to the version-atomic stage. A revision that lands
-        // after prediction must never publish metadata from the older model.
+        // Recheck identity and generation after all resource gates. A revision
+        // that lands after prediction must not publish the older candidates.
         if (predictor != null
                 && (ctx.prefillEp().getPredictor() != predictor
                 || predictor.generation() != expectedPredictorGeneration)) {
-            return false;
+            return BatcherCycleResult.Outcome.NO_ACTION;
         }
         long waitMs = ctx.now() - head.enqueuedAtMs();
         int queueBefore = ctx.size();
         int queueDepth = queueBefore - picked.size();
         DecisionGroupMetadata metadata =
                 new DecisionGroupMetadata(reason, queueDepth);
-        if (!ctx.stageDecisionGroupIfVersion(
-                picked, metadata, expectedQueueVersion,
-                predictor, expectedPredictorGeneration)) {
-            return false;
+        BatcherCycleResult result = ctx.admitAndDeliverCapacityFeasiblePrefix(
+                picked, metadata, predictor, expectedPredictorGeneration);
+        if (!(result instanceof BatcherCycleResult.Admitted admitted)) {
+            return result;
         }
 
+        List<BatchItem> admittedItems = admitted.items();
+        String admittedReason = admitted.metadata().reason();
         if (head.deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
-            reportBatchDecision(ctx, picked, reason, waitMs, queueBefore);
+            reportBatchDecision(
+                    ctx, admittedItems, admittedReason, waitMs, queueBefore);
         } else {
             Logger.debug("flexlb_route_decision reason={} picked_size={} "
                             + "wait_ms={} queue_before={} worker={} head_req_id={}",
-                    reason, picked.size(), waitMs, queueBefore,
+                    admittedReason, admittedItems.size(), waitMs, queueBefore,
                     ctx.key(), head.requestId());
         }
-        return true;
+        return result;
     }
 
     private static void reportBatchDecision(BatcherContext ctx,
@@ -414,18 +447,27 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                                             long waitMs,
                                             int queueBefore) {
         BatchItem head = picked.get(0);
-        ctx.reporter().reportDispatchReason(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason);
-        ctx.reporter().reportBatchSize(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, picked.size());
+        try {
+            String role = RoleType.PREFILL.name();
+            String worker = ctx.prefillEp().getIp();
+            ctx.reporter().reportDispatchReason(role, worker, reason);
+            ctx.reporter().reportBatchSize(
+                    role, worker, reason, picked.size());
 
-        // Compute batch-aggregated cache hit ratio
-        long totalSeqLen = 0;
-        long totalHitCache = 0;
-        for (BatchItem item : picked) {
-            totalSeqLen += item.seqLen();
-            totalHitCache += item.hitCache();
+            long totalSeqLen = 0;
+            long totalHitCache = 0;
+            for (BatchItem item : picked) {
+                totalSeqLen += item.seqLen();
+                totalHitCache += item.hitCache();
+            }
+            ctx.reporter().reportBatchCacheHitMetrics(
+                    role, worker, totalHitCache, totalSeqLen);
+            ctx.reporter().reportBatchTotalTokens(
+                    role, worker, reason, totalSeqLen);
+        } catch (Throwable telemetryFailure) {
+            Logger.error("Batch decision telemetry failed worker={} head_req_id={}",
+                    ctx.key(), head.requestId(), telemetryFailure);
         }
-        ctx.reporter().reportBatchCacheHitMetrics(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), totalHitCache, totalSeqLen);
-        ctx.reporter().reportBatchTotalTokens(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, totalSeqLen);
 
         Logger.debug("flexlb_batch_decision reason={} picked_size={} "
                         + "wait_ms={} queue_before={} worker={} head_req_id={}",

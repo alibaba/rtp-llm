@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -400,7 +401,7 @@ class ShortestTtftCacheAffinityTest {
                 RoleType.PREFILL, ip + ":8080", worker);
         if (estimatedWaitMs > 0) {
             long batchId = 900000L + ip.hashCode();
-            endpoint.commitBatch(
+            TestCapacityAdmission.registerQueueBatchLifecycle(endpoint,
                     batchId,
                     estimatedWaitMs,
                     List.of(batchItem(batchId, estimatedWaitMs)));

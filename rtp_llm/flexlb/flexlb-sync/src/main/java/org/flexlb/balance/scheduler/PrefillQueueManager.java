@@ -11,8 +11,8 @@ import java.util.List;
  *
  * <p>One instance per prefill endpoint, created by the batcher itself. It does
  * not own any state: every operation delegates to the batcher/context so the
- * active queue plus ready-delivery backlog stay the single source of truth
- * and every mutation goes through the shared queue lock.
+ * active queue stays the single source of truth and every mutation goes through
+ * the shared queue lock.
  *
  * <p>Snapshots capture removable identities under the queue lock. The hot wait
  * probe uses a versioned primitive priority histogram and therefore retains no
@@ -42,15 +42,15 @@ public final class PrefillQueueManager {
     /**
      * Consistent point-in-time view of the queue for eviction planning:
      * version + per-item {@link QueuedRequestSnapshot} in queue order.
-     * The hard capacity comes from the active scheduler/dispatcher variants.
+     * The hard capacity comes from the QUEUE scheduler's capacity policy.
      */
     public PrefillQueueSnapshot snapshot() {
         ctx.queueLock().lock();
         try {
             // Only live queue members are actionable eviction victims. A
-            // staged callback member remains capacity-charged, but is no
+            // callback-owned member remains capacity-charged, but is no
             // longer an actionable queue victim.
-            List<BatchItem> queued = ctx.sortedQueuedItems();
+            List<BatchItem> queued = ctx.activeItemsInSchedulingOrder();
             List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
             for (BatchItem item : queued) {
                 items.add(new QueuedRequestSnapshot(

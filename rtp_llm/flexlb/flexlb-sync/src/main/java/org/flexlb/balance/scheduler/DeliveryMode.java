@@ -1,25 +1,26 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.config.FlexlbConfig;
 
 /**
  * Immutable delivery choice captured when a request enters the priority scheduler.
  *
- * <p>Scheduling decides <em>when</em> a group is ready. Delivery decides whether
- * the master sends that group through {@code EnqueueBatch}, or publishes each
- * route decision so the frontend can send the request. Keeping this choice on
- * {@link BatchItem} prevents a live configuration update from changing the
- * ownership protocol of an already admitted request.
+ * <p>The decision policy proposes an ordered candidate group. Capacity
+ * admission turns a feasible prefix into the final group, and this value
+ * determines whether the master sends that group through {@code EnqueueBatch}
+ * or publishes route decisions for the frontend. Keeping the choice on
+ * {@link BatchItem} prevents a live config mutation from changing the ownership
+ * protocol of work already in the queue.
  */
 enum DeliveryMode {
     BATCH_ENQUEUE,
     ROUTE_DECISION;
 
-    static DeliveryMode from(BalanceContext context) {
-        if (context == null || context.getConfig() == null) {
+    static DeliveryMode from(FlexlbConfig config) {
+        if (config == null) {
             throw new IllegalStateException("request dispatcher configuration is unavailable");
         }
-        return context.getConfig().isBatchDispatch()
+        return config.isBatchDispatch()
                 ? BATCH_ENQUEUE
                 : ROUTE_DECISION;
     }

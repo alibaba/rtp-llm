@@ -23,7 +23,10 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -71,7 +74,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
         assertEquals(1, callback.successCount.get());
@@ -86,7 +89,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("gRPC connection refused")));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
 
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS),
                 "post-send transport error must be reconciled");
@@ -103,7 +106,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
 
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.uncertainCount.get());
@@ -116,7 +119,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
                 .thenReturn(null);
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test", callback);
 
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.uncertainCount.get());
@@ -133,7 +136,7 @@ class DefaultBatchDispatcherTest {
                         .addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder().setRequestId(8L))
                         .build()));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 88L,
+        submit(List.of(item), prefillEp, 88L,
                 100, "batch_id_mismatch", callback);
 
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
@@ -142,43 +145,43 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void dispatchHandlesRejectedExecutionAfterShutdown() {
+    void shutdownRejectsNewReservationsWithoutInvokingRequestCallbacks() {
         dispatcher.shutdown();
 
-        PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
-
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
-
-        // Should fail synchronously when executor is shut down
-        assertEquals(1, callback.failureCount.get());
+        assertInstanceOf(BatchDispatcher.SubmissionAdmissionFailed.class,
+                dispatcher.tryReserveSubmission());
+        assertEquals(0, callback.failureCount.get());
+        assertEquals(0, callback.successCount.get());
+        assertEquals(0, callback.uncertainCount.get());
     }
 
     @Test
-    void executorRejectionIsolatesFailureCallbacksForEveryItem() {
+    void shutdownWakesCapacityWaiterAndNextReservationReturnsAdmissionFailure()
+            throws Exception {
         dispatcher.shutdown();
-        PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem first = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem second = createBatchItem(2L, 500, 200, prefillEp);
-        AtomicInteger attempts = new AtomicInteger();
-        DispatchCallback throwingCallback = new DispatchCallback() {
-            @Override
-            public void onSuccess(BatchItem item, long batchId) {
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        BatchDispatcher.SubmissionPermit running = reservePermit();
+        BatchDispatcher.SubmissionPermit queued = reservePermit();
+        BatchDispatcher.SubmissionCapacityUnavailable unavailable = assertInstanceOf(
+                BatchDispatcher.SubmissionCapacityUnavailable.class,
+                dispatcher.tryReserveSubmission());
+        assertFalse(unavailable.availability().isAvailable());
+        CountDownLatch capacityChanged = new CountDownLatch(1);
+        unavailable.availability().addListener(() -> {
+            if (unavailable.availability().isAvailable()) {
+                capacityChanged.countDown();
             }
+        });
 
-            @Override
-            public void onFailure(BatchItem item, Throwable error) {
-                if (attempts.incrementAndGet() == 1) {
-                    throw new IllegalStateException("first callback failed");
-                }
-            }
-        };
+        dispatcher.shutdown();
 
-        dispatcher.dispatch(List.of(first, second), prefillEp,
-                1L, 100, "executor_rejected", throwingCallback);
-
-        assertEquals(2, attempts.get(), "one broken callback must not suppress later items");
-        verify(prefillEp, times(1)).releaseBatch(1L);
+        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS));
+        assertTrue(unavailable.availability().isAvailable(),
+                "shutdown is a state transition which wakes admission waiters");
+        assertInstanceOf(BatchDispatcher.SubmissionAdmissionFailed.class,
+                dispatcher.tryReserveSubmission());
+        running.release();
+        queued.release();
     }
 
     @Test
@@ -211,7 +214,7 @@ class DefaultBatchDispatcherTest {
             }
         };
 
-        dispatcher.dispatch(List.of(first, second), prefillEp,
+        submit(List.of(first, second), prefillEp,
                 2L, 100, "pre_send_failure", throwingCallback);
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
@@ -251,7 +254,7 @@ class DefaultBatchDispatcherTest {
             }
         };
 
-        dispatcher.dispatch(List.of(first, second), prefillEp,
+        submit(List.of(first, second), prefillEp,
                 3L, 100, "post_boundary_throw", throwingCallback);
 
         assertTrue(attempted.await(5, TimeUnit.SECONDS));
@@ -272,7 +275,7 @@ class DefaultBatchDispatcherTest {
                     return rpcFuture;
                 });
 
-        dispatcher.dispatch(List.of(item), prefillEp,
+        submit(List.of(item), prefillEp,
                 4L, 100, "completion_rejected", callback);
         assertTrue(invoked.await(5, TimeUnit.SECONDS));
         dispatcher.shutdown();
@@ -304,7 +307,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test", callback);
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
@@ -325,7 +328,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test", callback);
 
         assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.uncertainCount.get());
@@ -377,7 +380,7 @@ class DefaultBatchDispatcherTest {
             }
         };
 
-        dispatcher.dispatch(List.of(succeeded, rejected), prefillEp,
+        submit(List.of(succeeded, rejected), prefillEp,
                 91L, 100, "callback_isolation", throwingCallback);
 
         assertTrue(callbacksAttempted.await(5, TimeUnit.SECONDS));
@@ -388,29 +391,98 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void shutdownDrainsExecutor() throws Exception {
+    void permitReservedBeforeShutdownCanStillBeSubmitted() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-
-        // Submit tasks so executor has work in flight
-        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch rpcInvoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenAnswer(inv -> {
-                    started.countDown();
+                .thenAnswer(invocation -> {
+                    rpcInvoked.countDown();
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                 });
 
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        BatchDispatcher.SubmissionPermit permit = reservePermit();
 
-        // Wait for at least one task to start, then shutdown
-        assertTrue(started.await(5, TimeUnit.SECONDS));
         dispatcher.shutdown();
+        assertDoesNotThrow(() -> permit.submit(
+                List.of(item), prefillEp, 1L, 100, "accepted_before_shutdown", callback));
 
-        // Post-shutdown dispatch should be rejected immediately
-        int failuresBefore = callback.failureCount.get();
-        BatchItem extra = createBatchItem(99L, 500, 200, prefillEp);
-        dispatcher.dispatch(List.of(extra), prefillEp, 99L, 100, "test", callback);
-        assertEquals(failuresBefore + 1, callback.failureCount.get(), "Post-shutdown dispatch should add exactly 1 failure");
+        assertTrue(rpcInvoked.await(5, TimeUnit.SECONDS),
+                "the task accepted before shutdown must still invoke the RPC");
+        assertEquals(0, callback.failureCount.get());
+        assertInstanceOf(BatchDispatcher.SubmissionAdmissionFailed.class,
+                dispatcher.tryReserveSubmission());
+    }
+
+    @Test
+    void boundedExecutorReportsUnavailableAndQueuedPermitReleaseRestoresCapacity()
+            throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        BatchDispatcher.SubmissionPermit running = reservePermit();
+        BatchDispatcher.SubmissionPermit queued = reservePermit();
+        BatchDispatcher.SubmissionCapacityUnavailable unavailable = assertInstanceOf(
+                BatchDispatcher.SubmissionCapacityUnavailable.class,
+                dispatcher.tryReserveSubmission());
+        assertFalse(unavailable.availability().isAvailable());
+        CountDownLatch capacityChanged = new CountDownLatch(1);
+        unavailable.availability().addListener(() -> {
+            if (unavailable.availability().isAvailable()) {
+                capacityChanged.countDown();
+            }
+        });
+
+        queued.release();
+
+        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS));
+        assertTrue(unavailable.availability().isAvailable());
+        BatchDispatcher.SubmissionPermit replacement = reservePermit();
+        running.release();
+        replacement.release();
+    }
+
+    @Test
+    void runningReservedPermitReleaseSignalsAndRestoresCapacity() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        BatchDispatcher.SubmissionPermit running = reservePermit();
+        BatchDispatcher.SubmissionPermit queued = reservePermit();
+        BatchDispatcher.SubmissionCapacityUnavailable unavailable = assertInstanceOf(
+                BatchDispatcher.SubmissionCapacityUnavailable.class,
+                dispatcher.tryReserveSubmission());
+        assertFalse(unavailable.availability().isAvailable());
+        Object capacityMonitor = new Object();
+        unavailable.availability().addListener(() -> {
+            synchronized (capacityMonitor) {
+                capacityMonitor.notifyAll();
+            }
+        });
+
+        running.release();
+
+        awaitAvailable(unavailable.availability(), capacityMonitor);
+        assertTrue(unavailable.availability().isAvailable());
+        BatchDispatcher.SubmissionPermit replacement = reservePermit();
+        queued.release();
+        replacement.release();
+    }
+
+    @Test
+    void submittingAcceptedPermitsDoesNotPerformAnotherExecutorAdmission() {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        PrefillEndpoint endpoint = createPrefillEndpoint();
+        BatchItem firstItem = createBatchItem(1L, 500, 200, endpoint);
+        BatchItem secondItem = createBatchItem(2L, 500, 200, endpoint);
+        BatchDispatcher.SubmissionPermit running = reservePermit();
+        BatchDispatcher.SubmissionPermit queued = reservePermit();
+        assertInstanceOf(BatchDispatcher.SubmissionCapacityUnavailable.class,
+                dispatcher.tryReserveSubmission());
+
+        assertDoesNotThrow(() -> running.submit(
+                List.of(firstItem), endpoint, 1L, 100, "already_accepted", callback));
+        assertDoesNotThrow(() -> queued.submit(
+                List.of(secondItem), endpoint, 2L, 100, "already_accepted", callback));
     }
 
     // ---- task40: priority passthrough to GenerateInputPB ----
@@ -428,7 +500,7 @@ class DefaultBatchDispatcherTest {
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                 });
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         assertEquals(60, sentInput(sent.getFirst()).getPriority());
@@ -447,7 +519,7 @@ class DefaultBatchDispatcherTest {
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                 });
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "test", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         assertEquals(0, sentInput(sent.getFirst()).getPriority());
@@ -465,7 +537,7 @@ class DefaultBatchDispatcherTest {
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                 });
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "role_compat", callback);
+        submit(List.of(item), prefillEp, 1L, 100, "role_compat", callback);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
         EngineRpcService.RoleAddrPB addr = sentInput(sent.getFirst())
@@ -480,6 +552,36 @@ class DefaultBatchDispatcherTest {
     }
 
     // ---- helpers ----
+
+    private BatchDispatcher.SubmissionPermit reservePermit() {
+        return assertInstanceOf(BatchDispatcher.SubmissionReserved.class,
+                dispatcher.tryReserveSubmission()).permit();
+    }
+
+    private void submit(List<BatchItem> items,
+                        PrefillEndpoint prefillEndpoint,
+                        long batchId,
+                        long predictedMs,
+                        String reason,
+                        DispatchCallback dispatchCallback) {
+        reservePermit().submit(
+                items, prefillEndpoint, batchId, predictedMs, reason, dispatchCallback);
+    }
+
+    private static void awaitAvailable(
+            DeliveryCapacityAdmission.CapacityAvailability availability,
+            Object capacityMonitor) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        synchronized (capacityMonitor) {
+            while (!availability.isAvailable()) {
+                long remainingNanos = deadlineNanos - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    throw new AssertionError("dispatcher capacity did not become available");
+                }
+                TimeUnit.NANOSECONDS.timedWait(capacityMonitor, remainingNanos);
+            }
+        }
+    }
 
     private PrefillEndpoint createPrefillEndpoint() {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);

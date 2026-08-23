@@ -86,11 +86,11 @@ class PriorityEvictionSchedulerTest {
         config = new FlexlbConfig();
         // Large batch + window + SLO keep queued items parked (no dispatch),
         // so eviction races with neither dispatch nor expiry.
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(1);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         // Route reserves the decode (D reserve first), like production Router
@@ -175,11 +175,11 @@ class PriorityEvictionSchedulerTest {
 
         // Admit two victims, then lower the live hard limit so the next
         // request must atomically replace both of them.
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(2);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(2);
         CompletableFuture<Response> firstVictim = scheduler.submit(context(3, 20));
         CompletableFuture<Response> secondVictim = scheduler.submit(context(4, 30));
         await(() -> batcher.queueSize() == 2);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(1);
 
         doThrow(new IllegalStateException("victim metrics unavailable"))
                 .doNothing()

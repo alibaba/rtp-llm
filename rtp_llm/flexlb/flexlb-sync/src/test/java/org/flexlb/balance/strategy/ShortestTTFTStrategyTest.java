@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
@@ -189,7 +190,7 @@ class ShortestTTFTStrategyTest {
 
         strategy.rollBack(mockEp, requestId);
 
-        Mockito.verify(mockEp).releaseBatch(requestId);
+        Mockito.verify(mockEp).releaseRequest(requestId);
     }
 
     @Test
@@ -222,7 +223,9 @@ class ShortestTTFTStrategyTest {
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
-        assertEquals(2, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
+        assertEquals(2, endpoint.getLocallyOwnedRequestCount());
         assertTrue(endpoint.realWaitTimeMs() < 2000L);
     }
 
@@ -342,7 +345,7 @@ class ShortestTTFTStrategyTest {
         PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
-            ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
+            TestCapacityAdmission.registerQueueBatchLifecycle(ep, 900000L + ip.hashCode(), estimatedWaitMs,
                     List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
         }
         return w;

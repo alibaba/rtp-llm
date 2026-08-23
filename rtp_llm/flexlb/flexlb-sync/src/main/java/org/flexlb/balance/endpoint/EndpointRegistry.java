@@ -199,7 +199,9 @@ public class EndpointRegistry {
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
-        return new PrefillEndpoint(status, config, priorityScheduler(), reporter);
+        PriorityScheduler scheduler = priorityScheduler();
+        return new PrefillEndpoint(
+                status, config, scheduler, scheduler, reporter);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {

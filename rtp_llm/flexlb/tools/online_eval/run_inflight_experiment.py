@@ -50,18 +50,23 @@ PREFILL_EXECUTION_TIME_EXPRESSION = (
 
 DEFAULT_FLEXLB_CONFIG = json.dumps(
     {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "scheduler": {
             "type": "QUEUE",
             "ordering": {"type": "PRIORITY", "defaultPriority": 50},
-            "capacity": {"maxOutstandingRequestsGlobal": 1000000},
+            "decision": {
+                "type": "FIXED_WINDOW",
+                "maxRequests": 32,
+                "maxCollectionWaitMs": 220,
+                "maxPredictedExecutionMs": 550,
+            },
+            "capacity": {
+                "maxOutstandingRequestsGlobal": 1000000,
+                "maxWaitingRequestsPerPrefillWorker": 1024,
+            },
         },
         "dispatcher": {
             "type": "BATCH",
-            "maxRequests": 32,
-            "maxCollectionWaitMs": 220,
-            "maxWaitingRequestsPerPrefillWorker": 1024,
-            "earlyDispatchPredictedExecutionMs": 550,
             "maxInflightBatchesPerPrefillWorker": 2,
             "enqueueRpcTimeoutMs": 5000,
         },

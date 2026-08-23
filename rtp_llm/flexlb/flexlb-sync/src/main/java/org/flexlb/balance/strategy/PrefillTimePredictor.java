@@ -13,8 +13,8 @@ import org.flexlb.balance.scheduler.BatchItem;
  *   <li>{@link #predictBatchMs(List)} — batch prediction with aggregation</li>
  * </ul>
  *
- * <p>An optional {@link #learn(List, long, long)} callback is invoked on each batch
- * completion to feed back the actual-vs-predicted timing.
+ * <p>{@link #learn(PrefillBatchFeatures, long, long)} is invoked on each
+ * eligible batch completion to feed back the actual-vs-predicted timing.
  */
 public interface PrefillTimePredictor {
 
@@ -46,8 +46,16 @@ public interface PrefillTimePredictor {
      */
     double predictBatchMs(List<BatchItem> items);
 
+    enum LearningResult {
+        MODEL_UNCHANGED,
+        MODEL_UPDATED
+    }
+
     /**
      * Payload-free learning entry point used by long-lived inflight accounting.
+     * The result is the publication boundary for scheduling: callers must wake
+     * decisions exactly when this call publishes a new model generation.
      */
-    void learn(PrefillBatchFeatures features, long predictedMs, long actualMs);
+    LearningResult learn(
+            PrefillBatchFeatures features, long predictedMs, long actualMs);
 }

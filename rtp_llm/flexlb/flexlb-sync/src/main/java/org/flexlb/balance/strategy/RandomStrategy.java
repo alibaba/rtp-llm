@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
@@ -47,6 +48,8 @@ public class RandomStrategy implements LoadBalanceStrategy {
             Logger.debug("Random decode rollBack - ip: {}, requestId: {}",
                     decodeEndpoint.ipPort(), requestId);
             decodeEndpoint.release(requestId);
+        } else if (ep instanceof PrefillEndpoint prefillEndpoint) {
+            prefillEndpoint.releaseRequest(requestId);
         }
     }
 
@@ -123,6 +126,19 @@ public class RandomStrategy implements LoadBalanceStrategy {
                         expectedKvTokens, balanceContext.getPriority());
             }
             result.setSuccess(true);
+            if (roleType == RoleType.PREFILL && !config.isQueue()) {
+                if (!(ep instanceof PrefillEndpoint prefillEndpoint)) {
+                    throw new IllegalStateException(
+                            "PREFILL random selection requires PrefillEndpoint ownership");
+                }
+                long predictedMs = Math.max(0L,
+                        prefillEndpoint.getPredictor().estimateMs(
+                                balanceContext.getRequest().getSeqLen(), 0));
+                // Final fallible side effect: after this succeeds, DIRECT
+                // accounting belongs to this endpoint generation until terminal
+                // status, partial-route rollback, or generation retirement.
+                prefillEndpoint.registerDirectRequest(requestId, predictedMs);
+            }
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
             result.setSuccess(false);

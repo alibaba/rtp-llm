@@ -1,8 +1,11 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.DecisionGroupHandler;
+import org.flexlb.balance.scheduler.AdmittedDecisionGroup;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DecisionGroupMetadata;
+import org.flexlb.balance.scheduler.DeliveryCapacityAdmission;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.PriorityOrderingConfig;
@@ -20,6 +23,9 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -30,17 +36,69 @@ class PrefillRequestCapacityWakeTest {
     @Test
     void releasingRequestSlotWakesCapacityBlockedActiveRequest() throws Exception {
         CountDownLatch delivered = new CountDownLatch(1);
+        AtomicInteger deliveryCount = new AtomicInteger();
+        AtomicBoolean capacityReservedBeforeCallback = new AtomicBoolean();
+        AtomicReference<PrefillEndpoint> endpointRef = new AtomicReference<>();
+        DecisionGroupHandler handler = new DecisionGroupHandler() {
+            @Override public void onExpired(BatchItem head) { }
+            @Override public void onDecisionGroupAdmitted(
+                    AdmittedDecisionGroup group, DecisionGroupMetadata meta) {
+                deliveryCount.incrementAndGet();
+                capacityReservedBeforeCallback.set(
+                        endpointRef.get().availableRequestSlots(1) == 0);
+                TestCapacityAdmission.complete(group);
+                delivered.countDown();
+            }
+            @Override public void onOfferFailure(BatchItem item, Throwable error) { }
+            @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
+        };
+        DeliveryCapacityAdmission capacityAdmission = item -> {
+            PrefillEndpoint.RequestCapacityReservationAcquisition acquisition =
+                    endpointRef.get().acquireRequestCapacityReservation(
+                            item.requestId(), 10, 1);
+            return switch (acquisition.status()) {
+                case CAPACITY_FULL -> new DeliveryCapacityAdmission.CapacityUnavailable(
+                        DeliveryCapacityAdmission.CapacityResource.PREFILL_REQUEST,
+                        () -> endpointRef.get().availableRequestSlots(1) > 0);
+                case REQUEST_ALREADY_TRACKED ->
+                        new DeliveryCapacityAdmission.AdmissionFailed(
+                                new IllegalStateException(
+                                        "request capacity already tracked: "
+                                                + item.requestId()));
+                case ENDPOINT_RETIRED ->
+                        new DeliveryCapacityAdmission.AdmissionFailed(
+                                new EndpointGenerationRetiredException(
+                                        "endpoint generation retired"));
+                case ACQUIRED -> new DeliveryCapacityAdmission.CapacityReserved(
+                        new DeliveryCapacityAdmission.ItemCapacityReservation() {
+                            @Override public BatchItem item() {
+                                return item;
+                            }
+
+                            @Override public boolean transferToEndpointLifecycle() {
+                                if (!acquisition.reservation().prepareForDelivery()) {
+                                    return false;
+                                }
+                                acquisition.reservation().completePreparedDeliveryTransfer();
+                                return true;
+                            }
+
+                            @Override public void completeDeliveryHandoff() {
+                                acquisition.reservation().completeDeliveryHandoff();
+                            }
+
+                            @Override public void release() {
+                                acquisition.reservation().release();
+                            }
+                        });
+            };
+        };
         PrefillEndpoint endpoint = new PrefillEndpoint(
-                workerStatus(), config(), new DecisionGroupHandler() {
-                    @Override public void onExpired(BatchItem head) { }
-                    @Override public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
-                        delivered.countDown();
-                    }
-                    @Override public void onOfferFailure(BatchItem item, Throwable error) { }
-                    @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
-                }, mock(BatchSchedulerReporter.class));
+                workerStatus(), config(), handler, capacityAdmission,
+                mock(BatchSchedulerReporter.class));
+        endpointRef.set(endpoint);
         try {
-            assertTrue(endpoint.tryCommitRequest(1, 10, 1));
+            assertTrue(TestCapacityAdmission.commitRouteRequest(endpoint, 1, 10, 1));
             assertEquals(0, endpoint.availableRequestSlots(1));
 
             long beforeOfferVersion = endpoint.getBatcher().queueVersion();
@@ -49,12 +107,17 @@ class PrefillRequestCapacityWakeTest {
             awaitTrue(() -> endpoint.getBatcher().queueSize() == 1
                     && endpoint.getBatcher().queueVersion() == enqueuedVersion);
             assertEquals(enqueuedVersion, endpoint.getBatcher().queueVersion(),
-                    "capacity-blocked SINGLE request must remain in the active queue");
-            assertEquals(1, delivered.getCount());
+                    "capacity rejection must leave the request ACTIVE");
+            assertEquals(0, deliveryCount.get(),
+                    "capacity wait must not enter the delivery callback");
 
             assertTrue(endpoint.releaseRequest(1));
             assertTrue(delivered.await(2, TimeUnit.SECONDS),
-                    "releaseRequest must signal the ready-only worker after leaving its stripe");
+                    "releaseRequest must wake the active capacity waiter after leaving its stripe");
+            awaitTrue(() -> endpoint.getBatcher().queueSize() == 0);
+            assertEquals(1, deliveryCount.get());
+            assertTrue(capacityReservedBeforeCallback.get(),
+                    "hard request capacity must be reserved before callback entry");
         } finally {
             endpoint.close();
         }

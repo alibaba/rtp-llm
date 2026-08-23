@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointGenerationRetiredException;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
@@ -13,11 +14,9 @@ import org.flexlb.balance.scheduler.priority.InflightRegistrar.PriorityCanceledO
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
-import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FixedWindowDecisionConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -68,16 +67,19 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>Priority decision-group coordination through {@link WorkerBatcher}</li>
  *   <li>Delivery-independent lifecycle and resource ownership</li>
  *   <li>Batch enqueue or caller-owned route-decision delivery</li>
- *   <li>Resource rollback on failure or completion</li>
+ *   <li>Exact reservation release on failure or completion</li>
  * </ul>
  *
  * <p>External exposure is delegated to mode-specific {@link DecisionDelivery}
  * implementations. This class
- * commits endpoint ledgers and lifecycle ownership before a delivery can make
+ * transfers endpoint ledgers and lifecycle ownership before a delivery can make
  * a request visible to either the engine or caller.
  */
 @Component
-public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery.Callback, InflightRegistrar {
+public class PriorityScheduler implements DecisionGroupHandler,
+        DeliveryCapacityAdmission,
+        DecisionDelivery.Callback,
+        InflightRegistrar {
 
     private static final int DEFAULT_COMPLETION_WORKERS = Math.max(
             2, Math.min(8, Runtime.getRuntime().availableProcessors()));
@@ -479,9 +481,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         } else {
                             observeExternalFutureTerminal(entry);
                             ctx.setRouteSubmittedNanos(System.nanoTime());
-                            // Routing already reserved Decode capacity. While the request is
-                            // parked in a Prefill queue, keep that reservation out of the
-                            // engine-facing concurrency count.
+                            // Routing owns a Decode shadow reservation. Mark it queued before
+                            // tryOffer publishes the item so Prefill-queued work remains in the
+                            // placement view without consuming engine-facing hard capacity.
+                            // ACTIVE admission acquires the exact dispatch permit later; every
+                            // local rollback releases the shadow reservation and queued mark.
                             if (decodeEp != null) {
                                 decodeEp.markQueuedPhase(ctx.getRequestId());
                             }
@@ -705,8 +709,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 }
             }
         } else {
-            // Direct/legacy test seams already have an inflight entry and do
-            // not participate in the pre-registration admission race.
+            // Directly registered inflight entries do not participate in the
+            // pre-registration admission race.
             InflightEntry entry = inflight.get(requestId);
             if (entry != null && entry.item.future() == expectedFuture
                     && !expectedFuture.isDone()) {
@@ -1436,15 +1440,17 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private ResponseCompletion settlePriorityEntryLocked(InflightEntry entry, String detail) {
         entry.preemption.state = PreemptionRegistrationState.SETTLED;
         entry.cleanupOwned = true;
-        rollbackOnce(entry);
-        // Priority terminal proofs may omit the original Prefill batch id.
-        // The lifecycle still owns the exact dispatch generation, so retire
-        // its delivery ledger explicitly before publishing the tombstone.
-        releasePrefillAccounting(entry);
         RequestLifecycleSnapshot terminal = entry.lifecycle.cancel(detail);
         ResponseCompletion publication = errorPublicationLocked(
                 entry, StrategyErrorType.PRIORITY_PREEMPTED, detail);
-        finishEntry(entry, terminal);
+        TerminalFinalizer finalizer = new TerminalFinalizer(entry, "priority_preemption");
+        finalizer.run("Decode accounting release", () -> rollbackOnce(entry));
+        // Priority terminal proofs may omit the original Prefill batch id.
+        // The lifecycle still owns the exact dispatch generation, so retire
+        // its delivery ledger explicitly before publishing the tombstone.
+        finalizer.run("Prefill accounting release",
+                () -> releasePrefillAccounting(entry));
+        finalizer.finish(terminal);
         return publication;
     }
 
@@ -1895,7 +1901,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     /** Called with the request entry locked after an authoritative engine terminal. */
     private ResponseCompletion settleCancellationLocked(InflightEntry entry,
                                                         String proof) {
-        releaseLocallyOwnedResources(entry, proof);
         RequestLifecycleSnapshot terminal = settleCancellationLifecycle(
                 entry.lifecycle,
                 entry.cancellationReason,
@@ -1903,7 +1908,10 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         ResponseCompletion publication = errorPublicationLocked(entry,
                 cancelErrorType(entry.cancellationReason,
                         entry.deadlineErrorType), terminal.detail());
-        finishEntry(entry, terminal);
+        TerminalFinalizer finalizer = new TerminalFinalizer(entry, "cancellation");
+        finalizer.run("local endpoint accounting release",
+                () -> releaseLocallyOwnedResources(entry, proof));
+        finalizer.finish(terminal);
         return publication;
     }
 
@@ -2276,29 +2284,35 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                                                             DeferredTerminal terminal) {
         switch (terminal.kind()) {
             case ADMISSION_CLEANUP -> {
-                PrefillEndpoint prefill = entry.item.prefillEp();
-                if (prefill != null) {
-                    prefill.getBatcher().queueManager().tryRemove(
-                            entry.item.requestId(), "LEASE_RELEASE");
-                }
-                rollbackOnce(entry);
-                releasePrefillAccounting(entry);
-                removeInflightGeneration(entry);
+                TerminalFinalizer finalizer = new TerminalFinalizer(
+                        entry, "admission_cleanup");
+                finalizer.run("active queue release", () -> {
+                    PrefillEndpoint prefill = entry.item.prefillEp();
+                    if (prefill != null) {
+                        prefill.getBatcher().queueManager().tryRemove(
+                                entry.item.requestId(), "LEASE_RELEASE");
+                    }
+                });
+                finalizer.run("Decode accounting release", () -> rollbackOnce(entry));
+                finalizer.run("Prefill accounting release",
+                        () -> releasePrefillAccounting(entry));
+                finalizer.detachWithoutTombstone();
                 return null;
             }
             case FAILURE -> {
-                // A failure can escape after priority scheduling registration/offer
-                // (for example from telemetry or timer setup). Remove any
-                // still-queued item before retiring the generation.
-                removeQueuedItem(entry, terminal.detail());
-                rollbackOnce(entry);
-                if (terminal.releasePrefillAccounting()) {
-                    releasePrefillAccounting(entry);
-                }
                 RequestLifecycleSnapshot failed = entry.lifecycle.fail(terminal.detail());
                 ResponseCompletion publication = errorPublicationLocked(
                         entry, terminal.errorType(), terminal.detail());
-                finishEntry(entry, failed);
+                TerminalFinalizer finalizer = new TerminalFinalizer(entry, "failure");
+                // A failure can escape after priority scheduling registration/offer.
+                finalizer.run("active queue release",
+                        () -> removeQueuedItem(entry, terminal.detail()));
+                finalizer.run("Decode accounting release", () -> rollbackOnce(entry));
+                if (terminal.releasePrefillAccounting()) {
+                    finalizer.run("Prefill accounting release",
+                            () -> releasePrefillAccounting(entry));
+                }
+                finalizer.finish(failed);
                 return publication;
             }
             case TIMEOUT -> {
@@ -2340,12 +2354,14 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     entry, StrategyErrorType.WORKER_EXECUTION_FAILED,
                     "worker error code " + observation.errorCode());
         }
+        TerminalFinalizer finalizer = new TerminalFinalizer(entry, "worker_terminal");
         if (observation.prefill()
                 || current.deliveryClaimKind() == DeliveryClaimKind.ROUTE_DECISION) {
-            rollbackOnce(entry);
-            releasePrefillAccounting(entry);
+            finalizer.run("Decode accounting release", () -> rollbackOnce(entry));
+            finalizer.run("Prefill accounting release",
+                    () -> releasePrefillAccounting(entry));
         }
-        finishEntry(entry, terminal);
+        finalizer.finish(terminal);
         return publication;
     }
 
@@ -2404,11 +2420,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /** Production RTP-LLM raw {@code ErrorCode::PRIORITY_PREEMPTED}. */
     private static final long ENGINE_ERROR_PRIORITY_PREEMPTED = 8429;
-
-    /** Victim's decode endpoint key for the settle metric; "unknown" when absent. */
-    private static String decodeEndpointKey(BatchItem item) {
-        return item.decodeEp() != null ? item.decodeEp().ipPort() : "unknown";
-    }
 
     public RequestLifecycleSnapshot getRequestState(long requestId,
                                                     long expectedBatchId) {
@@ -2678,6 +2689,520 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
     }
 
+    // ==================== Delivery capacity admission (from WorkerBatcher) ====================
+
+    @Override
+    public BatchCapacityResult tryReserveBatchCapacity(BatchItem head) {
+        if (head == null || head.deliveryMode() != DeliveryMode.BATCH_ENQUEUE) {
+            return new BatchAdmissionFailed(new IllegalArgumentException(
+                    "batch capacity requires a BATCH_ENQUEUE head"));
+        }
+        InflightEntry entry = entryFor(head);
+        if (entry == null) {
+            return BatchOwnershipLost.INSTANCE;
+        }
+        synchronized (entry) {
+            if (shuttingDown.get()
+                    || inflight.get(head.requestId()) != entry
+                    || head.future().isDone()
+                    || entry.cleanupOwned
+                    || entry.preemption != null
+                    || entry.lifecycle.isTerminal()) {
+                return BatchOwnershipLost.INSTANCE;
+            }
+            PrefillEndpoint prefillEndpoint = head.prefillEp();
+            if (prefillEndpoint == null) {
+                return new BatchAdmissionFailed(new IllegalStateException(
+                        "batch decision has no Prefill endpoint"));
+            }
+            BatchDispatcher.SubmissionReservationResult submissionResult;
+            try {
+                submissionResult = batchEnqueueDelivery.tryReserveSubmission();
+            } catch (Throwable admissionFailure) {
+                return new BatchAdmissionFailed(admissionFailure);
+            }
+            if (submissionResult == null) {
+                return new BatchAdmissionFailed(new IllegalStateException(
+                        "batch dispatcher returned no submission reservation result"));
+            }
+            if (submissionResult
+                    instanceof BatchDispatcher.SubmissionCapacityUnavailable unavailable) {
+                return new BatchCapacityUnavailable(
+                        CapacityResource.BATCH_DISPATCHER,
+                        unavailable.availability());
+            }
+            if (submissionResult
+                    instanceof BatchDispatcher.SubmissionAdmissionFailed failed) {
+                return new BatchAdmissionFailed(failed.cause());
+            }
+
+            BatchDispatcher.SubmissionPermit submissionPermit =
+                    ((BatchDispatcher.SubmissionReserved) submissionResult).permit();
+            PrefillEndpoint.QueueBatchSlotResult endpointResult;
+            try {
+                endpointResult = prefillEndpoint.tryReserveQueueBatchSlot(
+                        head, head.maxInflightBatchesPerPrefillWorker());
+            } catch (Throwable endpointFailure) {
+                return batchAdmissionFailureAfterSubmissionReservation(
+                        submissionPermit, endpointFailure);
+            }
+            if (endpointResult instanceof PrefillEndpoint.QueueBatchSlotReserved reserved) {
+                return new BatchCapacityReserved(new BatchDeliveryCapacityReservation(
+                        head, reserved.reservation(), submissionPermit));
+            }
+
+            Throwable permitReleaseFailure = releaseUnusedSubmissionPermit(submissionPermit);
+            if (endpointResult instanceof PrefillEndpoint.QueueBatchSlotUnavailable unavailable) {
+                if (permitReleaseFailure != null) {
+                    return new BatchAdmissionFailed(permitReleaseFailure);
+                }
+                return new BatchCapacityUnavailable(
+                        CapacityResource.PREFILL_BATCH,
+                        unavailable.availability());
+            }
+            Throwable endpointFailure = endpointResult
+                    instanceof PrefillEndpoint.QueueBatchSlotAdmissionFailed failed
+                    ? failed.cause()
+                    : new IllegalStateException(
+                            "Prefill endpoint returned no batch slot result");
+            if (permitReleaseFailure != null && permitReleaseFailure != endpointFailure) {
+                endpointFailure.addSuppressed(permitReleaseFailure);
+            }
+            return new BatchAdmissionFailed(endpointFailure);
+        }
+    }
+
+    private static BatchAdmissionFailed batchAdmissionFailureAfterSubmissionReservation(
+            BatchDispatcher.SubmissionPermit submissionPermit,
+            Throwable endpointFailure) {
+        Throwable permitReleaseFailure = releaseUnusedSubmissionPermit(submissionPermit);
+        if (permitReleaseFailure != null && permitReleaseFailure != endpointFailure) {
+            endpointFailure.addSuppressed(permitReleaseFailure);
+        }
+        return new BatchAdmissionFailed(endpointFailure);
+    }
+
+    private static Throwable releaseUnusedSubmissionPermit(
+            BatchDispatcher.SubmissionPermit submissionPermit) {
+        try {
+            submissionPermit.release();
+            return null;
+        } catch (Throwable releaseFailure) {
+            return releaseFailure;
+        }
+    }
+
+    @Override
+    public AdmissionResult tryReserveItemCapacity(BatchItem item) {
+        if (item == null) {
+            return new AdmissionFailed(
+                    new IllegalArgumentException("delivery item is required"));
+        }
+        InflightEntry entry = entryFor(item);
+        if (entry == null) {
+            return OwnershipLost.INSTANCE;
+        }
+
+        DecodeEndpoint.EngineDispatchPermit decodePermit = null;
+        PrefillEndpoint.RequestCapacityReservation prefillReservation = null;
+        try {
+            synchronized (entry) {
+                if (shuttingDown.get()
+                        || inflight.get(item.requestId()) != entry
+                        || item.future().isDone()
+                        || entry.cleanupOwned
+                        || entry.preemption != null
+                        || entry.lifecycle.isTerminal()) {
+                    return OwnershipLost.INSTANCE;
+                }
+
+                long decodeConcurrencyLimit = item.maxDecodeEngineRequests();
+                long decodeKvUsageLimit = item.maxDecodeKvUsagePercent();
+                if (item.decodeEp() != null) {
+                    DecodeEndpoint.EngineDispatchPermitAcquisition decodeAcquisition =
+                            item.decodeEp().acquireEngineDispatchPermit(
+                                    item.requestId(), decodeConcurrencyLimit,
+                                    decodeKvUsageLimit);
+                    switch (decodeAcquisition.status()) {
+                        case ACQUIRED -> decodePermit = decodeAcquisition.permit();
+                        case CAPACITY_FULL -> {
+                            return new CapacityUnavailable(
+                                    CapacityResource.DECODE_ENGINE,
+                                    decodeCapacityAvailability(
+                                            item, decodeConcurrencyLimit,
+                                            decodeKvUsageLimit));
+                        }
+                        case NOT_OWNED, NOT_QUEUED -> {
+                            return OwnershipLost.INSTANCE;
+                        }
+                        case ALREADY_ACQUIRED -> {
+                            return new AdmissionFailed(new IllegalStateException(
+                                    "Decode capacity already reserved request_id="
+                                            + item.requestId()));
+                        }
+                        case ENDPOINT_RETIRED -> {
+                            return new AdmissionFailed(
+                                    new EndpointGenerationRetiredException(
+                                            "Decode endpoint generation retired before"
+                                                    + " reservation request_id="
+                                                    + item.requestId()));
+                        }
+                    }
+                }
+
+                if (item.deliveryMode() == DeliveryMode.ROUTE_DECISION) {
+                    PrefillEndpoint prefillEndpoint = item.prefillEp();
+                    if (prefillEndpoint == null) {
+                        releaseDecodePermitBeforeDelivery(decodePermit);
+                        return new AdmissionFailed(new IllegalStateException(
+                                "route decision has no Prefill endpoint"));
+                    }
+                    int prefillRequestLimit = item.maxPrefillRequestsPerWorker();
+                    long predictedMs = Math.max(0L,
+                            prefillEndpoint.getPredictor().estimateMs(
+                                    item.seqLen(), item.hitCache()));
+                    PrefillEndpoint.RequestCapacityReservationAcquisition
+                            prefillAcquisition =
+                            prefillEndpoint.acquireRequestCapacityReservation(
+                                    item.requestId(), predictedMs,
+                                    prefillRequestLimit);
+                    switch (prefillAcquisition.status()) {
+                        case ACQUIRED -> prefillReservation =
+                                prefillAcquisition.reservation();
+                        case CAPACITY_FULL -> {
+                            releaseDecodePermitBeforeDelivery(decodePermit);
+                            return new CapacityUnavailable(
+                                    CapacityResource.PREFILL_REQUEST,
+                                    () -> prefillRequestCapacityIsAvailable(
+                                            item, prefillRequestLimit));
+                        }
+                        case REQUEST_ALREADY_TRACKED -> {
+                            releaseDecodePermitBeforeDelivery(decodePermit);
+                            return new AdmissionFailed(new IllegalStateException(
+                                    "Prefill request already tracked request_id="
+                                            + item.requestId()));
+                        }
+                        case ENDPOINT_RETIRED -> {
+                            releaseDecodePermitBeforeDelivery(decodePermit);
+                            return new AdmissionFailed(
+                                    new EndpointGenerationRetiredException(
+                                            "Prefill endpoint generation retired before route"
+                                                    + " reservation request_id="
+                                                    + item.requestId()));
+                        }
+                    }
+                }
+
+                return new CapacityReserved(new EndpointCapacityReservation(
+                        item, decodePermit, prefillReservation));
+            }
+        } catch (Throwable admissionFailure) {
+            Throwable cleanupFailure = abortEndpointCapacityBeforeDelivery(
+                    prefillReservation, decodePermit);
+            if (cleanupFailure != null && cleanupFailure != admissionFailure) {
+                admissionFailure.addSuppressed(cleanupFailure);
+            }
+            return new AdmissionFailed(admissionFailure);
+        }
+    }
+
+    private static void releaseDecodePermitBeforeDelivery(
+            DecodeEndpoint.EngineDispatchPermit decodePermit) {
+        if (decodePermit != null) {
+            decodePermit.release();
+        }
+    }
+
+    /** Attempt both endpoint compensations before reporting either failure. */
+    private static Throwable abortEndpointCapacityBeforeDelivery(
+            PrefillEndpoint.RequestCapacityReservation prefillReservation,
+            DecodeEndpoint.EngineDispatchPermit decodePermit) {
+        Throwable firstFailure = null;
+        if (prefillReservation != null) {
+            try {
+                prefillReservation.abortBeforeDelivery();
+            } catch (Throwable prefillFailure) {
+                firstFailure = prefillFailure;
+            }
+        }
+        if (decodePermit != null) {
+            try {
+                decodePermit.release();
+            } catch (Throwable decodeFailure) {
+                if (firstFailure == null) {
+                    firstFailure = decodeFailure;
+                } else if (decodeFailure != firstFailure) {
+                    firstFailure.addSuppressed(decodeFailure);
+                }
+            }
+        }
+        return firstFailure;
+    }
+
+    private static void throwCapacityCleanupFailure(Throwable cleanupFailure) {
+        if (cleanupFailure instanceof RuntimeException runtimeException) {
+            throw runtimeException;
+        }
+        if (cleanupFailure instanceof Error error) {
+            throw error;
+        }
+        throw new IllegalStateException(
+                "endpoint capacity cleanup failed", cleanupFailure);
+    }
+
+    private static boolean decodeCapacityIsAvailable(
+            BatchItem item,
+            long maxEngineRequests,
+            long maxKvUsagePercent) {
+        DecodeEndpoint decodeEndpoint = item.decodeEp();
+        if (decodeEndpoint == null) {
+            return true;
+        }
+        return decodeEndpoint.isRetired()
+                || decodeEndpoint.isEngineDispatchPermitAvailable(
+                        item.requestId(), maxEngineRequests, maxKvUsagePercent);
+    }
+
+    private static CapacityAvailability decodeCapacityAvailability(
+            BatchItem item,
+            long maxEngineRequests,
+            long maxKvUsagePercent) {
+        DecodeEndpoint decodeEndpoint = Objects.requireNonNull(
+                item.decodeEp(), "Decode endpoint");
+        return new CapacityAvailability() {
+            @Override
+            public boolean isAvailable() {
+                return decodeCapacityIsAvailable(
+                        item, maxEngineRequests, maxKvUsagePercent);
+            }
+
+            @Override
+            public void addListener(Runnable listener) {
+                decodeEndpoint.addEngineDispatchCapacityListener(listener);
+            }
+
+            @Override
+            public void removeListener(Runnable listener) {
+                decodeEndpoint.removeEngineDispatchCapacityListener(listener);
+            }
+        };
+    }
+
+    private static boolean prefillRequestCapacityIsAvailable(
+            BatchItem item,
+            int maxRequestsPerWorker) {
+        PrefillEndpoint prefillEndpoint = item.prefillEp();
+        if (prefillEndpoint == null) {
+            return true;
+        }
+        return prefillEndpoint.availableRequestSlots(maxRequestsPerWorker) > 0;
+    }
+
+    /**
+     * One admitted batch owns both the Prefill lifecycle slot and an executor
+     * task already accepted by the local dispatcher.
+     */
+    private static final class BatchDeliveryCapacityReservation
+            implements BatchCapacityReservation {
+
+        private enum State {
+            CALLBACK_RESERVED,
+            BATCH_LIFECYCLE_OWNED,
+            DELIVERY_HANDOFF_COMPLETE,
+            RELEASED
+        }
+
+        private final BatchItem head;
+        private final PrefillEndpoint.QueueBatchSlotReservation endpointSlot;
+        private final BatchDispatcher.SubmissionPermit submissionPermit;
+        private State state = State.CALLBACK_RESERVED;
+
+        private BatchDeliveryCapacityReservation(
+                BatchItem head,
+                PrefillEndpoint.QueueBatchSlotReservation endpointSlot,
+                BatchDispatcher.SubmissionPermit submissionPermit) {
+            this.head = head;
+            this.endpointSlot = endpointSlot;
+            this.submissionPermit = submissionPermit;
+        }
+
+        @Override
+        public BatchItem head() {
+            return head;
+        }
+
+        @Override
+        public synchronized BatchLoadPublicationResult establishBatchLoadPublication(
+                List<BatchItem> requests) {
+            if (state != State.CALLBACK_RESERVED) {
+                return new BatchLoadPublicationFailed(
+                        new IllegalStateException(
+                                "batch callback ownership is no longer available"));
+            }
+            try {
+                return new BatchLoadPublicationEstablished(
+                        endpointSlot.beginBatchLoadPublication(requests));
+            } catch (Throwable publicationFailure) {
+                return new BatchLoadPublicationFailed(publicationFailure);
+            }
+        }
+
+        @Override
+        public synchronized BatchDispatcher.SubmissionPermit transferToBatchLifecycle(
+                long batchId,
+                long predictedMs,
+                List<BatchItem> requests) {
+            if (state != State.CALLBACK_RESERVED) {
+                throw new IllegalStateException(
+                        "batch delivery capacity is not callback-owned");
+            }
+            endpointSlot.transferToBatchLifecycle(batchId, predictedMs, requests);
+            state = State.BATCH_LIFECYCLE_OWNED;
+            return submissionPermit;
+        }
+
+        @Override
+        public synchronized void completeDeliveryHandoff() {
+            if (state == State.DELIVERY_HANDOFF_COMPLETE) {
+                return;
+            }
+            if (state != State.BATCH_LIFECYCLE_OWNED) {
+                throw new IllegalStateException(
+                        "batch lifecycle was not established before handoff completion");
+            }
+            endpointSlot.completeDeliveryHandoff();
+            state = State.DELIVERY_HANDOFF_COMPLETE;
+        }
+
+        @Override
+        public synchronized void release() {
+            if (state == State.RELEASED) {
+                return;
+            }
+            if (state != State.CALLBACK_RESERVED) {
+                return;
+            }
+            state = State.RELEASED;
+            Throwable firstFailure = null;
+            try {
+                endpointSlot.release();
+            } catch (Throwable endpointFailure) {
+                firstFailure = endpointFailure;
+            }
+            try {
+                submissionPermit.release();
+            } catch (Throwable submissionFailure) {
+                if (firstFailure == null) {
+                    firstFailure = submissionFailure;
+                } else if (firstFailure != submissionFailure) {
+                    firstFailure.addSuppressed(submissionFailure);
+                }
+            }
+            if (firstFailure != null) {
+                throwCapacityCleanupFailure(firstFailure);
+            }
+        }
+    }
+
+    /** Endpoint reservations held between a logical decision and callback ownership. */
+    private static final class EndpointCapacityReservation
+            implements ItemCapacityReservation {
+
+        private enum State { RESERVED, ENDPOINT_LIFECYCLE_OWNED, RELEASED }
+
+        private final BatchItem item;
+        private final DecodeEndpoint.EngineDispatchPermit decodePermit;
+        private final PrefillEndpoint.RequestCapacityReservation prefillReservation;
+        private State state = State.RESERVED;
+
+        private EndpointCapacityReservation(
+                BatchItem item,
+                DecodeEndpoint.EngineDispatchPermit decodePermit,
+                PrefillEndpoint.RequestCapacityReservation prefillReservation) {
+            this.item = item;
+            this.decodePermit = decodePermit;
+            this.prefillReservation = prefillReservation;
+        }
+
+        @Override
+        public BatchItem item() {
+            return item;
+        }
+
+        @Override
+        public synchronized boolean transferToEndpointLifecycle() {
+            if (state == State.ENDPOINT_LIFECYCLE_OWNED) {
+                return true;
+            }
+            if (state != State.RESERVED) {
+                return false;
+            }
+            boolean endpointOwnershipTransferred = false;
+            try {
+                // Prefill preparation remains exactly compensable. Decode is
+                // the final hard-capacity ownership transition which can
+                // report loss; no later capacity check can require rollback.
+                if (prefillReservation != null
+                        && !prefillReservation.prepareForDelivery()) {
+                    return false;
+                }
+                if (decodePermit != null) {
+                    DecodeEndpoint.EngineDispatchPermitTransferStatus transfer =
+                            decodePermit.transferToEngineLifecycle();
+                    if (transfer == DecodeEndpoint.EngineDispatchPermitTransferStatus
+                            .ENDPOINT_RETIRED) {
+                        throw new EndpointGenerationRetiredException(
+                                "Decode endpoint generation retired before delivery"
+                                        + " request_id=" + item.requestId());
+                    }
+                    if (transfer == DecodeEndpoint.EngineDispatchPermitTransferStatus
+                            .OWNERSHIP_LOST) {
+                        return false;
+                    }
+                }
+                if (prefillReservation != null) {
+                    prefillReservation.completePreparedDeliveryTransfer();
+                }
+
+                state = State.ENDPOINT_LIFECYCLE_OWNED;
+                endpointOwnershipTransferred = true;
+                return true;
+            } finally {
+                if (!endpointOwnershipTransferred) {
+                    state = State.RELEASED;
+                    Throwable cleanupFailure = abortEndpointCapacityBeforeDelivery(
+                            prefillReservation, decodePermit);
+                    if (cleanupFailure != null) {
+                        throwCapacityCleanupFailure(cleanupFailure);
+                    }
+                }
+            }
+        }
+
+        @Override
+        public synchronized void release() {
+            if (state != State.RESERVED) {
+                return;
+            }
+            state = State.RELEASED;
+            Throwable cleanupFailure = abortEndpointCapacityBeforeDelivery(
+                    prefillReservation, decodePermit);
+            if (cleanupFailure != null) {
+                throwCapacityCleanupFailure(cleanupFailure);
+            }
+        }
+
+        @Override
+        public synchronized void completeDeliveryHandoff() {
+            if (state != State.ENDPOINT_LIFECYCLE_OWNED) {
+                return;
+            }
+            if (prefillReservation != null) {
+                prefillReservation.completeDeliveryHandoff();
+            }
+        }
+    }
+
     // ==================== DecisionGroupHandler callbacks (from WorkerBatcher) ====================
 
     @Override
@@ -2694,69 +3219,28 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata metadata) {
-        if (items == null || items.isEmpty()) {
-            return;
-        }
+    public void onDecisionGroupAdmitted(
+            AdmittedDecisionGroup group,
+            DecisionGroupMetadata metadata) {
+        Objects.requireNonNull(group, "group");
+        Objects.requireNonNull(metadata, "metadata");
         if (!tryAcquireDeliveryPermit()) {
-            failDecisionGroupAfterShutdown(items);
+            // BatcherContext still owns every unresolved member and performs
+            // the single terminal reduction after this callback returns.
             return;
         }
         try {
-            DeliveryMode mode = items.get(0).deliveryMode();
-            int mixedAt = firstDifferentDeliveryMode(items, mode);
-            if (mixedAt < 0) {
-                deliverDecisionGroup(mode, items, metadata);
-                return;
-            }
-
-            // A live config update may leave old and new delivery modes in the
-            // same worker queue. The common case above allocates nothing; only the
-            // transition window pays for partitioning, and ownership protocols are
-            // never mixed in one externally visible operation.
-            List<BatchItem> batchItems = new ArrayList<>(items.size());
-            List<BatchItem> routeItems = new ArrayList<>(items.size());
-            for (BatchItem item : items) {
-                (item.deliveryMode() == DeliveryMode.BATCH_ENQUEUE
-                        ? batchItems : routeItems).add(item);
-            }
-            if (!batchItems.isEmpty()) {
-                deliverDecisionGroup(DeliveryMode.BATCH_ENQUEUE, batchItems, metadata);
-            }
-            if (!routeItems.isEmpty()) {
-                deliverDecisionGroup(DeliveryMode.ROUTE_DECISION, routeItems, metadata);
-            }
+            deliverDecisionGroup(group, metadata);
         } finally {
             releaseDeliveryPermit();
         }
     }
 
-    /** Reject staged work after the lifecycle gate closes without acquiring new ledgers. */
-    private void failDecisionGroupAfterShutdown(List<BatchItem> items) {
-        IllegalStateException shutdownFailure = new IllegalStateException(
-                "priority scheduler stopped before decision delivery");
-        for (BatchItem item : items) {
-            onDeliveryFailure(item, shutdownFailure);
-        }
-    }
-
-    private static int firstDifferentDeliveryMode(List<BatchItem> items,
-                                                  DeliveryMode expected) {
-        for (int i = 1; i < items.size(); i++) {
-            if (items.get(i).deliveryMode() != expected) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
-    private void deliverDecisionGroup(DeliveryMode mode,
-                                      List<BatchItem> items,
+    private void deliverDecisionGroup(AdmittedDecisionGroup group,
                                       DecisionGroupMetadata metadata) {
-        if (mode == DeliveryMode.BATCH_ENQUEUE) {
-            enqueueBatch(items, metadata);
-        } else {
-            deliverRouteDecisions(items, metadata);
+        switch (group.deliveryMode()) {
+            case BATCH_ENQUEUE -> enqueueBatch(group, metadata);
+            case ROUTE_DECISION -> deliverRouteDecisions(group);
         }
     }
 
@@ -2797,184 +3281,232 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     // ==================== Delivery pipeline ====================
 
     /**
-     * Commit batch to PrefillEndpoint, then delegate to {@link BatchDispatcher}
-     * for asynchronous gRPC dispatch.
-     * <p>
-     * The heavy gRPC I/O is handled asynchronously by the batch dispatcher's thread pool.
+     * Transfer an admitted batch to Prefill lifecycle and its preaccepted
+     * dispatcher task.
      */
-    private void enqueueBatch(List<BatchItem> items, DecisionGroupMetadata metadata) {
+    private void enqueueBatch(
+            AdmittedDecisionGroup group,
+            DecisionGroupMetadata metadata) {
+        List<BatchItem> items = group.requests();
         String reason = metadata.reason();
         PrefillEndpoint prefillEp = items.get(0).prefillEp();
-        WorkerBatcher batcher = prefillEp != null ? prefillEp.getBatcher() : null;
 
-        // [SYNC] Compute prediction and commit only active items to endpoint
+        // Transfer only live, capacity-reserved members to the batch lifecycle.
         long predMs = 0;
         long batchId = batchIdGenerator.nextBatchId();
-        Long configuredDecodeLimit = configService.loadBalanceConfig().getRouter()
-                .getRoles().getDecode().getAvailability().getMaxEngineRequests();
-        long decodeConcurrencyLimit = configuredDecodeLimit == null
-                ? 0 : configuredDecodeLimit;
-        long decodeKvUsageLimit = configService.loadBalanceConfig().getRouter()
-                .getRoles().getDecode().getAvailability().getMaxKvUsagePercent();
-        List<BatchItem> readyForEnqueue = new ArrayList<>(items.size());
-        for (BatchItem item : items) {
-            boolean callbackOwnsPending = false;
-            // stageForDelivery removed this item from the live queue while
-            // retaining its capacity slot. Claim callback ownership before
-            // any Decode or lifecycle mutation; shutdown drains only items
-            // that have not crossed this fence.
-            if (batcher != null) {
-                BatcherContext.PendingClaimResult pendingClaim =
-                        batcher.claimPendingDelivery(item);
-                if (pendingClaim == BatcherContext.PendingClaimResult.STOPPED) {
-                    // stopAndDrainTo owns and drains this still-STAGED item.
-                    continue;
-                }
-                callbackOwnsPending = pendingClaim
-                        == BatcherContext.PendingClaimResult.CLAIMED;
-                // NOT_PENDING preserves direct callback/test and legacy use:
-                // those items were never removed from this batcher's queue.
-            }
+        List<BatchItem> endpointOwnedBatchItems = new ArrayList<>(items.size());
+        List<AdmittedDecisionGroup.AdmittedItem> endpointOwnedBatchMembers =
+                new ArrayList<>(items.size());
+        for (AdmittedDecisionGroup.AdmittedItem admittedItem : group.members()) {
+            BatchItem item = admittedItem.request();
             try {
                 InflightEntry entry = entryFor(item);
                 if (entry == null) {
+                    settleAdmittedItemWithExistingOwner(admittedItem, "batch");
                     continue;
                 }
-                ResponseCompletion publication = null;
                 synchronized (entry) {
-                    if (!item.future().isDone()
-                            && !entry.lifecycle.isTerminal() && !entry.cleanupOwned) {
-                        DecodeEndpoint.DispatchClaimResult claim = item.decodeEp() == null
-                                ? DecodeEndpoint.DispatchClaimResult.CLAIMED
-                                : item.decodeEp().tryClaimEngineDispatch(
-                                        item.requestId(), decodeConcurrencyLimit,
-                                        decodeKvUsageLimit);
-                        if (claim == DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL) {
-                            restorePendingDelivery(batcher, item);
-                        } else if (claim == DecodeEndpoint.DispatchClaimResult.CLAIMED) {
-                            entry.lifecycle.startBatchEnqueue(batchId);
-                            readyForEnqueue.add(item);
-                        } else {
-                            // A scheduler preemption claim intentionally owns the
-                            // later terminal. Missing endpoint ownership without
-                            // such a claim is an invariant violation; fail it now
-                            // instead of leaving an item outside both queue and
-                            // engine indefinitely.
-                            if (entry.preemption == null) {
-                                publication = reduceOrdinaryTerminalLocked(entry,
-                                        DeferredTerminal.failure(
-                                                StrategyErrorType.BATCH_DISPATCH_FAILED,
-                                                "Decode dispatch ownership lost before send",
-                                                false));
-                            }
-                        }
+                    if (item.future().isDone()
+                            || entry.lifecycle.isTerminal() || entry.cleanupOwned) {
+                        settleAdmittedItemWithExistingOwner(admittedItem, "batch");
+                        continue;
                     }
+                    if (!admittedItem.transferCapacityToEndpointLifecycle()) {
+                        settleAdmittedItemWithExistingOwner(admittedItem, "batch");
+                        continue;
+                    }
+                    entry.lifecycle.startBatchEnqueue(batchId);
+                    endpointOwnedBatchItems.add(item);
+                    endpointOwnedBatchMembers.add(admittedItem);
                 }
-                submitResponseCompletion(publication);
             } catch (Throwable claimFailure) {
-                failClaimedDelivery(item, claimFailure);
-            } finally {
-                // CAPACITY_FULL has already restored and removed its pending
-                // record. Every other callback-owned outcome is terminal or
-                // dispatching and must release the charged queue slot here.
-                if (callbackOwnsPending) {
-                    completePendingDelivery(batcher, item);
-                }
+                // The group-scoped batch slot has not transferred yet.
+                // BatcherContext remains the sole terminal owner even if this
+                // item's endpoint reservations already transferred.
+                admittedItem.recordFailureBeforeDeliveryHandoff(claimFailure);
             }
         }
 
-        if (readyForEnqueue.isEmpty()) {
+        if (endpointOwnedBatchItems.isEmpty()) {
             return;
         }
-        boolean enqueueCallStarted = false;
+        boolean batchLifecycleTransferred = false;
+        boolean transportOwnershipTransferred = false;
+        BatchDispatcher.SubmissionPermit submissionPermit = null;
         BatchEnqueueDelivery.Submission deliverySubmission = null;
-        Throwable preSendFailure = null;
+        Throwable handoffFailure = null;
         try {
-            if (prefillEp != null) {
-                PrefillTimePredictor predictor = prefillEp.getPredictor();
-                predMs = (long) predictor.predictBatchMs(readyForEnqueue);
-            }
+            PrefillTimePredictor predictor = prefillEp.getPredictor();
+            predMs = (long) predictor.predictBatchMs(endpointOwnedBatchItems);
             synchronized (deliveryFence) {
                 // Prediction may yield to a request-expiration/cancel fence.
-                // Revalidate dispatch ownership immediately before the first
-                // externally visible commit/send step.
-                readyForEnqueue = readyForEnqueue.stream().filter(item -> {
-                    InflightEntry entry = entryFor(item);
-                    if (entry == null) {
-                        return false;
+                // Keep the item list and its admission owners aligned while
+                // removing generations already owned by cancellation or
+                // settlement. Those owners are resolved here without a second
+                // terminal callback from BatcherContext.
+                List<BatchItem> liveBatchItems =
+                        new ArrayList<>(endpointOwnedBatchItems.size());
+                List<AdmittedDecisionGroup.AdmittedItem> liveBatchMembers =
+                        new ArrayList<>(endpointOwnedBatchMembers.size());
+                for (int index = 0; index < endpointOwnedBatchItems.size(); index++) {
+                    BatchItem item = endpointOwnedBatchItems.get(index);
+                    AdmittedDecisionGroup.AdmittedItem admittedItem =
+                            endpointOwnedBatchMembers.get(index);
+                    if (ownsLiveBatchDelivery(item, batchId)) {
+                        liveBatchItems.add(item);
+                        liveBatchMembers.add(admittedItem);
+                    } else {
+                        settleAdmittedItemWithExistingOwner(admittedItem, "batch");
                     }
-                    synchronized (entry) {
-                        return inflight.get(item.requestId()) == entry
-                                && !entry.cleanupOwned
-                                && entry.engineFence == null
-                                && !entry.lifecycle.isTerminal()
-                                && entry.lifecycle.snapshot().batchId() == batchId;
-                    }
-                }).toList();
-                if (readyForEnqueue.isEmpty()) {
+                }
+                boolean membershipChanged =
+                        liveBatchItems.size() != endpointOwnedBatchItems.size();
+                endpointOwnedBatchItems = List.copyOf(liveBatchItems);
+                endpointOwnedBatchMembers = List.copyOf(liveBatchMembers);
+                if (endpointOwnedBatchItems.isEmpty()) {
                     return;
                 }
-                if (prefillEp != null) {
-                    prefillEp.commitBatch(batchId, predMs, readyForEnqueue);
+                if (membershipChanged) {
+                    predMs = (long) predictor.predictBatchMs(endpointOwnedBatchItems);
+                }
+                BatchEnqueueDelivery.Plan deliveryPlan = new BatchEnqueueDelivery.Plan(
+                        endpointOwnedBatchItems, prefillEp, batchId, predMs, reason);
+                submissionPermit = group.transferBatchCapacityToLifecycle(
+                        batchId, predMs, endpointOwnedBatchItems);
+                batchLifecycleTransferred = true;
+                Throwable memberHandoffFailure = completeDeliveryHandoffs(
+                        endpointOwnedBatchMembers, "batch");
+                if (memberHandoffFailure != null) {
+                    throw memberHandoffFailure;
                 }
 
-                // Record dispatch timestamp for dispatch-to-ACK latency metric
-                for (BatchItem item : readyForEnqueue) {
-                    InflightEntry entry = entryFor(item);
-                    if (entry != null) {
-                        entry.lifecycle.markBatchEnqueueStarted();
-                        item.ctx().setBatchDispatchedNanos(System.nanoTime());
-                    }
-                }
-
-                // Submitting the RPC while holding the fence closes the final
-                // validate->commit->send gap. Callback reconciliation reacquires
-                // the same fence after this method returns. A dispatcher is
-                // allowed to reject synchronously; its callback gate is opened
-                // only after this synchronized block has released the fence.
+                // Filling the preaccepted task while holding the fence closes
+                // the validate-to-transport gap. A successful return is the
+                // exact transport-ownership boundary; a thrown exception means
+                // the permit remains releasable and no send began.
                 deliverySubmission = batchEnqueueDelivery.prepare(
-                        new BatchEnqueueDelivery.Plan(readyForEnqueue, prefillEp,
-                                batchId, predMs, reason),
-                        this);
-                enqueueCallStarted = true;
+                        deliveryPlan, submissionPermit, this);
+                submissionPermit = null;
                 try {
                     deliverySubmission.submit();
+                    transportOwnershipTransferred = true;
+                    for (BatchItem item : endpointOwnedBatchItems) {
+                        InflightEntry entry = entryFor(item);
+                        if (entry != null) {
+                            entry.lifecycle.markBatchEnqueueStarted();
+                            item.ctx().setBatchDispatchedNanos(System.nanoTime());
+                        }
+                    }
                 } catch (Throwable deliveryStartFailure) {
-                    preSendFailure = deliveryStartFailure;
+                    handoffFailure = deliveryStartFailure;
                 }
             }
         } catch (Throwable preparationFailure) {
-            preSendFailure = preparationFailure;
-        }
-
-        if (enqueueCallStarted) {
-            reportBatchDispatch(
-                    readyForEnqueue, items, prefillEp, batchId, predMs, reason, metadata);
-        }
-
-        // The transport may synchronously report rejection from submit(). Drain
-        // those outcomes only after deliveryFence is released. The gate itself
-        // isolates per-item callback failures, so every deferred outcome runs.
-        if (deliverySubmission != null) {
-            deliverySubmission.releaseCallbacks();
-        }
-
-        if (preSendFailure != null) {
-            if (enqueueCallStarted) {
-                // A batch dispatcher may throw after starting its
-                // network invocation. Preserve both ledgers and use the same
-                // request-id cancel fence as an asynchronous lost ACK.
-                for (BatchItem item : readyForEnqueue) {
-                    onUncertain(item, preSendFailure);
+            handoffFailure = preparationFailure;
+        } finally {
+            // Once prepare() returns a submission, its deferred callback gate
+            // must open regardless of telemetry or later callback failures.
+            if (deliverySubmission != null) {
+                try {
+                    if (!transportOwnershipTransferred) {
+                        deliverySubmission.releaseUnsubmittedPermit();
+                    }
+                    deliverySubmission.releaseCallbacks();
+                } catch (Throwable callbackReleaseFailure) {
+                    if (handoffFailure == null) {
+                        handoffFailure = callbackReleaseFailure;
+                    } else if (handoffFailure != callbackReleaseFailure) {
+                        handoffFailure.addSuppressed(callbackReleaseFailure);
+                    }
                 }
-            } else {
-                if (prefillEp != null) {
-                    prefillEp.releaseBatch(batchId);
-                }
-                for (BatchItem item : readyForEnqueue) {
-                    failClaimedDelivery(item, preSendFailure);
+            } else if (submissionPermit != null) {
+                try {
+                    submissionPermit.release();
+                } catch (Throwable permitReleaseFailure) {
+                    if (handoffFailure == null) {
+                        handoffFailure = permitReleaseFailure;
+                    } else if (handoffFailure != permitReleaseFailure) {
+                        handoffFailure.addSuppressed(permitReleaseFailure);
+                    }
                 }
             }
+        }
+
+        if (handoffFailure != null && !batchLifecycleTransferred) {
+            // Before the real batch ledger owns the group slot, BatcherContext
+            // is the only terminal owner. It releases every reservation and
+            // invokes onDeliveryFailure exactly once per unresolved member.
+            throw propagateCallbackFailure(handoffFailure);
+        }
+
+        try {
+            if (handoffFailure != null) {
+                if (transportOwnershipTransferred) {
+                    // Transport already owns the accepted task. Preserve both
+                    // ledgers and reconcile this failure as an ambiguous ACK.
+                    for (int index = 0; index < endpointOwnedBatchItems.size(); index++) {
+                        BatchItem item = endpointOwnedBatchItems.get(index);
+                        AdmittedDecisionGroup.AdmittedItem admittedItem =
+                                endpointOwnedBatchMembers.get(index);
+                        try {
+                            onUncertain(item, handoffFailure);
+                        } catch (Throwable itemFailure) {
+                            Logger.error("Failed to fence uncertain batch delivery request_id={}",
+                                    item.requestId(), itemFailure);
+                        } finally {
+                            settleAdmittedItemWithExistingOwner(admittedItem, "batch");
+                        }
+                    }
+                } else {
+                    try {
+                        prefillEp.releaseBatch(batchId);
+                    } catch (Throwable batchReleaseFailure) {
+                        if (batchReleaseFailure != handoffFailure) {
+                            handoffFailure.addSuppressed(batchReleaseFailure);
+                        }
+                        Logger.error("Failed to release unsent Prefill batch batch_id={}",
+                                batchId, batchReleaseFailure);
+                    }
+                    for (int index = 0; index < endpointOwnedBatchItems.size(); index++) {
+                        BatchItem item = endpointOwnedBatchItems.get(index);
+                        AdmittedDecisionGroup.AdmittedItem admittedItem =
+                                endpointOwnedBatchMembers.get(index);
+                        try {
+                            failClaimedDelivery(item, handoffFailure);
+                        } catch (Throwable itemFailure) {
+                            Logger.error("Failed to terminate unsent batch delivery request_id={}",
+                                    item.requestId(), itemFailure);
+                        } finally {
+                            settleAdmittedItemWithExistingOwner(admittedItem, "batch");
+                        }
+                    }
+                }
+            }
+
+            if (transportOwnershipTransferred) {
+                reportBatchDispatch(
+                        endpointOwnedBatchItems, items, prefillEp,
+                        batchId, predMs, reason, metadata);
+            }
+        } finally {
+            // Retirement protection ends only after the transport owns the
+            // task or deterministic local cleanup has completed.
+            group.completeTransferredBatchHandoff();
+        }
+    }
+
+    /** Caller holds {@link #deliveryFence}. */
+    private boolean ownsLiveBatchDelivery(BatchItem item, long batchId) {
+        InflightEntry entry = entryFor(item);
+        if (entry == null) {
+            return false;
+        }
+        synchronized (entry) {
+            return inflight.get(item.requestId()) == entry
+                    && !entry.cleanupOwned
+                    && entry.engineFence == null
+                    && !entry.lifecycle.isTerminal()
+                    && entry.lifecycle.snapshot().batchId() == batchId;
         }
     }
 
@@ -3004,7 +3536,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         waitEntry.getKey());
             }
             FlexlbConfig config = configService.loadBalanceConfig();
-            BatchDispatcherConfig batch = config.batchDispatcher();
             int maxRequests = 1;
             long collectionWaitMs = 0L;
             Long predictionLimitMs = null;
@@ -3012,9 +3543,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 FixedWindowDecisionConfig decision = config.fixedWindowDecision();
                 maxRequests = decision.getMaxRequests();
                 collectionWaitMs = decision.getMaxCollectionWaitMs();
-                predictionLimitMs = config.hasExplicitDecisionPolicy()
-                        ? decision.getMaxPredictedExecutionMs()
-                        : batch.getEarlyDispatchPredictedExecutionMs();
+                predictionLimitMs = decision.getMaxPredictedExecutionMs();
             }
             Logger.debug("flexlb_batch_dispatch batch_id={} reason={} batch_size={} wait_ms={} "
                             + "predicted_ms={} threshold_ms={} fixed_wait_ms={} batch_size_max={} "
@@ -3022,129 +3551,149 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     batchId, reason, dispatched.size(), waitMs, predictedMs,
                     predictionLimitMs, collectionWaitMs, maxRequests, metadata.queueDepth(),
                     prefillEp != null ? prefillEp.ipPort() : "");
-        } catch (RuntimeException telemetryFailure) {
+        } catch (Throwable telemetryFailure) {
             Logger.warn("Failed to report batch dispatch: batch_id={}",
                     batchId, telemetryFailure);
         }
     }
 
     /**
-     * Commit request-scoped Prefill accounting and publish route decisions.
+     * Transfer request-scoped endpoint accounting and publish route decisions.
      *
      * <p>Unlike batch RPC delivery there is no ambiguous network send from the
-     * master. Each request acquires its Prefill and Decode ownership while its
-     * inflight entry is locked, then crosses a request-scoped lifecycle fence.
+     * master. Each request transfers the Prefill and Decode reservations already
+     * acquired by the batcher while its inflight entry is locked, then crosses
+     * a request-scoped lifecycle fence. Transfer does not recheck capacity.
      * No scheduler-wide dispatch lock is taken on this hot path.</p>
      */
-    private void deliverRouteDecisions(List<BatchItem> items, DecisionGroupMetadata metadata) {
-        PrefillEndpoint prefillEp = items.get(0).prefillEp();
-        if (prefillEp == null) {
-            for (BatchItem item : items) {
-                failClaimedDelivery(item,
-                        new IllegalStateException("route decision has no Prefill endpoint"));
-            }
-            return;
-        }
+    private void deliverRouteDecisions(AdmittedDecisionGroup group) {
+        List<BatchItem> items = group.requests();
+        List<BatchItem> routeDeliveryItems = new ArrayList<>(items.size());
+        List<AdmittedDecisionGroup.AdmittedItem> endpointOwnedRouteMembers =
+                new ArrayList<>(items.size());
 
-        WorkerBatcher batcher = prefillEp.getBatcher();
-        PrefillTimePredictor predictor = prefillEp.getPredictor();
-        FlexlbConfig config = configService.loadBalanceConfig();
-        Integer configuredPrefillLimit = config.getDispatcher()
-                instanceof NonBatchDispatcherConfig nonBatch
-                ? nonBatch.getMaxInflightRequestsPerPrefillWorker() : null;
-        int prefillRequestLimit = configuredPrefillLimit == null
-                ? 0 : configuredPrefillLimit;
-        Long configuredDecodeLimit = config.getRouter().getRoles().getDecode()
-                .getAvailability().getMaxEngineRequests();
-        long decodeConcurrencyLimit = configuredDecodeLimit == null
-                ? 0 : configuredDecodeLimit;
-        long decodeKvUsageLimit = config.getRouter().getRoles().getDecode()
-                .getAvailability().getMaxKvUsagePercent();
-        List<BatchItem> deliverable = new ArrayList<>(items.size());
-
-        for (BatchItem item : items) {
-            boolean callbackOwnsPending = false;
-            boolean requestLedgerCommitted = false;
-            ResponseCompletion publication = null;
-            boolean decodeOwnershipLost = false;
-            if (batcher != null) {
-                BatcherContext.PendingClaimResult pendingClaim =
-                        batcher.claimPendingDelivery(item);
-                if (pendingClaim == BatcherContext.PendingClaimResult.STOPPED) {
-                    continue;
-                }
-                callbackOwnsPending = pendingClaim
-                        == BatcherContext.PendingClaimResult.CLAIMED;
-            }
-
+        for (AdmittedDecisionGroup.AdmittedItem admittedItem : group.members()) {
+            BatchItem item = admittedItem.request();
+            boolean endpointLifecycleOwned = false;
             try {
                 InflightEntry entry = entryFor(item);
                 if (entry == null) {
+                    settleAdmittedItemWithExistingOwner(admittedItem, "route");
                     continue;
                 }
-                long predictedMs = Math.max(0L,
-                        predictor.estimateMs(item.seqLen(), item.hitCache()));
                 synchronized (entry) {
                     if (item.future().isDone() || entry.lifecycle.isTerminal()
                             || entry.cleanupOwned || inflight.get(item.requestId()) != entry) {
+                        settleAdmittedItemWithExistingOwner(admittedItem, "route");
                         continue;
                     }
 
-                    if (!prefillEp.tryCommitRequest(
-                            item.requestId(), predictedMs, prefillRequestLimit)) {
-                        restorePendingDelivery(batcher, item);
+                    if (!admittedItem.transferCapacityToEndpointLifecycle()) {
+                        settleAdmittedItemWithExistingOwner(admittedItem, "route");
                         continue;
                     }
-                    requestLedgerCommitted = true;
-
-                    DecodeEndpoint.DispatchClaimResult claim = item.decodeEp() == null
-                            ? DecodeEndpoint.DispatchClaimResult.CLAIMED
-                            : item.decodeEp().tryClaimEngineDispatch(
-                                    item.requestId(), decodeConcurrencyLimit,
-                                    decodeKvUsageLimit);
-                    if (claim == DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL) {
-                        prefillEp.releaseRequest(item.requestId());
-                        requestLedgerCommitted = false;
-                        restorePendingDelivery(batcher, item);
-                        continue;
-                    }
-                    if (claim != DecodeEndpoint.DispatchClaimResult.CLAIMED) {
-                        prefillEp.releaseRequest(item.requestId());
-                        requestLedgerCommitted = false;
-                        if (entry.preemption == null) {
-                            publication = reduceOrdinaryTerminalLocked(entry,
-                                    DeferredTerminal.failure(
-                                            StrategyErrorType.BATCH_DISPATCH_FAILED,
-                                            "Decode dispatch ownership lost before route delivery",
-                                            false));
-                        }
-                        decodeOwnershipLost = true;
-                    } else {
-                        entry.lifecycle.startRouteDecisionDelivery();
-                        deliverable.add(item);
-                    }
-                }
-                submitResponseCompletion(publication);
-                if (decodeOwnershipLost) {
-                    continue;
+                    endpointLifecycleOwned = true;
+                    endpointOwnedRouteMembers.add(admittedItem);
+                    entry.lifecycle.startRouteDecisionDelivery();
+                    routeDeliveryItems.add(item);
                 }
             } catch (Throwable claimFailure) {
-                if (requestLedgerCommitted) {
-                    prefillEp.releaseRequest(item.requestId());
+                if (!endpointLifecycleOwned) {
+                    admittedItem.recordFailureBeforeDeliveryHandoff(claimFailure);
+                    continue;
                 }
-                failClaimedDelivery(item, claimFailure);
-            } finally {
-                if (callbackOwnsPending) {
-                    completePendingDelivery(batcher, item);
+                PrefillEndpoint prefillEndpoint = item.prefillEp();
+                if (prefillEndpoint != null) {
+                    prefillEndpoint.releaseRequest(item.requestId());
+                }
+                try {
+                    failClaimedDelivery(item, claimFailure);
+                } catch (Throwable cleanupFailure) {
+                    Logger.error("Failed to terminate prepared route request_id={}",
+                            item.requestId(), cleanupFailure);
+                } finally {
+                    endpointOwnedRouteMembers.remove(admittedItem);
+                    settleAdmittedItemWithExistingOwner(admittedItem, "route");
                 }
             }
         }
 
-        if (deliverable.isEmpty()) {
-            return;
+        Throwable deliveryStartFailure = null;
+        if (!routeDeliveryItems.isEmpty()) {
+            try {
+                routeDecisionDelivery.deliver(routeDeliveryItems, this);
+            } catch (Throwable failure) {
+                deliveryStartFailure = failure;
+            }
+        }
+        if (deliveryStartFailure != null) {
+            // DecisionDelivery may be injected and does not promise a
+            // no-throw handoff. Every member below already has a route
+            // lifecycle owner, so reduce the failed handoff through that
+            // owner before allowing the callback failure to escape.
+            for (int index = 0; index < routeDeliveryItems.size(); index++) {
+                BatchItem item = routeDeliveryItems.get(index);
+                AdmittedDecisionGroup.AdmittedItem admittedItem =
+                        endpointOwnedRouteMembers.get(index);
+                try {
+                    failClaimedDelivery(item, deliveryStartFailure);
+                } catch (Throwable cleanupFailure) {
+                    if (cleanupFailure != deliveryStartFailure) {
+                        deliveryStartFailure.addSuppressed(cleanupFailure);
+                    }
+                } finally {
+                    settleAdmittedItemWithExistingOwner(admittedItem, "route");
+                }
+            }
+            endpointOwnedRouteMembers.clear();
         }
 
-        routeDecisionDelivery.deliver(deliverable, this);
+        Throwable handoffCompletionFailure = completeDeliveryHandoffs(
+                endpointOwnedRouteMembers, "route");
+        if (deliveryStartFailure != null) {
+            if (handoffCompletionFailure != null
+                    && handoffCompletionFailure != deliveryStartFailure) {
+                deliveryStartFailure.addSuppressed(handoffCompletionFailure);
+            }
+            throw propagateCallbackFailure(deliveryStartFailure);
+        }
+        if (handoffCompletionFailure != null) {
+            throw propagateCallbackFailure(handoffCompletionFailure);
+        }
+    }
+
+    private static Throwable completeDeliveryHandoffs(
+            List<AdmittedDecisionGroup.AdmittedItem> admittedItems,
+            String deliveryType) {
+        Throwable firstFailure = null;
+        for (AdmittedDecisionGroup.AdmittedItem admittedItem : admittedItems) {
+            try {
+                if (!admittedItem.completeDeliveryHandoff()) {
+                    throw new IllegalStateException(
+                            deliveryType + " member lifecycle handoff was not capacity-owned"
+                                    + " request_id="
+                                    + admittedItem.request().requestId());
+                }
+            } catch (Throwable failure) {
+                if (firstFailure == null) {
+                    firstFailure = failure;
+                } else if (firstFailure != failure) {
+                    firstFailure.addSuppressed(failure);
+                }
+            }
+        }
+        return firstFailure;
+    }
+
+    private static void settleAdmittedItemWithExistingOwner(
+            AdmittedDecisionGroup.AdmittedItem admittedItem,
+            String deliveryType) {
+        Throwable cleanupFailure = admittedItem.settleWithExistingRequestOwner();
+        if (cleanupFailure != null) {
+            Logger.error("Failed to settle {} admission with existing request owner "
+                            + "request_id={}",
+                    deliveryType, admittedItem.request().requestId(), cleanupFailure);
+        }
     }
 
     private void failClaimedDelivery(BatchItem item, Throwable error) {
@@ -3162,24 +3711,16 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         submitResponseCompletion(publication);
     }
 
-    private static void completePendingDelivery(WorkerBatcher batcher,
-                                                BatchItem item) {
-        if (batcher != null) {
-            batcher.completePendingDelivery(item);
+    private static RuntimeException propagateCallbackFailure(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            return runtimeFailure;
         }
-    }
-
-    private void restorePendingDelivery(WorkerBatcher batcher,
-                                        BatchItem item) {
-        if (batcher == null) {
-            return;
+        if (failure instanceof Error error) {
+            throw error;
         }
-        BatcherContext.PendingRestoreResult result = batcher.restorePendingDelivery(item);
-        if (result == BatcherContext.PendingRestoreResult.STOPPED) {
-            onDeliveryFailure(item,
-                    new java.util.concurrent.CancellationException(
-                            "FlexLB worker scheduling queue stopped while Decode capacity was full"));
-        }
+        return new IllegalStateException(
+                "decision callback failed before delivery ownership was established",
+                failure);
     }
 
     // ==================== DecisionDelivery.Callback implementation ====================
@@ -4022,14 +4563,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         PrefillEndpoint prefill = entry.item.prefillEp();
         if (entry.priorityAdmission) {
             admissionFailure = classifyAdmissionTimeout(entry.item, prefill);
-            if (prefill != null) {
-                prefill.getBatcher().queueManager().tryRemove(
-                        entry.item.requestId(), "ADMISSION_TIMEOUT");
-            }
         }
         RequestLifecycleSnapshot terminal = entry.lifecycle.timeout(detail);
-        rollbackOnce(entry);
-        releasePrefillAccounting(entry);
         ResponseCompletion publication;
         if (admissionFailure != null) {
             Logger.debug("[priority] admission timeout classified: request_id={} "
@@ -4041,7 +4576,19 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             publication = errorPublicationLocked(
                     entry, entry.deadlineErrorType, detail);
         }
-        finishEntry(entry, terminal);
+        TerminalFinalizer finalizer = new TerminalFinalizer(entry, "timeout");
+        if (entry.priorityAdmission) {
+            finalizer.run("active queue release", () -> {
+                if (prefill != null) {
+                    prefill.getBatcher().queueManager().tryRemove(
+                            entry.item.requestId(), "ADMISSION_TIMEOUT");
+                }
+            });
+        }
+        finalizer.run("Decode accounting release", () -> rollbackOnce(entry));
+        finalizer.run("Prefill accounting release",
+                () -> releasePrefillAccounting(entry));
+        finalizer.finish(terminal);
         return publication;
     }
 
@@ -4090,19 +4637,90 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     private void finishEntry(InflightEntry entry,
                              RequestLifecycleSnapshot terminal) {
-        clearEngineFenceLocked(entry, entry.engineFence);
+        Throwable cleanupFailure = null;
+        try {
+            clearEngineFenceLocked(entry, entry.engineFence);
+        } catch (Throwable fenceFailure) {
+            cleanupFailure = appendFailure(cleanupFailure, fenceFailure);
+        }
         if (entry.admissionLease != null) {
             try {
                 entry.admissionLease.markRequestSettled();
-            } catch (RuntimeException | Error terminationFailure) {
-                Logger.error("Failed to terminate admission lease: request_id={}",
-                        entry.item.requestId(), terminationFailure);
+            } catch (Throwable leaseFailure) {
+                cleanupFailure = appendFailure(cleanupFailure, leaseFailure);
             }
         }
         // Publish the tombstone before removing inflight. submit() then observes
         // at least one side of the ownership transition and cannot revive the request ID.
-        terminalStates.put(terminal.requestId(), terminal);
-        removeInflightGeneration(entry);
+        try {
+            terminalStates.put(terminal.requestId(), terminal);
+        } catch (Throwable tombstoneFailure) {
+            cleanupFailure = appendFailure(cleanupFailure, tombstoneFailure);
+        } finally {
+            try {
+                removeInflightGeneration(entry);
+            } catch (Throwable detachFailure) {
+                cleanupFailure = appendFailure(cleanupFailure, detachFailure);
+            }
+        }
+        if (cleanupFailure != null) {
+            Logger.error("event=terminal_detachment_incomplete request_id={} state={}",
+                    entry.item.requestId(), terminal.state(), cleanupFailure);
+        }
+    }
+
+    private static Throwable appendFailure(Throwable first, Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (first != next) {
+            first.addSuppressed(next);
+        }
+        return first;
+    }
+
+    /**
+     * One fail-closed boundary for an already-owned terminal result. Cleanup
+     * steps are independent: no endpoint failure can suppress the public
+     * terminal, tombstone publication, or inflight detachment.
+     */
+    private final class TerminalFinalizer {
+        private final InflightEntry entry;
+        private final String outcome;
+        private Throwable cleanupFailure;
+
+        private TerminalFinalizer(InflightEntry entry, String outcome) {
+            this.entry = entry;
+            this.outcome = outcome;
+        }
+
+        private void run(String step, Runnable action) {
+            try {
+                action.run();
+            } catch (Throwable failure) {
+                cleanupFailure = appendFailure(
+                        cleanupFailure,
+                        new IllegalStateException(step + " failed", failure));
+            }
+        }
+
+        private void finish(RequestLifecycleSnapshot terminal) {
+            run("terminal tombstone and inflight detachment",
+                    () -> finishEntry(entry, terminal));
+            reportFailures();
+        }
+
+        private void detachWithoutTombstone() {
+            run("inflight detachment", () -> removeInflightGeneration(entry));
+            reportFailures();
+        }
+
+        private void reportFailures() {
+            if (cleanupFailure != null) {
+                Logger.error("event=terminal_cleanup_incomplete request_id={} outcome={}",
+                        entry.item.requestId(), outcome, cleanupFailure);
+            }
+        }
     }
 
     /** Detach exactly one inflight/future generation; stale cleanup cannot remove a reuse. */

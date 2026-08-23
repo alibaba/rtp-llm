@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.InflightEvictor;
+import org.flexlb.util.Logger;
 
 import java.lang.invoke.VarHandle;
 import java.util.Map;
@@ -14,7 +15,7 @@ import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 
 /**
- * Request-scoped Prefill accounting for frontend-delivered route decisions.
+ * Request-scoped Prefill accounting for individually delivered requests.
  *
  * <p>The ledger owns the complete lifecycle of a route request: capacity,
  * EngineFence protection, WorkerStatus progress, wait-time accounting, and TTL
@@ -38,10 +39,162 @@ final class PrefillRequestLedger {
         BEFORE_CACHE_PUBLISH
     }
 
+    private enum EntryKind {
+        DIRECT_REQUEST,
+        QUEUE_ROUTE
+    }
+
+    enum ProgressOwnership {
+        NOT_TRACKED,
+        DIRECT_REQUEST,
+        QUEUE_ROUTE
+    }
+
+    /**
+     * Result of reserving request capacity before route delivery begins.
+     *
+     * <p>Only {@link Status#ACQUIRED} carries a reservation. An existing
+     * ledger owner is reported separately so a caller can preserve idempotent
+     * admission without receiving authority to release that owner's entry.
+     */
+    record RequestCapacityReservationAcquisition(
+            Status status,
+            RequestCapacityReservation reservation) {
+
+        enum Status {
+            ACQUIRED,
+            CAPACITY_FULL,
+            REQUEST_ALREADY_TRACKED
+        }
+
+        RequestCapacityReservationAcquisition {
+            Objects.requireNonNull(status, "status");
+            if ((status == Status.ACQUIRED) != (reservation != null)) {
+                throw new IllegalArgumentException(
+                        "only an acquired capacity reservation may carry a token");
+            }
+        }
+
+        static RequestCapacityReservationAcquisition acquired(
+                RequestCapacityReservation reservation) {
+            return new RequestCapacityReservationAcquisition(
+                    Status.ACQUIRED, Objects.requireNonNull(reservation, "reservation"));
+        }
+
+        static RequestCapacityReservationAcquisition capacityFull() {
+            return new RequestCapacityReservationAcquisition(Status.CAPACITY_FULL, null);
+        }
+
+        static RequestCapacityReservationAcquisition alreadyTracked() {
+            return new RequestCapacityReservationAcquisition(
+                    Status.REQUEST_ALREADY_TRACKED, null);
+        }
+    }
+
+    /**
+     * Exact-entry token for one newly reserved request-capacity slot.
+     *
+     * <p>{@link #prepareForDelivery()} verifies and pins the exact live ledger
+     * entry while it remains compensable. After the final hard-capacity
+     * ownership transition succeeds, {@link #completePreparedDeliveryTransfer()}
+     * performs the local one-way handoff. {@link #abortBeforeDelivery()} can
+     * remove only the exact entry created by this acquisition, never a
+     * replacement request-id generation.
+     */
+    static final class RequestCapacityReservation {
+
+        private enum State {
+            RESERVED,
+            PREPARED_FOR_DELIVERY,
+            DELIVERY_OWNED,
+            CLOSED
+        }
+
+        private final PrefillRequestLedger ledger;
+        private final long requestId;
+        private final Entry reservedEntry;
+        private State state = State.RESERVED;
+
+        private RequestCapacityReservation(PrefillRequestLedger ledger,
+                                           long requestId,
+                                           Entry reservedEntry) {
+            this.ledger = ledger;
+            this.requestId = requestId;
+            this.reservedEntry = reservedEntry;
+        }
+
+        /**
+         * Verify and pin the exact reserved entry against ordinary lifecycle
+         * settlement. Capacity was already occupied during acquisition and is
+         * not checked again here.
+         *
+         * @return {@code true} only for the first preparation while the exact
+         *         reserved entry is still live
+         */
+        synchronized boolean prepareForDelivery() {
+            if (state != State.RESERVED) {
+                return false;
+            }
+            if (!ledger.prepareReservation(requestId, reservedEntry, this)) {
+                state = State.CLOSED;
+                return false;
+            }
+            state = State.PREPARED_FOR_DELIVERY;
+            return true;
+        }
+
+        /**
+         * Transfer this token to ordinary lifecycle ownership. The caller
+         * invokes this only after the final hard-capacity ownership transition
+         * succeeds, so this local transition performs no endpoint work and
+         * cannot fail.
+         */
+        synchronized void completePreparedDeliveryTransfer() {
+            if (state == State.PREPARED_FOR_DELIVERY) {
+                // PREPARED pins the exact Entry against every ordinary removal.
+                // The token monitor is therefore the only writer which can
+                // complete this one-way handoff after Decode commits.
+                reservedEntry.transferToDelivery();
+                state = State.DELIVERY_OWNED;
+            }
+        }
+
+        /**
+         * Abandon this exact entry while delivery is still externally
+         * invisible, whether it is reserved or prepared for delivery.
+         */
+        synchronized boolean abortBeforeDelivery() {
+            if (state != State.RESERVED
+                    && state != State.PREPARED_FOR_DELIVERY) {
+                return false;
+            }
+            state = State.CLOSED;
+            return ledger.releaseReservation(
+                    requestId, reservedEntry, this, true);
+        }
+
+        /**
+         * Release this reservation before ownership is prepared.
+         *
+         * @return {@code true} only when this call removed its exact entry
+         */
+        synchronized boolean release() {
+            if (state != State.RESERVED) {
+                return false;
+            }
+            state = State.CLOSED;
+            return ledger.releaseReservation(
+                    requestId, reservedEntry, this, false);
+        }
+
+    }
+
     private final ConcurrentHashMap<Long, Entry> entries = new ConcurrentHashMap<>();
     private final Stripe[] stripes = createStripes();
     private final RunningWaitState runningWait = new RunningWaitState();
-    private final AtomicInteger count = new AtomicInteger();
+    private final AtomicInteger requestCount = new AtomicInteger();
+    /** Only QUEUE_ROUTE entries consume the configured route-request capacity. */
+    private final AtomicInteger queueRouteCapacityUsage = new AtomicInteger();
     private final Runnable capacityAvailable;
     private final LongSupplier clock;
     private final Consumer<WaitSnapshotStage> snapshotObserver;
@@ -71,47 +224,165 @@ final class PrefillRequestLedger {
         this.snapshotObserver = Objects.requireNonNull(snapshotObserver, "snapshotObserver");
     }
 
+    /** Atomically publish one DIRECT request as ordinary lifecycle-owned work. */
+    boolean registerDirectRequest(long requestId, long predictMs) {
+        Long requestKey = requestId;
+        Stripe stripe = stripeFor(requestId);
+        synchronized (stripe) {
+            Entry existing = entries.get(requestKey);
+            if (existing != null) {
+                return existing.kind() == EntryKind.DIRECT_REQUEST
+                        && existing.isDeliveryOwned();
+            }
+            if (!tryAcquireAccounting(EntryKind.DIRECT_REQUEST, 0)) {
+                return false;
+            }
+
+            long nowMs = clock.getAsLong();
+            Entry entry = new Entry(EntryKind.DIRECT_REQUEST, predictMs, nowMs);
+            boolean waitAccountingAdded = false;
+            boolean mutationBegun = false;
+            boolean published = false;
+            try {
+                entry.startDirectDelivery();
+                beginWaitMutation();
+                mutationBegun = true;
+                runningWait.add(entry, nowMs);
+                waitAccountingAdded = true;
+                entries.put(requestKey, entry);
+                published = true;
+                return true;
+            } finally {
+                if (!published) {
+                    if (waitAccountingAdded) {
+                        runningWait.remove(entry, nowMs);
+                    }
+                    releaseAccountingSlot(EntryKind.DIRECT_REQUEST);
+                }
+                if (mutationBegun) {
+                    endWaitMutation();
+                }
+            }
+        }
+    }
+
     /**
-     * Atomically acquire accounting for one route request.
+     * Retire every DIRECT request owned by an endpoint generation.
      *
-     * <p>A non-positive limit disables the configured cap, while the integer
-     * representation limit remains a hard bound. Re-acquiring a live request id
-     * is idempotent and does not replace its original prediction.
+     * <p>The generation lifecycle has already rejected new handoffs and waited
+     * for accepted DIRECT publications before invoking this method. Locking all
+     * request stripes freezes ordinary request mutation, making this a complete
+     * drain rather than a weakly consistent map scan. QUEUE_ROUTE entries remain
+     * untouched because their hard-capacity and EngineFence lifecycle outlives
+     * endpoint selection.
      */
-    boolean tryAcquire(long requestId, long predictMs, int maxPerWorker) {
+    int retireDirectRequests() {
+        return retireDirectRequestsWithStripesLocked(0);
+    }
+
+    private int retireDirectRequestsWithStripesLocked(int stripeIndex) {
+        if (stripeIndex == stripes.length) {
+            return removeDirectRequestsWhileStripesLocked();
+        }
+        synchronized (stripes[stripeIndex]) {
+            return retireDirectRequestsWithStripesLocked(stripeIndex + 1);
+        }
+    }
+
+    private int removeDirectRequestsWhileStripesLocked() {
+        long nowMs = clock.getAsLong();
+        int retired = 0;
+        beginWaitMutation();
+        try {
+            for (Map.Entry<Long, Entry> observed : entries.entrySet()) {
+                Entry entry = observed.getValue();
+                if (entry.kind() != EntryKind.DIRECT_REQUEST
+                        || !entries.remove(observed.getKey(), entry)) {
+                    continue;
+                }
+                boolean routeCapacityReleased = removeAccounting(
+                        stripeFor(observed.getKey()), entry, nowMs);
+                if (routeCapacityReleased) {
+                    throw new IllegalStateException(
+                            "DIRECT retirement released QUEUE_ROUTE capacity");
+                }
+                retired++;
+            }
+        } finally {
+            endWaitMutation();
+        }
+        return retired;
+    }
+
+    /**
+     * Reserve one request-capacity slot without transferring it to the normal
+     * delivery lifecycle yet.
+     *
+     * <p>Acquisition is the only capacity gate. A successful reservation is
+     * immediately included in request count and wait accounting. The returned
+     * token must subsequently be prepared and transferred, or released.
+     */
+    RequestCapacityReservationAcquisition acquireCapacityReservation(
+            long requestId,
+            long predictMs,
+            int maxPerWorker) {
+        return acquireCapacityReservation(
+                requestId, predictMs, maxPerWorker, EntryKind.QUEUE_ROUTE);
+    }
+
+    private RequestCapacityReservationAcquisition acquireCapacityReservation(
+            long requestId,
+            long predictMs,
+            int maxPerWorker,
+            EntryKind kind) {
         Long requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
         boolean capacityNeedsNotification = false;
         try {
             synchronized (stripe) {
                 if (entries.containsKey(requestKey)) {
-                    return true;
+                    return RequestCapacityReservationAcquisition.alreadyTracked();
                 }
-                if (!tryAcquireSlot(maxPerWorker)) {
-                    return false;
+                if (!tryAcquireAccounting(kind, maxPerWorker)) {
+                    return RequestCapacityReservationAcquisition.capacityFull();
                 }
 
-                boolean queuedWorkAdded = false;
+                boolean waitAccountingAdded = false;
                 boolean mutationBegun = false;
                 boolean published = false;
                 long accountedPredictMs = 0;
+                long nowMs = 0;
+                Entry entry = null;
                 try {
-                    Entry entry = new Entry(predictMs, clock.getAsLong());
+                    nowMs = clock.getAsLong();
+                    entry = new Entry(kind, predictMs, nowMs);
+                    RequestCapacityReservation reservation =
+                            new RequestCapacityReservation(this, requestId, entry);
+                    entry.reserveFor(reservation);
+                    RequestCapacityReservationAcquisition acquisition =
+                            RequestCapacityReservationAcquisition.acquired(reservation);
                     accountedPredictMs = entry.predictTimeMs();
                     beginWaitMutation();
                     mutationBegun = true;
-                    stripe.addQueued(accountedPredictMs);
-                    queuedWorkAdded = true;
+                    if (entry.waitProgressActive()) {
+                        runningWait.add(entry, nowMs);
+                    } else {
+                        stripe.addQueued(accountedPredictMs);
+                    }
+                    waitAccountingAdded = true;
                     entries.put(requestKey, entry);
                     published = true;
-                    return true;
+                    return acquisition;
                 } finally {
                     if (!published) {
-                        if (queuedWorkAdded) {
-                            stripe.removeQueued(accountedPredictMs);
+                        if (waitAccountingAdded) {
+                            if (entry.waitProgressActive()) {
+                                runningWait.remove(entry, nowMs);
+                            } else {
+                                stripe.removeQueued(accountedPredictMs);
+                            }
                         }
-                        count.decrementAndGet();
-                        capacityNeedsNotification = true;
+                        capacityNeedsNotification = releaseAccountingSlot(kind);
                     }
                     if (mutationBegun) {
                         endWaitMutation();
@@ -120,12 +391,64 @@ final class PrefillRequestLedger {
             }
         } finally {
             if (capacityNeedsNotification) {
-                capacityAvailable.run();
+                notifyCapacityAvailable();
             }
         }
     }
 
-    /** Remove an explicitly abandoned route request, idempotently. */
+    /** Atomically pin the exact entry against ordinary lifecycle settlement. */
+    private boolean prepareReservation(long requestId,
+                                       Entry reservedEntry,
+                                       RequestCapacityReservation reservation) {
+        Long requestKey = requestId;
+        Stripe stripe = stripeFor(requestId);
+        synchronized (stripe) {
+            return entries.get(requestKey) == reservedEntry
+                    && reservedEntry.prepareForDelivery(reservation);
+        }
+    }
+
+    /** Release only the exact entry created for a still-compensable reservation. */
+    private boolean releaseReservation(
+            long requestId,
+            Entry reservedEntry,
+            RequestCapacityReservation reservation,
+            boolean allowPrepared) {
+        Long requestKey = requestId;
+        Stripe stripe = stripeFor(requestId);
+        boolean routeCapacityReleased;
+        synchronized (stripe) {
+            if (entries.get(requestKey) != reservedEntry
+                    || !reservedEntry.isReleasableBy(reservation, allowPrepared)) {
+                return false;
+            }
+            beginWaitMutation();
+            try {
+                if (!entries.remove(requestKey, reservedEntry)) {
+                    return false;
+                }
+                routeCapacityReleased = removeAccounting(
+                        stripe, reservedEntry, clock.getAsLong());
+            } finally {
+                endWaitMutation();
+            }
+        }
+        if (routeCapacityReleased) {
+            notifyCapacityAvailable();
+        }
+        return true;
+    }
+
+    /** Capacity accounting is already changed; a wakeup must not undo it. */
+    private void notifyCapacityAvailable() {
+        try {
+            capacityAvailable.run();
+        } catch (Throwable notificationFailure) {
+            Logger.warn("Prefill request-capacity listener failed", notificationFailure);
+        }
+    }
+
+    /** Remove an explicitly abandoned individually delivered request. */
     boolean release(long requestId) {
         return remove(requestId);
     }
@@ -136,7 +459,7 @@ final class PrefillRequestLedger {
         Stripe stripe = stripeFor(requestId);
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
-            if (entry == null) {
+            if (entry == null || !entry.isDeliveryOwned()) {
                 return false;
             }
             entry.protectWithEngineFence();
@@ -150,7 +473,8 @@ final class PrefillRequestLedger {
         Stripe stripe = stripeFor(requestId);
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
-            return entry != null && entry.clearEngineFenceProtection();
+            return entry != null && entry.isDeliveryOwned()
+                    && entry.clearEngineFenceProtection();
         }
     }
 
@@ -159,26 +483,26 @@ final class PrefillRequestLedger {
      *
      * @return whether the request is owned by this ledger
      */
-    boolean observe(long requestId, boolean running, long observedAtMs) {
+    ProgressOwnership observe(long requestId, boolean engineRunning, long observedAtMs) {
         Long requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
-            if (entry == null) {
-                return false;
+            if (entry == null || !entry.isDeliveryOwned()) {
+                return ProgressOwnership.NOT_TRACKED;
             }
-            if (running == entry.running()) {
-                if (running) {
+            if (engineRunning == entry.waitProgressActive()) {
+                if (engineRunning) {
                     entry.markRunning(observedAtMs);
                 } else {
                     entry.markQueued(observedAtMs);
                 }
-                return true;
+                return progressOwnership(entry);
             }
 
             beginWaitMutation();
             try {
-                if (running) {
+                if (engineRunning) {
                     entry.markRunning(observedAtMs);
                     // Publish the running contribution first. A racing estimate
                     // may briefly overestimate, but cannot observe an unsafe gap.
@@ -193,8 +517,14 @@ final class PrefillRequestLedger {
             } finally {
                 endWaitMutation();
             }
-            return true;
+            return progressOwnership(entry);
         }
+    }
+
+    private static ProgressOwnership progressOwnership(Entry entry) {
+        return entry.kind() == EntryKind.DIRECT_REQUEST
+                ? ProgressOwnership.DIRECT_REQUEST
+                : ProgressOwnership.QUEUE_ROUTE;
     }
 
     /** Settle an authoritative WorkerStatus terminal, idempotently. */
@@ -202,16 +532,20 @@ final class PrefillRequestLedger {
         return remove(requestId);
     }
 
-    /** Advisory capacity snapshot; {@link #tryAcquire} is the hard gate. */
+    /** Advisory QUEUE_ROUTE capacity snapshot; reservation is the hard gate. */
     int available(int maxPerWorker) {
         if (maxPerWorker <= 0) {
             return Integer.MAX_VALUE;
         }
-        return Math.max(0, maxPerWorker - count.get());
+        return Math.max(0, maxPerWorker - queueRouteCapacityUsage.get());
     }
 
     int count() {
-        return count.get();
+        return requestCount.get();
+    }
+
+    int queueRouteCount() {
+        return queueRouteCapacityUsage.get();
     }
 
     /**
@@ -277,6 +611,7 @@ final class PrefillRequestLedger {
     int evict(long ttlMs, LongPredicate schedulerOwnsRequest) {
         long nowMs = clock.getAsLong();
         int evicted = 0;
+        boolean routeCapacityReleased = false;
         for (Map.Entry<Long, Entry> observed : entries.entrySet()) {
             Entry candidate = observed.getValue();
             if (nowMs - candidate.lastObservedAtMs() <= ttlMs) {
@@ -288,6 +623,7 @@ final class PrefillRequestLedger {
             synchronized (stripe) {
                 Entry current = entries.get(requestKey);
                 if (current != candidate
+                        || current.isPreparedForDelivery()
                         || current.engineFenceProtected()
                         || schedulerOwnsRequest.test(requestKey)
                         || nowMs - current.lastObservedAtMs() <= ttlMs) {
@@ -296,20 +632,21 @@ final class PrefillRequestLedger {
                 beginWaitMutation();
                 try {
                     entries.remove(requestKey);
-                    removeAccounting(stripe, current, nowMs);
+                    routeCapacityReleased |= removeAccounting(
+                            stripe, current, nowMs);
                     evicted++;
                 } finally {
                     endWaitMutation();
                 }
             }
         }
-        if (evicted > 0) {
-            capacityAvailable.run();
+        if (routeCapacityReleased) {
+            notifyCapacityAvailable();
         }
         return evicted;
     }
 
-    /** Age of the oldest live route-request entry, for Endpoint metrics glue. */
+    /** Age of the oldest live DIRECT or QUEUE_ROUTE entry, for endpoint metrics. */
     long maxAge(long nowMs) {
         return InflightEvictor.maxAgeMs(entries, nowMs);
     }
@@ -317,42 +654,76 @@ final class PrefillRequestLedger {
     private boolean remove(long requestId) {
         Long requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
+        boolean routeCapacityReleased;
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
-            if (entry == null) {
+            if (entry == null || entry.isPreparedForDelivery()) {
                 return false;
             }
             beginWaitMutation();
             try {
                 entries.remove(requestKey);
-                removeAccounting(stripe, entry, clock.getAsLong());
+                routeCapacityReleased = removeAccounting(
+                        stripe, entry, clock.getAsLong());
             } finally {
                 endWaitMutation();
             }
         }
-        capacityAvailable.run();
+        if (routeCapacityReleased) {
+            notifyCapacityAvailable();
+        }
         return true;
     }
 
-    private void removeAccounting(Stripe stripe, Entry entry, long nowMs) {
-        count.decrementAndGet();
-        if (entry.running()) {
+    private boolean removeAccounting(Stripe stripe, Entry entry, long nowMs) {
+        boolean routeCapacityReleased = releaseAccountingSlot(entry.kind());
+        if (entry.waitProgressActive()) {
             runningWait.remove(entry, nowMs);
         } else {
             stripe.removeQueued(entry.predictTimeMs());
         }
+        return routeCapacityReleased;
     }
 
-    private boolean tryAcquireSlot(int maxPerWorker) {
+    private boolean tryAcquireAccounting(EntryKind kind, int maxPerWorker) {
+        if (!tryIncrement(requestCount, 0)) {
+            return false;
+        }
+        if (kind == EntryKind.QUEUE_ROUTE
+                && !tryIncrement(queueRouteCapacityUsage, maxPerWorker)) {
+            decrementExact(requestCount, "Prefill request count");
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean tryIncrement(AtomicInteger counter, int limit) {
         while (true) {
-            int current = count.get();
-            if ((maxPerWorker > 0 && current >= maxPerWorker)
+            int current = counter.get();
+            if ((limit > 0 && current >= limit)
                     || current == Integer.MAX_VALUE) {
                 return false;
             }
-            if (count.compareAndSet(current, current + 1)) {
+            if (counter.compareAndSet(current, current + 1)) {
                 return true;
             }
+        }
+    }
+
+    private boolean releaseAccountingSlot(EntryKind kind) {
+        decrementExact(requestCount, "Prefill request count");
+        if (kind != EntryKind.QUEUE_ROUTE) {
+            return false;
+        }
+        decrementExact(queueRouteCapacityUsage, "Prefill QUEUE_ROUTE capacity");
+        return true;
+    }
+
+    private static void decrementExact(AtomicInteger counter, String name) {
+        int remaining = counter.decrementAndGet();
+        if (remaining < 0) {
+            counter.incrementAndGet();
+            throw new IllegalStateException(name + " released more than once");
         }
     }
 
@@ -437,17 +808,33 @@ final class PrefillRequestLedger {
         }
     }
 
-    /** Compact entry; all mutable fields are guarded by the owning stripe or running lock. */
+    /**
+     * Compact entry. Request state is guarded by its stripe, except the final
+     * PREPARED-to-DELIVERY_OWNED handoff: the exact reservation token performs
+     * that one-way write and publishes it through the volatile ownership field.
+     * Running-wait links remain guarded by {@link RunningWaitState#lock}.
+     */
     private static final class Entry implements InflightEvictor.TtlTracked {
+
+        private enum DeliveryOwnership {
+            RESERVED,
+            PREPARED_FOR_DELIVERY,
+            DELIVERY_OWNED
+        }
 
         // The count is an int, so this bound keeps the maximum aggregate
         // prediction representable in a signed long without saturation.
         private static final long MAX_ACCOUNTED_PREDICT_TIME_MS = Integer.MAX_VALUE;
 
+        private final EntryKind kind;
         private final long predictTimeMs;
         private final long createdAtMs;
         private volatile long lastObservedAtMs;
-        private boolean running;
+        /** Prepared under the stripe; final ownership is published by the token. */
+        private volatile DeliveryOwnership deliveryOwnership = DeliveryOwnership.RESERVED;
+        /** Guarded by the stripe until PREPARED; then owned by the exact token. */
+        private RequestCapacityReservation reservationOwner;
+        private boolean waitProgressActive;
         /** Guarded by the owning request stripe. */
         private boolean engineFenceProtected;
         /** Guarded by RunningWaitState.lock. */
@@ -456,11 +843,19 @@ final class PrefillRequestLedger {
         private Entry serviceOrderNext;
         private boolean inServiceOrder;
 
-        Entry(long predictTimeMs, long nowMs) {
+        Entry(EntryKind kind, long predictTimeMs, long nowMs) {
+            this.kind = Objects.requireNonNull(kind, "kind");
             this.predictTimeMs = Math.min(
                     MAX_ACCOUNTED_PREDICT_TIME_MS, Math.max(0, predictTimeMs));
             this.createdAtMs = nowMs;
             this.lastObservedAtMs = nowMs;
+            // DIRECT has crossed local selection/accounting ownership when
+            // published, so its wait prediction begins consuming service credit.
+            this.waitProgressActive = kind == EntryKind.DIRECT_REQUEST;
+        }
+
+        EntryKind kind() {
+            return kind;
         }
 
         long predictTimeMs() {
@@ -476,8 +871,57 @@ final class PrefillRequestLedger {
             return lastObservedAtMs;
         }
 
-        boolean running() {
-            return running;
+        void reserveFor(RequestCapacityReservation reservation) {
+            if (reservationOwner != null) {
+                throw new IllegalStateException("Prefill entry already has a reservation owner");
+            }
+            reservationOwner = Objects.requireNonNull(reservation, "reservation");
+        }
+
+        void startDirectDelivery() {
+            if (kind != EntryKind.DIRECT_REQUEST
+                    || reservationOwner != null
+                    || deliveryOwnership != DeliveryOwnership.RESERVED) {
+                throw new IllegalStateException(
+                        "Prefill entry is not available for DIRECT delivery");
+            }
+            deliveryOwnership = DeliveryOwnership.DELIVERY_OWNED;
+        }
+
+        boolean prepareForDelivery(RequestCapacityReservation reservation) {
+            if (deliveryOwnership != DeliveryOwnership.RESERVED
+                    || reservationOwner != reservation) {
+                return false;
+            }
+            deliveryOwnership = DeliveryOwnership.PREPARED_FOR_DELIVERY;
+            return true;
+        }
+
+        void transferToDelivery() {
+            reservationOwner = null;
+            deliveryOwnership = DeliveryOwnership.DELIVERY_OWNED;
+        }
+
+        boolean isReleasableBy(RequestCapacityReservation reservation,
+                               boolean allowPrepared) {
+            if (reservationOwner != reservation) {
+                return false;
+            }
+            return deliveryOwnership == DeliveryOwnership.RESERVED
+                    || (allowPrepared
+                    && deliveryOwnership == DeliveryOwnership.PREPARED_FOR_DELIVERY);
+        }
+
+        boolean isPreparedForDelivery() {
+            return deliveryOwnership == DeliveryOwnership.PREPARED_FOR_DELIVERY;
+        }
+
+        boolean isDeliveryOwned() {
+            return deliveryOwnership == DeliveryOwnership.DELIVERY_OWNED;
+        }
+
+        boolean waitProgressActive() {
+            return waitProgressActive;
         }
 
         boolean engineFenceProtected() {
@@ -496,15 +940,15 @@ final class PrefillRequestLedger {
 
         boolean markQueued(long observedAtMs) {
             touch(observedAtMs);
-            boolean wasRunning = running;
-            running = false;
+            boolean wasRunning = waitProgressActive;
+            waitProgressActive = false;
             return wasRunning;
         }
 
         boolean markRunning(long observedAtMs) {
             touch(observedAtMs);
-            if (!running) {
-                running = true;
+            if (!waitProgressActive) {
+                waitProgressActive = true;
                 return true;
             }
             return false;

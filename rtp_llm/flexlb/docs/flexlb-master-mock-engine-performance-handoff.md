@@ -4,6 +4,12 @@
 > `slo` 的文件名、脚本变量和结果字段是测试工具的历史命名，不是当前
 > FlexLB 的 SLO 配置接口。当前调度、凑批和路由行为只从进程配置中的
 > `FLEXLB_CONFIG` JSON 读取；不要把历史环境变量名称复制到生产配置。
+> 文中出现的 `dispatcher.maxRequests`、`dispatcher.maxCollectionWaitMs` 和
+> `dispatcher.earlyDispatchPredictedExecutionMs` 是当时 schema v1 的历史字段，
+> schema v2 已删除。当前分别使用 `scheduler.decision.maxRequests`、
+> `scheduler.decision.maxCollectionWaitMs` 和
+> `scheduler.decision.maxPredictedExecutionMs`；预测边界语义也已收敛为“等于
+> 上限时纳入并立即下发，超过上限时保留新请求”。
 
 本文用于交接 FlexLB Master 的 batch 调度性能测试。目标是让接手人能够复现测试、逐级寻找容量拐点，并判断瓶颈在发压端、FlexLB Master 还是 mock engine。
 
@@ -20,11 +26,13 @@ fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报�
 - Master 进程配置必须在 `FLEXLB_CONFIG` 中选择
   `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`SCHEDULE_ONLY=1` 只是
   load client 的测试开关。历史 10 ms base case 需要在独立进程 JSON 中
-  配置 `dispatcher.maxCollectionWaitMs=10`；当前仓库的
+  配置当时的 `dispatcher.maxCollectionWaitMs=10`，在当前 schema v2 中应写为
+  `scheduler.decision.maxCollectionWaitMs=10`；当前仓库的
   `master_fixed_window.json` 已不是该 10 ms fixture，不能用已删除的标量
   环境变量覆盖。历史 `slo500_wait160` case 在独立 JSON 中配置
-  `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
-  `dispatcher.maxCollectionWaitMs=160`。
+  当时的 `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
+  `dispatcher.maxCollectionWaitMs=160`；当前 fixture 已迁移到对应的
+  `scheduler.decision` 字段。
 - 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
 - 延迟以 Master 服务端的 `schedule_latency_ms` 为准，不以 client RTT 作为最终报告口径。
@@ -130,7 +138,7 @@ python3 -m unittest discover -s tools/online_eval/tests
 
 普通 `./mvnw test` 只运行功能测试，并排除 `performance-regression` tag。性能回归分为两个显式 profile，必须分别运行：
 
-- `sync-performance-regression`：`SchedulingConfigAndExpirationPerformanceTest`、`AutoTpmSchedulingOverheadPerfTest` 和 `CostBasedPrefillRoutingPerformanceTest`。其中后者覆盖 750 个 prefill endpoint 的 cost-based 选点热路径。
+- `sync-performance-regression`：`RequestExpirationTimerPerformanceTest`、`AutoTpmSchedulingOverheadPerfTest`、`CostBasedPrefillRoutingPerformanceTest` 和 `PrefillQueueManagerPerformanceTest`。其中 cost-based 测试覆盖 750 个 prefill endpoint 的选点热路径，queue-manager 测试覆盖不同队列深度下的等待时间估算开销。
 - `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路；cost-based prefill 热路径由 Sync profile 的 750-endpoint 门禁独立覆盖。
 
 分别运行两组门禁：

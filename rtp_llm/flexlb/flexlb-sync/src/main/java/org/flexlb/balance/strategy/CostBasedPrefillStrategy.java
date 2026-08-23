@@ -60,10 +60,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
-        // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by PriorityScheduler — no-op here.
+        // Release DIRECT request-ledger accounting on partial routing failure.
+        // All QUEUE paths are owned later by PriorityScheduler, so this is a no-op.
         if (ep instanceof PrefillEndpoint pe) {
-            pe.releaseBatch(requestId);
+            pe.releaseRequest(requestId);
         }
     }
 
@@ -586,11 +586,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                            long selectedPrefillMs,
                                            BalanceContext balanceContext,
                                            long bestCacheHit) {
-        // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
-        if (strategyOwnsInflightTracking(balanceContext)) {
-            ep.commitBatch(requestId, selectedPrefillMs, Collections.emptyList());
-        }
-
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
         DebugInfo debugInfo = new DebugInfo();
         debugInfo.setHitCacheLen(bestCacheHit);
@@ -606,6 +601,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
         result.setDpRank(ep.getStatus().getDpRank());
         result.setDebugInfo(debugInfo);
+        // This is the final fallible side effect. A failed registration must not
+        // leave an owner behind after selection reports failure.
+        if (strategyOwnsInflightTracking(balanceContext)) {
+            ep.registerDirectRequest(requestId, selectedPrefillMs);
+        }
         return result;
     }
 

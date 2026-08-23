@@ -37,7 +37,9 @@ class PrefillQueueManagerTest {
 
     private WorkerBatcher newBatcher() {
         return new WorkerBatcher("test-worker", null, config,
-                mock(DecisionGroupHandler.class), mock(BatchSchedulerReporter.class));
+                mock(DecisionGroupHandler.class),
+                TestCapacityAdmission.alwaysAvailable(),
+                mock(BatchSchedulerReporter.class));
     }
 
     // ==================== 8.1 queue order ====================
@@ -60,7 +62,8 @@ class PrefillQueueManagerTest {
         // supplied timestamp nor expiration changes same-priority FIFO.
         assertEquals(List.of(2L, 1L, 3L, 4L), order);
         assertEquals(4, snapshot.items().size());
-        assertEquals(SchedulingTestConfig.useBatchDispatcher(config).getMaxWaitingRequestsPerPrefillWorker(), snapshot.queueCapacity());
+        assertEquals(SchedulingTestConfig.useQueueCapacity(config)
+                .getMaxWaitingRequestsPerPrefillWorker(), snapshot.queueCapacity());
         for (QueuedRequestSnapshot item : snapshot.items()) {
             assertEquals(QueuedRequestSnapshot.PREFILL_QUEUED, item.state());
         }

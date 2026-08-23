@@ -50,7 +50,7 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
-    void explicit_decision_and_capacity_take_precedence_over_v1_dispatcher_fields() {
+    void decision_and_capacity_have_single_configuration_owners() {
         FlexlbConfig config = ConfigService.parse("""
                 {
                   "scheduler":{
@@ -69,56 +69,53 @@ class FlexlbConfigSchedulingModeTest {
                   },
                   "dispatcher":{
                     "type":"BATCH",
-                    "maxRequests":99,
-                    "maxCollectionWaitMs":999,
-                    "maxWaitingRequestsPerPrefillWorker":999,
-                    "earlyDispatchPredictedExecutionMs":999
+                    "maxInflightBatchesPerPrefillWorker":2
                   }
                 }
                 """);
 
         FixedWindowDecisionConfig decision = config.fixedWindowDecision();
-        assertTrue(config.hasExplicitDecisionPolicy());
         assertEquals(4, decision.getMaxRequests());
         assertEquals(25L, decision.getMaxCollectionWaitMs());
         assertEquals(80L, decision.getMaxPredictedExecutionMs().longValue());
         assertEquals(64, config.queueScheduler().getCapacity()
-                .getMaxWaitingRequestsPerPrefillWorker().intValue());
+                .getMaxWaitingRequestsPerPrefillWorker());
     }
 
     @Test
-    void omitted_decision_preserves_schema_v1_dispatcher_mapping() {
+    void omitted_queue_fields_use_canonical_scheduler_defaults() {
         FlexlbConfig batch = ConfigService.parse("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"}},
-                  "dispatcher":{
-                    "type":"BATCH",
-                    "maxRequests":7,
-                    "maxCollectionWaitMs":45,
-                    "earlyDispatchPredictedExecutionMs":90
-                  }
+                  "dispatcher":{"type":"BATCH"}
                 }
                 """);
         assertTrue(batch.isFixedWindowDecision());
-        assertFalse(batch.hasExplicitDecisionPolicy());
-        assertEquals(7, batch.fixedWindowDecision().getMaxRequests());
-        assertEquals(45L, batch.fixedWindowDecision().getMaxCollectionWaitMs());
+        assertEquals(8, batch.fixedWindowDecision().getMaxRequests());
+        assertEquals(300L, batch.fixedWindowDecision().getMaxCollectionWaitMs());
         assertNull(batch.fixedWindowDecision().getMaxPredictedExecutionMs());
-        assertEquals(90L, batch.batchDispatcher()
-                .getEarlyDispatchPredictedExecutionMs().longValue());
-        assertNull(batch.queueScheduler().getCapacity()
+        assertEquals(1024, batch.queueScheduler().getCapacity()
                 .getMaxWaitingRequestsPerPrefillWorker());
 
-        FlexlbConfig nonBatch = ConfigService.parse("""
+        FlexlbConfig nonBatchDefault = ConfigService.parse("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"}},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """);
+        assertTrue(nonBatchDefault.isFixedWindowDecision(),
+                "dispatcher type must not choose the decision policy");
+
+        FlexlbConfig nonBatchSingle = ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},
+                    "decision":{"type":"SINGLE"}},
                   "dispatcher":{"type":"NON_BATCH","maxInflightRequestsPerPrefillWorker":1}
                 }
                 """);
-        assertTrue(nonBatch.isSingleDecision());
-        assertFalse(nonBatch.hasExplicitDecisionPolicy());
-        assertInstanceOf(SingleDecisionConfig.class, nonBatch.decisionPolicy());
-        assertEquals(1, nonBatch.nonBatchDispatcher()
+        assertTrue(nonBatchSingle.isSingleDecision());
+        assertInstanceOf(SingleDecisionConfig.class, nonBatchSingle.decisionPolicy());
+        assertEquals(1, nonBatchSingle.nonBatchDispatcher()
                 .getMaxInflightRequestsPerPrefillWorker().intValue());
     }
 
@@ -162,6 +159,12 @@ class FlexlbConfigSchedulingModeTest {
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"}},
                   "dispatcher":{"type":"BATCH","maxInflightRequestsPerPrefillWorker":1}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"}},
+                  "dispatcher":{"type":"BATCH","maxRequests":8}
                 }
                 """));
         assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""

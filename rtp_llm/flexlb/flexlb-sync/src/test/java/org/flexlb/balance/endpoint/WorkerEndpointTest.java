@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
@@ -39,7 +40,12 @@ class WorkerEndpointTest {
         ((RoutingConfig.FormulaEstimatorConfig) config.getRouter().getRoles().getPrefill()
                 .getExecutionTimeEstimator()).setExpression("sum(computeTokens)");
         DecisionGroupHandler handler = Mockito.mock(DecisionGroupHandler.class);
-        endpoint = new PrefillEndpoint(status, config, handler, Mockito.mock(BatchSchedulerReporter.class));
+        endpoint = new PrefillEndpoint(
+                status,
+                config,
+                handler,
+                TestCapacityAdmission.alwaysAvailable(),
+                Mockito.mock(BatchSchedulerReporter.class));
     }
 
     @AfterEach
@@ -49,17 +55,17 @@ class WorkerEndpointTest {
 
     @Test
     void commitBatch_incrementsEstimate() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
         assertWaitTimeNear(500);
 
-        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
         assertWaitTimeNear(800);
     }
 
     @Test
     void releaseBatch_decrementsEstimate() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
 
         endpoint.releaseBatch(1L);
         assertWaitTimeNear(300);
@@ -67,14 +73,14 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_unknownBatchId_noEffect() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
         endpoint.releaseBatch(999L);
         assertWaitTimeNear(500);
     }
 
     @Test
     void releaseBatch_neverGoesNegative() {
-        endpoint.commitBatch(1L, 100, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
         endpoint.releaseBatch(1L);
         endpoint.releaseBatch(1L);
         assertEquals(0, endpoint.realWaitTimeMs());
@@ -88,7 +94,7 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_noInflight_resetsToZero() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
 
         TaskInfo finished = task(100L, 1000, 0, 1L);
         finished.setErrorCode(0);
@@ -100,7 +106,7 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_finishedBatch_removedFromInflight() {
-        endpoint.commitBatch(5L, 9999, List.of(
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 5L, 9999, List.of(
                 new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0), new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0)));
 
         TaskInfo t1 = task(100L, 1000, 0, 5L);
@@ -115,7 +121,7 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_partialBatchFailure_repacks() {
-        endpoint.commitBatch(5L, 9999, List.of(
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 5L, 9999, List.of(
                 new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0), new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0)));
 
         TaskInfo failed = task(100L, 1000, 0, 5L);
@@ -131,8 +137,8 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_inflightUnconfirmedBatchesSurvive() {
-        endpoint.commitBatch(5L, 1000, List.of(new BatchItem(ctx(100L, 500), null, null, null, null, null, null, 0)));
-        endpoint.commitBatch(7L, 2000, List.of(new BatchItem(ctx(200L, 1000), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 5L, 1000, List.of(new BatchItem(ctx(100L, 500), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 7L, 2000, List.of(new BatchItem(ctx(200L, 1000), null, null, null, null, null, null, 0)));
 
         TaskInfo finished = task(100L, 500, 0, 5L);
         finished.setErrorCode(0);
@@ -146,7 +152,7 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_removesFailedRequests() {
-        endpoint.commitBatch(5L, 9999, List.of(
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 5L, 9999, List.of(
                 new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0),
                 new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0),
                 new BatchItem(ctx(102L, 3000), null, null, null, null, null, null, 0)));
@@ -157,7 +163,7 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_allFailed_removesBatch() {
-        endpoint.commitBatch(5L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 5L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
 
         endpoint.repackBatch(5L, java.util.Set.of(100L));
 

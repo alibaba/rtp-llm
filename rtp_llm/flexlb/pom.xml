@@ -351,18 +351,6 @@
                     </configuration>
                     <executions>
                         <execution>
-                            <!-- Throughput floors are wall-clock assertions, so they run in a
-                                 dedicated JVM instead of sharing a fork with the rest of the suite. -->
-                            <id>performance-regression</id>
-                            <goals>
-                                <goal>test</goal>
-                            </goals>
-                            <configuration>
-                                <groups>performance-regression</groups>
-                                <reuseForks>false</reuseForks>
-                            </configuration>
-                        </execution>
-                        <execution>
                             <id>default-test</id>
                             <configuration>
                                 <excludedGroups>performance-regression</excludedGroups>
@@ -388,10 +376,12 @@
                                 <id>default-test</id>
                                 <configuration combine.self="override">
                                     <includes>
-                                        <include>**/SchedulingConfigAndExpirationPerformanceTest.java</include>
+                                        <include>**/RequestExpirationTimerPerformanceTest.java</include>
                                         <include>**/AutoTpmSchedulingOverheadPerfTest.java</include>
                                         <include>**/CostBasedPrefillRoutingPerformanceTest.java</include>
+                                        <include>**/PrefillQueueManagerPerformanceTest.java</include>
                                     </includes>
+                                    <groups>performance-regression</groups>
                                     <forkCount>1</forkCount>
                                     <reuseForks>false</reuseForks>
                                     <failIfNoTests>false</failIfNoTests>

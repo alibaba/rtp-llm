@@ -19,7 +19,7 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 @Setter
 public final class FlexlbConfig {
 
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = 2;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new QueueSchedulerConfig();
@@ -52,34 +52,10 @@ public final class FlexlbConfig {
         return dispatcher instanceof BatchDispatcherConfig;
     }
 
-    /** Whether scheduler.decision, rather than the schema-v1 mapping, is active. */
-    @JsonIgnore
-    public boolean hasExplicitDecisionPolicy() {
-        return isQueue() && queueScheduler().getDecision() != null;
-    }
-
-    /**
-     * Resolve the effective QUEUE decision policy. An explicit
-     * scheduler.decision is authoritative. For schema-v1 documents that omit
-     * it, BATCH maps maxRequests/maxCollectionWaitMs to FIXED_WINDOW and
-     * NON_BATCH maps to SINGLE. The legacy early-dispatch prediction trigger
-     * remains dispatcher-owned because its boundary is {@code >=}, while the
-     * explicit strict maximum uses {@code >}; callers distinguish that path
-     * with hasExplicitDecisionPolicy().
-     */
+    /** Resolve the QUEUE decision policy from its single configuration owner. */
     @JsonIgnore
     public DecisionPolicyConfig decisionPolicy() {
-        DecisionPolicyConfig explicit = queueScheduler().getDecision();
-        if (explicit != null) {
-            return explicit;
-        }
-        if (dispatcher instanceof BatchDispatcherConfig batch) {
-            FixedWindowDecisionConfig legacy = new FixedWindowDecisionConfig();
-            legacy.setMaxRequests(batch.getMaxRequests());
-            legacy.setMaxCollectionWaitMs(batch.getMaxCollectionWaitMs());
-            return legacy;
-        }
-        return new SingleDecisionConfig();
+        return queueScheduler().getDecision();
     }
 
     @JsonIgnore
@@ -87,18 +63,13 @@ public final class FlexlbConfig {
         if (isDirect()) {
             return false;
         }
-        DecisionPolicyConfig explicit = queueScheduler().getDecision();
-        return explicit != null
-                ? explicit instanceof SingleDecisionConfig
-                : dispatcher instanceof NonBatchDispatcherConfig;
+        return queueScheduler().getDecision() instanceof SingleDecisionConfig;
     }
 
     @JsonIgnore
     public boolean isFixedWindowDecision() {
-        if (isDirect()) {
-            return false;
-        }
-        return !isSingleDecision();
+        return !isDirect()
+                && queueScheduler().getDecision() instanceof FixedWindowDecisionConfig;
     }
 
     @JsonIgnore

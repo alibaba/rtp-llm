@@ -3,8 +3,8 @@ package org.flexlb.balance.scheduler;
 /**
  * Queue decision-policy contract. One instance per {@link WorkerBatcher}.
  *
- * <p>Implementations encapsulate dispatch decision logic — when to
- * assemble a batch, how many items to pick, and when to wait.
+ * <p>Implementations encapsulate grouping and admission decisions — when to
+ * form a group, how many items to propose, and when to wait.
  */
 public interface BatcherAlgorithm {
 
@@ -12,16 +12,19 @@ public interface BatcherAlgorithm {
      * Core decision loop. Called by {@link WorkerBatcher#runLoop()} each
      * iteration when the queue is non-empty.
      *
-     * <p>On each call the implementation should make one of:
+     * <p>On each call the implementation must return one typed outcome:
      * <ul>
-     *   <li>Stage a decision group through {@link BatcherContext}</li>
+     *   <li>Reserve hard capacity and deliver an admitted group through
+     *       {@link BatcherContext}</li>
      *   <li>Drop the head item via {@link BatcherContext#dropHead}
      *       (only for algorithms that support expiry)</li>
-     *   <li>Park briefly (e.g. {@code TimeUnit.MILLISECONDS.sleep(1)})
-     *       and return, letting the caller re-invoke</li>
+     *   <li>Report the exact capacity resource, state generation, or deadline
+     *       on which the worker must wait</li>
      * </ul>
+     * The algorithm never sleeps or polls; {@link WorkerBatcher} owns all
+     * condition waiting.
      */
-    void processQueue(BatcherContext ctx) throws InterruptedException;
+    BatcherCycleResult processQueue(BatcherContext ctx);
 
     /**
      * Hook called by {@link WorkerBatcher#offer} before enqueue. Gives the
@@ -37,7 +40,7 @@ public interface BatcherAlgorithm {
     long queueWaitMs(BatcherContext ctx);
 
     /**
-     * Hook called by {@link WorkerBatcher#shutdown} before the queue is drained.
+     * Hook called by {@link WorkerBatcher#shutdown} after the active queue is drained.
      * Gives the algorithm a chance to clean up internal state.
      */
     default void onShutdown(BatcherContext ctx) {

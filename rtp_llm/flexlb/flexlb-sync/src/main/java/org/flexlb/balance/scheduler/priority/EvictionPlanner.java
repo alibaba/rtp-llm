@@ -84,7 +84,7 @@ public final class EvictionPlanner {
             return null;
         }
         // 9.2: only PREFILL_QUEUED requests of strictly lower priority.
-        // Task40: no-priority items (legacy path) are never selected as
+        // Priority-neutral items are never selected as
         // victims — filter them out before the < comparison, which would
         // otherwise always match them.
         List<QueuedRequestSnapshot> candidates = new ArrayList<>();
@@ -463,7 +463,7 @@ public final class EvictionPlanner {
      * layers join only behind the Phase 5 gate ({@code includeAccepted}), with
      * the same strict priority boundary. The stage comparator/cost makes
      * {@code ACCEPTED_NOT_RUNNING} cheaper than {@code RUNNING}.
-     * Task40: no-priority entries (priority 0, legacy path) never qualify.
+     * Priority-neutral entries (priority 0) never qualify.
      * P1-3: slot selection additionally skips queued-phase reservations
      * ({@code excludeQueued}) — they hold no engine slot, so evicting them
      * cannot reduce a slot deficit; KV selection keeps them (their hard KV

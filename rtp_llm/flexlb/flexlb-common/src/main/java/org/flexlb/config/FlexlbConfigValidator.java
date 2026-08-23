@@ -30,7 +30,7 @@ final class FlexlbConfigValidator {
             require(config.getDispatcher() instanceof NonBatchDispatcherConfig,
                     "dispatcher.type", "DIRECT requires NON_BATCH");
         } else {
-            validateQueue(config, config.queueScheduler());
+            validateQueue(config.queueScheduler());
         }
         validateDispatcher(config);
         validateRouting(config.getRouter());
@@ -38,19 +38,16 @@ final class FlexlbConfigValidator {
         validateObservability(config.getObservability());
     }
 
-    private static void validateQueue(FlexlbConfig config, QueueSchedulerConfig queue) {
+    private static void validateQueue(QueueSchedulerConfig queue) {
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
         require(queue.getOrdering() != null, "scheduler.ordering", "is required for QUEUE");
+        require(queue.getDecision() != null, "scheduler.decision", "is required for QUEUE");
         require(queue.getCapacity() != null, "scheduler.capacity", "is required for QUEUE");
         require(queue.getLifecycle() != null, "scheduler.lifecycle", "is required for QUEUE");
         positive(queue.getCapacity().getMaxOutstandingRequestsGlobal(),
                 "scheduler.capacity.maxOutstandingRequestsGlobal");
-        Integer perWorkerCapacity = queue.getCapacity()
-                .getMaxWaitingRequestsPerPrefillWorker();
-        if (perWorkerCapacity != null) {
-            positive(perWorkerCapacity,
-                    "scheduler.capacity.maxWaitingRequestsPerPrefillWorker");
-        }
+        positive(queue.getCapacity().getMaxWaitingRequestsPerPrefillWorker(),
+                "scheduler.capacity.maxWaitingRequestsPerPrefillWorker");
         DecisionPolicyConfig decision = queue.getDecision();
         if (decision instanceof FixedWindowDecisionConfig fixedWindow) {
             positive(fixedWindow.getMaxRequests(),
@@ -100,15 +97,7 @@ final class FlexlbConfigValidator {
     private static void validateDispatcher(FlexlbConfig config) {
         DispatcherConfig dispatcher = config.getDispatcher();
         if (dispatcher instanceof BatchDispatcherConfig batch) {
-            positive(batch.getMaxRequests(), "dispatcher.maxRequests");
-            nonNegative(batch.getMaxCollectionWaitMs(), "dispatcher.maxCollectionWaitMs");
-            positive(batch.getMaxWaitingRequestsPerPrefillWorker(),
-                    "dispatcher.maxWaitingRequestsPerPrefillWorker");
             positive(batch.getEnqueueRpcTimeoutMs(), "dispatcher.enqueueRpcTimeoutMs");
-            if (batch.getEarlyDispatchPredictedExecutionMs() != null) {
-                positive(batch.getEarlyDispatchPredictedExecutionMs(),
-                        "dispatcher.earlyDispatchPredictedExecutionMs");
-            }
             if (batch.getMaxInflightBatchesPerPrefillWorker() != null) {
                 positive(batch.getMaxInflightBatchesPerPrefillWorker(),
                         "dispatcher.maxInflightBatchesPerPrefillWorker");

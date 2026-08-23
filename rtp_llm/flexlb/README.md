@@ -80,14 +80,14 @@ directly in the environment variable; a file-path form is not supported.
 The parser is strict: duplicate keys, unknown fields, fields from inactive tagged
 variants, `null`, scalar coercion, numeric enum values, and trailing JSON are rejected at
 startup. Optional fields must be omitted rather than set to `null`. If the environment
-variable is absent, the schema-v1 compatibility mapping defaults to
+variable is absent, schema v2 defaults directly to
 `QUEUE + FIFO + FIXED_WINDOW + BATCH` and the remaining model defaults.
 
 The following example activates every major configuration section:
 
 ```bash
 export FLEXLB_CONFIG='{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
     "queueTimeoutMs": 3600000,
@@ -267,7 +267,7 @@ axes:
 | Scheduler | Queue ordering | Decision | Dispatcher | Behavior |
 | --- | --- | --- | --- | --- |
 | `DIRECT` | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
-| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | Queue one request at a time; frontend sends |
+| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | Form singleton decisions; frontend sends |
 | `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | Master sends singleton `EnqueueBatch` calls |
 | `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
 | `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | Form bounded groups; Master sends `EnqueueBatch` |
@@ -279,16 +279,18 @@ one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Maste
 sends them.
 
 `FIXED_WINDOW` is bounded by `maxRequests`, `maxCollectionWaitMs`, and the optional
-strict group-growth cap `maxPredictedExecutionMs`: another request is not added
-when it would exceed the cap, although an indivisible singleton may exceed it.
-`SINGLE` has no collection parameters. For
-schema-version 1 compatibility, omitting `scheduler.decision` maps legacy `BATCH`
-dispatcher fields to the old fixed-window behavior and maps `NON_BATCH` to
-`SINGLE`; explicit decision fields take precedence. The old BATCH fields remain
-accepted so the new image can start with an existing configuration. This
-compatibility is one-way: an older image does not recognize the new
-`scheduler.decision` or scheduler-capacity fields, so rollback must restore the
-previous `FLEXLB_CONFIG` together with the previous image.
+inclusive group-growth cap `maxPredictedExecutionMs`: reaching the cap dispatches
+the group without waiting for the collection window; another request is not
+added when it would exceed the cap, although an indivisible singleton may
+exceed it. A zero collection window skips waiting but still groups requests that
+are already available, so it is not equivalent to `SINGLE`.
+`SINGLE` has no collection parameters. In schema v2 every setting has one owner:
+decision-group limits live only under `scheduler.decision`, waiting-queue limits
+live only under `scheduler.capacity`, and `dispatcher` contains only delivery and
+delivery-backpressure settings. Omitting `scheduler.decision` uses
+`FIXED_WINDOW`; select `SINGLE` explicitly when that behavior is required.
+Documents declaring `schemaVersion: 1` are rejected rather than silently
+translated.
 
 Production-style examples migrated from the former field-level environment variables:
 
@@ -300,7 +302,7 @@ DIRECT configuration with explicit random prefill/decode selection is:
 
 ```bash
 export FLEXLB_CONFIG='{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {"type": "DIRECT"},
   "dispatcher": {"type": "NON_BATCH"},
   "router": {

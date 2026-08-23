@@ -10,7 +10,9 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
 
 class DecodeEndpointTest {
 
@@ -134,8 +136,8 @@ class DecodeEndpointTest {
         endpoint.markQueuedPhase(2L);
         assertEquals(1, endpoint.getEngineLoad());
 
-        // dispatch req 1 → back to engine load 2
-        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L));
+        // Commit req 1's pre-delivery permit → back to engine load 2.
+        assertEquals(TRANSFERRED, acquirePermit(1L).transferToEngineLifecycle());
         assertEquals(2, endpoint.getEngineLoad());
 
         // release req 2 (was queued) → inflight=2, queued=0
@@ -178,11 +180,12 @@ class DecodeEndpointTest {
     }
 
     @Test
-    void getEngineLoad_idempotent_markDispatched_does_not_over_decrement() {
+    void getEngineLoad_idempotentPermitCommit_doesNotOverDecrement() {
         endpoint.reserve(1L, 100, 100);
         endpoint.markQueuedPhase(1L);
-        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L));
-        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L)); // already engine-visible
+        DecodeEndpoint.EngineDispatchPermit permit = acquirePermit(1L);
+        assertEquals(TRANSFERRED, permit.transferToEngineLifecycle());
+        assertEquals(TRANSFERRED, permit.transferToEngineLifecycle());
         assertEquals(1, endpoint.getEngineLoad());
     }
 
@@ -256,5 +259,14 @@ class DecodeEndpointTest {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         return task;
+    }
+
+    private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
+        DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
+                endpoint.acquireEngineDispatchPermit(requestId, 0);
+        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                acquisition.status());
+        assertNotNull(acquisition.permit());
+        return acquisition.permit();
     }
 }

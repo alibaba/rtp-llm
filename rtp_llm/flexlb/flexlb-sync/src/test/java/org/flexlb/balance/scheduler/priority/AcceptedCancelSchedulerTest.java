@@ -4,13 +4,17 @@ import org.flexlb.balance.scheduler.SchedulingTestConfig;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.AdmittedDecisionGroup;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DecisionGroupMetadata;
+import org.flexlb.balance.scheduler.DispatchCallback;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -74,19 +78,20 @@ class AcceptedCancelSchedulerTest {
     private FlexlbConfig config;
     private PrioritySchedulerReporter priorityReporter;
     private PriorityAdmissionScheduler priorityScheduler;
+    private AcceptedSubmissionDispatcher dispatcher;
 
     @BeforeEach
     void setUp() {
         configService = mock(ConfigService.class);
         router = mock(Router.class);
-        BatchDispatcher dispatcher = mock(BatchDispatcher.class);
+        dispatcher = new AcceptedSubmissionDispatcher();
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(16);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(16);
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
         SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_ENGINE_OWNED);
@@ -160,7 +165,7 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void lateEnqueueSuccessDuringCancelRequestedWaitsForTypedCanceled() throws Exception {
-        BatchItem victim = registerDispatchedShadowVictim(11L, 30);
+        BatchItem victim = registerBatchDispatchInFlightVictim(11L, 30);
         RequestLifecycleSnapshot dispatched = scheduler.getRequestState(11L, 0);
         long batchId = dispatched.batchId();
         assertEquals(RequestLifecycleState.DISPATCHING, dispatched.state());
@@ -194,7 +199,7 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void acceptedCancelDefersAdmissionDeadlineUntilTypedCanceled() throws Exception {
-        BatchItem victim = registerDispatchedShadowVictim(13L, 30);
+        BatchItem victim = registerBatchDispatchInFlightVictim(13L, 30);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
 
@@ -458,7 +463,7 @@ class AcceptedCancelSchedulerTest {
         SchedulingTestConfig.disallowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
         SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_ENGINE_OWNED);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (5));
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(3_600_000);
         SchedulingTestConfig.engineCancellation(config).setAckTimeoutMs(500);
         SchedulingTestConfig.engineCancellation(config).setCompletionTimeoutMs(1_000);
 
@@ -719,7 +724,7 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void asyncCancelHandoffBeforeAdmissionDeadlineUsesInflightReducer() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(3_600_000);
         BatchItem victim = registerConfirmedVictim(61L, 30, TaskPhase.RUNNING);
         CompletableFuture<EngineCancelChannel.CancelOutcome> ack = new CompletableFuture<>();
         cancelChannel.handler = (ignored, requestId) -> ack;
@@ -758,7 +763,7 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void committedEnginePreemptionIgnoresTelemetryFailure() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(3_600_000);
         registerConfirmedVictim(63L, 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(
@@ -868,7 +873,7 @@ class AcceptedCancelSchedulerTest {
     @Test
     void softTimeoutTransfersNotFoundPreemptionToEngineFenceUntilTombstoned()
             throws Exception {
-        BatchItem victim = registerDispatchedShadowVictim(31L, 30);
+        BatchItem victim = registerBatchDispatchInFlightVictim(31L, 30);
         AdmissionLease lease = new AdmissionLease(
                 victim, decodeEndpoint, null, scheduler, 0, null, null);
         lease.bindTo(victim.future());
@@ -995,11 +1000,19 @@ class AcceptedCancelSchedulerTest {
         return item;
     }
 
-    private BatchItem registerDispatchedShadowVictim(long requestId, int priority) {
+    private BatchItem registerBatchDispatchInFlightVictim(long requestId, int priority) {
         BatchItem item = dummyItem(requestId, priority);
         assertTrue(scheduler.registerInflight(item));
         decodeEndpoint.reserve(requestId, 128, 136, priority);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("stage2_test", 0));
+        decodeEndpoint.markQueuedPhase(requestId);
+        AdmittedDecisionGroup admittedGroup = TestCapacityAdmission.admit(
+                scheduler, List.of(item));
+        TestCapacityAdmission.runDeliveryCallback(
+                scheduler,
+                admittedGroup,
+                new DecisionGroupMetadata("stage2_test", 0));
+        assertTrue(dispatcher.wasSubmitted(requestId),
+                "fixture must transfer its preaccepted dispatcher task to transport");
         return item;
     }
 
@@ -1184,6 +1197,75 @@ class AcceptedCancelSchedulerTest {
             cancelCount.incrementAndGet();
             lastTarget = target;
             return handler.apply(target, requestId);
+        }
+    }
+
+    /** Dispatcher boundary which accepts a task permit and keeps its RPC pending. */
+    private static final class AcceptedSubmissionDispatcher implements BatchDispatcher {
+        private final Map<Long, DispatchCallback> submittedCallbacks = new LinkedHashMap<>();
+
+        @Override
+        public SubmissionReservationResult tryReserveSubmission() {
+            return new SubmissionReserved(new AcceptedSubmissionPermit(this));
+        }
+
+        private synchronized void recordSubmission(
+                List<BatchItem> items, DispatchCallback callback) {
+            if (items == null || items.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "accepted dispatcher task requires at least one request");
+            }
+            for (BatchItem item : items) {
+                if (submittedCallbacks.putIfAbsent(item.requestId(), callback) != null) {
+                    throw new IllegalStateException(
+                            "request was submitted twice: " + item.requestId());
+                }
+            }
+        }
+
+        private synchronized boolean wasSubmitted(long requestId) {
+            return submittedCallbacks.containsKey(requestId);
+        }
+    }
+
+    private static final class AcceptedSubmissionPermit
+            implements BatchDispatcher.SubmissionPermit {
+        private enum State {
+            ACCEPTED,
+            SUBMITTED,
+            RELEASED
+        }
+
+        private final AcceptedSubmissionDispatcher dispatcher;
+        private State state = State.ACCEPTED;
+
+        private AcceptedSubmissionPermit(AcceptedSubmissionDispatcher dispatcher) {
+            this.dispatcher = dispatcher;
+        }
+
+        @Override
+        public synchronized void submit(
+                List<BatchItem> items,
+                PrefillEndpoint prefillEndpoint,
+                long batchId,
+                long predictedMs,
+                String reason,
+                DispatchCallback callback) {
+            if (state != State.ACCEPTED) {
+                throw new IllegalStateException(
+                        "accepted dispatcher task was already resolved: " + state);
+            }
+            dispatcher.recordSubmission(items, callback);
+            state = State.SUBMITTED;
+        }
+
+        @Override
+        public synchronized void release() {
+            if (state != State.ACCEPTED) {
+                throw new IllegalStateException(
+                        "accepted dispatcher task was already resolved: " + state);
+            }
+            state = State.RELEASED;
         }
     }
 

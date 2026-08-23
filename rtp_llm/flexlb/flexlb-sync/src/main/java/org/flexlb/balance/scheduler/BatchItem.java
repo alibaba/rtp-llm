@@ -2,11 +2,16 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.BatchDispatcherConfig;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Prioritized;
 
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -36,23 +41,10 @@ public final class BatchItem implements Prioritized {
     private final long enqueuedAtMs;
     private final long enqueueSequence;
     private final DeliveryMode deliveryMode;
-
-    /**
-     * Non-null after the batching policy has declared this route decision
-     * ready for delivery. Access is serialized by the owning worker batcher's
-     * queue lock; keeping the marker on the existing item avoids allocating a
-     * wrapper for every request held behind the request-mode inflight cap.
-     */
-    private String readyDeliveryReason;
-
-    /**
-     * Last batching-park diagnostics are owned by the request itself. Keeping the
-     * lazily-created mutable holder here makes repeated parks allocation-free
-     * while adding only one reference to requests that never park. Unlike a
-     * scheduler-wide request-id map, it cannot retain externally removed
-     * items. Access is serialized by the owning worker thread / queue lock.
-     */
-    private ParkTrace parkTrace;
+    private final long maxDecodeEngineRequests;
+    private final long maxDecodeKvUsagePercent;
+    private final int maxPrefillRequestsPerWorker;
+    private final int maxInflightBatchesPerPrefillWorker;
 
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
@@ -71,7 +63,29 @@ public final class BatchItem implements Prioritized {
         this.decodeEp = decodeEp;
         this.enqueuedAtMs = enqueuedAtMs;
         this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
-        this.deliveryMode = DeliveryMode.from(ctx);
+        FlexlbConfig schedulingConfig = Objects.requireNonNull(
+                ctx.getConfig(), "request scheduling config");
+        this.deliveryMode = DeliveryMode.from(schedulingConfig);
+        RoutingConfig.DecodeAvailabilityConfig decodeAvailability =
+                schedulingConfig.getRouter().getRoles()
+                .getDecode().getAvailability();
+        Long configuredDecodeLimit = decodeAvailability.getMaxEngineRequests();
+        this.maxDecodeEngineRequests = configuredDecodeLimit == null
+                ? 0L : configuredDecodeLimit;
+        this.maxDecodeKvUsagePercent =
+                decodeAvailability.getMaxKvUsagePercent();
+        Integer configuredPrefillLimit = schedulingConfig.getDispatcher()
+                instanceof NonBatchDispatcherConfig nonBatch
+                ? nonBatch.getMaxInflightRequestsPerPrefillWorker()
+                : null;
+        this.maxPrefillRequestsPerWorker = configuredPrefillLimit == null
+                ? 0 : configuredPrefillLimit;
+        Integer configuredBatchLimit = schedulingConfig.getDispatcher()
+                instanceof BatchDispatcherConfig batch
+                ? batch.getMaxInflightBatchesPerPrefillWorker()
+                : null;
+        this.maxInflightBatchesPerPrefillWorker = configuredBatchLimit == null
+                ? 0 : configuredBatchLimit;
     }
 
     // -- accessors --
@@ -85,74 +99,11 @@ public final class BatchItem implements Prioritized {
     public DecodeEndpoint decodeEp() { return decodeEp; }
     public long enqueuedAtMs() { return enqueuedAtMs; }
     DeliveryMode deliveryMode() { return deliveryMode; }
-
-    String readyDeliveryReason() { return readyDeliveryReason; }
-
-    void markRouteDecisionReady(String reason) {
-        if (deliveryMode != DeliveryMode.ROUTE_DECISION) {
-            throw new IllegalStateException(
-                    "Only route decisions can enter the ready-delivery backlog");
-        }
-        readyDeliveryReason = reason == null || reason.isBlank()
-                ? "route_decision_ready" : reason;
-    }
-
-    void clearRouteDecisionReady() { readyDeliveryReason = null; }
-
-    void recordParkTrace(String reason, long budgetMs, long waitMs,
-                         int queueSize, int inflightCount) {
-        ParkTrace trace = parkTrace;
-        if (trace == null) {
-            trace = new ParkTrace();
-            parkTrace = trace;
-        }
-        trace.update(reason, budgetMs, waitMs, queueSize, inflightCount);
-    }
-
-    ParkTrace consumeParkTrace() {
-        ParkTrace trace = parkTrace;
-        parkTrace = null;
-        return trace == null ? ParkTrace.EMPTY : trace;
-    }
-
-    void clearParkTrace() {
-        parkTrace = null;
-    }
-
-    boolean hasParkTrace() { return parkTrace != null; }
-
-    static final class ParkTrace {
-        private static final ParkTrace EMPTY =
-                new ParkTrace("none", -1, -1, -1, -1);
-
-        private String reason;
-        private long budgetMs;
-        private long waitMs;
-        private int queueSize;
-        private int inflightCount;
-
-        private ParkTrace() {
-        }
-
-        private ParkTrace(String reason, long budgetMs, long waitMs,
-                          int queueSize, int inflightCount) {
-            update(reason, budgetMs, waitMs, queueSize, inflightCount);
-        }
-
-        private void update(String reason, long budgetMs, long waitMs,
-                            int queueSize, int inflightCount) {
-            this.reason = reason;
-            this.budgetMs = budgetMs;
-            this.waitMs = waitMs;
-            this.queueSize = queueSize;
-            this.inflightCount = inflightCount;
-        }
-
-        String reason() { return reason; }
-        long budgetMs() { return budgetMs; }
-        long waitMs() { return waitMs; }
-        int queueSize() { return queueSize; }
-        int inflightCount() { return inflightCount; }
+    long maxDecodeEngineRequests() { return maxDecodeEngineRequests; }
+    long maxDecodeKvUsagePercent() { return maxDecodeKvUsagePercent; }
+    int maxPrefillRequestsPerWorker() { return maxPrefillRequestsPerWorker; }
+    int maxInflightBatchesPerPrefillWorker() {
+        return maxInflightBatchesPerPrefillWorker;
     }
 
     /**

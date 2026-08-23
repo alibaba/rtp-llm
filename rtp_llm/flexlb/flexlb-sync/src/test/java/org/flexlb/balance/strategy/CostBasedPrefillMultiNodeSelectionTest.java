@@ -6,6 +6,7 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.TestCapacityAdmission;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.BatchDispatcherConfig;
@@ -72,6 +73,13 @@ class CostBasedPrefillMultiNodeSelectionTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         PriorityScheduler batchScheduler = Mockito.mock(PriorityScheduler.class);
+        Mockito.when(batchScheduler.tryReserveBatchCapacity(any(BatchItem.class)))
+                .thenAnswer(invocation ->
+                        TestCapacityAdmission.tryReserveEndpointBatchCapacity(
+                                invocation.getArgument(0)));
+        Mockito.when(batchScheduler.tryReserveItemCapacity(any(BatchItem.class)))
+                .thenAnswer(invocation -> TestCapacityAdmission.alwaysAvailable()
+                        .tryReserveItemCapacity(invocation.getArgument(0)));
 
         endpointRegistry = new EndpointRegistry(configService, () -> batchScheduler,
                 Mockito.mock(BatchSchedulerReporter.class));
@@ -193,15 +201,12 @@ class CostBasedPrefillMultiNodeSelectionTest {
     private void setUpAutoTpmBatcherConfig() {
         config.queueScheduler().setOrdering(new PriorityOrderingConfig());
         BatchDispatcherConfig dispatcher = config.batchDispatcher();
-        dispatcher.setMaxCollectionWaitMs(1_000);
-        dispatcher.setMaxRequests(10);
+        config.fixedWindowDecision().setMaxCollectionWaitMs(1_000);
+        config.fixedWindowDecision().setMaxRequests(10);
         dispatcher.setMaxInflightBatchesPerPrefillWorker(1);
     }
 
-    /**
-     * 注册 endpoint 并 commit 一个 dummy inflight batch，使 batcher 线程因
-     * 背压（inflightBatchCount >= max）确定性 park，队列内容不会被 dispatch。
-     */
+    /** Reserve one real QUEUE batch slot so queued work deterministically parks. */
     private PrefillEndpoint parkedEndpoint(String ip) {
         WorkerStatus w = createUnregisteredWorker(ip);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ip + ":8080", w);
@@ -209,8 +214,14 @@ class CostBasedPrefillMultiNodeSelectionTest {
                 RoleType.PREFILL, ip + ":8080", w);
         createdEndpoints.add(ep);
         // 两 endpoint 使用同样的 predictMs，endpointWaitMs 对称抵消（几 ms 漂移
-        // 远小于 1000ms 的 collection-delay 差）
-        ep.commitBatch(800_000L + ip.hashCode(), 60_000, List.of());
+        // 远小于 1000ms 的 collection-delay 差）。真实 batch lifecycle 同时
+        // 占用 maxInflight=1 的权威 group slot。
+        long batchId = 800_000L + ip.hashCode();
+        TestCapacityAdmission.registerQueueBatchLifecycle(
+                ep,
+                batchId,
+                60_000,
+                List.of(queuedItem(ep, batchId, 1, System.currentTimeMillis())));
         return ep;
     }
 
@@ -218,19 +229,28 @@ class CostBasedPrefillMultiNodeSelectionTest {
     private void fillQueue(PrefillEndpoint ep, int priority, int count, long idBase) {
         long now = System.currentTimeMillis();
         for (int i = 0; i < count; i++) {
-            Request req = new Request();
-            req.setRequestId(idBase + i);
-            req.setSeqLen(100);
-            req.setPriority(priority);
-            BalanceContext ctx = new BalanceContext();
-            ctx.setRequest(req);
-            ctx.setConfig(config);
-            ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 30_000));
-            BatchItem item = new BatchItem(ctx, null, null, null, null, ep, null, now);
-            ep.getBatcher().offer(item);
+            ep.getBatcher().offer(queuedItem(ep, idBase + i, priority, now));
         }
         assertEquals(count, ep.getBatcher().queueSize(),
                 "parked batcher queue must retain all items for " + ep.getIp());
+    }
+
+    private BatchItem queuedItem(
+            PrefillEndpoint endpoint,
+            long requestId,
+            int priority,
+            long enqueuedAtMs) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(100);
+        request.setPriority(priority);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(config);
+        context.setSchedulingMetadata(
+                SchedulingMetadata.explicit(priority, enqueuedAtMs + 30_000));
+        return new BatchItem(
+                context, null, null, null, null, endpoint, null, enqueuedAtMs);
     }
 
     private BalanceContext priorityContext(long requestId, int priority) {
@@ -249,7 +269,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
                 RoleType.PREFILL, ip + ":8080", w);
         createdEndpoints.add(ep);
         if (estimatedWaitMs > 0) {
-            ep.commitBatch(900_000L + ip.hashCode(), estimatedWaitMs, List.of());
+            ep.registerDirectRequest(900_000L + ip.hashCode(), estimatedWaitMs);
         }
     }
 

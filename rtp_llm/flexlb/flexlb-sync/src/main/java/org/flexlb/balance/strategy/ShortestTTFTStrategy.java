@@ -49,8 +49,9 @@ import java.util.Map;
  *
  * <p>Supports DIRECT and QUEUE scheduling with either dispatcher. Common
  * scheduler paths include the worker-batcher wait while their inflight
- * lifecycle remains owned by {@code PriorityScheduler}; DIRECT and FIFO
- * non-batch queue routing reserve locally.
+ * lifecycle remains owned by {@code PriorityScheduler}. Only DIRECT selection
+ * publishes local request-ledger accounting inside this strategy; every QUEUE
+ * combination is accounted by {@code PriorityScheduler}/{@code WorkerBatcher}.
  */
 @Component("shortestTtftStrategy")
 public class ShortestTTFTStrategy implements LoadBalanceStrategy {
@@ -83,10 +84,10 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
-        // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by PriorityScheduler — no-op here.
+        // Release DIRECT request-ledger accounting on partial routing failure.
+        // All QUEUE paths are owned later by PriorityScheduler, so this is a no-op.
         if (ep instanceof PrefillEndpoint pe) {
-            pe.releaseBatch(requestId);
+            pe.releaseRequest(requestId);
         }
     }
 
@@ -519,11 +520,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long ttft = selected.ttft();
         long bestCacheHit = selected.hitCache();
 
-        // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
-        if (strategyOwnsInflightTracking(balanceContext)) {
-            ep.commitBatch(requestId, selected.prefillMs(), Collections.emptyList());
-        }
-
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
         DebugInfo debugInfo = new DebugInfo();
         debugInfo.setHitCacheLen(bestCacheHit);
@@ -539,6 +535,11 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
         result.setDpRank(ep.getStatus().getDpRank());
         result.setDebugInfo(debugInfo);
+        // This is the final fallible side effect. A failed registration must not
+        // leave an owner behind after selection reports failure.
+        if (strategyOwnsInflightTracking(balanceContext)) {
+            ep.registerDirectRequest(requestId, selected.prefillMs());
+        }
         return result;
     }
 

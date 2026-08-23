@@ -8,6 +8,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.PriorityOrderingConfig;
+import org.flexlb.config.QueueCapacityConfig;
 import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.config.SingleDecisionConfig;
 import org.flexlb.config.VictimStage;
@@ -57,6 +58,15 @@ public final class SchedulingTestConfig {
         queue.setDecision(fixedWindow);
         config.setScheduler(queue);
         return fixedWindow;
+    }
+
+    public static QueueCapacityConfig useQueueCapacity(FlexlbConfig config) {
+        QueueSchedulerConfig queue = activeQueueOrNew(config);
+        if (queue.getCapacity() == null) {
+            queue.setCapacity(new QueueCapacityConfig());
+        }
+        config.setScheduler(queue);
+        return queue.getCapacity();
     }
 
     public static BatchDispatcherConfig useBatchDispatcher(FlexlbConfig config) {

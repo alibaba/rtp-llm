@@ -28,6 +28,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -55,7 +56,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         SchedulingTestConfig.useFixedWindowDecision(config)
                 .setMaxCollectionWaitMs(3_600_000);
         SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(100);
+        SchedulingTestConfig.useQueueCapacity(config).setMaxWaitingRequestsPerPrefillWorker(100);
         startScheduler();
     }
 
@@ -187,7 +188,7 @@ class PriorityAdmissionTimeoutClassificationTest {
     @Timeout(5)
     void fifoNonBatchQueuedDeadlineUsesSharedSchedulingTimeoutCode() throws Exception {
         restartFifoNonBatchWithOneInflight();
-        assertTrue(prefillEndpoint.tryCommitRequest(9_999L, 1_000L, 1));
+        assertTrue(TestCapacityAdmission.commitRouteRequest(prefillEndpoint, 9_999L, 1_000L, 1));
         BalanceContext context = context(52L, 50);
         context.setConfig(config);
         long now = System.currentTimeMillis();
@@ -196,7 +197,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         long deadline = System.currentTimeMillis() + 1_000;
         while (prefillEndpoint.getBatcher().queueSize() != 1
                 && System.currentTimeMillis() < deadline) {
-            Thread.onSpinWait();
+            parkForAsyncProgress();
         }
         assertEquals(1, prefillEndpoint.getBatcher().queueSize());
 
@@ -210,10 +211,10 @@ class PriorityAdmissionTimeoutClassificationTest {
 
     @Test
     @Timeout(5)
-    void fifoNonBatchCapacityReleaseWakesActiveRequestWithoutDeadlineOrNewRequest()
+    void fifoNonBatchCapacityReleaseWakesBlockedActiveRequestWithoutNewRequest()
             throws Exception {
         restartFifoNonBatchWithOneInflight();
-        assertTrue(prefillEndpoint.tryCommitRequest(9_997L, 1_000L, 1));
+        assertTrue(TestCapacityAdmission.commitRouteRequest(prefillEndpoint, 9_997L, 1_000L, 1));
         WorkerBatcher batcher = prefillEndpoint.getBatcher();
         long beforeSubmitVersion = batcher.queueVersion();
 
@@ -233,7 +234,7 @@ class PriorityAdmissionTimeoutClassificationTest {
     @Timeout(5)
     void fifoNonBatchQueuedClientCancelCompletesOwnedPublication() throws Exception {
         restartFifoNonBatchWithOneInflight();
-        assertTrue(prefillEndpoint.tryCommitRequest(9_998L, 1_000L, 1));
+        assertTrue(TestCapacityAdmission.commitRouteRequest(prefillEndpoint, 9_998L, 1_000L, 1));
         BalanceContext context = context(53L, 50);
         context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
@@ -313,7 +314,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
         while (prefillEndpoint.getBatcher().queueSize() != expected
                 && System.nanoTime() < deadlineNanos) {
-            Thread.onSpinWait();
+            parkForAsyncProgress();
         }
         assertEquals(expected, prefillEndpoint.getBatcher().queueSize());
     }
@@ -322,26 +323,40 @@ class PriorityAdmissionTimeoutClassificationTest {
             WorkerBatcher batcher, long beforeSubmitVersion) {
         long enqueuedVersion = beforeSubmitVersion + 1;
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
-        while (!(batcher.queueSize() == 1
-                && batcher.queueVersion() == enqueuedVersion
-                && batcher.isWaitingForSignal())
-                && System.nanoTime() < deadlineNanos) {
-            Thread.onSpinWait();
+        boolean observedBlockedWait = false;
+        while (System.nanoTime() < deadlineNanos) {
+            if (batcher.queueSize() == 1
+                    && batcher.queueVersion() == enqueuedVersion
+                    && batcher.callbackOwnedRequestCount() == 0
+                    && batcher.isWaitingForSignal()) {
+                observedBlockedWait = true;
+                break;
+            }
+            parkForAsyncProgress();
         }
         assertEquals(1, batcher.queueSize());
         assertEquals(enqueuedVersion, batcher.queueVersion(),
-                "capacity-blocked SINGLE request must remain in the active queue");
-        assertTrue(batcher.isWaitingForSignal(),
-                "capacity-blocked FIFO worker did not park on the shared condition");
+                "capacity rejection must leave the request ACTIVE without another transition");
+        assertEquals(0, batcher.callbackOwnedRequestCount(),
+                "capacity wait must not enter callback ownership");
+        assertTrue(observedBlockedWait,
+                "capacity-blocked active request did not park on the shared condition");
     }
 
     private void awaitCompletionQueueSize(int expected) {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
         while (scheduler.completionExecutorSnapshot().queueSize() != expected
                 && System.nanoTime() < deadlineNanos) {
-            Thread.onSpinWait();
+            parkForAsyncProgress();
         }
         assertEquals(expected, scheduler.completionExecutorSnapshot().queueSize());
+    }
+
+    private static void parkForAsyncProgress() {
+        LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        if (Thread.currentThread().isInterrupted()) {
+            throw new AssertionError("interrupted while awaiting asynchronous progress");
+        }
     }
 
     private static void await(CountDownLatch latch) {

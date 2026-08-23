@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.DecisionGroupHandler;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.DeliveryCapacityAdmission;
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.strategy.FormulaPredictor;
@@ -25,6 +26,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -71,14 +73,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private final PrefillTimePredictor predictor;
     private final ConcurrentHashMap<Long, BatchInflight> inflightBatches = new ConcurrentHashMap<>();
+    /** Reserved plus registered QUEUE batch slots; DIRECT wait records are excluded. */
+    private final AtomicInteger queueBatchCapacityUsage = new AtomicInteger();
+    private final EndpointGenerationLifecycle generationLifecycle =
+            new EndpointGenerationLifecycle();
     private final ConcurrentHashMap<Long, ConcurrentHashMap<Long, BatchMemberProtection>>
             batchMemberProtections = new ConcurrentHashMap<>();
-    private final AtomicInteger inflightBatchRequestCount = new AtomicInteger();
+    /**
+     * QUEUE batch members admitted out of ACTIVE, including callback-owned
+     * members and members registered in a real {@link BatchInflight} lifecycle.
+     */
+    private final AtomicInteger admittedBatchRequestCount = new AtomicInteger();
     private final WorkerBatcher batcher;
     private final PrefillRequestLedger requestLedger;
     private final BatchSchedulerReporter reporter;
 
-    /** Active Engine tasks not already represented in the local batch ledger. */
+    /** Active Engine tasks not represented in either local lifecycle ledger. */
     private volatile long engineUntrackedRequestCount = 0;
 
     /**
@@ -91,11 +101,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            DecisionGroupHandler decisionHandler,
+                           DeliveryCapacityAdmission capacityAdmission,
                            BatchSchedulerReporter reporter) {
         super(status);
         this.reporter = reporter;
         this.predictor = createPredictor(config);
-        this.batcher = createBatcher(config, decisionHandler, reporter);
+        this.batcher = createBatcher(
+                config, decisionHandler, capacityAdmission, reporter);
         AtomicReference<WaitSnapshotHook> snapshotHook = waitSnapshotHook;
         this.requestLedger = new PrefillRequestLedger(
                 batcher::signalDeliveryCapacityAvailable,
@@ -104,9 +116,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.batcher.start();
     }
 
-    private WorkerBatcher createBatcher(FlexlbConfig config, DecisionGroupHandler decisionHandler,
+    private WorkerBatcher createBatcher(FlexlbConfig config,
+                                        DecisionGroupHandler decisionHandler,
+                                        DeliveryCapacityAdmission capacityAdmission,
                                         BatchSchedulerReporter reporter) {
-        return new WorkerBatcher(status.getIpPort(), this, config, decisionHandler, reporter);
+        return new WorkerBatcher(status.getIpPort(), this, config,
+                decisionHandler, capacityAdmission, reporter);
     }
 
     public WorkerBatcher getBatcher() {
@@ -115,10 +130,73 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     @Override
     public void close() {
+        if (!generationLifecycle.tryBeginRetirement()) {
+            if (generationLifecycle.currentThreadOwnsRetirement()
+                    || generationLifecycle.currentThreadOwnsAcceptedHandoff()) {
+                return;
+            }
+            generationLifecycle.awaitRetirement();
+            return;
+        }
+
+        Throwable shutdownFailure = null;
         try {
             batcher.shutdown();
-        } finally {
+        } catch (Throwable failure) {
+            shutdownFailure = failure;
+        }
+
+        Throwable retirementCause = shutdownFailure;
+        generationLifecycle.runWhenAcceptedHandoffsDrain(
+                () -> completeGenerationRetirement(retirementCause));
+        if (generationLifecycle.currentThreadOwnsAcceptedHandoff()) {
+            rethrowEndpointRetirementFailure(shutdownFailure);
+            return;
+        }
+        generationLifecycle.awaitRetirement();
+    }
+
+    /** Runs exactly once, either on close or on the final handoff-releasing thread. */
+    private void completeGenerationRetirement(Throwable initialFailure) {
+        Throwable retirementFailure = initialFailure;
+        try {
+            requestLedger.retireDirectRequests();
+        } catch (Throwable directRetirementFailure) {
+            retirementFailure = appendRetirementFailure(
+                    retirementFailure, directRetirementFailure);
+        }
+        try {
             super.close();
+        } catch (Throwable endpointCloseFailure) {
+            retirementFailure = appendRetirementFailure(
+                    retirementFailure, endpointCloseFailure);
+        } finally {
+            generationLifecycle.completeRetirement(retirementFailure);
+        }
+    }
+
+    private static Throwable appendRetirementFailure(
+            Throwable first,
+            Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (first != next) {
+            first.addSuppressed(next);
+        }
+        return first;
+    }
+
+    private static void rethrowEndpointRetirementFailure(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            throw runtimeFailure;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure != null) {
+            throw new IllegalStateException(
+                    "Prefill endpoint retirement failed", failure);
         }
     }
 
@@ -131,8 +209,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return batcher.queueManager().estimateWaitMs(priority, requestId);
     }
 
-    private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
-        RoutingConfig.ExecutionTimeEstimatorConfig estimator = cfg.getRouter()
+    private static PrefillTimePredictor createPredictor(FlexlbConfig config) {
+        RoutingConfig.ExecutionTimeEstimatorConfig estimator = config.getRouter()
                 .getRoles().getPrefill().getExecutionTimeEstimator();
         if (estimator instanceof RoutingConfig.LearningEstimatorConfig) {
             return new LearningPredictor();
@@ -142,23 +220,293 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return new FormulaPredictor(formula.getExpression());
     }
 
-    public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
-        BatchInflight newBatch = new BatchInflight(predictMs, requests);
+    /** Result of reserving the endpoint half of one QUEUE batch admission. */
+    public sealed interface QueueBatchSlotResult permits QueueBatchSlotReserved,
+            QueueBatchSlotUnavailable, QueueBatchSlotAdmissionFailed {
+    }
+
+    public record QueueBatchSlotReserved(QueueBatchSlotReservation reservation)
+            implements QueueBatchSlotResult {
+        public QueueBatchSlotReserved {
+            Objects.requireNonNull(reservation, "reservation");
+        }
+    }
+
+    public record QueueBatchSlotUnavailable(
+            DeliveryCapacityAdmission.CapacityAvailability availability)
+            implements QueueBatchSlotResult {
+        public QueueBatchSlotUnavailable {
+            Objects.requireNonNull(availability, "availability");
+        }
+    }
+
+    public record QueueBatchSlotAdmissionFailed(Throwable cause)
+            implements QueueBatchSlotResult {
+        public QueueBatchSlotAdmissionFailed {
+            Objects.requireNonNull(cause, "cause");
+        }
+    }
+
+    /** Atomically reserve the endpoint lifecycle slot for one QUEUE batch. */
+    public QueueBatchSlotResult tryReserveQueueBatchSlot(
+            BatchItem head,
+            int maximumInflightBatches) {
+        Objects.requireNonNull(head, "head");
+        EndpointGenerationLifecycle.HandoffPermit handoffPermit =
+                generationLifecycle.tryAcquireHandoff();
+        if (handoffPermit == null) {
+            return new QueueBatchSlotAdmissionFailed(
+                    new EndpointGenerationRetiredException(
+                            "Prefill endpoint generation retired before batch reservation"));
+        }
+        while (true) {
+            int current = queueBatchCapacityUsage.get();
+            if (current == Integer.MAX_VALUE
+                    || (maximumInflightBatches > 0
+                    && current >= maximumInflightBatches)) {
+                handoffPermit.close();
+                return new QueueBatchSlotUnavailable(
+                        () -> generationLifecycle.isRetiringOrRetired()
+                                || queueBatchCapacityUsage.get() < Integer.MAX_VALUE
+                                && (maximumInflightBatches <= 0
+                                || queueBatchCapacityUsage.get()
+                                < maximumInflightBatches));
+            }
+            if (!queueBatchCapacityUsage.compareAndSet(current, current + 1)) {
+                continue;
+            }
+            return new QueueBatchSlotReserved(
+                    new QueueBatchSlotReservation(head, handoffPermit));
+        }
+    }
+
+    /** Number of real QUEUE batch slots currently reserved or registered. */
+    public int getQueueBatchCapacityUsage() {
+        return queueBatchCapacityUsage.get();
+    }
+
+    /** Register one individually delivered DIRECT request in the request ledger. */
+    public void registerDirectRequest(long requestId, long predictedMs) {
+        EndpointGenerationLifecycle.HandoffPermit handoffPermit =
+                generationLifecycle.tryAcquireHandoff();
+        if (handoffPermit == null) {
+            throw new EndpointGenerationRetiredException(
+                    "Prefill endpoint generation retired before DIRECT registration");
+        }
+        try {
+            if (!requestLedger.registerDirectRequest(requestId, predictedMs)) {
+                throw new IllegalStateException(
+                        "DIRECT request already has a live Prefill owner request_id="
+                                + requestId);
+            }
+        } finally {
+            handoffPermit.close();
+        }
+    }
+
+    private void registerReservedQueueBatch(
+            QueueBatchSlotReservation reservation,
+            long batchId,
+            long predictedMs,
+            List<BatchItem> requests) {
+        BatchInflight batch = new BatchInflight(
+                predictedMs, requests, reservation::releaseFromBatchLifecycle);
         beginBatchWaitMutation();
         try {
-            inflightBatches.compute(batchId, (id, previous) -> {
-                int previousSize = previous != null ? previous.requests().size() : 0;
-                inflightBatchRequestCount.addAndGet(
-                        newBatch.requests().size() - previousSize);
-                return newBatch;
-            });
+            BatchInflight previous = inflightBatches.putIfAbsent(batchId, batch);
+            if (previous != null) {
+                throw new IllegalStateException(
+                        "batch lifecycle already registered batch_id=" + batchId);
+            }
         } finally {
             endBatchWaitMutation();
         }
     }
 
+    private void releaseQueueBatchCapacityUnit() {
+        int remaining = queueBatchCapacityUsage.decrementAndGet();
+        if (remaining < 0) {
+            queueBatchCapacityUsage.incrementAndGet();
+            throw new IllegalStateException("QUEUE batch capacity released more than once");
+        }
+        batcher.signalDeliveryCapacityAvailable();
+    }
+
+    public final class QueueBatchSlotReservation {
+
+        private enum State {
+            RESERVED,
+            BATCH_LIFECYCLE,
+            RELEASED
+        }
+
+        private final BatchItem head;
+        private final EndpointGenerationLifecycle.HandoffPermit handoffPermit;
+        private State state = State.RESERVED;
+        private List<BatchItem> admittedRequests = List.of();
+        private boolean batchLoadPublicationOpen;
+        private long registeredBatchId = -1L;
+        private boolean batchLifecycleEstablished;
+        private boolean deliveryHandoffComplete;
+
+        private QueueBatchSlotReservation(
+                BatchItem head,
+                EndpointGenerationLifecycle.HandoffPermit handoffPermit) {
+            this.head = head;
+            this.handoffPermit = handoffPermit;
+        }
+
+        public BatchItem head() {
+            return head;
+        }
+
+        /**
+         * Publish callback-owned members before the active queue releases them.
+         * Closing the publication after lifecycle transfer or abandonment
+         * completes the coherent load transition.
+         */
+        public synchronized DeliveryCapacityAdmission.BatchLoadPublication
+                beginBatchLoadPublication(List<BatchItem> requests) {
+            if (state != State.RESERVED || !admittedRequests.isEmpty()
+                    || batchLoadPublicationOpen) {
+                throw new IllegalStateException(
+                        "QUEUE batch callback load ownership was already established");
+            }
+            List<BatchItem> admitted = List.copyOf(requests);
+            if (admitted.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "QUEUE batch callback ownership requires requests");
+            }
+            AtomicBoolean closed = new AtomicBoolean();
+            DeliveryCapacityAdmission.BatchLoadPublication publication = () -> {
+                if (closed.compareAndSet(false, true)) {
+                    synchronized (QueueBatchSlotReservation.this) {
+                        batchLoadPublicationOpen = false;
+                    }
+                    endBatchWaitMutation();
+                }
+            };
+            beginBatchWaitMutation();
+            boolean published = false;
+            try {
+                admittedRequests = admitted;
+                batchLoadPublicationOpen = true;
+                admittedBatchRequestCount.addAndGet(admitted.size());
+                published = true;
+            } finally {
+                if (!published) {
+                    endBatchWaitMutation();
+                }
+            }
+            return publication;
+        }
+
+        public synchronized void transferToBatchLifecycle(
+                long batchId,
+                long predictedMs,
+                List<BatchItem> requests) {
+            if (state != State.RESERVED) {
+                throw new IllegalStateException(
+                        "QUEUE batch capacity is not available for registration");
+            }
+            if (admittedRequests.isEmpty()) {
+                throw new IllegalStateException(
+                        "QUEUE batch load was not published before lifecycle transfer");
+            }
+            List<BatchItem> registeredRequests = List.copyOf(requests);
+            validateRegisteredBatchMembers(registeredRequests);
+            registerReservedQueueBatch(
+                    this, batchId, predictedMs, registeredRequests);
+            int membersNotRegistered = admittedRequests.size() - registeredRequests.size();
+            if (membersNotRegistered > 0) {
+                beginBatchWaitMutation();
+                try {
+                    admittedBatchRequestCount.addAndGet(-membersNotRegistered);
+                } finally {
+                    endBatchWaitMutation();
+                }
+            }
+            // Membership validation and callback-load reconciliation are now
+            // complete. The real BatchInflight owns the payload; the slot token
+            // must not retain BatchItem graphs for the rest of the batch life.
+            admittedRequests = List.of();
+            registeredBatchId = batchId;
+            state = State.BATCH_LIFECYCLE;
+            batchLifecycleEstablished = true;
+        }
+
+        public synchronized void release() {
+            if (state != State.RESERVED) {
+                return;
+            }
+            state = State.RELEASED;
+            try {
+                if (!admittedRequests.isEmpty()) {
+                    beginBatchWaitMutation();
+                    try {
+                        admittedBatchRequestCount.addAndGet(-admittedRequests.size());
+                        admittedRequests = List.of();
+                    } finally {
+                        endBatchWaitMutation();
+                    }
+                }
+                releaseQueueBatchCapacityUnit();
+            } finally {
+                completeDeliveryHandoffPermit();
+            }
+        }
+
+        public synchronized void completeDeliveryHandoff() {
+            if (!batchLifecycleEstablished) {
+                throw new IllegalStateException(
+                        "QUEUE batch lifecycle was not established");
+            }
+            completeDeliveryHandoffPermit();
+        }
+
+        private void completeDeliveryHandoffPermit() {
+            if (!deliveryHandoffComplete) {
+                deliveryHandoffComplete = true;
+                handoffPermit.close();
+            }
+        }
+
+        private synchronized void releaseFromBatchLifecycle() {
+            if (state == State.RELEASED) {
+                return;
+            }
+            if (state != State.BATCH_LIFECYCLE) {
+                throw new IllegalStateException(
+                        "QUEUE batch capacity has no registered batch lifecycle"
+                                + " batch_id=" + registeredBatchId);
+            }
+            state = State.RELEASED;
+            releaseQueueBatchCapacityUnit();
+        }
+
+        private void validateRegisteredBatchMembers(List<BatchItem> requests) {
+            if (requests.isEmpty() || requests.size() > admittedRequests.size()) {
+                throw new IllegalArgumentException(
+                        "registered QUEUE batch must be a non-empty admitted subset");
+            }
+            int nextAdmittedIndex = 0;
+            for (BatchItem registered : requests) {
+                while (nextAdmittedIndex < admittedRequests.size()
+                        && admittedRequests.get(nextAdmittedIndex) != registered) {
+                    nextAdmittedIndex++;
+                }
+                if (nextAdmittedIndex == admittedRequests.size()) {
+                    throw new IllegalArgumentException(
+                            "registered QUEUE batch contains an unadmitted request");
+                }
+                nextAdmittedIndex++;
+            }
+        }
+    }
+
     public void releaseBatch(long batchId) {
         long statusMs = System.currentTimeMillis();
+        AtomicReference<BatchInflight> removedBatch = new AtomicReference<>();
         beginBatchWaitMutation();
         try {
             inflightBatches.compute(batchId, (id, batch) -> {
@@ -170,7 +518,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         || protectedRequests.isEmpty()) {
                     batchMemberProtections.remove(id);
                     if (batch != null) {
-                        inflightBatchRequestCount.addAndGet(-batch.requests().size());
+                        admittedBatchRequestCount.addAndGet(-batch.requests().size());
+                        removedBatch.set(batch);
                     }
                     return null;
                 }
@@ -185,7 +534,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 int removed = batch.requests().size() - survivors.size();
                 if (survivors.isEmpty()) {
                     batchMemberProtections.remove(id, protectedRequests);
-                    inflightBatchRequestCount.addAndGet(-batch.requests().size());
+                    admittedBatchRequestCount.addAndGet(-batch.requests().size());
+                    removedBatch.set(batch);
                     return null;
                 }
                 if (removed == 0) {
@@ -195,35 +545,167 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
                 batch.touch(statusMs);
                 batch.observeFailure();
-                long newPredMs = (long) predictor.predictBatchMs(survivors);
+                long newPredMs = predictRepackedBatchMs(survivors);
                 BatchInflight repacked = batch.repack(newPredMs, survivors);
-                inflightBatchRequestCount.addAndGet(-removed);
+                admittedBatchRequestCount.addAndGet(-removed);
                 return repacked;
             });
         } finally {
             endBatchWaitMutation();
         }
+        BatchInflight removed = removedBatch.get();
+        if (removed != null) {
+            removed.releaseCapacitySlot();
+        }
+    }
+
+    /** Outcome of reserving one request-scoped Prefill delivery slot. */
+    public enum RequestCapacityReservationStatus {
+        ACQUIRED,
+        CAPACITY_FULL,
+        REQUEST_ALREADY_TRACKED,
+        ENDPOINT_RETIRED
+    }
+
+    /** Explicit result of {@link #acquireRequestCapacityReservation}. */
+    public record RequestCapacityReservationAcquisition(
+            RequestCapacityReservationStatus status,
+            RequestCapacityReservation reservation) {
+        public RequestCapacityReservationAcquisition {
+            Objects.requireNonNull(status, "status");
+            if ((status == RequestCapacityReservationStatus.ACQUIRED)
+                    != (reservation != null)) {
+                throw new IllegalArgumentException(
+                        "only ACQUIRED may carry a Prefill capacity reservation");
+            }
+        }
     }
 
     /**
-     * Atomically account for one route-decision request.
-     *
-     * <p>A positive {@code maxPerWorker} is a hard admission cap over
-     * individually delivered route requests. Real batch members retain their
-     * independent batch-count controls and contribute only to the total request metric. A
-     * non-positive limit disables the route cap. Repeating the same live request id
-     * is idempotent and returns {@code true} without replacing its original prediction
-     * or incrementing either counter.
-     * Request ids are delivery identities and must not be reused while an old
-     * WorkerStatus terminal for the id can still arrive; Engine status does not
-     * carry a route-delivery generation token that could disambiguate such reuse.
-     *
-     * <p>Mutations for a request id are serialized by a fixed stripe. No request
-     * stripe is acquired while holding a batch/protection map lock (or vice
-     * versa), so request accounting cannot participate in a cross-ledger lock cycle.
+     * Exact-entry token for capacity held before delivery becomes externally
+     * visible. A composite admission prepares this entry first, performs its
+     * final hard-capacity ownership transition, then transfers the token to
+     * ordinary lifecycle ownership. Before that transfer, abort affects only
+     * this exact generation.
      */
-    public boolean tryCommitRequest(long requestId, long predictMs, int maxPerWorker) {
-        return requestLedger.tryAcquire(requestId, predictMs, maxPerWorker);
+    public static final class RequestCapacityReservation {
+        private enum State {
+            RESERVED,
+            PREPARED_FOR_DELIVERY,
+            DELIVERY_OWNED,
+            HANDOFF_COMPLETE,
+            CLOSED
+        }
+
+        private final PrefillRequestLedger.RequestCapacityReservation delegate;
+        private final EndpointGenerationLifecycle.HandoffPermit handoffPermit;
+        private State state = State.RESERVED;
+
+        private RequestCapacityReservation(
+                PrefillRequestLedger.RequestCapacityReservation delegate,
+                EndpointGenerationLifecycle.HandoffPermit handoffPermit) {
+            this.delegate = delegate;
+            this.handoffPermit = handoffPermit;
+        }
+
+        public synchronized boolean prepareForDelivery() {
+            if (state != State.RESERVED) {
+                return false;
+            }
+            boolean prepared = false;
+            try {
+                prepared = delegate.prepareForDelivery();
+                state = prepared
+                        ? State.PREPARED_FOR_DELIVERY
+                        : State.CLOSED;
+                return prepared;
+            } finally {
+                if (!prepared) {
+                    handoffPermit.close();
+                }
+            }
+        }
+
+        public synchronized boolean release() {
+            if (state != State.RESERVED) {
+                return false;
+            }
+            state = State.CLOSED;
+            try {
+                return delegate.release();
+            } finally {
+                handoffPermit.close();
+            }
+        }
+
+        public synchronized boolean abortBeforeDelivery() {
+            if (state != State.RESERVED
+                    && state != State.PREPARED_FOR_DELIVERY) {
+                return false;
+            }
+            state = State.CLOSED;
+            try {
+                return delegate.abortBeforeDelivery();
+            } finally {
+                handoffPermit.close();
+            }
+        }
+
+        public synchronized void completePreparedDeliveryTransfer() {
+            if (state != State.PREPARED_FOR_DELIVERY) {
+                throw new IllegalStateException(
+                        "Prefill request capacity was not prepared for delivery");
+            }
+            delegate.completePreparedDeliveryTransfer();
+            state = State.DELIVERY_OWNED;
+        }
+
+        public synchronized void completeDeliveryHandoff() {
+            if (state == State.HANDOFF_COMPLETE || state == State.CLOSED) {
+                return;
+            }
+            if (state != State.DELIVERY_OWNED) {
+                throw new IllegalStateException(
+                        "Prefill request delivery ownership was not established");
+            }
+            state = State.HANDOFF_COMPLETE;
+            handoffPermit.close();
+        }
+
+    }
+
+    /** Reserve the hard route-request slot without exposing the request. */
+    public RequestCapacityReservationAcquisition acquireRequestCapacityReservation(
+            long requestId, long predictMs, int maxPerWorker) {
+        EndpointGenerationLifecycle.HandoffPermit handoffPermit =
+                generationLifecycle.tryAcquireHandoff();
+        if (handoffPermit == null) {
+            return new RequestCapacityReservationAcquisition(
+                    RequestCapacityReservationStatus.ENDPOINT_RETIRED, null);
+        }
+        PrefillRequestLedger.RequestCapacityReservationAcquisition acquisition;
+        try {
+            acquisition = requestLedger.acquireCapacityReservation(
+                    requestId, predictMs, maxPerWorker);
+        } catch (Throwable failure) {
+            handoffPermit.close();
+            throw failure;
+        }
+        RequestCapacityReservationStatus status = switch (acquisition.status()) {
+            case ACQUIRED -> RequestCapacityReservationStatus.ACQUIRED;
+            case CAPACITY_FULL -> RequestCapacityReservationStatus.CAPACITY_FULL;
+            case REQUEST_ALREADY_TRACKED ->
+                    RequestCapacityReservationStatus.REQUEST_ALREADY_TRACKED;
+        };
+        RequestCapacityReservation reservation;
+        if (acquisition.reservation() == null) {
+            handoffPermit.close();
+            reservation = null;
+        } else {
+            reservation = new RequestCapacityReservation(
+                    acquisition.reservation(), handoffPermit);
+        }
+        return new RequestCapacityReservationAcquisition(status, reservation);
     }
 
     /**
@@ -261,19 +743,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return requestLedger.unprotect(requestId);
     }
 
-    /** Advisory capacity snapshot; {@link #tryCommitRequest} is the hard gate. */
+    /** Advisory QUEUE_ROUTE snapshot; reservation acquisition is the hard gate. */
     public int availableRequestSlots(int maxPerWorker) {
         return requestLedger.available(maxPerWorker);
     }
 
-    /** Total locally-accounted Prefill requests, including real batch members. */
-    public int getInflightRequestCount() {
-        return inflightBatchRequestCount.get() + requestLedger.count();
+    /**
+     * Requests owned by a local Prefill lifecycle: admitted QUEUE batch members
+     * plus individually tracked DIRECT and QUEUE_ROUTE requests.
+     */
+    public int getLocallyOwnedRequestCount() {
+        return admittedBatchRequestCount.get() + requestLedger.count();
     }
 
-    /** Individually-accounted route-decision requests only. */
-    public int getInflightRouteRequestCount() {
+    /** Individually-accounted DIRECT and QUEUE_ROUTE requests. */
+    public int getIndividuallyTrackedRequestCount() {
         return requestLedger.count();
+    }
+
+    /** QUEUE route requests currently consuming the configured hard cap. */
+    public int getQueueRouteCapacityUsage() {
+        return requestLedger.queueRouteCount();
     }
 
     /**
@@ -282,6 +772,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public void repackBatch(long batchId, Set<Long> failedRequestIds) {
         long statusMs = System.currentTimeMillis();
+        AtomicReference<BatchInflight> removedBatch = new AtomicReference<>();
         beginBatchWaitMutation();
         try {
             inflightBatches.computeIfPresent(batchId, (id, old) -> {
@@ -295,25 +786,38 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 old.touch(statusMs);
                 old.observeFailure();
                 if (survivors.isEmpty()) {
-                    inflightBatchRequestCount.addAndGet(-old.requests().size());
+                    admittedBatchRequestCount.addAndGet(-old.requests().size());
+                    removedBatch.set(old);
                     return null; // removes entry from map
                 }
-                long newPredMs = (long) predictor.predictBatchMs(survivors);
+                long newPredMs = predictRepackedBatchMs(survivors);
                 BatchInflight repacked = old.repack(newPredMs, survivors);
-                inflightBatchRequestCount.addAndGet(-removed);
+                admittedBatchRequestCount.addAndGet(-removed);
                 return repacked;
             });
         } finally {
             endBatchWaitMutation();
         }
+        BatchInflight removed = removedBatch.get();
+        if (removed != null) {
+            removed.releaseCapacitySlot();
+        }
     }
 
     @Override
     public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
-        super.onWorkerStatusUpdate(ws, resp);
-        Set<Long> activeNonRouteRequestIds =
-                calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
-        updateEngineUntrackedRequestCount(resp, activeNonRouteRequestIds);
+        try {
+            super.onWorkerStatusUpdate(ws, resp);
+            Set<Long> activeRequestsOutsideRequestLedger =
+                    calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
+            updateEngineUntrackedRequestCount(
+                    resp, activeRequestsOutsideRequestLedger);
+        } finally {
+            // WorkerStatus-derived capacity is an advisory scheduling input.
+            // Predictor model updates publish their own change at the exact
+            // learning boundary, including updates outside this status path.
+            batcher.signalSchedulingInputsChanged();
+        }
     }
 
     /**
@@ -328,11 +832,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (logger.isDebugEnabled()
                 && (finishedSize > 0 || !inflightBatches.isEmpty() || requestLedger.count() > 0)) {
             logger.debug("Prefill calibrate: finishedTasks={}, runningTasks={}, "
-                            + "inflightBatches={}, inflightRouteRequests={}",
+                            + "inflightBatches={}, individuallyTrackedRequests={}",
                     finishedSize, runningSize, inflightBatches.size(), requestLedger.count());
         }
 
-        // Phase 1: settle route-decision requests directly by request id, then collect
+        // Phase 1: settle individually tracked requests directly by request id,
+        // then collect
         // terminal observations owned by real batches. Checking the request ledger
         // first also tolerates Engine versions that attach a synthetic batch id to an
         // individually submitted request.
@@ -367,7 +872,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // Phase 3: update progress anchors. A queued batch cannot spend
         // predicted forward time until the worker reports it as RUNNING.
         Map<Long, List<TaskInfo>> activeByBatch = new HashMap<>();
-        Set<Long> activeNonRouteRequestIds = new HashSet<>();
+        Set<Long> activeRequestsOutsideRequestLedger = new HashSet<>();
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
                 if (task == null) {
@@ -377,7 +882,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     continue;
                 }
                 if (!isPriorityCancelOverlayOnly(task)) {
-                    activeNonRouteRequestIds.add(task.getRequestId());
+                    activeRequestsOutsideRequestLedger.add(task.getRequestId());
                 }
                 long batchId = task.getBatchId();
                 if (batchId >= 0) {
@@ -416,7 +921,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             });
         }
 
-        // Phase 4: check non-route running requests for anomalies.
+        // Phase 4: check active requests outside the request ledger for anomalies.
         for (Map.Entry<Long, List<TaskInfo>> entry : activeByBatch.entrySet()) {
             if (!inflightBatches.containsKey(entry.getKey())) {
                 for (TaskInfo task : entry.getValue()) {
@@ -425,7 +930,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
             }
         }
-        return activeNonRouteRequestIds;
+        return activeRequestsOutsideRequestLedger;
     }
 
     private boolean settleRequest(TaskInfo task) {
@@ -442,7 +947,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private boolean observeRequestProgress(TaskInfo task, long statusMs) {
         return requestLedger.observe(task.getRequestId(),
-                task.getPhase() == TaskPhase.RUNNING, statusMs);
+                task.getPhase() == TaskPhase.RUNNING, statusMs)
+                != PrefillRequestLedger.ProgressOwnership.NOT_TRACKED;
     }
 
     private void settleFinishedMembers(long batchId,
@@ -460,6 +966,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         BatchInflight completedBatch = completed.get();
         if (completedBatch != null) {
+            completedBatch.releaseCapacitySlot();
             reportBatchCompletion(batchId, completedBatch);
         }
     }
@@ -519,27 +1026,45 @@ public class PrefillEndpoint extends WorkerEndpoint {
         List<BatchItem> survivors = batch.requests().stream()
                 .filter(item -> !finishedIds.contains(item.requestId()))
                 .toList();
-        inflightBatchRequestCount.addAndGet(
-                -(batch.requests().size() - survivors.size()));
+        int finishedMemberCount = batch.requests().size() - survivors.size();
         if (survivors.isEmpty()) {
+            admittedBatchRequestCount.addAndGet(-finishedMemberCount);
             completed.set(batch);
             return null;
         }
 
-        long newPredMs = (long) predictor.predictBatchMs(survivors);
-        return batch.repack(newPredMs, survivors);
+        long newPredMs = predictRepackedBatchMs(survivors);
+        BatchInflight repackedBatch = batch.repack(newPredMs, survivors);
+        // All operations that can fail complete before the ledger count changes.
+        // The surrounding mutation epoch keeps readers from observing the small
+        // counter-to-map publication interval inside ConcurrentHashMap.compute.
+        admittedBatchRequestCount.addAndGet(-finishedMemberCount);
+        return repackedBatch;
+    }
+
+    /**
+     * Membership settlement must not depend on the optional cost estimator.
+     * If prediction fails, the batch still loses the finished members while
+     * its wait estimate becomes unavailable. No monotonicity is assumed from
+     * a predictor, so only {@link Long#MAX_VALUE} is a guaranteed non-low
+     * replacement.
+     */
+    private long predictRepackedBatchMs(List<BatchItem> survivingRequests) {
+        try {
+            return (long) predictor.predictBatchMs(survivingRequests);
+        } catch (Throwable predictionFailure) {
+            logger.error("Prefill batch repack prediction failed; marking wait unavailable "
+                            + "engine={} surviving_requests={}",
+                    getIp(), survivingRequests.size(), predictionFailure);
+            return Long.MAX_VALUE;
+        }
     }
 
     /**
      * Reconcile a finished task whose Engine status omitted the original batch id.
      *
-     * <p>Legacy non-batch reservations are keyed by request id and carry an empty
-     * member list. A real batch is keyed by its generated batch id and always
-     * carries its request members. Checking the value shape before the direct
-     * removal prevents an unrelated real batch from being erased when its batch
-     * id happens to equal this request id.
-     *
-     * <p>Production priority-cancel terminals may currently report
+     * <p>Individually delivered requests were already reconciled through the
+     * request ledger. Production priority-cancel terminals may report
      * {@code batch_id=-1} even though the Master committed the request as a member
      * of a real batch. In that case scan the live ledger for the unique owning
      * batch and remove only the matching member. The member is revalidated inside
@@ -549,25 +1074,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     private void reconcileFinishedWithoutBatchId(FinishedObservation observation, long statusMs) {
         long requestId = observation.requestId();
-        AtomicBoolean removedNonBatch = new AtomicBoolean(false);
-        beginBatchWaitMutation();
-        try {
-            inflightBatches.computeIfPresent(requestId, (id, batch) -> {
-                if (!batch.requests().isEmpty()) {
-                    return batch;
-                }
-                removedNonBatch.set(true);
-                batchMemberProtections.remove(id);
-                inflightBatchRequestCount.addAndGet(-batch.requests().size());
-                return null;
-            });
-        } finally {
-            endBatchWaitMutation();
-        }
-        if (removedNonBatch.get()) {
-            return;
-        }
-
         List<Long> matchingBatchIds = new ArrayList<>();
         for (Map.Entry<Long, BatchInflight> entry : inflightBatches.entrySet()) {
             boolean containsRequest = entry.getValue().requests().stream()
@@ -596,8 +1102,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private void updateEngineUntrackedRequestCount(
-            WorkerStatusResponse response, Set<Long> activeNonRouteRequestIds) {
-        // Real batches are few and need a membership set. Route membership was
+            WorkerStatusResponse response,
+            Set<Long> activeRequestsOutsideRequestLedger) {
+        // Real batches are few and need a membership set. Individual-request
+        // membership was
         // classified while applying the same WorkerStatus observation, avoiding
         // a second request-ledger lookup or a copy of all live route ids.
         Set<Long> localBatchRequestIds = new HashSet<>();
@@ -607,18 +1115,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
 
-        activeNonRouteRequestIds.removeAll(localBatchRequestIds);
+        activeRequestsOutsideRequestLedger.removeAll(localBatchRequestIds);
 
         long reportedActive = Math.max(0, response.getWaitingQueryLen())
                 + Math.max(0, response.getRunningQueryLen());
         long scalarLowerBound = Math.max(
-                0, reportedActive - Math.max(0, getInflightRequestCount()));
+                0, reportedActive - Math.max(0, getLocallyOwnedRequestCount()));
         // The protobuf converter represents an absent detail list as an empty map,
         // while older/newer Engine variants may still populate only the scalar
         // counts. Keep the request-id union when details exist and conservatively
         // retain the scalar lower bound when the detail list is empty or partial.
         engineUntrackedRequestCount = Math.max(
-                activeNonRouteRequestIds.size(), scalarLowerBound);
+                activeRequestsOutsideRequestLedger.size(), scalarLowerBound);
     }
 
     private static boolean isPriorityCancelOverlayOnly(TaskInfo task) {
@@ -636,13 +1144,33 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * not already represented in the local ledger.
      */
     public long realPendingCount() {
-        return getInflightRequestCount() + batcher.queueSize() + engineUntrackedRequestCount;
+        for (int attempt = 0; attempt < COMBINED_WAIT_SNAPSHOT_MAX_ATTEMPTS; attempt++) {
+            long batchVersionBefore = batchWaitMutationVersion();
+            if (batchVersionBefore < 0) {
+                Thread.onSpinWait();
+                continue;
+            }
+            long locallyOwned = getLocallyOwnedRequestCount();
+            long activeQueue = batcher.queueSize();
+            long untrackedEngine = engineUntrackedRequestCount;
+            long batchVersionAfter = batchWaitMutationVersion();
+            if (batchVersionBefore == batchVersionAfter) {
+                return saturatedAdd(
+                        saturatedAdd(locallyOwned, activeQueue),
+                        Math.max(0L, untrackedEngine));
+            }
+            Thread.onSpinWait();
+        }
+        // Continuous ownership transfer cannot yield a coherent non-blocking
+        // snapshot. Route away conservatively instead of publishing a torn low
+        // Prefill load.
+        return Long.MAX_VALUE;
     }
 
     // ==================== Wait Time ====================
 
     /**
-     * Real wait time: estimated time to drain current inflight batches.
+     * Real wait time: combined estimate for batch and individual request ledgers.
      */
     public long realWaitTimeMs() {
         return estimateWaitingTimeMs(System.currentTimeMillis());
@@ -692,7 +1220,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
             BatchInflight removed = evicted.get();
             if (removed != null) {
-                inflightBatchRequestCount.addAndGet(-removed.requests().size());
+                admittedBatchRequestCount.addAndGet(-removed.requests().size());
+                removed.releaseCapacitySlot();
                 evictedCount.incrementAndGet();
             }
         }
@@ -809,6 +1338,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         BatchInflight completedBatch = completed.get();
         if (completedBatch != null) {
+            completedBatch.releaseCapacitySlot();
             reportBatchCompletion(batchId, completedBatch);
         }
     }
@@ -862,7 +1392,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), priority, size));
         }
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), getInflightRequestCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), getLocallyOwnedRequestCount());
         long nowMs = System.currentTimeMillis();
         long maxAgeMs = Math.max(
                 InflightEvictor.maxAgeMs(inflightBatches, nowMs),
@@ -893,7 +1423,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // sample even if another member completed successfully.
         if (batch.learningEligible()) {
             try {
-                predictor.learn(batch.originalFeatures(), predictedMs, actualMs);
+                PrefillTimePredictor.LearningResult learningResult = predictor.learn(
+                        batch.originalFeatures(), predictedMs, actualMs);
+                if (learningResult
+                        == PrefillTimePredictor.LearningResult.MODEL_UPDATED) {
+                    batcher.signalSchedulingInputsChanged();
+                }
             } catch (RuntimeException learningFailure) {
                 logger.warn("batch predictor learning failed after settlement: batchId={} engine={}",
                         batchId, getIp(), learningFailure);
@@ -963,8 +1498,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         long earliestBatchProgressBaseMs = Long.MAX_VALUE;
         for (BatchInflight batch : inflightBatches.values()) {
             batchPredMs = saturatedAdd(batchPredMs, Math.max(0, batch.predictTimeMs()));
-            // Preserve legacy batch semantics: an inflight batch begins aging at
-            // commit and WorkerStatus may subsequently re-anchor it.
+            if (batchPredMs == Long.MAX_VALUE) {
+                return Long.MAX_VALUE;
+            }
+            // An inflight batch begins aging at lifecycle commit and
+            // WorkerStatus may subsequently re-anchor it.
             earliestBatchProgressBaseMs = Math.min(
                     earliestBatchProgressBaseMs, batch.progressBaseMs());
         }

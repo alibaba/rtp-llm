@@ -60,7 +60,7 @@ class AnalyzeSloBatchTest(unittest.TestCase):
                                         "FLEXLB_CONFIG",
                                         json.dumps(
                                             {
-                                                "schemaVersion": 1,
+                                                "schemaVersion": 2,
                                                 "scheduler": {
                                                     "type": "QUEUE",
                                                     "ordering": {"type": "PRIORITY"},

@@ -38,6 +38,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -67,12 +69,12 @@ class DecodeAcceptanceLinearizationTest {
     void setUp() {
         ConfigService configService = mock(ConfigService.class);
         Router router = mock(Router.class);
-        BatchDispatcher dispatcher = mock(BatchDispatcher.class);
+        AcceptedBatchDispatcher dispatcher = new AcceptedBatchDispatcher();
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
         FlexlbConfig config = new FlexlbConfig();
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(3_600_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
@@ -105,10 +107,27 @@ class DecodeAcceptanceLinearizationTest {
         lease.bindTo(item.future());
         decodeEndpoint.reserve(REQUEST_ID, 128, 136, 50);
         decodeEndpoint.markQueuedPhase(REQUEST_ID);
-        scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
+
+        AdmittedDecisionGroup admitted =
+                TestCapacityAdmission.admit(scheduler, List.of(item));
+        assertEquals(SubmissionPermitState.ACCEPTED, dispatcher.permitState());
+
+        TestCapacityAdmission.runDeliveryCallback(
+                scheduler,
+                admitted,
+                new DecisionGroupMetadata("test", 0));
         RequestLifecycleSnapshot dispatched = scheduler.getRequestState(REQUEST_ID, 0);
         assertEquals(RequestLifecycleState.DISPATCHING, dispatched.state());
         batchId = dispatched.batchId();
+        assertEquals(SubmissionPermitState.SUBMITTED, dispatcher.permitState());
+        SubmittedBatch submitted = dispatcher.submittedBatch();
+        assertNotNull(submitted);
+        assertEquals(List.of(item), submitted.items());
+        assertSame(prefillEndpoint, submitted.prefillEndpoint());
+        assertEquals(batchId, submitted.batchId());
+        assertEquals("test", submitted.reason());
+        assertNotNull(submitted.callback());
+        assertEquals(1, prefillEndpoint.getInflightBatchCount());
     }
 
     @AfterEach
@@ -390,5 +409,85 @@ class DecodeAcceptanceLinearizationTest {
             Thread.currentThread().interrupt();
             throw new AssertionError(e);
         }
+    }
+
+    /**
+     * Accepts one exact dispatcher task during capacity admission and retains
+     * the submitted callback so each test can inject the competing outcome
+     * directly at the scheduler boundary it exercises.
+     */
+    private static final class AcceptedBatchDispatcher implements BatchDispatcher {
+
+        private SubmissionPermitState permitState = SubmissionPermitState.NOT_RESERVED;
+        private SubmittedBatch submittedBatch;
+
+        @Override
+        public synchronized SubmissionReservationResult tryReserveSubmission() {
+            if (permitState != SubmissionPermitState.NOT_RESERVED) {
+                throw new IllegalStateException(
+                        "linearization fixture accepts exactly one submission task");
+            }
+            permitState = SubmissionPermitState.ACCEPTED;
+            return new SubmissionReserved(new AcceptedSubmissionPermit());
+        }
+
+        synchronized SubmissionPermitState permitState() {
+            return permitState;
+        }
+
+        synchronized SubmittedBatch submittedBatch() {
+            return submittedBatch;
+        }
+
+        private final class AcceptedSubmissionPermit
+                implements BatchDispatcher.SubmissionPermit {
+
+            @Override
+            public void submit(
+                    List<BatchItem> items,
+                    PrefillEndpoint prefillEndpoint,
+                    long batchId,
+                    long predictedMs,
+                    String reason,
+                    DispatchCallback callback) {
+                synchronized (AcceptedBatchDispatcher.this) {
+                    requireAcceptedPermit();
+                    permitState = SubmissionPermitState.SUBMITTED;
+                    submittedBatch = new SubmittedBatch(
+                            List.copyOf(items), prefillEndpoint, batchId,
+                            reason, callback);
+                }
+            }
+
+            @Override
+            public void release() {
+                synchronized (AcceptedBatchDispatcher.this) {
+                    requireAcceptedPermit();
+                    permitState = SubmissionPermitState.RELEASED;
+                }
+            }
+
+            private void requireAcceptedPermit() {
+                if (permitState != SubmissionPermitState.ACCEPTED) {
+                    throw new IllegalStateException(
+                            "submission permit was already resolved");
+                }
+            }
+        }
+    }
+
+    private record SubmittedBatch(
+            List<BatchItem> items,
+            PrefillEndpoint prefillEndpoint,
+            long batchId,
+            String reason,
+            DispatchCallback callback) {
+    }
+
+    private enum SubmissionPermitState {
+        NOT_RESERVED,
+        ACCEPTED,
+        SUBMITTED,
+        RELEASED
     }
 }
