@@ -611,10 +611,11 @@ void LocalRpcServer::installSleepHooks() {
                 }
             }
         }
-        // Rebuild cheap Python-owned caches explicitly discarded by the sleep
-        // hook (currently DSV4 RoPE/cos-sin caches). This is required for both
-        // level 1 and level 2; level 2 runs it after checkpoint weights and
-        // computed weights have been restored.
+        // Restore Python-owned runtime state explicitly discarded by the sleep
+        // hook (currently TP symmetric-memory state). DSV4 RoPE/cos-sin caches
+        // intentionally remain resident because decode CUDA graphs capture
+        // their device pointers; replacing them here would leave graph replay
+        // dereferencing a stale address.
         if (ok && !weight_manager_.is_none()) {
             try {
                 py::gil_scoped_acquire acquire;

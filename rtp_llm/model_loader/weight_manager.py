@@ -425,7 +425,7 @@ class WeightManager:
         resume_after_wake(self._device, reason=reason)
 
     def restore_runtime_gpu_caches(self, reason: str = "wake") -> None:
-        """Rebuild inexpensive Python-owned caches explicitly dropped at sleep."""
+        """Restore Python-owned runtime state explicitly dropped at sleep."""
         # The TP symmetric-memory staging buffer is deliberately dropped while
         # sleeping (the process group remains valid). Recreate it before the
         # engine warmup so the normal TP fast path is restored on wake.
@@ -456,16 +456,10 @@ class WeightManager:
                 reason,
                 e,
             )
-        from rtp_llm.models_py.modules.dsv4.fp8.attention import (
-            restore_rope_caches_after_wake,
-        )
-
-        restored = restore_rope_caches_after_wake()
-        logging.info(
-            "restore_runtime_gpu_caches[%s]: restored DSV4 RoPE caches for %d owner(s)",
-            reason,
-            restored,
-        )
+        # DSV4 RoPE caches deliberately remain resident across sleep/wake. Their
+        # device pointers are captured by decode CUDA graphs; rebuilding them
+        # here would not update an already-captured graph. See the TODO in
+        # sleep_gpu_reclaim.py for the required invalidate+recapture protocol.
 
     def reload_weights_from_loader(self) -> None:
         """Reload weights in place from the model loader (level-2 wake).

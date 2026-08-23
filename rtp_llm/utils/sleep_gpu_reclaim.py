@@ -40,15 +40,14 @@ def _clear_module_device_caches() -> list[str]:
     and is therefore opt-in.
     """
     notes: list[str] = []
-    try:
-        from rtp_llm.models_py.modules.dsv4.fp8.attention import (
-            release_rope_caches_for_sleep,
-        )
-
-        rope_bytes = release_rope_caches_for_sleep()
-        notes.append(f"DSV4 RoPE caches RELEASED {rope_bytes / _MiB:.1f} MiB")
-    except Exception as e:
-        notes.append(f"DSV4 RoPE cache release skipped: {e}")
+    # DSV4 decode CUDA graphs capture the freqs_cis device pointer inside the
+    # indexSelect/fused RoPE launches. Replacing that tensor at wake would leave
+    # graph replay using the old (possibly unmapped) address and can produce a
+    # warp illegal address with no Python traceback. Keep it resident until the
+    # graph lifecycle grows an explicit invalidate+recapture protocol.
+    # TODO(sleep): re-enable RoPE release only after graph invalidation/recapture
+    # is rank-symmetric and completes before any post-wake replay.
+    notes.append("DSV4 RoPE caches KEPT (CUDA-graph pointer stability)")
 
     try:
         clear_cublas = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
