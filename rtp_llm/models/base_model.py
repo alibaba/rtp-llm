@@ -167,6 +167,20 @@ class BaseModel(object):
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
+        # CUDA graph replay does not execute Python to refresh pointers.  Latch
+        # this process-wide before constructing any Python model so sleep reclaim
+        # keeps graph-captured optional buffers at stable virtual addresses.  The
+        # latch is deliberately never cleared: a second non-graph model may
+        # coexist with a graph-enabled model in the same worker.
+        from rtp_llm.models_py.utils.cuda_graph_state import mark_cuda_graph_baked
+
+        mark_cuda_graph_baked(
+            bool(
+                getattr(self.hw_kernel_config, "enable_cuda_graph", False)
+                or getattr(self.hw_kernel_config, "enable_native_cuda_graph", False)
+            )
+        )
+
         self._may_init_multimodal()
         self.custom_module = self._init_custom_module()
 

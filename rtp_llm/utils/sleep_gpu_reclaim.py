@@ -32,6 +32,35 @@ _MiB = 1024.0 * 1024.0
 _GiB = 1024.0**3
 
 
+def _cuda_graph_baked() -> bool:
+    """Return whether any process-local graph requires stable allocations."""
+    try:
+        from rtp_llm.models_py.utils.cuda_graph_state import cuda_graph_baked
+
+        graph_baked = bool(cuda_graph_baked())
+    except Exception:
+        # If the optional Python state cannot be imported, fail closed.  The C++
+        # hook independently protects allocator emptyCache in graph mode.
+        graph_baked = True
+    if graph_baked:
+        return True
+    try:
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        return bool(mega_buf.mega_buffers_graph_baked())
+    except Exception:
+        return False
+
+
+def _optional_release_allowed(env_name: str, graph_baked: bool) -> bool:
+    """Explicit opt-in release, never allowed for graph-baked pointers.
+
+    The switches intentionally default to ``0``.  Operators can opt into
+    reclaim on a no-graph role, while a graph role always wins the safety check.
+    """
+    return not graph_baked and os.environ.get(env_name, "0") == "1"
+
+
 def _clear_module_device_caches() -> list[str]:
     """Drop long-lived Python-held device tensor caches so their segments free.
 
@@ -40,6 +69,7 @@ def _clear_module_device_caches() -> list[str]:
     and is therefore opt-in.
     """
     notes: list[str] = []
+    graph_baked = _cuda_graph_baked()
     # DSV4 decode CUDA graphs capture the freqs_cis device pointer inside the
     # indexSelect/fused RoPE launches. Replacing that tensor at wake would leave
     # graph replay using the old (possibly unmapped) address and can produce a
@@ -49,24 +79,32 @@ def _clear_module_device_caches() -> list[str]:
     # is rank-symmetric and completes before any post-wake replay.
     notes.append("DSV4 RoPE caches KEPT (CUDA-graph pointer stability)")
 
-    try:
-        clear_cublas = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
-        if clear_cublas is not None:
-            clear_cublas()
-            notes.append("cuBLAS workspaces RELEASED")
-        else:
-            notes.append("cuBLAS workspace clear unavailable")
-    except Exception as e:
-        notes.append(f"cuBLAS workspace release skipped: {e}")
+    if _optional_release_allowed("RTP_LLM_SLEEP_FREE_CUBLAS_WORKSPACE", graph_baked):
+        try:
+            clear_cublas = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
+            if clear_cublas is not None:
+                clear_cublas()
+                notes.append("cuBLAS workspaces RELEASED")
+            else:
+                notes.append("cuBLAS workspace clear unavailable")
+        except Exception as e:
+            notes.append(f"cuBLAS workspace release skipped: {e}")
+    else:
+        reason = "CUDA-graph pointer stability" if graph_baked else "env disabled"
+        notes.append(f"cuBLAS workspaces KEPT ({reason})")
     try:
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
             CudaFp8DeepGEMMLinear,
         )
 
-        scale_bytes = CudaFp8DeepGEMMLinear.release_runtime_caches_for_sleep()
-        notes.append(
-            f"DeepGEMM runtime scale caches RELEASED {scale_bytes / _MiB:.1f} MiB"
-        )
+        if _optional_release_allowed("RTP_LLM_SLEEP_FREE_DEEPGEMM_SCALES", graph_baked):
+            scale_bytes = CudaFp8DeepGEMMLinear.release_runtime_caches_for_sleep()
+            notes.append(
+                f"DeepGEMM runtime scale caches RELEASED {scale_bytes / _MiB:.1f} MiB"
+            )
+        else:
+            reason = "CUDA-graph pointer stability" if graph_baked else "env disabled"
+            notes.append(f"DeepGEMM runtime scale caches KEPT ({reason})")
     except Exception as e:
         notes.append(f"DeepGEMM runtime scale cache release skipped: {e}")
     try:
@@ -74,10 +112,14 @@ def _clear_module_device_caches() -> list[str]:
             release_symm_mem_communicator_for_sleep,
         )
 
-        symm_bytes = release_symm_mem_communicator_for_sleep()
-        notes.append(
-            f"TP symmetric-memory communicator RELEASED {symm_bytes / _MiB:.1f} MiB"
-        )
+        if _optional_release_allowed("RTP_LLM_SLEEP_FREE_TP_SYMM_MEM", graph_baked):
+            symm_bytes = release_symm_mem_communicator_for_sleep()
+            notes.append(
+                f"TP symmetric-memory communicator RELEASED {symm_bytes / _MiB:.1f} MiB"
+            )
+        else:
+            reason = "CUDA-graph pointer stability" if graph_baked else "env disabled"
+            notes.append(f"TP symmetric-memory communicator KEPT ({reason})")
     except Exception as e:
         notes.append(f"TP symmetric-memory communicator release skipped: {e}")
     try:
@@ -102,7 +144,7 @@ def _clear_module_device_caches() -> list[str]:
         # re-create cannot fire. ``mega_buffers_graph_baked()`` keeps them resident
         # unconditionally in that mode, making the crash impossible-by-construction
         # even if the env is set on a graph engine by mistake (see mega_buf).
-        graph_baked = mega_buf.mega_buffers_graph_baked()
+        graph_baked = graph_baked or mega_buf.mega_buffers_graph_baked()
         output_gib = mega_buf.mega_output_buffer_gib()
         symm = 0.0
         for _key, buf in getattr(mega_buf, "_MEGA_BUF_CACHE", {}).items():
@@ -380,6 +422,7 @@ def release_and_trim(device: object, reason: str = "sleep") -> None:
     """
     try:
         with torch.cuda.device(device):
+            graph_baked = _cuda_graph_baked()
             free_before, total = torch.cuda.mem_get_info(device)
             logging.info(
                 "[SleepReclaim][%s] BEFORE driver_free=%.0fMiB total=%.0fMiB\n%s",
@@ -391,12 +434,18 @@ def release_and_trim(device: object, reason: str = "sleep") -> None:
             notes = _clear_module_device_caches()
             gc.collect()
             torch.cuda.synchronize()
-            try:
-                torch.cuda.empty_cache()
-            except Exception as e:  # noqa: BLE001 - best-effort teardown
-                logging.warning(
-                    "[SleepReclaim][%s] empty_cache failed (ignored): %s", reason, e
+            if graph_baked:
+                logging.info(
+                    "[SleepReclaim][%s] empty_cache kept skipped (CUDA-graph pointers must remain stable)",
+                    reason,
                 )
+            else:
+                try:
+                    torch.cuda.empty_cache()
+                except Exception as e:  # noqa: BLE001 - best-effort teardown
+                    logging.warning(
+                        "[SleepReclaim][%s] empty_cache failed (ignored): %s", reason, e
+                    )
             free_after = torch.cuda.mem_get_info(device)[0]
             logging.info(
                 "[SleepReclaim][%s] AFTER driver_free=%.0fMiB (reclaimed %.0fMiB) | %s\n%s",

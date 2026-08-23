@@ -486,7 +486,9 @@ void LocalRpcServer::installSleepHooks() {
         // once the engine is quiesced -- so a failure must NOT fail the sleep: swallow it, drain
         // the sticky CUDA error so it can't poison the subsequent wake, and continue.
 #if USING_CUDA || USING_ROCM
-        if (ok) {
+        const bool cuda_graph_enabled = maga_init_params_.hw_kernel_config.enable_cuda_graph
+                                        || maga_init_params_.hw_kernel_config.enable_native_cuda_graph;
+        if (ok && !cuda_graph_enabled) {
             {
                 OptionalSleepDeviceGuard empty_cache_guard(local_rank);
                 try {
@@ -503,6 +505,12 @@ void LocalRpcServer::installSleepHooks() {
                                         e.what());
                 }
             }
+        } else if (ok && cuda_graph_enabled) {
+            // Graph replay keeps raw pointers to allocator-backed workspaces and
+            // Python-owned buffers.  Dropping free blocks here can unmap those
+            // addresses; graph replay does not execute Python to repair them.
+            RTP_LLM_LOG_INFO("releaseRestorableGpuMemory: keeping best-effort emptyCache() "
+                             "because CUDA graph pointers must remain stable");
         } else {
             // A critical VMM/NCCL release already failed. Do not issue another
             // allocator/VMM operation on a potentially sticky CUDA error path;
