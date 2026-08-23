@@ -117,6 +117,7 @@ class KimiK3RendererTest(unittest.TestCase):
         self.assertEqual(config.max_thinking_tokens, 0)
 
     def test_thinking_budget_uses_k3_xtml_transition_without_grammar(self) -> None:
+        """Without grammar constraints, end_think_token_ids should NOT be set."""
         renderer = KimiK3Renderer.__new__(KimiK3Renderer)
         renderer.tokenizer = Mock()
         renderer.tokenizer.encode.return_value = [101, 102, 103]
@@ -126,11 +127,9 @@ class KimiK3RendererTest(unittest.TestCase):
             self.request(enable_thinking=True), config
         )
 
-        self.assertEqual(config.end_think_token_ids, [101, 102, 103])
-        renderer.tokenizer.encode.assert_called_once_with(
-            renderer._THINK_TO_RESPONSE,
-            add_special_tokens=False,
-        )
+        # No grammar constraint → end_think_token_ids stays default (empty)
+        self.assertEqual(config.end_think_token_ids, [])
+        renderer.tokenizer.encode.assert_not_called()
 
     def test_thinking_effort_precedes_legacy_reasoning_effort(self) -> None:
         request = ChatCompletionRequest(

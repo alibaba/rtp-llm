@@ -890,7 +890,7 @@ class KimiK3Renderer(CustomChatRenderer):
                 structural_tag, ensure_ascii=False, separators=(",", ":")
             )
 
-        if generate_config.in_think_mode:
+        if generate_config.in_think_mode and self._grammar_constraint_fields(generate_config):
             boundary_ids = self.tokenizer.encode(
                 self._THINK_TO_RESPONSE, add_special_tokens=False
             )
