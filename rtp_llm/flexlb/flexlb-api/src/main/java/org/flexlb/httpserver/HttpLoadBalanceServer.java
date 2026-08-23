@@ -254,9 +254,9 @@ public class HttpLoadBalanceServer {
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
                 ep.put("inflight_batches", entry.getValue().getInflightBatchCount());
-                ep.put("inflight_requests", entry.getValue().getInflightRequestCount());
+                ep.put("inflight_requests", entry.getValue().getLocallyOwnedRequestCount());
                 ep.put("inflight_route_requests",
-                        entry.getValue().getInflightRouteRequestCount());
+                        entry.getValue().getIndividuallyTrackedRequestCount());
                 prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);

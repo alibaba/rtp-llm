@@ -295,10 +295,10 @@ class FaultInjectionE2ETest {
                     "the first enqueue must trigger the configured engine crash");
             AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 1
                             && prefillEndpoint.getInflightBatchCount() == 1
-                            && prefillEndpoint.getInflightRequestCount() == 1,
+                            && prefillEndpoint.getLocallyOwnedRequestCount() == 1,
                     2_000, "missing ACK must retain scheduler and Prefill accounting");
 
-            assertEquals(0, prefillEndpoint.getInflightRouteRequestCount(),
+            assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount(),
                     "batch delivery must not consume the route-request ledger");
             assertFalse(crashedTerminal.await(250, TimeUnit.MILLISECONDS),
                     "missing ACK without an authoritative Engine terminal must stay fenced");
@@ -309,7 +309,7 @@ class FaultInjectionE2ETest {
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
             assertFalse(crashed.isDone(), "healthy delivery must not settle the unrelated fence");
             assertEquals(1, prefillEndpoint.getInflightBatchCount());
-            assertEquals(1, prefillEndpoint.getInflightRequestCount());
+            assertEquals(1, prefillEndpoint.getLocallyOwnedRequestCount());
         }
     }
 
