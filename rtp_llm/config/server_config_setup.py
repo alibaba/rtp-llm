@@ -367,13 +367,13 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
-    # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:
         if torch.cuda.is_available():
             if (
                 "NCCL_P2P_DISABLE" not in os.environ
                 and "RTX" in torch.cuda.get_device_name(0)
+                and torch.cuda.get_device_capability(0)[0] < 12
             ):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
                 logging.info("set NCCL_P2P_DISABLE to 1")
