@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -248,6 +249,27 @@ class V4Transformer(nn.Module):
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
 
+    def embed_full(self, input_ids: torch.Tensor) -> torch.Tensor:
+        h = self.embed(input_ids)
+        if h.size(-1) == self.args.dim:
+            return h
+        if self.args.dim % h.size(-1) != 0:
+            raise ValueError(
+                "DSV4 TP embedding shard has incompatible hidden size: "
+                f"local={h.size(-1)} dim={self.args.dim}"
+            )
+        shard_count = self.args.dim // h.size(-1)
+        from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+        leading = h.shape[:-1]
+        local_dim = h.size(-1)
+        flat = h.reshape(-1, local_dim).contiguous()
+        gathered = all_gather(flat, group=Group.TP)
+        return (
+            gathered.view(shard_count, flat.size(0), local_dim)
+            .transpose(0, 1)
+            .contiguous()
+            .view(*leading, self.args.dim)
+        )
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
 
@@ -273,6 +295,17 @@ class V4Transformer(nn.Module):
             )
         self.capture_aux_hidden_layer_ids = capture_ids
 
+    def _ensure_mtp_hidden_capacity(self, rows: int) -> None:
+        buf = self._mtp_hidden_buffer
+        if buf is None or int(rows) <= int(buf.size(0)):
+            return
+        if os.environ.get("DSV4_SM120_DYNAMIC_PREFILL_WORKSPACE", "0") != "1":
+            return
+        grown = torch.empty(
+            int(rows), int(buf.size(1)), dtype=buf.dtype, device=buf.device
+        )
+        grown[: buf.size(0)].copy_(buf)
+        self.register_buffer("_mtp_hidden_buffer", grown, persistent=False)
     def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
         """Write one selected layer's mean-pooled hidden into the shared
         runtime buffer.
@@ -300,6 +333,8 @@ class V4Transformer(nn.Module):
         pooled = hidden.mean(dim=-2)
         flat = pooled.reshape(-1, pooled.size(-1))
         rows, dim = flat.shape
+        self._ensure_mtp_hidden_capacity(rows)
+        buf = self._mtp_hidden_buffer
         assert (segment + 1) * dim <= buf.size(1), (
             f"aux segment overflow: segment={segment} dim={dim} "
             f"row_width={buf.size(1)}"
@@ -455,7 +490,7 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids.view(B, q_len)
         else:
             input_ids_2d = input_ids
-        h = self.embed(input_ids_2d)  # [B, q_len, dim]
+        h = self.embed_full(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
         for layer in self.layers:
             h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
@@ -544,7 +579,7 @@ class V4Transformer(nn.Module):
             # begin() may suppress this forward (MOEDBG_MAX_SEQ); honour it.
             if _rt._get_buf() is None:
                 _rt_on = False
-        h = self.embed(input_ids)  # [B, S, d]
+        h = self.embed_full(input_ids)  # [B, S, d]
         if _rt_on:
             _rt.record("embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, S, hc, d]

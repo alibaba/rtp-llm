@@ -103,6 +103,17 @@ class SparseAttnV4DecodeFp8Op:
         over a second FP8 KV pool in a single FlashMLA invocation. The
         kernel merges softmax across both pools natively.
         """
+        if q.is_cuda and torch.cuda.get_device_capability(q.device)[0] == 12:
+            return self._forward_sm120_flashinfer(
+                q,
+                kv_cache,
+                attn_sink,
+                topk_idxs,
+                topk_length,
+                extra_k_cache,
+                extra_topk_idxs,
+                extra_topk_length,
+            )
         assert _FLASH_MLA_AVAILABLE, (
             "flash_mla wheel is required for FP8 sparse decode "
             "(install rtp_llm with cuda12_9 / cuda13 config)"
@@ -120,6 +131,65 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_idxs,
             extra_topk_length,
         )
+    def _forward_sm120_flashinfer(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_sink: torch.Tensor,
+        topk_idxs: torch.Tensor,
+        topk_length: Optional[torch.Tensor] = None,
+        extra_k_cache: Optional[torch.Tensor] = None,
+        extra_topk_idxs: Optional[torch.Tensor] = None,
+        extra_topk_length: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+            canonical_topk,
+            pack_logical_workspace,
+            run,
+            token_lens,
+        )
+        batch, q_len, heads, dim = q.shape
+        rows = batch * q_len
+        swa_indices = topk_idxs.squeeze(2) if topk_idxs.dim() == 4 else topk_idxs
+        swa_indices, swa_topk_lens = canonical_topk(
+            swa_indices.reshape(rows, -1),
+            topk_length,
+            (128, 512, 1024),
+        )
+        extra_indices = extra_topk_idxs
+        if extra_indices is not None and extra_indices.dim() == 4:
+            extra_indices = extra_indices.squeeze(2)
+        if extra_indices is not None:
+            extra_indices = extra_indices.reshape(rows, -1).to(torch.int32).contiguous()
+        swa_decode_cache, swa_indices = pack_logical_workspace(
+            kv_cache, swa_indices, page_size=64
+        )
+        if extra_k_cache is not None and extra_indices is not None:
+            extra_page_size = 2 if int(extra_k_cache.shape[1]) <= 2 else 64
+            extra_decode_cache, extra_indices = pack_logical_workspace(
+                extra_k_cache, extra_indices, page_size=extra_page_size
+            )
+        else:
+            extra_decode_cache = None
+        flat_q = q.reshape(batch * q_len, heads, dim).contiguous()
+        flat_out = torch.empty_like(flat_q)
+        run(
+            query=flat_q,
+            swa_cache=swa_decode_cache,
+            swa_indices=swa_indices,
+            swa_lens=swa_topk_lens,
+            extra_cache=extra_decode_cache,
+            extra_indices=extra_indices,
+            extra_lens=(
+                token_lens(extra_topk_length, rows, extra_indices.shape[-1], q.device)
+                if extra_indices is not None
+                else None
+            ),
+            out=flat_out,
+            scale=self.softmax_scale,
+            sinks=attn_sink.float(),
+        )
+        return flat_out.view_as(q)
 
     def _forward_flash_mla(
         self,

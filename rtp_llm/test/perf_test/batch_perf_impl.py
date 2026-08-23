@@ -49,7 +49,6 @@ def _curl_server_single_worker(
             req["top_k"] = generate_config["top_k"]
         if "top_p" in generate_config:
             req["top_p"] = generate_config["top_p"]
-
     if "top_k" not in req:
         req["top_k"] = 1
 

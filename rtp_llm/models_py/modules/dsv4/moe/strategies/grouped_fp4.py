@@ -36,7 +36,11 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 from rtp_llm.models_py.utils.math import align, ceil_div
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from .._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
+from .._silu_mul_fp8_quant_triton import (
+    silu_mul_fp8_quant_packed,
+    silu_mul_fp8_quant_packed_from_parts,
+)
+from ..warmup_sync import cuda_graph_warmup_forward_enabled
 from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 
 
@@ -44,6 +48,7 @@ from ...quant_layouts import FP4_BLOCK, FP8_BLOCK, prepare_fp4_weight_scale_for_
 # DeepGEMM contiguous requires per-expert M to be a multiple of the kernel's
 # alignment (128 on SM100). We use the same constant.
 _GROUPED_ALIGNMENT = 128
+_SM120_FUSED_MOE_WORKSPACES = {}
 
 
 def _has_fp8_fp4_grouped_kernel() -> bool:
@@ -62,6 +67,17 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
     flag = os.environ.get("DSV4_USE_GROUPED_FP4", "auto").strip().lower()
     if flag in ("0", "false", "off", "no"):
         return False
+    if not torch.cuda.is_available():
+        return False
+    cap = torch.cuda.get_device_capability()
+    if cap[0] == 12:
+        try:
+            from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
+            from flashinfer import mxfp8_quantize, block_scale_interleave
+            return all((group_gemm_mxfp4_nt_groupwise, mxfp8_quantize,
+                        block_scale_interleave))
+        except Exception:
+            return False
     try:
         import deep_gemm
     except Exception:
@@ -70,9 +86,6 @@ def _has_fp8_fp4_grouped_kernel() -> bool:
         return False
     if not hasattr(deep_gemm, "get_mk_alignment_for_contiguous_layout"):
         return False
-    if not torch.cuda.is_available():
-        return False
-    cap = torch.cuda.get_device_capability()
     return cap[0] == 10
 
 
@@ -132,14 +145,33 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         )
         # Bulk copy from stacked → repacked layout (one slice per dim,
         # no per-expert iteration).
-        self._w13[:, :inter].copy_(stacked_w1_w)
-        s13_raw[:, :inter].copy_(stacked_w1_s)
-        self._w13[:, inter:].copy_(stacked_w3_w)
-        s13_raw[:, inter:].copy_(stacked_w3_s)
+        is_sm120 = torch.cuda.get_device_capability(device)[0] == 12
+        if is_sm120:
+            self._w13[:, :inter].copy_(stacked_w3_w)
+            s13_raw[:, :inter].copy_(stacked_w3_s)
+            self._w13[:, inter:].copy_(stacked_w1_w)
+            s13_raw[:, inter:].copy_(stacked_w1_s)
+        else:
+            self._w13[:, :inter].copy_(stacked_w1_w)
+            s13_raw[:, :inter].copy_(stacked_w1_s)
+            self._w13[:, inter:].copy_(stacked_w3_w)
+            s13_raw[:, inter:].copy_(stacked_w3_s)
         self._w2.copy_(stacked_w2_w)
         s2_raw.copy_(stacked_w2_s)
         del stacked_w1_w, stacked_w1_s, stacked_w2_w, stacked_w2_s
         del stacked_w3_w, stacked_w3_s
+        if is_sm120:
+            from flashinfer import block_scale_interleave
+            self._s13_sm120 = block_scale_interleave(
+                s13_raw.view(torch.uint8)
+            ).reshape(E, 2 * inter, D // FP4_BLOCK)
+            self._s2_sm120 = block_scale_interleave(
+                s2_raw.view(torch.uint8)
+            ).reshape(E, D, inter // FP4_BLOCK)
+            self._s13 = self._s2 = None
+            self._s13_dense_t = self._s2_dense_t = None
+            torch.cuda.empty_cache()
+            return
 
         self._s13 = prepare_fp4_weight_scale_for_deepgemm(
             s13_raw, 2 * inter, D, E
@@ -195,6 +227,10 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
 
         if N == 0:
             return torch.zeros(N, D, dtype=torch.float32, device=device)
+        if torch.cuda.get_device_capability(device)[0] == 12:
+            if torch.cuda.is_current_stream_capturing() or cuda_graph_warmup_forward_enabled():
+                return self._forward_capture_sm120(x, weights, indices)
+            return self._forward_sm120(x, weights, indices)
         if torch.cuda.is_current_stream_capturing():
             return self._forward_capture_topk(x, weights, indices)
 
@@ -318,6 +354,111 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         ep_gather(down_out, adjusted_topk_ids, weights, output_index, gather_out)
         return gather_out.float()
 
+    def _forward_sm120(self, x, weights, indices,
+                       input_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+        from flashinfer import block_scale_interleave, mxfp8_quantize
+        from flashinfer.gemm import group_gemm_mxfp4_nt_groupwise
+        cfg = self.cfg
+        n, d = x.shape
+        e, inter = cfg.n_routed_experts, cfg.moe_inter_dim
+        device = x.device
+        routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
+        adjusted_ids, counts = recompute_topk_ids_sum_expert_count(
+            routed_ids, current_expert_start_id=0, num_local_experts=e)
+        counts_list = counts.cpu().tolist()
+        aligned_list = [align(int(count), 4) for count in counts_list]
+        total_rows = sum(aligned_list)
+        if total_rows == 0:
+            return torch.zeros((n, d), dtype=torch.float32, device=device)
+        aligned = torch.tensor(aligned_list, dtype=torch.int32,
+                               pin_memory=True).to(device, non_blocking=True)
+        indptr = torch.cat((torch.zeros(1, dtype=torch.int32, device=device),
+                            aligned.cumsum(0).to(torch.int32)))
+        expert_start = torch.empty_like(aligned)
+        m_indices = torch.empty(align(total_rows, 128),
+                                dtype=torch.int32, device=device)
+        output_index = torch.empty_like(adjusted_ids)
+        if input_scale is None:
+            x_q, linear_scale = mxfp8_quantize(x.contiguous(),
+                                               is_sf_swizzled_layout=False)
+            linear_scale = linear_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
+        else:
+            x_q = x
+            linear_scale = input_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
+        routed_q = torch.empty(total_rows, d, dtype=x_q.dtype, device=device)
+        routed_scale = torch.zeros(total_rows, d // FP4_BLOCK,
+                                   dtype=torch.uint8, device=device)
+        ep_scatter(x_q, linear_scale, adjusted_ids, aligned, expert_start,
+                   routed_q, routed_scale, m_indices, output_index)
+        expert_ids = torch.bucketize(torch.arange(total_rows, device=device),
+                                     indptr[1:], right=True)
+        group_ids = torch.arange(e + 1, dtype=torch.int32, device=device)
+        sf_offsets = ((indptr + group_ids * 127) // 128) * 128
+        scale_rows = torch.arange(total_rows, device=device) + \
+            (sf_offsets[:-1] - indptr[:-1]).index_select(0, expert_ids)
+        sf_rows = int(sf_offsets[-1].item())
+        def pack_scale(linear: torch.Tensor) -> torch.Tensor:
+            padded = torch.zeros(sf_rows, linear.size(1),
+                                 dtype=torch.uint8, device=device)
+            padded.index_copy_(0, scale_rows, linear)
+            return block_scale_interleave(padded).reshape(sf_rows, linear.size(1))
+        def gemm(inp_q, inp_scale, expert_weight, expert_scale):
+            return group_gemm_mxfp4_nt_groupwise(inp_q, expert_weight,
+                pack_scale(inp_scale), expert_scale, indptr,
+                tile_n=128, out_dtype=torch.bfloat16)
+        gate_up = gemm(routed_q, routed_scale,
+                       self._w13.view(torch.uint8), self._s13_sm120)
+        up, gate = gate_up[:, :inter], gate_up[:, inter:]
+        hidden_q, hidden_scale_packed = silu_mul_fp8_quant_packed_from_parts(
+            gate, up, clamp_limit=cfg.swiglu_limit, group_size=FP4_BLOCK)
+        hidden_scale = hidden_scale_packed.contiguous().view(torch.uint8) \
+            .reshape(total_rows, inter // FP4_BLOCK)
+        down = gemm(hidden_q, hidden_scale,
+                    self._w2.view(torch.uint8), self._s2_sm120)
+        output = torch.empty((n, d), dtype=torch.float32, device=device)
+        ep_gather(down, adjusted_ids, weights, output_index, output)
+        return output
+    def _get_sm120_fused_moe_workspace(self, device) -> torch.Tensor:
+        from flashinfer.fused_moe import cutlass_fused_moe_workspace_size
+        from flashinfer.fused_moe.core import ActivationType
+        cfg = self.cfg
+        max_tokens = min(max(int(cfg.max_tokens_per_rank), 1), 512)
+        key = (device.index, max_tokens, cfg.dim, cfg.moe_inter_dim,
+               cfg.n_routed_experts, cfg.n_activated_experts)
+        workspace = _SM120_FUSED_MOE_WORKSPACES.get(key)
+        if workspace is None:
+            workspace_bytes = cutlass_fused_moe_workspace_size(
+                max_tokens, cfg.dim, cfg.moe_inter_dim, cfg.n_routed_experts,
+                cfg.n_activated_experts, x_dtype=torch.float8_e4m3fn,
+                weight_dtype=torch.long, output_dtype=torch.bfloat16,
+                activation_type=ActivationType.Swiglu, use_mxfp8_act_scaling=True,
+                use_fused_finalize=False, device=device)
+            workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+            _SM120_FUSED_MOE_WORKSPACES[key] = workspace
+        return workspace
+    def _forward_capture_sm120(self, x, weights, indices) -> torch.Tensor:
+        from flashinfer import mxfp8_quantize
+        from flashinfer.fused_moe import cutlass_fused_moe
+        from flashinfer.fused_moe.core import ActivationType
+        cfg = self.cfg
+        num_experts = cfg.n_routed_experts
+        fake_input_scale = torch.ones(num_experts, dtype=torch.float32, device=x.device)
+        swiglu_limit = torch.full_like(fake_input_scale, cfg.swiglu_limit)
+        output = torch.empty_like(x)
+        kernel_input, input_sf = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=True)
+        cutlass_fused_moe(input=kernel_input,
+            token_selected_experts=indices.to(torch.int32).contiguous(),
+            token_final_scales=weights.float().contiguous(),
+            fc1_expert_weights=self._w13.view(torch.uint8).view(torch.long),
+            fc2_expert_weights=self._w2.view(torch.uint8).view(torch.long), output_dtype=torch.bfloat16,
+            quant_scales=[self._s13_sm120.view(torch.int32), fake_input_scale,
+                self._s2_sm120.view(torch.int32), fake_input_scale],
+            input_sf=input_sf, swiglu_limit=swiglu_limit, output=output,
+            use_mxfp8_act_scaling=True, use_fused_finalize=False, enable_pdl=False,
+            workspace_buffer=self._get_sm120_fused_moe_workspace(x.device),
+            tune_max_num_tokens=min(max(int(cfg.max_tokens_per_rank), 1), 512),
+            activation_type=ActivationType.Swiglu)
+        return output.float()
     def _forward_capture_topk(
         self,
         x: torch.Tensor,
