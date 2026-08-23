@@ -66,7 +66,12 @@ on:
     types: [submitted]
     branches: ["main"]
   issue_comment:
-    types: [created, edited]
+    # `created` only. GitHub creates the run -- and, on a gated fork PR,
+    # parks it in action_required -- before it evaluates the job-level `if`
+    # below, so an edit that does not even contain the trigger phrase still
+    # leaves a run awaiting manual approval. PR 1312 accumulated 69 that
+    # way. Nothing inside the job can suppress this; only the trigger can.
+    types: [created]
 
 permissions:
   actions: write
