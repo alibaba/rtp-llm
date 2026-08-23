@@ -26,8 +26,20 @@ protected:
                            uint32_t                            local_partition_id) override;
 
 private:
+    void doLoadAttempt(const std::shared_ptr<LoadRequest>&                          request,
+                       const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
+                       int64_t                                                      deadline_ms);
+    void scheduleRetryOrFail(const std::shared_ptr<LoadRequest>&                          request,
+                             const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
+                             int64_t                                                      deadline_ms,
+                             CacheStoreErrorCode                                          ec,
+                             const std::string&                                           reason);
+
+private:
     std::shared_ptr<TcpServer>                tcp_server_;
     std::shared_ptr<TcpCacheStoreServiceImpl> service_;
+    // per-attempt timeout cap for load rpc, leaves retry budget within request timeout
+    uint32_t load_attempt_timeout_ms_{10000};
 };
 
 }  // namespace rtp_llm

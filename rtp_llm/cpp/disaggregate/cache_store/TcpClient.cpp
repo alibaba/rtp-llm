@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpClient.h"
 
+#include "autil/EnvUtil.h"
+#include "autil/TimeUtility.h"
 #include "aios/network/arpc/arpc/metric/KMonitorANetClientMetricReporter.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -32,7 +34,10 @@ bool TcpClient::init(int io_thread_count) {
         }
         rpc_channel_manager_->SetMetricReporter(metricReporter);
     }
-    RTP_LLM_LOG_INFO("tcp client init success, io thread count %d", io_thread_count);
+    channel_idle_timeout_ms_ = autil::EnvUtil::getEnv("CACHE_STORE_TCP_CHANNEL_IDLE_TIMEOUT_MS", int64_t(60000));
+    RTP_LLM_LOG_INFO("tcp client init success, io thread count %d, channel idle timeout %ld ms",
+                     io_thread_count,
+                     channel_idle_timeout_ms_);
     return true;
 }
 
@@ -50,21 +55,46 @@ void TcpClient::stop() {
 
 std::shared_ptr<arpc::RPCChannelBase> TcpClient::getChannel(const std::string& ip, uint32_t port) {
     std::string spec = "tcp:" + ip + ":" + std::to_string(port);
+    int64_t     now  = autil::TimeUtility::currentTimeInMilliSeconds();
 
     std::lock_guard<std::mutex> lock(channel_map_mutex_);
-    auto                        channel = channel_map_[spec];
-    if (channel != nullptr && !channel->ChannelBroken()) {
-        return channel;
+    auto&                       entry = channel_map_[spec];
+    if (entry.channel != nullptr && !entry.channel->ChannelBroken()
+        && (channel_idle_timeout_ms_ <= 0 || now - entry.last_use_ms < channel_idle_timeout_ms_)) {
+        entry.last_use_ms = now;
+        return entry.channel;
     }
 
+    if (entry.channel != nullptr) {
+        RTP_LLM_LOG_WARNING("tcp client drop cached channel to %s, broken %d, idle %ld ms",
+                            spec.c_str(),
+                            entry.channel->ChannelBroken(),
+                            now - entry.last_use_ms);
+    }
     auto new_channel = openChannel(spec);
     if (new_channel == nullptr || new_channel->ChannelBroken()) {
+        entry.channel = nullptr;
         return nullptr;
     }
 
-    channel_map_[spec] = new_channel;
+    entry.channel     = new_channel;
+    entry.last_use_ms = now;
     RTP_LLM_LOG_INFO("tcp client new channel connect to %s", spec.c_str());
     return new_channel;
+}
+
+void TcpClient::invalidateChannel(const std::string& ip, uint32_t port) {
+    std::string spec = "tcp:" + ip + ":" + std::to_string(port);
+
+    std::lock_guard<std::mutex> lock(channel_map_mutex_);
+    auto                        it = channel_map_.find(spec);
+    if (it == channel_map_.end()) {
+        return;
+    }
+    // erase from cache, the channel is released after in-flight references drop,
+    // next getChannel() will establish a fresh connection
+    channel_map_.erase(it);
+    RTP_LLM_LOG_WARNING("tcp client invalidate channel %s, will reconnect on next request", spec.c_str());
 }
 
 std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& spec) {
