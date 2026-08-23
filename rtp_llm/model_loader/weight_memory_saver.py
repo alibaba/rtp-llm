@@ -245,12 +245,13 @@ def release_collective_memory() -> bool:
     a runtime NCCL new enough to expose ``ncclCommSuspend`` -- so a deployment
     that wants level 2 does not implicitly opt into those.
 
-    Defaults to off. Sleeping with the communicator resident is exactly today's
-    behaviour, so off is the no-change answer.
+    Defaults to on. The feature is fail-closed when the runtime NCCL does not
+    expose the suspend/resume API, and an explicit ``0`` still disables it for
+    deployments that do not want the pinned-host-memory/latency trade-off.
     """
     if _collective_release_override is not None:
         return _collective_release_override
-    return os.environ.get(ENV_COLLECTIVE_RELEASE, "0") == "1"
+    return os.environ.get(ENV_COLLECTIVE_RELEASE, "1") == "1"
 
 
 def _get_tms() -> Optional[Any]:

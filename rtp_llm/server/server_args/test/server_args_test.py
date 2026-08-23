@@ -284,14 +284,14 @@ class ServerArgsSetTest(TestCase):
     # the ONLY transport to the (leaf, config-less) sleep hook module. There is
     # therefore nothing to assert on py_env_configs.runtime_config for this arg.
 
-    def test_sleep_release_collective_memory_defaults_off(self):
-        """Flag absent: the collective-release switch stays off (no-change default)."""
+    def test_sleep_release_collective_memory_defaults_on(self):
+        """Flag absent: the collective-release switch defaults on."""
         sys.argv = ["prog"]
 
         wms = self._setup_args_and_reload()
 
-        self.assertFalse(wms.release_collective_memory())
-        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "0")
+        self.assertTrue(wms.release_collective_memory())
+        self.assertEqual(os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"], "1")
 
     def test_sleep_release_collective_memory_arg_enables_switch(self):
         """Both the underscored flag and its dashed alias must reach the env mirror."""

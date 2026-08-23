@@ -451,8 +451,8 @@ void LocalRpcServer::installSleepHooks() {
                                     e.what());
             }
         }
-        // Hand back the NCCL communicator's GPU memory (opt-in via
-        // --sleep_release_collective_memory); see rtp_llm/utils/nccl_memory.py for the rules this
+        // Hand back the NCCL communicator's GPU memory (enabled by default;
+        // disable with --sleep_release_collective_memory=0); see rtp_llm/utils/nccl_memory.py for the rules this
         // call obeys.
         //
         // Its own step, not part of release_runtime_gpu_caches above, for two local reasons.

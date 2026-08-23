@@ -2,7 +2,7 @@
 
 GPU-free: torch_memory_saver is faked via sys.modules injection (or forced
 to be un-importable with a None sys.modules entry), so the tests validate:
-  - default-off behavior (env switch unset -> everything is a no-op)
+  - default-on behavior (env switch unset -> collective release is enabled)
   - graceful degradation when torch_memory_saver is unavailable
   - region(tag="weights", enable_cpu_backup=True) call forwarding
   - pause/resume forwarding + is_paused state machine (idempotency)
@@ -572,8 +572,8 @@ class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):
 
     Deliberately independent of the sleep level and of the sleep-mode switch: it
     carries costs the level does not (equal pinned host memory, seconds on each of
-    sleep/wake, NCCL >= 2.29.7), so it is read on its own. Defaults to off, because
-    sleeping with the communicator resident is exactly today's behaviour.
+    sleep/wake, NCCL >= 2.29.7), so it is read on its own. Defaults to on; an
+    explicit env/runtime value of false remains an opt-out.
 
     The CLI arg has no C++ RuntimeConfig field, so the env var (mirrored by
     server_args.setup_args) and the explicit override installed by
@@ -584,8 +584,8 @@ class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):
         super().setUp()
         os.environ.pop(wms.ENV_COLLECTIVE_RELEASE, None)
 
-    def test_default_is_off(self) -> None:
-        self.assertFalse(wms.release_collective_memory())
+    def test_default_is_on(self) -> None:
+        self.assertTrue(wms.release_collective_memory())
 
     def test_env_one_enables(self) -> None:
         os.environ[wms.ENV_COLLECTIVE_RELEASE] = "1"
@@ -627,15 +627,15 @@ class CollectiveReleaseSwitchTest(WeightMemorySaverTestBase):
         # the communicator buffers go too. Level 2 must not imply the release.
         wms.configure_from_runtime(True, sleep_mode_level=2)
         self.assertEqual(wms.sleep_mode_level(), 2)
-        self.assertFalse(wms.release_collective_memory())
+        self.assertTrue(wms.release_collective_memory())
 
     def test_reset_for_testing_clears_override(self) -> None:
         wms.configure_from_runtime(True, release_collective_memory=True)
         self.assertTrue(wms.release_collective_memory())
         wms._reset_for_testing()
         self.assertIsNone(wms._collective_release_override)
-        # Back to env-driven (env is off in this class's setUp).
-        self.assertFalse(wms.release_collective_memory())
+        # Back to env-driven (env is unset in this class's setUp).
+        self.assertTrue(wms.release_collective_memory())
 
 
 class PausableAllocGuardTest(WeightMemorySaverTestBase):

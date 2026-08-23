@@ -527,7 +527,7 @@ def setup_args() -> PyEnvConfigs:
     # utils module on the sleep hook path, which has no access to the parsed
     # config object.
     os.environ["SLEEP_RELEASE_COLLECTIVE_MEMORY"] = (
-        "1" if getattr(parsed_args, "sleep_release_collective_memory", False) else "0"
+        "1" if getattr(parsed_args, "sleep_release_collective_memory", True) else "0"
     )
 
     # Normalize the two switches before model construction and process spawn.
