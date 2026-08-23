@@ -123,6 +123,9 @@ Important optional variables:
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
+  KIMI_K3_DECODE_TOPOLOGY   tp8_ep8 (default) validates the legacy baseline;
+                            dp8_ep8_tp1_ktp8 validates Decode TP1/DP8/EP8/KTP8
+                            with Prefill flat-72 MLA Cache-TP and Decode fan-in
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -146,6 +149,23 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-/ssd/2/kimi-k3}"
 SMOKE_RUN_ID="${SMOKE_RUN_ID:-manual}"
 [[ "${SMOKE_RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]] \
     || die "SMOKE_RUN_ID may contain only letters, digits, dot, underscore and dash"
+decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}"
+case "${decode_topology}" in
+    tp8_ep8 | dp8_ep8_tp1_ktp8) ;;
+    *) die "KIMI_K3_DECODE_TOPOLOGY must be tp8_ep8 or dp8_ep8_tp1_ktp8" ;;
+esac
+smoke_prefill_kv_cache_mem_mb="${SMOKE_PREFILL_KV_CACHE_MEM_MB:-43000}"
+if [[ "${decode_topology}" == "dp8_ep8_tp1_ktp8" ]]; then
+    default_decode_kv_cache_mem_mb=8192
+else
+    default_decode_kv_cache_mem_mb=44000
+fi
+smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-${default_decode_kv_cache_mem_mb}}"
+for value_name in smoke_prefill_kv_cache_mem_mb smoke_decode_kv_cache_mem_mb; do
+    value="${!value_name}"
+    [[ "${value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${value_name} must be a positive integer"
+done
 
 endpoint_port() {
     local endpoint="$1"
@@ -359,6 +379,26 @@ wait_for_health() {
     die "timed out waiting for health at ${host}:${port}"
 }
 
+wait_for_backend_ranks() {
+    local backend_log="${role_dir}/runtime/logs/${role}/main_0.log"
+    local expected_ranks=8
+    local deadline=$((SECONDS + startup_timeout))
+    while ((SECONDS < deadline)); do
+        if [[ -n "${service_pid}" ]] && ! kill -0 "${service_pid}" 2>/dev/null; then
+            tail -200 "${service_log}" >&2 || true
+            [[ -f "${backend_log}" ]] && tail -200 "${backend_log}" >&2 || true
+            die "${role} service exited before all backend ranks were ready"
+        fi
+        if [[ -f "${backend_log}" ]] \
+            && grep -Fq "All ${expected_ranks} ranks started successfully" "${backend_log}"; then
+            return 0
+        fi
+        sleep 2
+    done
+    [[ -f "${backend_log}" ]] && tail -200 "${backend_log}" >&2 || true
+    die "timed out waiting for all ${expected_ranks} ${role} backend ranks"
+}
+
 wait_for_result_listener() {
     local deadline=$((SECONDS + startup_timeout))
     while ((SECONDS < deadline)); do
@@ -410,6 +450,9 @@ verify_role_environment() {
         "${smoke_chunk_tokens}" \
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
+        "${smoke_prefill_kv_cache_mem_mb}" \
+        "${smoke_decode_kv_cache_mem_mb}" \
+        "${decode_topology}" \
         "${sp_checkpoint_real}" \
         "${smoke_eagle3_aux_layer_ids}" <<'PY'
 import pathlib
@@ -424,6 +467,9 @@ import sys
     chunk_tokens,
     linear_step,
     chunkwise_rdma,
+    prefill_kv_cache_mem_mb,
+    decode_kv_cache_mem_mb,
+    decode_topology,
     sp_checkpoint_path,
     eagle3_aux_layer_ids,
 ) = sys.argv[1:]
@@ -459,11 +505,19 @@ expected = {
     "KIMI_K3_EAGLE3_AUX_LAYER_IDS": eagle3_aux_layer_ids,
 }
 absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb"]
+expected["KIMI_K3_DECODE_TOPOLOGY"] = decode_topology
+expected["KIMI_K3_DECODE_KTP"] = (
+    "1" if role == "decode" and decode_topology == "dp8_ep8_tp1_ktp8" else "0"
+)
+if decode_topology == "dp8_ep8_tp1_ktp8":
+    expected["KIMI_K3_MLA_CACHE_TP"] = "1"
+else:
+    absent.append("KIMI_K3_MLA_CACHE_TP")
 if role == "prefill":
     expected.update({
+        "KV_CACHE_MEM_MB": prefill_kv_cache_mem_mb,
         "MAX_SEQ_LEN": "1258294",
         "MAX_BATCH_TOKENS_SIZE": "1258291",
-        "KV_CACHE_MEM_MB": "42000",
         "REUSE_CACHE": "1",
         "KIMI_K3_KDA_POOL_BLOCKS": "0",
         "RESERVER_RUNTIME_MEM_MB": "15000",
@@ -479,7 +533,7 @@ else:
     expected.update({
         "MAX_SEQ_LEN": "1468006",
         "MAX_BATCH_TOKENS_SIZE": "1468006",
-        "KV_CACHE_MEM_MB": "42000",
+        "KV_CACHE_MEM_MB": decode_kv_cache_mem_mb,
         "REUSE_CACHE": "0",
         "KIMI_K3_KDA_POOL_BLOCKS": "112",
         "RESERVER_RUNTIME_MEM_MB": "8000",
@@ -506,7 +560,28 @@ for key in absent:
     if key in env:
         raise SystemExit(f"{key} must be absent for {role}")
 
+cmdline = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+cmdline = [value.decode(errors="replace") for value in cmdline if value]
+
+def option(name):
+    try:
+        return cmdline[cmdline.index(name) + 1]
+    except (ValueError, IndexError):
+        raise SystemExit(f"missing {name} in service command line: {cmdline}")
+
+if role == "prefill":
+    expected_parallel = {"--tp_size": "8", "--dp_size": "1", "--ep_size": "8", "--ktp_size": "1"}
+elif decode_topology == "dp8_ep8_tp1_ktp8":
+    expected_parallel = {"--tp_size": "1", "--dp_size": "8", "--ep_size": "8", "--ktp_size": "8"}
+else:
+    expected_parallel = {"--tp_size": "8", "--dp_size": "1", "--ep_size": "8", "--ktp_size": "1"}
+for name, value in expected_parallel.items():
+    actual = option(name)
+    if actual != value:
+        raise SystemExit(f"{name}={actual!r}; expected {value!r}")
+
 lines = [f"{key}={env[key]}" for key in sorted(expected)]
+lines.extend(f"ARGV_{key[2:].upper()}={value}" for key, value in sorted(expected_parallel.items()))
 lines.extend(f"{key}=<unset>" for key in sorted(absent))
 pathlib.Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
@@ -522,6 +597,12 @@ apply_validated_common_profile() {
     export CHECKPOINT_PATH="${checkpoint_real}"
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
+    export KIMI_K3_DECODE_TOPOLOGY="${decode_topology}"
+    if [[ "${decode_topology}" == "dp8_ep8_tp1_ktp8" ]]; then
+        export KIMI_K3_MLA_CACHE_TP=1
+    else
+        unset KIMI_K3_MLA_CACHE_TP
+    fi
     export LOAD_METHOD=fastsafetensors
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
@@ -559,7 +640,7 @@ apply_validated_common_profile() {
 apply_validated_prefill_profile() {
     export MAX_SEQ_LEN=1258294
     export MAX_BATCH_TOKENS_SIZE=1258291
-    export KV_CACHE_MEM_MB=42000
+    export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
     export REUSE_CACHE=1
     export KIMI_K3_KDA_POOL_BLOCKS=0
     export RESERVER_RUNTIME_MEM_MB=15000
@@ -575,7 +656,7 @@ apply_validated_prefill_profile() {
 apply_validated_decode_profile() {
     export MAX_SEQ_LEN=1468006
     export MAX_BATCH_TOKENS_SIZE=1468006
-    export KV_CACHE_MEM_MB=42000
+    export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
     export REUSE_CACHE=0
     export KIMI_K3_KDA_POOL_BLOCKS=112
     export RESERVER_RUNTIME_MEM_MB=8000
@@ -604,6 +685,7 @@ echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
 echo "[${role}] eagle3_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
+echo "[${role}] decode_topology=${decode_topology} mla_cache_tp=${KIMI_K3_MLA_CACHE_TP:-0}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
 service_pid=$!
@@ -612,6 +694,7 @@ printf '%s\n' "${service_pid}" >"${role_dir}/service.pid"
 local_port="${prefill_port}"
 [[ "${role}" == "prefill" ]] || local_port="${decode_port}"
 wait_for_health 127.0.0.1 "${local_port}"
+wait_for_backend_ranks
 verify_fastsafetensors_log
 verify_rdma_log
 verify_role_environment

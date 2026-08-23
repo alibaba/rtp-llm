@@ -319,7 +319,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+    // A request-DP worker with no runnable local request still executes the
+    // model's fake stream so every KTP rank enters the same collective
+    // sequence.  The model intentionally returns zero output rows for that
+    // participant; sampling it would narrow a non-empty fake stream batch out
+    // of an empty logits tensor.  MTP has the same guard.  Finish the
+    // collective tick, then skip sampling and dispatch for the fake stream.
+    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
         if (profile_step_finish_) {

@@ -447,7 +447,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
 
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.request_id.data_ptr<int64_t>()[ctx.batch_idx]       = stream->streamId();
-            model_input.generation_epoch.data_ptr<int64_t>()[ctx.batch_idx] = stream->schedulerEnqueueTimeUs();
+            model_input.generation_epoch.data_ptr<int64_t>()[ctx.batch_idx] = stream->generationEpoch();
             model_input.trace_ids.push_back(stream->traceId());
             if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
@@ -616,7 +616,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
 
             *(model_input.request_id.data_ptr<int64_t>() + ctx.batch_idx) = stream->streamId();
-            *(model_input.generation_epoch.data_ptr<int64_t>() + ctx.batch_idx) = stream->schedulerEnqueueTimeUs();
+            *(model_input.generation_epoch.data_ptr<int64_t>() + ctx.batch_idx) = stream->generationEpoch();
             *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + ctx.batch_idx) =
                 stream->queryPdSep();
 

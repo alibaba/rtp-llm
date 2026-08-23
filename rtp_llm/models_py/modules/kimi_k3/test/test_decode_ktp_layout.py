@@ -10,14 +10,20 @@ from rtp_llm.models.kimi_k3.decode_ktp import (
     KdaParallelContext,
     KtpBatchPlan,
     KtpStepDescriptor,
+    build_ktp_attention_inputs,
     build_owner_attention_inputs,
     rendezvous_ktp_step,
 )
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models.kimi_k3.kimi_k3_weight import _KimiK3KDAWeight
 from rtp_llm.model_loader.linear_attn_weight import LinearAttnConfig
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.kimi_k3.kda import KimiK3KDA
+from rtp_llm.models_py.modules.kimi_k3.moe import (
+    KimiK3LatentMoE,
+    _validate_k3_mega_parallelism,
+)
 from rtp_llm.ops import LinearAttentionConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W, identity
@@ -109,6 +115,46 @@ def _target_parallelism(rank: int = 3) -> ParallelismConfig:
 
 
 class KdaParallelContextTest(unittest.TestCase):
+    def test_mega_moe_accepts_decode_dp8_ktp8_owner_local_tokens(self):
+        with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}):
+            mode = _validate_k3_mega_parallelism(
+                attn_tp_size=1,
+                dp_size=8,
+                ep_size=8,
+                ktp_size=8,
+                world_size=8,
+                local_expert_count=112,
+                role_type=RoleType.DECODE,
+            )
+        self.assertEqual(mode, "dp8_ep8_ktp8")
+
+        fake_moe = SimpleNamespace(
+            attn_tp_size=1,
+            dp_size=8,
+            ep_size=8,
+            ktp_size=8,
+            local_expert_count=112,
+            parallelism_config=SimpleNamespace(role_type=RoleType.DECODE),
+        )
+        with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}):
+            self.assertEqual(
+                KimiK3LatentMoE._mega_parallel_mode(fake_moe, 8),
+                "dp8_ep8_ktp8",
+            )
+
+    def test_mega_moe_rejects_dp8_without_ktp_contract(self):
+        with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "0"}):
+            with self.assertRaisesRegex(RuntimeError, "TP1/DP8/EP8/KTP8"):
+                _validate_k3_mega_parallelism(
+                    attn_tp_size=1,
+                    dp_size=8,
+                    ep_size=8,
+                    ktp_size=8,
+                    world_size=8,
+                    local_expert_count=112,
+                    role_type=RoleType.DECODE,
+                )
+
     def test_target_topology_builds_independent_ktp_view(self):
         config = _target_parallelism()
         with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}):
@@ -373,6 +419,49 @@ class KtpBatchRendezvousTest(unittest.TestCase):
         self.assertIs(actual, expected)
         self.assertEqual(reduce_scatter.call_args.kwargs["group"], Group.KTP)
         all_reduce.assert_not_called()
+
+    def test_kda_shadow_snapshot_selects_group_one_for_all_global_rows(self):
+        plan = KtpBatchPlan(self._descriptors([1] * 8, bucket=1), rank=0)
+        attention = PyAttentionInputs()
+        attention.is_prefill = False
+        attention.is_fake_stream = False
+        attention.input_lengths = torch.ones(1, dtype=torch.int32)
+        attention.sequence_lengths = torch.tensor([100], dtype=torch.int32)
+        attention.kda_shadow_group_id = 1
+        attention.kda_shadow_keys_host = torch.tensor(
+            [[rank * 100, 3] for rank in range(8)], dtype=torch.int64
+        )
+        physical = torch.arange(8 * 3, dtype=torch.int32).reshape(8, 3)
+        kernel = physical + 100
+        attention.kda_shadow_block_ids_host = physical
+        attention.kda_shadow_kernel_block_ids_host = kernel
+
+        with patch.object(
+            KtpBatchPlan,
+            "all_gather_rows",
+            side_effect=[
+                torch.ones(8, dtype=torch.int32),
+                torch.arange(100, 108, dtype=torch.int32),
+            ],
+        ):
+            result = build_ktp_attention_inputs(
+                attention, plan, device=torch.device("cpu")
+            )
+
+        self.assertEqual(tuple(result.sequence_lengths_plus_1_d.shape), (8,))
+        self.assertEqual(len(result.kv_cache_kernel_block_id_device_by_group), 2)
+        self.assertEqual(
+            tuple(result.kv_cache_kernel_block_id_device_by_group[0].shape), (0, 0)
+        )
+        self.assertTrue(
+            torch.equal(result.kv_cache_kernel_block_id_device_by_group[1], kernel),
+            msg=(
+                f"actual={result.kv_cache_kernel_block_id_device_by_group[1].tolist()} "
+                f"expected={kernel.tolist()}"
+            ),
+        )
+        self.assertEqual(select_block_map_for_layer(result, 0, 1), 1)
+        self.assertTrue(torch.equal(result.kv_cache_kernel_block_id_device, kernel))
 
 
 if __name__ == "__main__":

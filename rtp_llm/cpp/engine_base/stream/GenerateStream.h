@@ -471,6 +471,14 @@ public:
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
     }
+    // Immutable identity for one request lifetime. Unlike
+    // schedulerEnqueueTimeUs(), this value must not change when the stream is
+    // later admitted to (or re-enqueued by) the scheduler. Distributed cache
+    // registries use it together with streamId() to reject stale operations
+    // after a request id is reused.
+    uint64_t generationEpoch() const {
+        return static_cast<uint64_t>(enqueueTime());
+    }
     int64_t schedulerEnqueueTimeUs() const {
         return scheduler_enqueue_time_us_ > 0 ? scheduler_enqueue_time_us_ : enqueueTime();
     }

@@ -32,6 +32,15 @@ class _IdentityExportedDevice:
         return tensor
 
 
+class _CopyableLoadConfig(SimpleNamespace):
+    """Minimal LoadConfig double that preserves per-weight KTP overrides."""
+
+    def model_copy(self, *, update):
+        values = vars(self).copy()
+        values.update(update)
+        return _CopyableLoadConfig(**values)
+
+
 class KdaFusedProjectionSplitTest(unittest.TestCase):
     def test_qkvg_are_sharded_and_fa_beta_are_replicated(self):
         hidden = 3
@@ -124,12 +133,6 @@ class KdaFusedProjectionSplitTest(unittest.TestCase):
         manifest.model_config = SimpleNamespace(
             linear_attention_config=linear_attention_config
         )
-        fused_weight_info = next(
-            weight
-            for weight in manifest._kda_weights()
-            if weight.name == W.linear_attn_qkvg_fa_beta_w
-        )
-
         for tp_size in (1, 2, 4, 8):
             local_projection_width = projection_width // tp_size
             consumer_widths = (
@@ -140,13 +143,26 @@ class KdaFusedProjectionSplitTest(unittest.TestCase):
                 f_a_width,
                 heads,
             )
+            loaded_by_rank = []
             for tp_rank in range(tp_size):
-                load_config = SimpleNamespace(
+                # Decode's model-wide loader intentionally remains TP1/DP8.
+                # The KDA atomic weight must override only its split view with
+                # the independent KTP rank carried by the manifest.
+                manifest.kda_parallel_context = SimpleNamespace(
+                    size=tp_size,
+                    rank=tp_rank,
+                )
+                fused_weight_info = next(
+                    weight
+                    for weight in manifest._kda_weights()
+                    if weight.name == W.linear_attn_qkvg_fa_beta_w
+                )
+                load_config = _CopyableLoadConfig(
                     compute_dtype=torch.float32,
                     exported_device=_IdentityExportedDevice(),
                     merge_lora=False,
-                    tp_size=tp_size,
-                    tp_rank=tp_rank,
+                    tp_size=1,
+                    tp_rank=0,
                 )
                 loaded = fused_weight_info.load(
                     source,
@@ -159,6 +175,7 @@ class KdaFusedProjectionSplitTest(unittest.TestCase):
                     *consumer_widths,
                     dim=1,
                 )
+                loaded_by_rank.append(loaded_sections)
 
                 begin = tp_rank * local_projection_width
                 expected_weights = tuple(
@@ -189,6 +206,31 @@ class KdaFusedProjectionSplitTest(unittest.TestCase):
                 )
                 for actual, weight in zip(projected_sections, expected_weights):
                     self.assertTrue(torch.equal(actual, hidden_states @ weight))
+
+            for section_idx, suffix in enumerate(
+                (
+                    "q_proj.weight",
+                    "k_proj.weight",
+                    "v_proj.weight",
+                    "g_proj.weight",
+                )
+            ):
+                reconstructed = torch.cat(
+                    [sections[section_idx] for sections in loaded_by_rank], dim=1
+                )
+                self.assertTrue(
+                    torch.equal(
+                        reconstructed,
+                        checkpoint_sections[suffix].T.contiguous(),
+                    )
+                )
+            for replicated_idx, suffix in (
+                (4, "f_a_proj.weight"),
+                (5, "b_proj.weight"),
+            ):
+                expected = checkpoint_sections[suffix].T.contiguous()
+                for sections in loaded_by_rank:
+                    self.assertTrue(torch.equal(sections[replicated_idx], expected))
 
 
 if __name__ == "__main__":

@@ -187,9 +187,13 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_EXPECTED_LAYERS",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",
+        "SMOKE_PREFILL_KV_CACHE_MEM_MB",
+        "SMOKE_DECODE_KV_CACHE_MEM_MB",
         "SMOKE_CHUNK_TOKENS",
         "SMOKE_LINEAR_STEP",
         "SMOKE_CHUNKWISE_RDMA",
+        "KIMI_K3_DECODE_TOPOLOGY",
+        "ACCL_NIC_GPU_AFFINITY",
         "RTP_LLM_SKIP_BUILD",
     )
     for name in names:
@@ -426,10 +430,22 @@ def run_short_ssh(
 def fetch_detached_log(
     args: argparse.Namespace, role: str, destination: pathlib.Path
 ) -> None:
+    _, runtime, container, _ = role_launch_parts(args, role)
+    remote_command = shlex.join(
+        (
+            runtime,
+            "exec",
+            "-u",
+            args.container_user,
+            container,
+            "cat",
+            detached_control_paths(args, role)["log"],
+        )
+    )
     result = run_short_ssh(
         args,
         role,
-        f"cat {shlex.quote(detached_control_paths(args, role)['log'])}",
+        remote_command,
     )
     destination.write_text(
         result.stdout + (result.stderr if result.returncode else ""),
@@ -552,14 +568,28 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                 if statuses[role] is not None:
                     continue
                 status_path = detached_control_paths(args, role)["status"]
+                _, runtime, container, _ = role_launch_parts(args, role)
+                status_inner = (
+                    f"if test -f {shlex.quote(status_path)}; then "
+                    f"cat {shlex.quote(status_path)}; else exit 3; fi"
+                )
+                status_command = shlex.join(
+                    (
+                        runtime,
+                        "exec",
+                        "-u",
+                        args.container_user,
+                        container,
+                        "bash",
+                        "-lc",
+                        status_inner,
+                    )
+                )
                 try:
                     result = run_short_ssh(
                         args,
                         role,
-                        (
-                            f"if test -f {shlex.quote(status_path)}; then "
-                            f"cat {shlex.quote(status_path)}; else exit 3; fi"
-                        ),
+                        status_command,
                     )
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     poll_failures[role] += 1
@@ -577,6 +607,13 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                         )
                     statuses[role] = int(value)
                     print(f"[{role}] detached role completed rc={value}")
+                    if statuses[role] != 0:
+                        peer = "prefill" if role == "decode" else "decode"
+                        if statuses[peer] is None:
+                            stop_detached_role(args, peer)
+                        raise RuntimeError(
+                            f"{role} detached role failed rc={statuses[role]}"
+                        )
                     continue
                 if result.returncode == 3:
                     poll_failures[role] = 0

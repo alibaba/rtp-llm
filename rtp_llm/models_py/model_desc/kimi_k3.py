@@ -418,7 +418,7 @@ class KimiK3DecoderLayer(nn.Module):
             valid_token_count=local_valid_tokens,
         )
         output = prefix_sum + mlp_output
-        if decode_sp or owner_local_decode:
+        if decode_sp:
             output = all_gather_trim(output, logical_tokens, group=Group.TP)
         return KimiK3DecoderOutput(output, block_residual)
 

@@ -311,11 +311,24 @@ class TestConcatAndCacheMLA(unittest.TestCase):
         expected[0, slot_offset, kv_lora_rank:] = k_pe[0]
         torch.testing.assert_close(kv_cache, expected)
 
-    def test_concat_and_cache_mla_zero_rope_dim(self):
-        """Test concat_and_cache_mla with qk_rope_head_dim=64 nope_dim=448(model1 format)"""
+    def test_concat_and_cache_mla_model1_widths(self):
+        """Test the unquantized Model1-compatible 448+64 widths."""
         self._run_concat_and_cache_mla(
             kv_lora_rank=448,
             qk_rope_head_dim=64,
+            num_tokens=42,
+            block_size=16,
+            num_blocks=8,
+            dtype=torch.bfloat16,
+            seed=0,
+            kv_cache_dtype="auto",
+        )
+
+    def test_concat_and_cache_mla_flat72_zero_rope_dim(self):
+        """The K3 flat-shard ABI writes an opaque 72-wide tensor plus 0 RoPE."""
+        self._run_concat_and_cache_mla(
+            kv_lora_rank=72,
+            qk_rope_head_dim=0,
             num_tokens=42,
             block_size=16,
             num_blocks=8,

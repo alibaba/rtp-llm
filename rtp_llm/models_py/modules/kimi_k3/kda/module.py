@@ -301,9 +301,18 @@ class KimiK3KDA(nn.Module):
                     # equivalent to all-reduce + shard, while avoiding the
                     # replicated output activation and extra NVLink traffic.
                     if ktp_batch_plan is not None:
-                        return ktp_batch_plan.reduce_scatter_rows(
-                            ktp_batch_plan.expand_valid_rows(output)
+                        # Different DP owners receive different physical
+                        # ReduceScatter shards.  Accumulating the eight KDA
+                        # row-parallel partials directly in BF16 makes the
+                        # result depend on the NCCL reduction destination/order
+                        # strongly enough to violate the cross-owner numerical
+                        # contract.  Keep only this KTP reduction in FP32, then
+                        # restore the model dtype after the collective.
+                        output_dtype = output.dtype
+                        reduced = ktp_batch_plan.reduce_scatter_rows(
+                            ktp_batch_plan.expand_valid_rows(output.float())
                         )
+                        return reduced.to(dtype=output_dtype)
                     return reduce_scatter_padded(output, group=collective_group)
                 output = all_reduce(output, group=collective_group)
             return output

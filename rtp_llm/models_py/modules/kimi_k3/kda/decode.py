@@ -69,21 +69,53 @@ class KimiK3KDADecode(nn.Module):
         # LINEAR cache groups use one kernel block per physical state block;
         # select_block_map_for_layer therefore exposes the physical KDA IDs
         # through the existing kernel-map field.
-        block_map = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
-        if (
-            sequence_lengths_plus_one is None
-            or block_map is None
-            or not sequence_lengths_plus_one.is_cuda
-            or not block_map.is_cuda
-            or sequence_lengths_plus_one.ndim != 1
-            or block_map.ndim != 2
-            or sequence_lengths_plus_one.numel() != block_map.shape[0]
-            or hidden_states.shape[0] % block_map.shape[0] != 0
-            or block_map.shape[1] == 0
-        ):
+        block_map = getattr(
+            attention_inputs, "kv_cache_kernel_block_id_device", None
+        )
+        invalid_reasons: list[str] = []
+        if sequence_lengths_plus_one is None:
+            invalid_reasons.append("sequence_lengths_plus_1_d is missing")
+        else:
+            if not sequence_lengths_plus_one.is_cuda:
+                invalid_reasons.append("sequence lengths are not CUDA")
+            if sequence_lengths_plus_one.ndim != 1:
+                invalid_reasons.append("sequence lengths are not one-dimensional")
+        if block_map is None:
+            invalid_reasons.append("kernel block map is missing")
+        else:
+            if not block_map.is_cuda:
+                invalid_reasons.append("kernel block map is not CUDA")
+            if block_map.ndim != 2:
+                invalid_reasons.append("kernel block map is not two-dimensional")
+            elif block_map.shape[0] == 0:
+                invalid_reasons.append("kernel block map has zero request rows")
+            else:
+                if (
+                    sequence_lengths_plus_one is not None
+                    and sequence_lengths_plus_one.ndim == 1
+                    and sequence_lengths_plus_one.numel() != block_map.shape[0]
+                ):
+                    invalid_reasons.append("sequence/map request rows differ")
+                if hidden_states.shape[0] % block_map.shape[0] != 0:
+                    invalid_reasons.append("hidden/map request rows are not divisible")
+                if block_map.shape[1] == 0:
+                    invalid_reasons.append("kernel block map has zero block columns")
+        if invalid_reasons:
+            def describe(value: object) -> str:
+                if value is None:
+                    return "None"
+                if not isinstance(value, torch.Tensor):
+                    return f"type={type(value).__name__}"
+                return (
+                    f"shape={tuple(value.shape)},device={value.device},"
+                    f"dtype={value.dtype},cuda={value.is_cuda}"
+                )
             raise RuntimeError(
-                "KDA paged decode requires CUDA sequence lengths and a "
-                "two-dimensional LINEAR block map matching the request batch"
+                "KDA paged decode metadata mismatch: "
+                + "; ".join(invalid_reasons)
+                + f"; hidden=({describe(hidden_states)}), "
+                + f"sequence=({describe(sequence_lengths_plus_one)}), "
+                + f"block_map=({describe(block_map)})"
             )
 
         ssm_cache, conv_cache = self.cache.get_views(kv_cache)

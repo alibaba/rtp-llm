@@ -38,6 +38,16 @@ TEST(MlaCacheTpTransferTest, KeepsKdaRankToRankAndMlaOwnerOnly) {
     ASSERT_TRUE(non_owner_plan.mla_peer_addrs.empty());
 }
 
+TEST(MlaCacheTpTransferTest, AcceptsBaselineAndDecodeKtpRankToRankContracts) {
+    EXPECT_TRUE(isK3PdRankToRankContract(8, 8, 8, 8));
+    EXPECT_TRUE(isK3PdRankToRankContract(8, 1, 8, 8));
+
+    EXPECT_FALSE(isK3PdRankToRankContract(8, 1, 1, 8));
+    EXPECT_FALSE(isK3PdRankToRankContract(8, 2, 8, 8));
+    EXPECT_FALSE(isK3PdRankToRankContract(8, 1, 8, 7));
+    EXPECT_FALSE(isK3PdRankToRankContract(1, 1, 1, 1));
+}
+
 TEST(MlaCacheTpTransferTest, RejectsMissingShardAndInvalidPlacement) {
     K3MlaCacheTpLayout layout(8);
     auto destination = torch::zeros({1, K3MlaCacheTpLayout::kFullWidth}, torch::dtype(torch::kBFloat16));

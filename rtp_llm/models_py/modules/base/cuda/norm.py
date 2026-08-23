@@ -19,6 +19,15 @@ class RMSNorm(BaseNorm):
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        # Request-DP workers are allowed to contribute an empty local shard to
+        # a KTP decode tick.  CUDA RMSNorm kernels reject zero-element launches,
+        # while the mathematically correct result is simply an empty tensor.
+        # Keep this guard generic so later norms in an all-padding/fake tick do
+        # not accidentally turn an expected empty shard into a fatal launch.
+        if hidden_states.numel() == 0:
+            if output is None:
+                return torch.empty_like(hidden_states)
+            return output
         stream_id = torch.cuda.current_stream().cuda_stream
         if output is None:
             output = torch.empty_like(hidden_states)
@@ -33,6 +42,8 @@ class RMSResNorm(BaseResNorm):
         super().__init__(weight, eps)
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor):
+        if hidden_states.numel() == 0:
+            return hidden_states
         stream_id = torch.cuda.current_stream().cuda_stream
         rtp_llm_ops.fused_add_rmsnorm(
             hidden_states, residual, self.weight.data, self.variance_epsilon, stream_id

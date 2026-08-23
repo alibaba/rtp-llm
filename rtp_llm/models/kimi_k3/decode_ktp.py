@@ -488,21 +488,25 @@ def build_ktp_attention_inputs(
     result.kv_cache_block_id_host = physical
     result.kv_cache_kernel_block_id_host = kernel
     result.kv_cache_kernel_block_id_device = kernel.to(device=device, non_blocking=True)
-    result.kv_cache_block_id_host_by_group = [
+    physical_by_group = [
         physical.new_empty((0, 0)) for _ in range(group_id + 1)
     ]
-    result.kv_cache_kernel_block_id_host_by_group = [
+    kernel_host_by_group = [
         kernel.new_empty((0, 0)) for _ in range(group_id + 1)
     ]
-    result.kv_cache_kernel_block_id_device_by_group = [
+    kernel_device_by_group = [
         result.kv_cache_kernel_block_id_device.new_empty((0, 0))
         for _ in range(group_id + 1)
     ]
-    result.kv_cache_block_id_host_by_group[group_id] = physical
-    result.kv_cache_kernel_block_id_host_by_group[group_id] = kernel
-    result.kv_cache_kernel_block_id_device_by_group[group_id] = (
-        result.kv_cache_kernel_block_id_device
-    )
+    # PyAttentionInputs exposes these C++ std::vector fields as copied Python
+    # lists. Mutating an element through the getter does not write it back to
+    # the pybind object, so populate local lists before assigning each field.
+    physical_by_group[group_id] = physical
+    kernel_host_by_group[group_id] = kernel
+    kernel_device_by_group[group_id] = result.kv_cache_kernel_block_id_device
+    result.kv_cache_block_id_host_by_group = physical_by_group
+    result.kv_cache_kernel_block_id_host_by_group = kernel_host_by_group
+    result.kv_cache_kernel_block_id_device_by_group = kernel_device_by_group
     return result
 
 

@@ -73,6 +73,28 @@ struct K3MlaCacheTpPeerPlan {
     std::vector<std::string> mla_peer_addrs;
 };
 
+// KDA cache remains rank-to-rank when Decode replaces attention TP with an
+// independent KTP group.  In the target topology P attention-TP8 maps to
+// D attention-TP1/KTP8; the physical KDA shard count is KTP8, not D TP1.
+// Keeping this predicate independent of ParallelismConfig makes every P->D
+// call site use the same strict contract and gives the topology a small,
+// deterministic unit-test surface.
+inline bool isK3PdRankToRankContract(int prefill_attention_tp,
+                                    int decode_attention_tp,
+                                    int decode_kda_tp,
+                                    size_t ordered_prefill_peer_count) {
+    if (prefill_attention_tp <= 1 || decode_attention_tp <= 0 || decode_kda_tp <= 0) {
+        return false;
+    }
+    const auto peer_count = static_cast<int>(ordered_prefill_peer_count);
+    if (peer_count != prefill_attention_tp || decode_kda_tp != prefill_attention_tp) {
+        return false;
+    }
+    // Baseline: D attention TP owns the KDA shards directly. Target: D TP1
+    // owns MLA while the independent KTP group owns the KDA shards.
+    return decode_attention_tp == prefill_attention_tp || decode_attention_tp == 1;
+}
+
 inline K3MlaCacheTpPeerPlan makeK3MlaCacheTpPeerPlan(const std::vector<std::string>& ordered_prefill_peers,
                                                       int                             decode_worker_rank,
                                                       int                             owner_rank) {
