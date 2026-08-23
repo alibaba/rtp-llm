@@ -23,6 +23,8 @@ class ConfigServiceTest {
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isBatchDispatch());
+        assertTrue(config.isFixedWindowDecision());
+        assertFalse(config.hasExplicitDecisionPolicy());
         assertEquals(1, config.getSchemaVersion());
     }
 
@@ -50,8 +52,15 @@ class ConfigServiceTest {
                         }
                       }
                     },
+                    "decision": {
+                      "type": "FIXED_WINDOW",
+                      "maxRequests": 12,
+                      "maxCollectionWaitMs": 40,
+                      "maxPredictedExecutionMs": 90
+                    },
                     "capacity": {
-                      "maxOutstandingRequestsGlobal": 2000
+                      "maxOutstandingRequestsGlobal": 2000,
+                      "maxWaitingRequestsPerPrefillWorker": 192
                     },
                     "lifecycle": {
                       "staleInflightTimeoutMs": 300000,
@@ -153,6 +162,13 @@ class ConfigServiceTest {
                 .getEngineCancellation().getAckTimeoutMs());
         assertEquals(1200, config.priorityOrdering().getPreemption()
                 .getEngineCancellation().getCompletionTimeoutMs());
+        assertTrue(config.hasExplicitDecisionPolicy());
+        assertEquals(12, config.fixedWindowDecision().getMaxRequests());
+        assertEquals(40L, config.fixedWindowDecision().getMaxCollectionWaitMs());
+        assertEquals(90L, config.fixedWindowDecision()
+                .getMaxPredictedExecutionMs().longValue());
+        assertEquals(192, config.queueScheduler().getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker().intValue());
         assertEquals(16, config.batchDispatcher().getMaxRequests());
         FormulaEstimatorConfig estimator = assertInstanceOf(FormulaEstimatorConfig.class,
                 config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator());

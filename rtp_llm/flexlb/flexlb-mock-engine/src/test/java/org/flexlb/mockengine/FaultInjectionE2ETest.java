@@ -2,6 +2,7 @@ package org.flexlb.mockengine;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.SingleDecisionConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -41,8 +42,6 @@ class FaultInjectionE2ETest {
 
     /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
     private static void arm(AutoTpmE2EHarness h) {
-        h.config.batchDispatcher().setMaxRequests(1);
-        h.config.batchDispatcher().setMaxCollectionWaitMs(5);
         h.startAutoPump(10);
     }
 
@@ -58,7 +57,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c01_fail_on_enqueue_propagates_8510_message_and_isolates_healthy_engine() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT, 2, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .failOnEnqueue(true)
@@ -92,7 +92,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c02_enqueue_delay_defers_ack_but_request_succeeds() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 10, 1, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .enqueueDelayMs(300)
@@ -115,7 +116,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c03_generate_delay_slows_prefill_execution_without_breaking_completion() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 20, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 20, 1, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             prefill.setFaultConfig(FaultInjectionConfig.builder()
@@ -142,7 +144,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c04_generate_error_fails_direct_stream_and_scheduler_path_unaffected() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 30, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 30, 2, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .generateError(true)
@@ -164,7 +167,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c05_fetch_error_fails_fetch_response_and_scheduler_path_unaffected() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 40, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 40, 2, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .fetchError(true)
@@ -186,7 +190,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c06_no_respond_hangs_stream_but_dispatch_ack_succeeds_and_engine_drains() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 50, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 50, 1, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             prefill.setFaultConfig(FaultInjectionConfig.builder()
@@ -217,7 +222,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c07_kv_pressure_propagates_through_worker_status_and_clears() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 60, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 60, 1, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             JavaMockEngineCluster.FastRpcService decode = h.decodeEngines.get(0);
             long totalKv = decode.getTotalKvTokens();
             decode.setFaultConfig(FaultInjectionConfig.builder()
@@ -241,7 +247,8 @@ class FaultInjectionE2ETest {
     @Timeout(30)
     void c08_queue_depth_limit_rejects_overflow_and_isolates_healthy_engine() throws Exception {
         // 长 prefill（800ms）让第一个请求稳定占住 pending 名额
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 70, 2, 1, "800", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 70, 2, 1, "800", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
 
@@ -268,7 +275,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c09_crash_after_n_requests_fences_missing_ack_and_isolates_healthy_engine() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 80, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 80, 2, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             PrefillEndpoint prefillEndpoint = h.prefillEndpoint(0);

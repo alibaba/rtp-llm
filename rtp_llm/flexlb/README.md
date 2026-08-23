@@ -80,8 +80,8 @@ directly in the environment variable; a file-path form is not supported.
 The parser is strict: duplicate keys, unknown fields, fields from inactive tagged
 variants, `null`, scalar coercion, numeric enum values, and trailing JSON are rejected at
 startup. Optional fields must be omitted rather than set to `null`. If the environment
-variable is absent, the code defaults to `QUEUE + FIFO + BATCH` and the remaining model
-defaults.
+variable is absent, the schema-v1 compatibility mapping defaults to
+`QUEUE + FIFO + FIXED_WINDOW + BATCH` and the remaining model defaults.
 
 The following example activates every major configuration section:
 
@@ -106,8 +106,15 @@ export FLEXLB_CONFIG='{
         }
       }
     },
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 8,
+      "maxCollectionWaitMs": 300,
+      "maxPredictedExecutionMs": 100
+    },
     "capacity": {
-      "maxOutstandingRequestsGlobal": 100000
+      "maxOutstandingRequestsGlobal": 100000,
+      "maxWaitingRequestsPerPrefillWorker": 1024
     },
     "lifecycle": {
       "staleInflightTimeoutMs": 300000,
@@ -117,10 +124,6 @@ export FLEXLB_CONFIG='{
   },
   "dispatcher": {
     "type": "BATCH",
-    "maxRequests": 8,
-    "maxCollectionWaitMs": 300,
-    "maxWaitingRequestsPerPrefillWorker": 1024,
-    "earlyDispatchPredictedExecutionMs": 100,
     "maxInflightBatchesPerPrefillWorker": 2,
     "enqueueRpcTimeoutMs": 5000
   },
@@ -256,28 +259,36 @@ export MODEL_SERVICE_CONFIG='{
 }'
 ```
 
-### Scheduler, ordering, and dispatcher
+### Scheduler, ordering, decision, and dispatcher
 
-These are separate concepts:
+Under `QUEUE`, ordering, decision formation, and delivery are three independent
+axes:
 
-| Scheduler | Queue ordering | Dispatcher | Behavior |
-| --- | --- | --- | --- |
-| `DIRECT` | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
-| `QUEUE` | `FIFO` | `NON_BATCH` | Queue lifecycle with arrival-order, one immediate route decision per request |
-| `QUEUE` | `PRIORITY` | `NON_BATCH` | Queue lifecycle with priority-order, one immediate route decision per request |
-| `QUEUE` | `FIFO` | `BATCH` | Arrival-order collection followed by Master `EnqueueBatch` |
-| `QUEUE` | `PRIORITY` | `BATCH` | Priority-order collection followed by Master `EnqueueBatch` |
+| Scheduler | Queue ordering | Decision | Dispatcher | Behavior |
+| --- | --- | --- | --- | --- |
+| `DIRECT` | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
+| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | Queue one request at a time; frontend sends |
+| `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | Master sends singleton `EnqueueBatch` calls |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | Form bounded groups; Master sends `EnqueueBatch` |
 
-`DIRECT + BATCH` is invalid. `FIFO` and `PRIORITY` only describe the order of
-requests owned by `QUEUE`; neither is a synonym for direct routing or batching.
-`PRIORITY` adds `defaultPriority` and optional preemption. It does not add an SLO
-budget, length buckets, or priority-dependent TTL multipliers. `QUEUE` uses one
-absolute scheduling expiration derived from FlexLB admission time plus
-`scheduler.queueTimeoutMs`; retries and preemption do not reset it. `DIRECT` has
-no scheduling timeout.
+`PRIORITY` can replace `FIFO` in all four QUEUE combinations. `DIRECT + BATCH`
+is invalid and DIRECT cannot configure `decision`. `FIFO`/`PRIORITY` choose which
+request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests form
+one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
+sends them.
 
-`BATCH` dispatches on batch size, maximum collection wait, or the optional predicted
-execution threshold. `NON_BATCH` has no collection window or target batch size.
+`FIXED_WINDOW` is bounded by `maxRequests`, `maxCollectionWaitMs`, and the optional
+strict group-growth cap `maxPredictedExecutionMs`: another request is not added
+when it would exceed the cap, although an indivisible singleton may exceed it.
+`SINGLE` has no collection parameters. For
+schema-version 1 compatibility, omitting `scheduler.decision` maps legacy `BATCH`
+dispatcher fields to the old fixed-window behavior and maps `NON_BATCH` to
+`SINGLE`; explicit decision fields take precedence. The old BATCH fields remain
+accepted so the new image can start with an existing configuration. This
+compatibility is one-way: an older image does not recognize the new
+`scheduler.decision` or scheduler-capacity fields, so rollback must restore the
+previous `FLEXLB_CONFIG` together with the previous image.
 
 Production-style examples migrated from the former field-level environment variables:
 
@@ -316,9 +327,9 @@ controlled by the optional positive
 `router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
 request-count cap.
 
-See [QUEUE ordering and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
-for the QUEUE lifecycle, accounting invariants, complete scheduler/dispatcher
-parameter reference, and mode matrix.
+See [QUEUE ordering, decision, and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
+for the QUEUE lifecycle, accounting invariants, complete configuration parameter
+reference, and mode matrix.
 
 ### Run
 

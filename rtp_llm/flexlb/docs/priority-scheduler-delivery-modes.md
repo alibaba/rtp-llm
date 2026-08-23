@@ -1,21 +1,23 @@
-# QUEUE ordering and dispatcher modes
+# QUEUE ordering, decision, and dispatcher modes
 
 ## Purpose
 
-FlexLB exposes three separate configuration decisions in one strict
+FlexLB exposes the scheduler plus three independent QUEUE axes in one strict
 `FLEXLB_CONFIG` JSON document:
 
 1. `scheduler.type` chooses immediate routing (`DIRECT`) or scheduler-owned
    request lifecycle (`QUEUE`).
 2. `scheduler.ordering.type`, present only for `QUEUE`, chooses arrival order
    (`FIFO`) or priority order (`PRIORITY`).
-3. `dispatcher.type` chooses one-request route decisions (`NON_BATCH`) or
-   Master-side batch enqueue (`BATCH`).
+3. `scheduler.decision.type`, present only for `QUEUE`, chooses one request per
+   decision (`SINGLE`) or bounded group formation (`FIXED_WINDOW`).
+4. `dispatcher.type` chooses frontend delivery (`NON_BATCH`) or Master-side
+   `EnqueueBatch` delivery (`BATCH`).
 
-These names are not interchangeable. In particular, `FIFO` is the peer of
-`PRIORITY`, `DIRECT` is the peer of `QUEUE`, and `NON_BATCH` is the peer of
-`BATCH`. `DIRECT` requires `NON_BATCH`; all four ordering/dispatcher
-combinations are valid under `QUEUE`.
+These names are not interchangeable. `FIFO` is the peer of `PRIORITY`, `SINGLE`
+is the peer of `FIXED_WINDOW`, and `NON_BATCH` is the peer of `BATCH`. `DIRECT`
+requires `NON_BATCH` and cannot configure a decision policy. Every
+ordering/decision/dispatcher combination is valid under `QUEUE`.
 
 The Java class is still named `PriorityScheduler`, but it is the common QUEUE
 implementation for both FIFO and PRIORITY. That class name is an implementation
@@ -33,6 +35,7 @@ classDiagram
     }
     class PriorityAdmissionScheduler
     class WorkerBatcher
+    class SingleRequestBatcherAlgorithm
     class FixedWindowBatcherAlgorithm
     class RouteDecisionDelivery
     class BatchEnqueueDelivery
@@ -45,7 +48,8 @@ classDiagram
     PriorityScheduler --> DefaultRouter : FIFO placement
     PriorityScheduler --> PriorityAdmissionScheduler : PRIORITY placement/preemption
     PriorityScheduler --> WorkerBatcher : per-Prefill queue
-    WorkerBatcher --> FixedWindowBatcherAlgorithm : NON_BATCH and BATCH
+    WorkerBatcher --> SingleRequestBatcherAlgorithm : SINGLE
+    WorkerBatcher --> FixedWindowBatcherAlgorithm : FIXED_WINDOW
     PriorityScheduler --> RouteDecisionDelivery : NON_BATCH
     PriorityScheduler --> BatchEnqueueDelivery : BATCH
     BatchEnqueueDelivery --> BatchDispatcher : EnqueueBatch RPC
@@ -75,12 +79,15 @@ sequenceDiagram
         R->>S: submit(context)
         S->>S: admit, order, and place
         S->>W: enqueue selected Prefill work
-        alt dispatcher.type = NON_BATCH
+        alt scheduler.decision.type = SINGLE
             W-->>S: one-request decision group
+        else scheduler.decision.type = FIXED_WINDOW
+            W-->>S: bounded decision group
+        end
+        alt dispatcher.type = NON_BATCH
             S-->>F: route decision, enqueued_by_master=false
             F->>E: GenerateStream(request)
         else dispatcher.type = BATCH
-            W-->>S: fixed-window decision group
             S->>E: EnqueueBatch(group)
             E-->>S: ACK
             S-->>F: enqueued_by_master=true
@@ -90,17 +97,24 @@ sequenceDiagram
     end
 ```
 
-The two dispatchers differ only in who delivers the request — the frontend calls
-`GenerateStream` itself, or the master calls `EnqueueBatch` — and both run the
-same decision algorithm on the selected worker queue. `NON_BATCH` decides one
-request at a time, so its group is complete on arrival; a request the worker
-cannot take yet, because of KV pressure or engine backpressure, waits in the
-queue. `BATCH` grows a group up to `dispatcher.maxRequests` and, when configured,
-keeps its predicted execution time below
-`dispatcher.earlyDispatchPredictedExecutionMs`; it dispatches once either bound
-stops growth, or once the picked group's longest-waiting member reaches
-`dispatcher.maxCollectionWaitMs`. A single-request group is never incomplete, so
-`NON_BATCH` has no window to spend. There is no SLO-budget batching policy.
+The decision policy and dispatcher answer different questions. `SINGLE` forms a
+complete decision group for each request. `FIXED_WINDOW` grows a group up to
+`scheduler.decision.maxRequests`, waits at most
+`scheduler.decision.maxCollectionWaitMs`, and optionally refuses to add another
+request when the resulting group's prediction would exceed the strict
+`scheduler.decision.maxPredictedExecutionMs` growth cap. A request is
+indivisible, so a singleton whose own prediction exceeds the cap is still a
+valid group. The dispatcher then chooses who sends the already-formed group:
+the frontend calls `GenerateStream` for `NON_BATCH`, while the Master calls
+`EnqueueBatch` for `BATCH`.
+
+A request the worker cannot take yet because of KV pressure or engine
+backpressure remains QUEUE-owned. There is no SLO-budget batching policy.
+
+The current online `LEARNING` estimator updates from completed `EnqueueBatch`
+groups. NON_BATCH decisions can read its published model, but route-request
+terminals do not contribute training samples; use a `FORMULA` estimator when a
+stable prediction cap is required for `FIXED_WINDOW + NON_BATCH`.
 
 ## Ordering and expiration
 
@@ -137,7 +151,12 @@ accepted.
 | `scheduler.queueTimeoutMs` | `QUEUE` | `3600000` ms | Total scheduling lifetime from FlexLB admission through delivery acknowledgement |
 | `scheduler.ordering.type` | `QUEUE` | `FIFO` | `FIFO` or `PRIORITY` |
 | `scheduler.ordering.defaultPriority` | `QUEUE + PRIORITY` | `50` | Fallback priority in `[1, 100]` |
+| `scheduler.decision.type` | `QUEUE` | compatibility mapping | `SINGLE` or `FIXED_WINDOW`; see schema-v1 mapping below |
+| `scheduler.decision.maxRequests` | `QUEUE + FIXED_WINDOW` | `8` | Maximum requests in one decision group |
+| `scheduler.decision.maxCollectionWaitMs` | `QUEUE + FIXED_WINDOW` | `300` ms | Maximum collection wait; zero is allowed |
+| `scheduler.decision.maxPredictedExecutionMs` | `QUEUE + FIXED_WINDOW` | omitted | Optional positive strict group-growth cap; an indivisible singleton may exceed it |
 | `scheduler.capacity.maxOutstandingRequestsGlobal` | `QUEUE` | `100000` | Exact cluster-wide cap on requests owned by QUEUE |
+| `scheduler.capacity.maxWaitingRequestsPerPrefillWorker` | `QUEUE` | compatibility fallback | Optional positive hard bound for each Prefill waiting queue |
 | `scheduler.lifecycle.staleInflightTimeoutMs` | `QUEUE` | `300000` ms | Stale inflight reconciliation bound |
 | `scheduler.lifecycle.deliveredNotAcceptedTimeoutMs` | `QUEUE` | `30000` ms | Bound before reconciling work delivered but not accepted by Decode |
 | `scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal` | `QUEUE` | `200` | Global post-delivery ownership guard |
@@ -154,20 +173,42 @@ FIFO has no additional fields. PRIORITY can optionally contain
 `engineCancellation` is required when `DECODE_ENGINE_OWNED` is allowed and is
 rejected otherwise. Omit the whole `preemption` object to disable preemption.
 
+In schema version 1, `scheduler.decision` is optional for rolling compatibility.
+When omitted, `dispatcher.type=BATCH` selects the old fixed-window behavior using
+`dispatcher.maxRequests` and `dispatcher.maxCollectionWaitMs`; `NON_BATCH`
+selects `SINGLE`. An explicit decision always wins. The legacy
+`dispatcher.earlyDispatchPredictedExecutionMs` remains an early-dispatch trigger,
+not the strict new upper bound. An additional member whose resulting prediction
+is greater than or equal to the legacy trigger stays queued; an indivisible head
+at the trigger is still released as a singleton. The explicit maximum uses a
+strict greater-than boundary, so equality is allowed there.
+
+Compatibility is one-way: the new image accepts an existing schema-v1 document,
+but an older strict parser does not recognize the new `scheduler.decision` or
+scheduler-capacity fields. Introduce the new fields only after the new image is
+healthy. A rollback to an older image must restore the previous configuration
+document at the same time.
+
+When `scheduler.capacity.maxWaitingRequestsPerPrefillWorker` is omitted, the
+scheduler uses the legacy BATCH dispatcher value or the NON_BATCH runtime
+fallback. An explicit scheduler capacity always wins.
+
 ### Dispatcher
 
 | JSON path | Applies to | Default | Meaning |
 | --- | --- | ---: | --- |
 | `dispatcher.type` | all | `BATCH` | `BATCH` or `NON_BATCH`; DIRECT requires `NON_BATCH` |
-| `dispatcher.maxRequests` | `BATCH` | `8` | Maximum requests in one decision group |
-| `dispatcher.maxCollectionWaitMs` | `BATCH` | `300` ms | Maximum fixed-window collection wait; zero is allowed |
-| `dispatcher.maxWaitingRequestsPerPrefillWorker` | `BATCH` | `1024` | Hard per-Prefill waiting-queue bound |
-| `dispatcher.earlyDispatchPredictedExecutionMs` | `BATCH` | omitted | Optional positive predicted-execution budget capping batch growth |
+| `dispatcher.maxRequests` | legacy `BATCH` | `8` | Compatibility decision size when `scheduler.decision` is omitted |
+| `dispatcher.maxCollectionWaitMs` | legacy `BATCH` | `300` ms | Compatibility collection wait when `scheduler.decision` is omitted |
+| `dispatcher.maxWaitingRequestsPerPrefillWorker` | legacy `BATCH` | `1024` | Compatibility queue bound when the scheduler capacity is omitted |
+| `dispatcher.earlyDispatchPredictedExecutionMs` | legacy `BATCH` | omitted | Compatibility `>=` growth boundary; the additional item that reaches it stays queued, while an indivisible head still forms a singleton |
 | `dispatcher.maxInflightBatchesPerPrefillWorker` | `BATCH` | omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
 | `dispatcher.enqueueRpcTimeoutMs` | `BATCH` | `5000` ms | EnqueueBatch RPC timeout |
 | `dispatcher.maxInflightRequestsPerPrefillWorker` | `QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill route-decision cap |
 
-The two optional inflight limits use omission, not zero, to mean unlimited.
+The two optional inflight limits use omission, not zero, to mean unlimited. The
+legacy fields remain accepted so schema version stays at 1, but new
+configurations should put decision and waiting-capacity fields under `scheduler`.
 
 ## Valid examples
 
@@ -181,30 +222,73 @@ DIRECT with the default role routing configuration:
 }
 ```
 
-FIFO QUEUE with one immediate route decision per request:
+The four minimal FIFO QUEUE combinations make the independent axes explicit.
+
+SINGLE decision, frontend delivery:
 
 ```json
 {
   "schemaVersion": 1,
   "scheduler": {
     "type": "QUEUE",
-    "queueTimeoutMs": 3600000,
     "ordering": {"type": "FIFO"},
-    "capacity": {"maxOutstandingRequestsGlobal": 100000},
-    "lifecycle": {
-      "staleInflightTimeoutMs": 300000,
-      "deliveredNotAcceptedTimeoutMs": 30000,
-      "maxDeliveredNotAcceptedRequestsGlobal": 200
-    }
+    "decision": {"type": "SINGLE"}
   },
-  "dispatcher": {
-    "type": "NON_BATCH",
-    "maxInflightRequestsPerPrefillWorker": 32
-  }
+  "dispatcher": {"type": "NON_BATCH"}
 }
 ```
 
-PRIORITY QUEUE with fixed-window batching:
+SINGLE decision, Master delivery:
+
+```json
+{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "ordering": {"type": "FIFO"},
+    "decision": {"type": "SINGLE"}
+  },
+  "dispatcher": {"type": "BATCH"}
+}
+```
+
+FIXED_WINDOW decision, frontend delivery:
+
+```json
+{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "ordering": {"type": "FIFO"},
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 8,
+      "maxCollectionWaitMs": 300
+    }
+  },
+  "dispatcher": {"type": "NON_BATCH"}
+}
+```
+
+FIXED_WINDOW decision, Master delivery:
+
+```json
+{
+  "schemaVersion": 1,
+  "scheduler": {
+    "type": "QUEUE",
+    "ordering": {"type": "FIFO"},
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 8,
+      "maxCollectionWaitMs": 300
+    }
+  },
+  "dispatcher": {"type": "BATCH"}
+}
+```
+
+A fuller PRIORITY example with explicit FIXED_WINDOW decision and BATCH delivery:
 
 ```json
 {
@@ -219,7 +303,16 @@ PRIORITY QUEUE with fixed-window batching:
         "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"]
       }
     },
-    "capacity": {"maxOutstandingRequestsGlobal": 100000},
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 32,
+      "maxCollectionWaitMs": 160,
+      "maxPredictedExecutionMs": 500
+    },
+    "capacity": {
+      "maxOutstandingRequestsGlobal": 100000,
+      "maxWaitingRequestsPerPrefillWorker": 1024
+    },
     "lifecycle": {
       "staleInflightTimeoutMs": 300000,
       "deliveredNotAcceptedTimeoutMs": 30000,
@@ -228,10 +321,6 @@ PRIORITY QUEUE with fixed-window batching:
   },
   "dispatcher": {
     "type": "BATCH",
-    "maxRequests": 32,
-    "maxCollectionWaitMs": 160,
-    "maxWaitingRequestsPerPrefillWorker": 1024,
-    "earlyDispatchPredictedExecutionMs": 500,
     "maxInflightBatchesPerPrefillWorker": 2,
     "enqueueRpcTimeoutMs": 5000
   }
@@ -262,12 +351,17 @@ The role-local prefill, decode, and VIT selectors shown in the top-level
 
 ## Mode matrix
 
-| Scheduler | Ordering | Dispatcher | Scheduling path | Delivery |
+| Scheduler | Ordering | Decision | Dispatcher | Delivery |
 | --- | --- | --- | --- | --- |
-| `DIRECT` | — | `NON_BATCH` | `DefaultRouter` | Immediate route response; frontend sends |
-| `QUEUE` | `FIFO` | `NON_BATCH` | Common QUEUE lifecycle, FIFO placement | One route response; frontend sends |
-| `QUEUE` | `PRIORITY` | `NON_BATCH` | Priority admission/preemption | One route response; frontend sends |
-| `QUEUE` | `FIFO` | `BATCH` | Common QUEUE lifecycle, FIFO placement | Master `EnqueueBatch` |
-| `QUEUE` | `PRIORITY` | `BATCH` | Priority admission/preemption | Master `EnqueueBatch` |
+| `DIRECT` | — | — | `NON_BATCH` | Immediate route response; frontend sends |
+| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | FIFO singleton route response; frontend sends |
+| `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | FIFO singleton `EnqueueBatch`; Master sends |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | FIFO grouped decisions; frontend sends each request |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | FIFO grouped `EnqueueBatch`; Master sends |
+| `QUEUE` | `PRIORITY` | `SINGLE` | `NON_BATCH` | Priority singleton route response; frontend sends |
+| `QUEUE` | `PRIORITY` | `SINGLE` | `BATCH` | Priority singleton `EnqueueBatch`; Master sends |
+| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | Priority grouped decisions; frontend sends each request |
+| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `BATCH` | Priority grouped `EnqueueBatch`; Master sends |
 
-`DIRECT + BATCH` is rejected during configuration validation.
+`DIRECT + BATCH` and `DIRECT + decision` are rejected during strict
+configuration parsing/validation.

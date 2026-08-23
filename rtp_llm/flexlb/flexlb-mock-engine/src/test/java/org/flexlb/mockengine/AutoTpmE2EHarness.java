@@ -14,8 +14,11 @@ import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.PlanCommitter;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.scheduler.priority.UnsupportedEngineCancelChannel;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.EngineCancellationConfig;
+import org.flexlb.config.FixedWindowDecisionConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.PriorityOrderingConfig;
@@ -55,8 +58,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -87,6 +90,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     final FlexlbConfig config = new FlexlbConfig();
+    final FixedWindowDecisionConfig fixedWindowDecision;
     final ConfigService configService = mock(ConfigService.class);
     final Router router = mock(Router.class);
     final EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
@@ -122,7 +126,15 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
                       String prefillFormulaMs, double decodeStepMs,
                       boolean realCancelChannel) {
-        this(basePort, nPrefill, nDecode, prefillFormulaMs, decodeStepMs, realCancelChannel, true);
+        this(basePort, nPrefill, nDecode, prefillFormulaMs, decodeStepMs,
+                realCancelChannel, true, defaultFixedWindowDecision());
+    }
+
+    AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
+                      String prefillFormulaMs, double decodeStepMs,
+                      boolean realCancelChannel, DecisionPolicyConfig decisionPolicy) {
+        this(basePort, nPrefill, nDecode, prefillFormulaMs, decodeStepMs,
+                realCancelChannel, true, decisionPolicy);
     }
 
     /**
@@ -134,6 +146,16 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
                       String prefillFormulaMs, double decodeStepMs,
                       boolean realCancelChannel, boolean autoTpm) {
+        this(basePort, nPrefill, nDecode, prefillFormulaMs, decodeStepMs,
+                realCancelChannel, autoTpm, defaultFixedWindowDecision());
+    }
+
+    private AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
+                             String prefillFormulaMs, double decodeStepMs,
+                             boolean realCancelChannel, boolean autoTpm,
+                             DecisionPolicyConfig decisionPolicy) {
+        this.fixedWindowDecision = decisionPolicy instanceof FixedWindowDecisionConfig fixed
+                ? fixed : null;
         try {
             tempDir = Files.createTempDirectory("auto-tpm-e2e");
         } catch (IOException e) {
@@ -164,12 +186,11 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         if (autoTpm) {
             config.queueScheduler().setOrdering(new PriorityOrderingConfig());
         }
-        config.batchDispatcher().setMaxRequests(100);
-        config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+        config.setDispatcher(new BatchDispatcherConfig());
+        config.queueScheduler().setDecision(decisionPolicy);
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
-        config.batchDispatcher().setMaxCollectionWaitMs(10_000);
-        config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(1024);
+        config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         routeFn = this::defaultRoute;
@@ -248,6 +269,20 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     // ==================== endpoint / route wiring ====================
+
+    FixedWindowDecisionConfig fixedWindowDecision() {
+        if (fixedWindowDecision == null) {
+            throw new IllegalStateException("FIXED_WINDOW decision is not active");
+        }
+        return fixedWindowDecision;
+    }
+
+    private static FixedWindowDecisionConfig defaultFixedWindowDecision() {
+        FixedWindowDecisionConfig decision = new FixedWindowDecisionConfig();
+        decision.setMaxRequests(100);
+        decision.setMaxCollectionWaitMs(10_000);
+        return decision;
+    }
 
     private void registerEndpoint(RoleType role, JavaMockEngineCluster.FastRpcService svc) {
         int grpcPort = svc.getGrpcPort();

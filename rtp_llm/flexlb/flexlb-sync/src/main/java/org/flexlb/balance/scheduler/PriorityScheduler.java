@@ -15,6 +15,7 @@ import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FixedWindowDecisionConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.dao.BalanceContext;
@@ -2993,14 +2994,24 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         nowMs - waitEntry.getValue(),
                         waitEntry.getKey());
             }
-            BatchDispatcherConfig batch = configService.loadBalanceConfig().batchDispatcher();
+            FlexlbConfig config = configService.loadBalanceConfig();
+            BatchDispatcherConfig batch = config.batchDispatcher();
+            int maxRequests = 1;
+            long collectionWaitMs = 0L;
+            Long predictionLimitMs = null;
+            if (config.isFixedWindowDecision()) {
+                FixedWindowDecisionConfig decision = config.fixedWindowDecision();
+                maxRequests = decision.getMaxRequests();
+                collectionWaitMs = decision.getMaxCollectionWaitMs();
+                predictionLimitMs = config.hasExplicitDecisionPolicy()
+                        ? decision.getMaxPredictedExecutionMs()
+                        : batch.getEarlyDispatchPredictedExecutionMs();
+            }
             Logger.debug("flexlb_batch_dispatch batch_id={} reason={} batch_size={} wait_ms={} "
                             + "predicted_ms={} threshold_ms={} fixed_wait_ms={} batch_size_max={} "
                             + "queue_after={} worker={}",
                     batchId, reason, dispatched.size(), waitMs, predictedMs,
-                    batch.getEarlyDispatchPredictedExecutionMs(),
-                    batch.getMaxCollectionWaitMs(),
-                    batch.getMaxRequests(), metadata.queueDepth(),
+                    predictionLimitMs, collectionWaitMs, maxRequests, metadata.queueDepth(),
                     prefillEp != null ? prefillEp.ipPort() : "");
         } catch (RuntimeException telemetryFailure) {
             Logger.warn("Failed to report batch dispatch: batch_id={}",

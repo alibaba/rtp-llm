@@ -3,11 +3,13 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FifoOrderingConfig;
+import org.flexlb.config.FixedWindowDecisionConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.config.QueueSchedulerConfig;
+import org.flexlb.config.SingleDecisionConfig;
 import org.flexlb.config.VictimStage;
 
 import java.util.EnumSet;
@@ -38,6 +40,23 @@ public final class SchedulingTestConfig {
         queue.setOrdering(new FifoOrderingConfig());
         config.setScheduler(queue);
         return queue;
+    }
+
+    public static void useSingleDecision(FlexlbConfig config) {
+        QueueSchedulerConfig queue = activeQueueOrNew(config);
+        queue.setDecision(new SingleDecisionConfig());
+        config.setScheduler(queue);
+    }
+
+    public static FixedWindowDecisionConfig useFixedWindowDecision(FlexlbConfig config) {
+        QueueSchedulerConfig queue = activeQueueOrNew(config);
+        if (queue.getDecision() instanceof FixedWindowDecisionConfig fixedWindow) {
+            return fixedWindow;
+        }
+        FixedWindowDecisionConfig fixedWindow = new FixedWindowDecisionConfig();
+        queue.setDecision(fixedWindow);
+        config.setScheduler(queue);
+        return fixedWindow;
     }
 
     public static BatchDispatcherConfig useBatchDispatcher(FlexlbConfig config) {

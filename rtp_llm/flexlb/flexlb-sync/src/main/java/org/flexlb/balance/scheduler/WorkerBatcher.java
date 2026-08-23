@@ -24,8 +24,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * delegating grouping decisions to a {@link BatcherAlgorithm}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and grouped by the algorithm, whose bounds come
- * from the configured dispatcher. A group may be delivered through
+ * {@link #offer(BatchItem)} and grouped by the configured decision policy. A
+ * group may independently be delivered through
  * EnqueueBatch or as individual route decisions.
  *
  * <p>The context-owned active queue and ready-delivery backlog together are
@@ -38,8 +38,14 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public class WorkerBatcher {
 
-    private static final long DELIVERY_CAPACITY_RETRY_NANOS =
-            TimeUnit.MILLISECONDS.toNanos(1);
+    /**
+     * A failed hard delivery claim or callback restore is retried after one
+     * small, explicit delay. The fixed upper bound prevents a tight retry loop
+     * without making capacity-release latency unbounded in the absence of a
+     * Decode-side wakeup.
+     */
+    private static final long DELIVERY_RETRY_BACKOFF_NANOS =
+            TimeUnit.MILLISECONDS.toNanos(10);
 
     /**
      * PRIORITY queue order: delegates to
@@ -88,7 +94,9 @@ public class WorkerBatcher {
     private final BatcherAlgorithm algorithm;
     private final BatcherContext ctx;
     private final PrefillQueueManager queueManager;
-    private volatile long deliveryRetryNotBeforeNanos;
+    private volatile long readyRetryNotBeforeNanos;
+    private volatile long activeRetryNotBeforeNanos;
+    private volatile BatchItem activeRetryItem;
 
     public WorkerBatcher(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                          DecisionGroupHandler decisionHandler,
@@ -100,7 +108,9 @@ public class WorkerBatcher {
         Comparator<BatchItem> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         this.queue = new PriorityBlockingQueue<>(11, queueOrder);
-        this.algorithm = new FixedWindowBatcherAlgorithm();
+        this.algorithm = cfg.isSingleDecision()
+                ? new SingleRequestBatcherAlgorithm()
+                : new FixedWindowBatcherAlgorithm();
         this.ctx = new BatcherContext(
                 key, prefillEp, cfg, decisionHandler, queue, queueDepth, queueVersion, queueLock,
                 queueOrder, reporter);
@@ -239,12 +249,7 @@ public class WorkerBatcher {
      * already owns the batcher.
      */
     BatcherContext.PendingRestoreResult restorePendingDelivery(BatchItem item) {
-        BatcherContext.PendingRestoreResult result = ctx.restorePendingDelivery(item);
-        if (result == BatcherContext.PendingRestoreResult.RESTORED) {
-            long retryAt = System.nanoTime() + DELIVERY_CAPACITY_RETRY_NANOS;
-            deliveryRetryNotBeforeNanos = Math.max(deliveryRetryNotBeforeNanos, retryAt);
-        }
-        return result;
+        return ctx.restorePendingDelivery(item);
     }
 
     int pendingDeliveryCount() {
@@ -291,6 +296,11 @@ public class WorkerBatcher {
                 }
             }
             if (!removed.isEmpty()) {
+                // External cancellation/expiration may replace a
+                // capacity-blocked route head with processable batch work.
+                // Publish that predicate transition under the same lock as
+                // the removal so the worker cannot miss the wakeup.
+                stateChanged.signal();
                 Logger.debug("[priority-scheduler] queue remove: worker={} reason={} removed={}",
                         key, reason, removed.size());
             }
@@ -318,6 +328,8 @@ public class WorkerBatcher {
      */
     PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresent(
             List<Long> victimIds, BatchItem incoming) {
+        List<BatchItem> removed = new ArrayList<>(victimIds.size());
+        boolean queueChanged = false;
         queueLock.lock();
         try {
             if (stopped) {
@@ -337,7 +349,6 @@ public class WorkerBatcher {
             if (!missing.isEmpty()) {
                 return PrefillQueueManager.ReplaceOutcome.victimGone(missing);
             }
-            List<BatchItem> removed = new ArrayList<>(present.size());
             for (BatchItem victim : present) {
                 if (!ctx.remove(victim)) {
                     // Unreachable under the lock discipline; victims already
@@ -345,6 +356,7 @@ public class WorkerBatcher {
                     return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
                 }
                 removed.add(victim);
+                queueChanged = true;
             }
             if (!tryOffer(incoming)) {
                 return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
@@ -352,8 +364,15 @@ public class WorkerBatcher {
             return PrefillQueueManager.ReplaceOutcome.success(removed);
         } catch (RuntimeException | Error e) {
             Logger.error("WorkerBatcher[{}] presence-guarded victim replace failed", key, e);
-            return PrefillQueueManager.ReplaceOutcome.partialFailure(List.of());
+            return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
         } finally {
+            if (queueChanged) {
+                // A partial replacement may remove the route head without a
+                // successful incoming offer. Wake the condition waiter so a
+                // newly exposed active head is not hidden until the removed
+                // request's old expiration deadline.
+                stateChanged.signal();
+            }
             queueLock.unlock();
         }
     }
@@ -364,12 +383,19 @@ public class WorkerBatcher {
         while (!stopped && !Thread.currentThread().isInterrupted()) {
             try {
                 waitForNonEmpty();
-                waitForDeliveryRetry();
                 BatcherContext.ReadyDeliveryResult readyDelivery =
-                        ctx.deliverReadyRequests();
+                        BatcherContext.ReadyDeliveryResult.EMPTY;
+                if (!readyRetryDeferred()) {
+                    readyDelivery = ctx.deliverReadyRequests();
+                    schedulePendingDeliveryRetries();
+                }
                 if (readyDelivery == BatcherContext.ReadyDeliveryResult.CAPACITY_BLOCKED) {
                     if (ctx.isActiveEmpty()) {
-                        awaitDeliveryCapacityOrActiveWork();
+                        if (readyRetryDeferred()) {
+                            awaitReadyRetryOrActiveWork();
+                        } else {
+                            awaitDeliveryCapacityOrActiveWork();
+                        }
                         continue;
                     }
                     // A live config transition can leave BATCH_ENQUEUE work behind
@@ -380,11 +406,29 @@ public class WorkerBatcher {
                 if (readyDelivery == BatcherContext.ReadyDeliveryResult.DELIVERED) {
                     continue;
                 }
+                if (readyRetryDeferred() && ctx.isActiveEmpty()) {
+                    awaitReadyRetryOrActiveWork();
+                    continue;
+                }
+                if (awaitActiveRetryIfDeferred()) {
+                    continue;
+                }
+                if (awaitActiveRouteCapacityIfBlocked()) {
+                    // A slot or queue-state transition ended the wait. Restart
+                    // at the top so an older ready-delivery backlog retains
+                    // priority over active work newly able to stage.
+                    continue;
+                }
                 algorithm.processQueue(ctx);
+                schedulePendingDeliveryRetries();
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Throwable t) {
+                // A callback failure restores still-STAGED ownership before it
+                // escapes. Consume that restore signal here so the same
+                // callback cannot immediately fail again in a tight loop.
+                schedulePendingDeliveryRetries();
                 Logger.error("WorkerBatcher[{}] loop failed", key, t);
             }
         }
@@ -420,6 +464,53 @@ public class WorkerBatcher {
         }
     }
 
+    /**
+     * Park active route-decision work while request-mode capacity is full.
+     *
+     * <p>The ordered head is the only member that can start the next logical
+     * decision. A BATCH_ENQUEUE head must therefore remain processable even if
+     * route work exists behind it. Slot release and active-queue mutations
+     * signal the same condition under {@link #queueLock}, closing the
+     * check-to-wait race. The route head's absolute expiration bounds each
+     * wait so deadline cleanup still runs without a capacity poll.
+     *
+     * @return true when a signal made the route head processable and the run
+     *         loop should restart to preserve ready-backlog priority; false
+     *         when no wait was needed or an expiration deadline was reached
+     */
+    private boolean awaitActiveRouteCapacityIfBlocked() throws InterruptedException {
+        queueLock.lockInterruptibly();
+        try {
+            boolean waited = false;
+            while (!stopped
+                    && ctx.activeHeadUsesRouteDelivery()
+                    && ctx.availableDeliverySlots() == 0) {
+                BatchItem head = ctx.peek();
+                if (head == null
+                        || !BatchShape.empty().add(head)
+                        .fitsCompute(ctx.batchTokenCapacity())) {
+                    // The algorithm owns permanent oversize rejection. Do
+                    // not let unrelated request-slot pressure hide it.
+                    return false;
+                }
+                long expiresAtMs = ctx.activeRouteHeadExpirationAtMs();
+                long nowMs = System.currentTimeMillis();
+                if (expiresAtMs <= nowMs) {
+                    return false;
+                }
+                waited = true;
+                if (expiresAtMs == Long.MAX_VALUE) {
+                    awaitStateChange();
+                } else {
+                    awaitStateChangeUntil(expiresAtMs - nowMs);
+                }
+            }
+            return waited;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
     private void awaitStateChange() throws InterruptedException {
         waitingForSignal = true;
         try {
@@ -429,11 +520,22 @@ public class WorkerBatcher {
         }
     }
 
+    private void awaitStateChangeUntil(long remainingMs) throws InterruptedException {
+        waitingForSignal = true;
+        try {
+            stateChanged.awaitNanos(TimeUnit.MILLISECONDS.toNanos(
+                    Math.max(1L, remainingMs)));
+        } finally {
+            waitingForSignal = false;
+        }
+    }
+
     /** Called after Prefill releases a request-mode slot, outside its stripe. */
     public void signalDeliveryCapacityAvailable() {
         queueLock.lock();
         try {
-            if (ctx.readyDeliveryCount() > 0) {
+            if (ctx.readyDeliveryCount() > 0
+                    || ctx.activeHeadUsesRouteDelivery()) {
                 stateChanged.signal();
             }
         } finally {
@@ -446,10 +548,97 @@ public class WorkerBatcher {
         return waitingForSignal;
     }
 
-    private void waitForDeliveryRetry() throws InterruptedException {
-        long remaining = deliveryRetryNotBeforeNanos - System.nanoTime();
-        if (remaining > 0) {
-            TimeUnit.NANOSECONDS.sleep(remaining);
+    private void schedulePendingDeliveryRetries() {
+        BatcherContext.DeliveryRetrySignal signal = ctx.consumeDeliveryRetrySignal();
+        if (signal == null) {
+            return;
+        }
+        long retryAt = System.nanoTime() + DELIVERY_RETRY_BACKOFF_NANOS;
+        if (signal.ready()) {
+            readyRetryNotBeforeNanos = Math.max(readyRetryNotBeforeNanos, retryAt);
+        }
+        if (signal.active()) {
+            activeRetryItem = signal.activeRetryItem();
+            activeRetryNotBeforeNanos = Math.max(activeRetryNotBeforeNanos, retryAt);
+        }
+    }
+
+    private boolean readyRetryDeferred() {
+        long retryAt = readyRetryNotBeforeNanos;
+        if (retryAt == 0L) {
+            return false;
+        }
+        if (retryAt - System.nanoTime() > 0L) {
+            return true;
+        }
+        readyRetryNotBeforeNanos = 0L;
+        return false;
+    }
+
+    /**
+     * Wait for a ready-backlog retry only while there is no unrelated active
+     * work. A new offer/removal signals the same condition and is processed
+     * immediately rather than sitting behind the failed ready delivery.
+     */
+    private void awaitReadyRetryOrActiveWork() throws InterruptedException {
+        queueLock.lockInterruptibly();
+        try {
+            while (!stopped && ctx.isActiveEmpty() && ctx.readyDeliveryCount() > 0) {
+                long remaining = readyRetryNotBeforeNanos - System.nanoTime();
+                if (remaining <= 0L) {
+                    readyRetryNotBeforeNanos = 0L;
+                    return;
+                }
+                awaitStateChangeNanos(remaining);
+            }
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /**
+     * Delay only the restored active head. Cancellation or a newly-arrived
+     * higher-priority head changes the identity predicate and ends the wait,
+     * so the bounded retry cannot starve independently processable work.
+     */
+    private boolean awaitActiveRetryIfDeferred() throws InterruptedException {
+        BatchItem deferredItem = activeRetryItem;
+        long retryAt = activeRetryNotBeforeNanos;
+        if (deferredItem == null || retryAt - System.nanoTime() <= 0L) {
+            activeRetryItem = null;
+            activeRetryNotBeforeNanos = 0L;
+            return false;
+        }
+
+        queueLock.lockInterruptibly();
+        try {
+            boolean waited = false;
+            while (!stopped && ctx.peek() == deferredItem) {
+                long remaining = activeRetryNotBeforeNanos - System.nanoTime();
+                if (remaining <= 0L) {
+                    activeRetryItem = null;
+                    activeRetryNotBeforeNanos = 0L;
+                    break;
+                }
+                waited = true;
+                awaitStateChangeNanos(remaining);
+            }
+            if (ctx.peek() != deferredItem) {
+                activeRetryItem = null;
+                activeRetryNotBeforeNanos = 0L;
+            }
+            return waited;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private void awaitStateChangeNanos(long remainingNanos) throws InterruptedException {
+        waitingForSignal = true;
+        try {
+            stateChanged.awaitNanos(Math.max(1L, remainingNanos));
+        } finally {
+            waitingForSignal = false;
         }
     }
 

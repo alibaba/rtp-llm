@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 /**
- * Batching algorithm contract. One instance per {@link WorkerBatcher}.
+ * Queue decision-policy contract. One instance per {@link WorkerBatcher}.
  *
  * <p>Implementations encapsulate dispatch decision logic — when to
  * assemble a batch, how many items to pick, and when to wait.
@@ -14,7 +14,7 @@ public interface BatcherAlgorithm {
      *
      * <p>On each call the implementation should make one of:
      * <ul>
-     *   <li>Dispatch items via {@link BatcherContext#dispatch}</li>
+     *   <li>Stage a decision group through {@link BatcherContext}</li>
      *   <li>Drop the head item via {@link BatcherContext#dropHead}
      *       (only for algorithms that support expiry)</li>
      *   <li>Park briefly (e.g. {@code TimeUnit.MILLISECONDS.sleep(1)})

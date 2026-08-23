@@ -99,8 +99,9 @@ class PriorityAdmissionSchedulerTest {
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(2);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
         SchedulingTestConfig.usePriorityQueue(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -201,7 +202,7 @@ class PriorityAdmissionSchedulerTest {
         // normalize() always assigns 1-100 in production, so the switch is
         // the sole gate — even a raw priority-0 context goes through the
         // priority scheduler and is placed normally.
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
         Response response = scheduler.submit(context(61, 0)).get(2, TimeUnit.SECONDS);
 
         assertTrue(response.isSuccess());
@@ -266,7 +267,7 @@ class PriorityAdmissionSchedulerTest {
     void admissionPermitLimitIsAtomicAcrossConcurrentScheduling() throws Exception {
         config.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
         config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
 
         CountDownLatch firstRouteEntered = new CountDownLatch(1);
         CountDownLatch allowFirstRoute = new CountDownLatch(1);
@@ -318,7 +319,7 @@ class PriorityAdmissionSchedulerTest {
     @Test
     void admissionPermitIsReleasedWhenLeaseAttachmentThrows() {
         config.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
 
         InflightRegistrar registrar = openRegistrar();
         when(registrar.registerInflight(any(BatchItem.class))).thenReturn(true);
@@ -339,7 +340,7 @@ class PriorityAdmissionSchedulerTest {
     void successfulPrefillOnlyAdmissionsDoNotConsumeTheHardLimit() throws Exception {
         config.queueScheduler().getLifecycle().setMaxDeliveredNotAcceptedRequestsGlobal(1);
         config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
         when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
             BalanceContext ctx = invocation.getArgument(0);
             return prefillOnlyRoute(ctx.getRequestId());
@@ -360,7 +361,7 @@ class PriorityAdmissionSchedulerTest {
     @Test
     void shutdownCancelsPendingLeaseTimeoutAndRejectsNewAdmission() throws Exception {
         config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
 
         InflightRegistrar registrar = openRegistrar();
         AtomicReference<AdmissionLease> attachedLease = new AtomicReference<>();
@@ -408,7 +409,7 @@ class PriorityAdmissionSchedulerTest {
                 configService, router, endpointRegistry, new PlanCommitter(),
                 priorityReporter, reporter, new UnsupportedEngineCancelChannel());
         config.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(1);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
 
         long firstRequestId = 176L;
         long secondRequestId = 177L;
@@ -626,7 +627,7 @@ class PriorityAdmissionSchedulerTest {
     @Test
     void offer_failure_releases_decode_reservation_and_fails_explicitly() throws Exception {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
         // Route performs the decode reservation (D reserve first), like production Router

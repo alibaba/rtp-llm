@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -20,18 +19,25 @@ import java.util.stream.Collectors;
  * where {@code reuse = hitCache / 1024}, {@code compute = (seqLen - hitCache) / 1024}.
  *
  * <p>
- * The model weights are stored in an {@link AtomicReference}. The
- * {@link #learn(List, long, long)} callback uses an Adam optimizer to perform
- * online gradient descent on completed batches.
+ * The model generation and weights are stored together in an atomically
+ * published snapshot. The {@link #learn(PrefillBatchFeatures, long, long)}
+ * callback uses an Adam optimizer to perform online gradient descent on
+ * completed batches.
  */
 public class LearningPredictor implements PrefillTimePredictor {
     private record BatchUpdateItem(PrefillBatchFeatures features, long actualMs) {
     }
 
+    /**
+     * Atomically published prediction model. The weights array is owned by the
+     * snapshot and is never mutated after the snapshot is constructed.
+     */
+    private record ModelSnapshot(long generation, double[] weights) {
+    }
+
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final AtomicReference<double[]> weightsRef;
-    private final AtomicLong generation = new AtomicLong();
+    private final AtomicReference<ModelSnapshot> modelRef;
     private final int linear_param_count;
     private final int total_param_count;
     private final double[] adamMoment1;
@@ -48,22 +54,24 @@ public class LearningPredictor implements PrefillTimePredictor {
     private final List<BatchUpdateItem> itemBatch;
 
     public LearningPredictor() {
-        this.weightsRef = new AtomicReference<>(new double[] { -4.40538432604287, 10.522208701202377, 1.5043093890711503,
-                                                               21.40103419118763, 0.11145680735428248, 0.08305932028650383,
-                                                               1.451617309598213, 1.0268830123611967, -4.405384326042869});
+        this.modelRef = new AtomicReference<>(new ModelSnapshot(0L,
+                new double[] { -4.40538432604287, 10.522208701202377, 1.5043093890711503,
+                               21.40103419118763, 0.11145680735428248, 0.08305932028650383,
+                               1.451617309598213, 1.0268830123611967, -4.405384326042869 }));
         this.linear_param_count = 6;
-        this.total_param_count = this.weightsRef.get().length;
+        this.total_param_count = this.modelRef.get().weights().length;
         this.adamMoment1 = new double[this.total_param_count];
         this.adamMoment2 = new double[this.total_param_count];
         this.itemBatch = new ArrayList<>();
         logger.debug(
                 "learn predictor created, t: {}, total param {}, init param: {}, beta1: {}, beta2: {}, alpha: {}, batchSize: {}",
-                this.t, this.total_param_count, formulaStringParam(this.weightsRef.get()), this.beta1, this.beta2, this.alpha, this.batchSize);
+                this.t, this.total_param_count, formulaStringParam(this.modelRef.get().weights()),
+                this.beta1, this.beta2, this.alpha, this.batchSize);
     }
 
     @Override
     public long generation() {
-        return generation.get();
+        return this.modelRef.get().generation();
     }
 
     @Override
@@ -79,7 +87,8 @@ public class LearningPredictor implements PrefillTimePredictor {
         inputs[3] = thisCompute;
         inputs[4] = thisCompute * thisCompute;
         inputs[5] = thisReuse * thisCompute;
-        double[] weights = this.weightsRef.get();
+        ModelSnapshot model = this.modelRef.get();
+        double[] weights = model.weights();
         double linear = calcLinear(inputs, weights);
         double[] values = new double[5];
         calcNonLinear(weights, linear, values);
@@ -88,15 +97,16 @@ public class LearningPredictor implements PrefillTimePredictor {
 
     @Override
     public double predictBatchMs(List<BatchItem> items) {
+        ModelSnapshot model = this.modelRef.get();
         if (logger.isDebugEnabled()) {
             logger.debug("t: {}, learn predictor predictBatchMs: {}, items count: {}",
-                    this.t, formulaStringParam(this.weightsRef.get()), items.size());
+                    this.t, formulaStringParam(model.weights()), items.size());
         }
         if (items.isEmpty()) {
             return 0;
         }
         double[] inputs = this.collectInput(items);
-        double[] weights = this.weightsRef.get();
+        double[] weights = model.weights();
         double linear = calcLinear(inputs, weights);
         double[] values = new double[5];
         calcNonLinear(weights, linear, values);
@@ -166,56 +176,52 @@ public class LearningPredictor implements PrefillTimePredictor {
         if (this.itemBatch.size() < this.batchSize) {
             return;
         }
-        this.weightsRef.updateAndGet(oldWeights -> {
-            double[] gradient = new double[this.total_param_count];
-            for (BatchUpdateItem batchItem : this.itemBatch) {
-                double[] thisGradient = new double[this.total_param_count];
-                double[] inputs = this.collectInput(batchItem.features());
-                double linear = calcLinear(inputs, oldWeights);
-                double[] nonLinearOutput = new double[5];
-                calcNonLinear(oldWeights, linear, nonLinearOutput);
-                double predict = nonLinearOutput[0];
-                double nonLinearGrad = nonLinearOutput[1];
-                double nonLinearP6Grad = nonLinearOutput[2];
-                double nonLinearP7Grad = nonLinearOutput[3];
-                double nonLinearP8Grad = nonLinearOutput[4];
-                thisGradient[this.linear_param_count] = nonLinearP6Grad;
-                thisGradient[this.linear_param_count + 1] = nonLinearP7Grad;
-                thisGradient[this.linear_param_count + 2] = nonLinearP8Grad;
-                double linearGrad = nonLinearGrad / this.coff3;
-                for (int i = 0; i < inputs.length; i++) {
-                    thisGradient[i] = linearGrad * inputs[i];
-                }
-                double diff = predict - batchItem.actualMs();
-                for (int i = 0; i < oldWeights.length; i++) {
-                    gradient[i] += diff * thisGradient[i];
-                }
+        ModelSnapshot oldModel = this.modelRef.get();
+        double[] oldWeights = oldModel.weights();
+        double[] gradient = new double[this.total_param_count];
+        for (BatchUpdateItem batchItem : this.itemBatch) {
+            double[] thisGradient = new double[this.total_param_count];
+            double[] inputs = this.collectInput(batchItem.features());
+            double linear = calcLinear(inputs, oldWeights);
+            double[] nonLinearOutput = new double[5];
+            calcNonLinear(oldWeights, linear, nonLinearOutput);
+            double predict = nonLinearOutput[0];
+            double nonLinearGrad = nonLinearOutput[1];
+            double nonLinearP6Grad = nonLinearOutput[2];
+            double nonLinearP7Grad = nonLinearOutput[3];
+            double nonLinearP8Grad = nonLinearOutput[4];
+            thisGradient[this.linear_param_count] = nonLinearP6Grad;
+            thisGradient[this.linear_param_count + 1] = nonLinearP7Grad;
+            thisGradient[this.linear_param_count + 2] = nonLinearP8Grad;
+            double linearGrad = nonLinearGrad / this.coff3;
+            for (int i = 0; i < inputs.length; i++) {
+                thisGradient[i] = linearGrad * inputs[i];
             }
+            double diff = predict - batchItem.actualMs();
             for (int i = 0; i < oldWeights.length; i++) {
-                gradient[i] = gradient[i] / this.batchSize;
+                gradient[i] += diff * thisGradient[i];
             }
-            for (int i = 0; i < oldWeights.length; i++) {
-                this.adamMoment1[i] = this.adamMoment1[i] * this.beta1 + (1 - this.beta1) * gradient[i];
-                this.adamMoment2[i] = this.adamMoment2[i] * this.beta2 + (1 - this.beta2) * gradient[i] * gradient[i];
-            }
-            double[] newWeights = oldWeights.clone();
-            for (int i = 0; i < newWeights.length; i++) {
-                newWeights[i] -= this.alpha * Math.sqrt(1.0 - Math.pow(this.beta2, this.t))
-                        / (1.0 - Math.pow(this.beta1, this.t))
-                        * this.adamMoment1[i] / (Math.sqrt(this.adamMoment2[i] + this.epsilon));
-            }
+        }
+        for (int i = 0; i < oldWeights.length; i++) {
+            gradient[i] = gradient[i] / this.batchSize;
+        }
+        for (int i = 0; i < oldWeights.length; i++) {
+            this.adamMoment1[i] = this.adamMoment1[i] * this.beta1 + (1 - this.beta1) * gradient[i];
+            this.adamMoment2[i] = this.adamMoment2[i] * this.beta2 + (1 - this.beta2) * gradient[i] * gradient[i];
+        }
+        double[] newWeights = oldWeights.clone();
+        for (int i = 0; i < newWeights.length; i++) {
+            newWeights[i] -= this.alpha * Math.sqrt(1.0 - Math.pow(this.beta2, this.t))
+                    / (1.0 - Math.pow(this.beta1, this.t))
+                    * this.adamMoment1[i] / (Math.sqrt(this.adamMoment2[i] + this.epsilon));
+        }
 
-            return newWeights;
-        });
-        // Publish the generation only after the new immutable weight array is
-        // visible. A scheduler which overlaps this update may use either model
-        // for its current decision, but it will never publish a decision made
-        // against the replaced model after observing this increment.
-        this.generation.incrementAndGet();
+        // The generation and its immutable weights become visible together.
+        this.modelRef.set(new ModelSnapshot(oldModel.generation() + 1L, newWeights));
         this.t = this.t + 1;
         this.itemBatch.clear();
         if (logger.isDebugEnabled()) {
-            logger.debug("t: {}, learn predictor param: {}", this.t, formulaStringParam(this.weightsRef.get()));
+            logger.debug("t: {}, learn predictor param: {}", this.t, formulaStringParam(newWeights));
         }
     }
 

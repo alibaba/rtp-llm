@@ -1,7 +1,11 @@
 package org.flexlb.balance.scheduler.priority;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.DecisionGroupMetadata;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PriorityScheduler;
@@ -26,9 +30,12 @@ import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -38,6 +45,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -53,7 +61,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Rate-limited performance matrix for every legal scheduler/dispatcher pair.
+ * Rate-limited performance matrix for every legal scheduler, ordering,
+ * decision, and dispatcher combination.
  *
  * <p>The test deliberately enters through {@link RouteService}, including DIRECT,
  * so it measures the public configuration switch rather than calling a scheduler
@@ -84,6 +93,26 @@ class AutoTpmSchedulingOverheadPerfTest {
             "flexlb.perf.autotpm.requests", Math.max(1_024, TARGET_QPS));
     private static final long PHASE_TIMEOUT_SECONDS =
             Long.getLong("flexlb.perf.phase-timeout-seconds", 20L);
+    private static Logger flexlbLogger;
+    private static Logger syncLogger;
+    private static Level previousFlexlbLogLevel;
+    private static Level previousSyncLogLevel;
+
+    @BeforeAll
+    static void suppressHotPathLogging() {
+        flexlbLogger = (Logger) LoggerFactory.getLogger("flexlbLogger");
+        syncLogger = (Logger) LoggerFactory.getLogger("syncLogger");
+        previousFlexlbLogLevel = flexlbLogger.getLevel();
+        previousSyncLogLevel = syncLogger.getLevel();
+        flexlbLogger.setLevel(Level.ERROR);
+        syncLogger.setLevel(Level.WARN);
+    }
+
+    @AfterAll
+    static void restoreLogging() {
+        flexlbLogger.setLevel(previousFlexlbLogLevel);
+        syncLogger.setLevel(previousSyncLogLevel);
+    }
 
     @Test
     @Timeout(value = 120, unit = TimeUnit.SECONDS)
@@ -96,7 +125,7 @@ class AutoTpmSchedulingOverheadPerfTest {
         System.out.printf(
                 "Scheduling config matrix: target_qps=%d requests=%d topology=%dP/%dD%n",
                 TARGET_QPS, REQUEST_COUNT, PREFILL_WORKERS, DECODE_WORKERS);
-        System.out.printf("%-28s %-12s %-12s %-12s %-12s %-12s%n",
+        System.out.printf("%-42s %-12s %-12s %-12s %-12s %-12s%n",
                 "mode", "actual_qps", "e2e_p50_ms", "e2e_p90_ms",
                 "e2e_p99_ms", "e2e_avg_ms");
 
@@ -106,7 +135,7 @@ class AutoTpmSchedulingOverheadPerfTest {
                 runWarmup(harness);
                 result = runRateLimited(harness);
             }
-            System.out.printf("%-28s %-12.1f %-12.3f %-12.3f %-12.3f %-12.3f%n",
+            System.out.printf("%-42s %-12.1f %-12.3f %-12.3f %-12.3f %-12.3f%n",
                     mode.label, result.qps,
                     result.p50Ns / 1e6, result.p90Ns / 1e6,
                     result.p99Ns / 1e6, result.avgNs / 1e6);
@@ -168,22 +197,37 @@ class AutoTpmSchedulingOverheadPerfTest {
     }
 
     private enum Mode {
-        QUEUE_PRIORITY_BATCH("QUEUE+PRIORITY+BATCH", true, true, true),
-        QUEUE_FIFO_BATCH("QUEUE+FIFO+BATCH", true, true, false),
-        QUEUE_PRIORITY_NON_BATCH("QUEUE+PRIORITY+NON_BATCH", true, false, true),
-        QUEUE_FIFO_NON_BATCH("QUEUE+FIFO+NON_BATCH", true, false, false),
-        DIRECT_NON_BATCH("DIRECT+NON_BATCH", false, false, false);
+        QUEUE_PRIORITY_SINGLE_BATCH(
+                "QUEUE+PRIORITY+SINGLE+BATCH", true, true, true, false),
+        QUEUE_FIFO_SINGLE_BATCH(
+                "QUEUE+FIFO+SINGLE+BATCH", true, true, false, false),
+        QUEUE_PRIORITY_FIXED_WINDOW_BATCH(
+                "QUEUE+PRIORITY+FIXED_WINDOW+BATCH", true, true, true, true),
+        QUEUE_FIFO_FIXED_WINDOW_BATCH(
+                "QUEUE+FIFO+FIXED_WINDOW+BATCH", true, true, false, true),
+        QUEUE_PRIORITY_SINGLE_NON_BATCH(
+                "QUEUE+PRIORITY+SINGLE+NON_BATCH", true, false, true, false),
+        QUEUE_FIFO_SINGLE_NON_BATCH(
+                "QUEUE+FIFO+SINGLE+NON_BATCH", true, false, false, false),
+        QUEUE_PRIORITY_FIXED_WINDOW_NON_BATCH(
+                "QUEUE+PRIORITY+FIXED_WINDOW+NON_BATCH", true, false, true, true),
+        QUEUE_FIFO_FIXED_WINDOW_NON_BATCH(
+                "QUEUE+FIFO+FIXED_WINDOW+NON_BATCH", true, false, false, true),
+        DIRECT_NON_BATCH("DIRECT+NON_BATCH", false, false, false, false);
 
         private final String label;
         private final boolean queue;
         private final boolean batch;
         private final boolean priority;
+        private final boolean fixedWindow;
 
-        Mode(String label, boolean queue, boolean batch, boolean priority) {
+        Mode(String label, boolean queue, boolean batch,
+             boolean priority, boolean fixedWindow) {
             this.label = label;
             this.queue = queue;
             this.batch = batch;
             this.priority = priority;
+            this.fixedWindow = fixedWindow;
         }
 
         void configure(FlexlbConfig config) {
@@ -196,6 +240,11 @@ class AutoTpmSchedulingOverheadPerfTest {
                 SchedulingTestConfig.usePriorityQueue(config);
             } else {
                 SchedulingTestConfig.useFifoQueue(config);
+            }
+            if (fixedWindow) {
+                SchedulingTestConfig.useFixedWindowDecision(config);
+            } else {
+                SchedulingTestConfig.useSingleDecision(config);
             }
             if (batch) {
                 SchedulingTestConfig.useBatchDispatcher(config);
@@ -252,6 +301,7 @@ class AutoTpmSchedulingOverheadPerfTest {
         private final List<Object> decodeStatusLocks = new ArrayList<>();
         private final AtomicLong dispatchCount = new AtomicLong();
         private final AtomicLong completionCount = new AtomicLong();
+        private final AtomicInteger maxDecisionGroupSize = new AtomicInteger();
         private final AtomicReference<String> firstFailure = new AtomicReference<>();
 
         PerfHarness(Mode mode) {
@@ -333,7 +383,14 @@ class AutoTpmSchedulingOverheadPerfTest {
                     priorityReporter, reporter, new UnsupportedEngineCancelChannel());
             scheduler = new PriorityScheduler(
                     configService, router, endpointRegistry, dispatcher, reporter,
-                    priorityScheduler, null, new UnsupportedEngineCancelChannel());
+                    priorityScheduler, null, new UnsupportedEngineCancelChannel()) {
+                @Override
+                public void onDecisionGroupReady(
+                        List<BatchItem> items, DecisionGroupMetadata metadata) {
+                    maxDecisionGroupSize.accumulateAndGet(items.size(), Math::max);
+                    super.onDecisionGroupReady(items, metadata);
+                }
+            };
             schedulerRef.set(scheduler);
             routeService = new RouteService(
                     configService, router, scheduler, traceReporter);
@@ -353,13 +410,15 @@ class AutoTpmSchedulingOverheadPerfTest {
             }
             config.queueScheduler().getCapacity()
                     .setMaxOutstandingRequestsGlobal(requestedCapacity);
+            config.queueScheduler().getCapacity()
+                    .setMaxWaitingRequestsPerPrefillWorker(requestedCapacity);
             config.queueScheduler().getLifecycle()
                     .setMaxDeliveredNotAcceptedRequestsGlobal(requestedCapacity);
-            if (mode.batch) {
-                SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10L);
-                SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(16);
-                SchedulingTestConfig.useBatchDispatcher(config)
-                        .setMaxWaitingRequestsPerPrefillWorker(requestedCapacity);
+            if (mode.fixedWindow) {
+                SchedulingTestConfig.useFixedWindowDecision(config)
+                        .setMaxCollectionWaitMs(10L);
+                SchedulingTestConfig.useFixedWindowDecision(config)
+                        .setMaxRequests(16);
             }
         }
 
@@ -462,6 +521,19 @@ class AutoTpmSchedulingOverheadPerfTest {
                                 + " message=" + response.getErrorMessage());
                 assertEquals(mode.batch, response.isEnqueuedByMaster(),
                         () -> mode.label + " returned the wrong delivery protocol");
+            }
+            // A sparse, user-configured topology can legitimately time out
+            // every FIXED_WINDOW as a singleton. Require a multi-request group
+            // only when the unrated warmup provides at least two requests per
+            // Prefill worker; deterministic algorithm tests cover grouping for
+            // every topology independently of this load generator.
+            if (mode.queue && mode.fixedWindow
+                    && WARMUP_REQUESTS >= 2 * PREFILL_WORKERS) {
+                assertTrue(maxDecisionGroupSize.get() > 1,
+                        () -> mode.label + " never formed a multi-request decision group");
+            } else if (mode.queue && !mode.fixedWindow) {
+                assertEquals(1, maxDecisionGroupSize.get(),
+                        () -> mode.label + " did not preserve SINGLE decision groups");
             }
         }
 

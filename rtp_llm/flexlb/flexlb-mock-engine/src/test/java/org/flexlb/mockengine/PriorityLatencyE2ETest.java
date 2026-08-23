@@ -38,9 +38,9 @@ class PriorityLatencyE2ETest {
     void b_high_priority_dispatches_earlier_under_saturation() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false)) {
             // hold：批次上限大于总量 + 长 fixedWait → 零派发，队列稳定吸收提交
-            h.config.batchDispatcher().setMaxRequests(200);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
-            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(1024);
+            h.fixedWindowDecision().setMaxRequests(200);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
+            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
 
             Map<Long, Long> submitNanos = new HashMap<>();
             Map<Long, Integer> priorityByRid = new HashMap<>();
@@ -62,8 +62,8 @@ class PriorityLatencyE2ETest {
                     "all requests must be committed into the priority queue before release");
 
             // flip：小批次 + 短 fixedWait 放行派发，持续饱和下由优先级序主导
-            h.config.batchDispatcher().setMaxRequests(2);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(5);
+            h.fixedWindowDecision().setMaxRequests(2);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.startAutoPump(10);
 
             AutoTpmE2EHarness.await(

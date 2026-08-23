@@ -371,8 +371,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
             long serviceWaitMs = saturatingAdd(endpointWaitMs, singlePrefillMs);
             long pendingCount = ep.realPendingCount();
-            // Priority ordering adds the exact queue prefix estimate; FIFO
-            // batch dispatch uses the batcher's aggregate wait estimate.
+            // Both ordering modes add only the batcher's collection-delay
+            // estimate. Engine work is already represented by endpointWaitMs.
             long batcherWaitMs = estimatedBatcherWaitMs(
                     ep, balanceContext, schedulerOwnsRequest, priorityOrdered);
             long score = saturatingAdd(serviceWaitMs, batcherWaitMs);

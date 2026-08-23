@@ -7,6 +7,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.config.QueueSchedulerConfig;
+import org.flexlb.config.SingleDecisionConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -27,7 +28,7 @@ import static org.mockito.Mockito.mock;
 class PrefillRequestCapacityWakeTest {
 
     @Test
-    void releasingRequestSlotWakesCapacityBlockedReadyBacklog() throws Exception {
+    void releasingRequestSlotWakesCapacityBlockedActiveRequest() throws Exception {
         CountDownLatch delivered = new CountDownLatch(1);
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 workerStatus(), config(), new DecisionGroupHandler() {
@@ -44,7 +45,11 @@ class PrefillRequestCapacityWakeTest {
 
             long beforeOfferVersion = endpoint.getBatcher().queueVersion();
             assertTrue(endpoint.getBatcher().tryOffer(batchItem(2)));
-            awaitTrue(() -> endpoint.getBatcher().queueVersion() > beforeOfferVersion + 1);
+            long enqueuedVersion = beforeOfferVersion + 1;
+            awaitTrue(() -> endpoint.getBatcher().queueSize() == 1
+                    && endpoint.getBatcher().queueVersion() == enqueuedVersion);
+            assertEquals(enqueuedVersion, endpoint.getBatcher().queueVersion(),
+                    "capacity-blocked SINGLE request must remain in the active queue");
             assertEquals(1, delivered.getCount());
 
             assertTrue(endpoint.releaseRequest(1));
@@ -59,6 +64,7 @@ class PrefillRequestCapacityWakeTest {
         FlexlbConfig config = new FlexlbConfig();
         QueueSchedulerConfig scheduler = new QueueSchedulerConfig();
         scheduler.setOrdering(new PriorityOrderingConfig());
+        scheduler.setDecision(new SingleDecisionConfig());
         scheduler.getCapacity().setMaxOutstandingRequestsGlobal(16);
         NonBatchDispatcherConfig dispatcher = new NonBatchDispatcherConfig();
         dispatcher.setMaxInflightRequestsPerPrefillWorker(1);

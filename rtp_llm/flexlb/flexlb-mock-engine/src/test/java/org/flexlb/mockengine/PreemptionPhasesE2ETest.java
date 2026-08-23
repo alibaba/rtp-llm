@@ -2,7 +2,6 @@ package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -15,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -51,10 +49,10 @@ class PreemptionPhasesE2ETest {
     void a1_queue_full_evicts_lowest_priority_victim_with_8400_yielded() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "50", 1.0, false)) {
             h.allowPreemption(VictimStage.PREFILL_QUEUED);
-            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(2);
+            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(2);
             // 大窗口停住派发：队列状态稳定可断言
-            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
-            h.config.batchDispatcher().setMaxRequests(100);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
+            h.fixedWindowDecision().setMaxRequests(100);
 
             CompletableFuture<Response> low1 = h.scheduler.submit(h.context(101, 30));
             CompletableFuture<Response> low2 = h.scheduler.submit(h.context(102, 40));
@@ -90,8 +88,8 @@ class PreemptionPhasesE2ETest {
             h.allowPreemption(VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
-            h.config.batchDispatcher().setMaxRequests(100);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
+            h.fixedWindowDecision().setMaxRequests(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             h.setDecodeKvCapacity(0, 128, 256);
@@ -129,8 +127,8 @@ class PreemptionPhasesE2ETest {
             h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
-            h.config.batchDispatcher().setMaxRequests(100);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
+            h.fixedWindowDecision().setMaxRequests(100);
             h.config.priorityOrdering().getPreemption().getEngineCancellation()
                     .setCompletionTimeoutMs(3_000);
 
@@ -202,8 +200,8 @@ class PreemptionPhasesE2ETest {
             h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
-            h.config.batchDispatcher().setMaxRequests(100);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
+            h.fixedWindowDecision().setMaxRequests(100);
             // 短等待窗口 + 不泵 → 引擎释放永远得不到确认 → 超时
             h.config.priorityOrdering().getPreemption().getEngineCancellation()
                     .setCompletionTimeoutMs(100);
@@ -258,9 +256,9 @@ class PreemptionPhasesE2ETest {
             h.allowPreemption(VictimStage.PREFILL_QUEUED, VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(1);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
-            h.config.batchDispatcher().setMaxRequests(100);
+            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
+            h.fixedWindowDecision().setMaxRequests(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             h.setDecodeKvCapacity(0, 128, 256);

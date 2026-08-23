@@ -356,9 +356,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     /**
-     * Estimate all work already ahead of a request. Queue-scheduler-owned paths include
-     * both dispatched inflight work and the per-worker batcher queue; otherwise only the
-     * inflight ledger is relevant. Long.MAX_VALUE remains an unavailable sentinel.
+     * Estimate dispatched inflight work plus the decision policy's additional
+     * collection delay. Long.MAX_VALUE remains an unavailable sentinel.
      */
     protected long estimatedQueueWaitMs(PrefillEndpoint ep, BalanceContext balanceContext) {
         long inflightWaitMs = ep.realWaitTimeMs();

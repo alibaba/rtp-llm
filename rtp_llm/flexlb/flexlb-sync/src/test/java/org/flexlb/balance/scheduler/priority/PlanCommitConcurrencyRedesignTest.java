@@ -98,8 +98,9 @@ class PlanCommitConcurrencyRedesignTest {
         priorityReporter = mock(PrioritySchedulerReporter.class);
 
         config = new FlexlbConfig();
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(2);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
         SchedulingTestConfig.usePriorityQueue(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -156,7 +157,8 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void c1_queued_reservations_do_not_saturate_engine_concurrency() throws Exception {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100); // batch never fills → items stay queued
+        SchedulingTestConfig.useFixedWindowDecision(config)
+                .setMaxRequests(100); // batch never fills → items stay queued
         decodeWs.setAlive(true);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
@@ -199,7 +201,8 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void p1_1_immediate_dispatch_does_not_leave_stale_queued_mark() throws Exception {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1); // dispatch immediately on offer
+        SchedulingTestConfig.useFixedWindowDecision(config)
+                .setMaxRequests(1); // dispatch immediately on offer
         decodeWs.setAlive(true);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
@@ -360,7 +363,7 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void commit_ignores_unrelated_queue_mutation() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(2);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
 
         AtomicInteger routeCalls = new AtomicInteger();
@@ -393,7 +396,7 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void capacity_fast_rejects_after_primary_and_one_fallback_offer() throws Exception {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
         // Route performs the decode reservation (D reserve first), like production
@@ -426,7 +429,7 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void presence_replace_survives_unrelated_queue_mutation() {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
         assertTrue(batcher.tryOffer(dummyItem(601))); // victim
@@ -445,7 +448,7 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void n3_presence_replace_victim_gone_is_zero_side_effect() {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
         assertTrue(batcher.tryOffer(dummyItem(701)));

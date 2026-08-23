@@ -126,10 +126,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return batcher.queueWaitMs();
     }
 
-    /**
-     * Auto-TPM priority-aware queue wait estimate (design doc 8.4):
-     * counts only items ordered ahead of the incoming request.
-     */
+    /** Priority-aware estimate of additional fixed-window collection delay. */
     public long batcherEstimatedWaitMs(int priority, long requestId) {
         return batcher.queueManager().estimateWaitMs(priority, requestId);
     }

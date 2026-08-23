@@ -3,7 +3,9 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.BatchDispatcherConfig;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.FixedWindowDecisionConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -38,6 +40,9 @@ public class BatcherContext {
     private final String key;
     private final PrefillEndpoint prefillEp;
     private final FlexlbConfig cfg;
+    private final FixedWindowDecisionConfig fixedWindowDecision;
+    private final boolean explicitDecisionPolicy;
+    private final Long legacyPredictionTriggerMs;
     private final DecisionGroupHandler decisionHandler;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth;
@@ -106,9 +111,18 @@ public class BatcherContext {
     enum PendingClaimResult { CLAIMED, STOPPED, NOT_PENDING }
     enum ReadyDeliveryResult { EMPTY, CAPACITY_BLOCKED, DELIVERED }
 
-    /** Decision-interval sliding average for the queue wait estimate. */
-    private volatile long lastDecisionAtMs;
-    private volatile double decisionIntervalEmaMs;
+    /**
+     * A delivery attempt returned queue ownership and should not be retried in
+     * a tight loop. Produced under {@link #queueLock} by every successful
+     * restore and consumed by the owning worker after the callback returns.
+     */
+    record DeliveryRetrySignal(boolean active, boolean ready,
+                               BatchItem activeRetryItem) {
+    }
+
+    private boolean activeDeliveryRetryPending;
+    private boolean readyDeliveryRetryPending;
+    private BatchItem activeDeliveryRetryItem;
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    DecisionGroupHandler decisionHandler,
@@ -137,6 +151,15 @@ public class BatcherContext {
         this.key = key;
         this.prefillEp = prefillEp;
         this.cfg = cfg;
+        this.explicitDecisionPolicy = cfg.hasExplicitDecisionPolicy();
+        DecisionPolicyConfig resolvedDecision = cfg.isQueue()
+                ? cfg.decisionPolicy() : null;
+        this.fixedWindowDecision = resolvedDecision instanceof FixedWindowDecisionConfig fixed
+                ? fixed : null;
+        this.legacyPredictionTriggerMs = !explicitDecisionPolicy
+                && cfg.isQueue()
+                && cfg.getDispatcher() instanceof BatchDispatcherConfig batch
+                ? batch.getEarlyDispatchPredictedExecutionMs() : null;
         this.decisionHandler = decisionHandler;
         this.queue = queue;
         this.queueDepth = queueDepth;
@@ -162,6 +185,13 @@ public class BatcherContext {
     }
 
     int maxQueueCapacity() {
+        if (cfg.isQueue()) {
+            Integer configured = cfg.queueScheduler().getCapacity()
+                    .getMaxWaitingRequestsPerPrefillWorker();
+            if (configured != null) {
+                return configured;
+            }
+        }
         if (cfg.getDispatcher() instanceof BatchDispatcherConfig batch) {
             return batch.getMaxWaitingRequestsPerPrefillWorker();
         }
@@ -169,13 +199,12 @@ public class BatcherContext {
     }
 
     /**
-     * Largest decision group this dispatcher may release at once. NON_BATCH
-     * decides one request at a time, so its group is complete on arrival.
+     * Largest group the queue's decision policy may release at once. Delivery
+     * ownership is deliberately not consulted here.
      */
     int maxDecisionRequests() {
-        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
-                ? Math.max(1, batch.getMaxRequests())
-                : 1;
+        return fixedWindowDecision == null
+                ? 1 : Math.max(1, fixedWindowDecision.getMaxRequests());
     }
 
     /**
@@ -184,9 +213,8 @@ public class BatcherContext {
      * window to spend.
      */
     long collectionWindowMs() {
-        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
-                ? Math.max(0L, batch.getMaxCollectionWaitMs())
-                : 0L;
+        return fixedWindowDecision == null
+                ? 0L : Math.max(0L, fixedWindowDecision.getMaxCollectionWaitMs());
     }
 
     /**
@@ -194,11 +222,27 @@ public class BatcherContext {
      * budget applies. A single-request group has nothing to cap.
      */
     long predictedExecutionBudgetMs() {
-        if (!(cfg.getDispatcher() instanceof BatchDispatcherConfig batch)) {
+        if (fixedWindowDecision == null) {
             return 0L;
         }
-        Long configured = batch.getEarlyDispatchPredictedExecutionMs();
+        Long configured;
+        if (explicitDecisionPolicy) {
+            configured = fixedWindowDecision.getMaxPredictedExecutionMs();
+        } else {
+            // Schema-v1 compatibility: this uses a >= boundary and leaves the
+            // additional member that reaches it queued. The explicit maximum
+            // instead uses a strict > boundary, so equality is allowed there.
+            // Snapshot the trigger with the other legacy decision fields so
+            // later dispatcher mutation cannot redefine the decision axis.
+            configured = legacyPredictionTriggerMs;
+        }
         return configured == null ? 0L : configured;
+    }
+
+    boolean usesStrictPredictedExecutionLimit() {
+        return explicitDecisionPolicy
+                && fixedWindowDecision != null
+                && fixedWindowDecision.getMaxPredictedExecutionMs() != null;
     }
 
     BatchSchedulerReporter reporter() {
@@ -247,16 +291,40 @@ public class BatcherContext {
      * holds nothing.
      */
     long oldestActiveEnqueuedAtMs() {
-        return queueWaitView().oldestEnqueuedAtMs();
+        long oldest = Long.MAX_VALUE;
+        for (BatchItem item : queue) {
+            oldest = Math.min(oldest, item.enqueuedAtMs());
+        }
+        return oldest;
     }
 
     /**
-     * Active decision-queue depth. The common no-backlog path preserves the
-     * existing charged-depth read exactly; only a live ready backlog needs the
-     * physical queue size to exclude already-decided requests.
+     * Absolute expiration of the currently processable route head.
+     *
+     * <p>The worker consults this while holding {@link #queueLock} before it
+     * waits for a request-mode slot. A later expired member is intentionally
+     * not used as the deadline: queue ordering prevents it from being handled
+     * before this head, so repeatedly timing out on it would create a spin.
+     */
+    long activeRouteHeadExpirationAtMs() {
+        BatchItem head = queue.peek();
+        return head != null && head.deliveryMode() == DeliveryMode.ROUTE_DECISION
+                ? head.ctx().getRequestExpiresAtMs() : Long.MAX_VALUE;
+    }
+
+    /** Whether the currently processable ordered head needs a route slot. */
+    boolean activeHeadUsesRouteDelivery() {
+        BatchItem head = queue.peek();
+        return head != null && head.deliveryMode() == DeliveryMode.ROUTE_DECISION;
+    }
+
+    /**
+     * Physical active decision-queue depth. Charged depth also includes ready
+     * and callback-pending delivery ownership, neither of which may be counted
+     * as candidates for a new logical decision.
      */
     int activeSize() {
-        return readyDeliveryCount == 0 ? queueDepth.get() : queue.size();
+        return queue.size();
     }
 
     int size() {
@@ -389,36 +457,35 @@ public class BatcherContext {
     }
 
     /**
-     * Probe-independent ordering state of the queued work at one queue version:
-     * the ready count that drains first, the oldest active enqueue time, and the
-     * active members an incoming probe is positioned against.
+     * Compact priority-position cache for the current queue version. It keeps
+     * only primitive counts, never request objects or futures.
      */
-    private record QueueWaitView(long version,
-                                 int readySize,
-                                 long oldestEnqueuedAtMs,
-                                 BatchItem[] activeItems) {
+    private record QueuePositionView(long version,
+                                     int activeSize,
+                                     int[] activeCountByPriority) {
     }
 
-    private volatile QueueWaitView queueWaitView;
+    private volatile QueuePositionView queuePositionView;
 
-    /**
-     * The ordering view for the current queue version, captured on the first
-     * estimate after a mutation and shared by every later probe until the next
-     * one. "Version unchanged ⇒ queue content unchanged" makes a matching view
-     * exactly as current as reading the containers directly.
-     */
-    private QueueWaitView queueWaitView() {
-        QueueWaitView view = queueWaitView;
+    private QueuePositionView queuePositionView() {
+        QueuePositionView view = queuePositionView;
         if (view != null && view.version() == queueVersion.get()) {
             return view;
         }
         queueLock.lock();
         try {
             long version = queueVersion.get();
-            view = queueWaitView;
+            view = queuePositionView;
             if (view == null || view.version() != version) {
-                view = captureQueueWaitView(version);
-                queueWaitView = view;
+                int[] counts = new int[101];
+                int activeSize = 0;
+                for (BatchItem item : queue) {
+                    int normalizedPriority = Math.max(1, Math.min(100, item.priority()));
+                    counts[normalizedPriority]++;
+                    activeSize++;
+                }
+                view = new QueuePositionView(version, activeSize, counts);
+                queuePositionView = view;
             }
             return view;
         } finally {
@@ -426,74 +493,43 @@ public class BatcherContext {
         }
     }
 
-    /** Caller holds {@link #queueLock}. */
-    private QueueWaitView captureQueueWaitView(long version) {
-        BatchItem[] activeItems = queue.toArray(new BatchItem[0]);
-        long oldestEnqueuedAtMs = Long.MAX_VALUE;
-        for (BatchItem item : activeItems) {
-            oldestEnqueuedAtMs = Math.min(oldestEnqueuedAtMs, item.enqueuedAtMs());
-        }
-        // Every physical ready member is ahead regardless of priority. Read the
-        // container, not the advisory volatile counter.
-        return new QueueWaitView(version, readyDeliveryQueue.size(),
-                oldestEnqueuedAtMs, activeItems);
-    }
-
     /**
-     * Estimate the wait position of an incoming Auto-TPM request without
-     * materializing and sorting the endpoint queue.
+     * Estimate only the additional fixed-window collection delay for an
+     * incoming priority request. Engine execution and request-slot turnover are
+     * already accounted by the endpoint ledgers and must not be fabricated from
+     * the wall-clock interval between unrelated logical decisions.
      *
-     * <p>Every ready route decision drains before the active queue, so only
-     * its count is needed. For active requests, the number ordered before the
-     * incoming probe is independent of iteration order, while the view's head
-     * is the same active head that a sorted copy would expose. Both come from
-     * one {@link QueueWaitView}, so the probe reduces to an allocation-free
-     * {@code O(N)} scan over published state.
+     * <p>The estimate is zero when the incoming request's ordered group can be
+     * filled by members already active behind it; otherwise it is the configured
+     * window. Resource-shape filtering can still make the actual delay larger;
+     * no request-shape information exists at this probe boundary.
      */
     long estimateIncomingWaitMs(int priority, long arrivalMs, long requestId) {
-        if (isEmpty()) {
-            // An idle worker holds no ordering state worth retaining.
-            if (queueWaitView != null) {
-                queueWaitView = null;
-            }
+        int maxRequests = maxDecisionRequests();
+        if (maxRequests <= 1) {
             return 0L;
         }
-        QueueWaitView view = queueWaitView();
+        QueuePositionView view = queuePositionView();
+        int normalizedPriority = Math.max(1, Math.min(100, priority));
         int activeItemsAhead = 0;
-        for (BatchItem item : view.activeItems()) {
-            if (PriorityOrdering.comesBefore(
-                    item, item.requestId(), priority, arrivalMs, requestId)) {
-                activeItemsAhead++;
-            }
+        for (int existingPriority = normalizedPriority;
+             existingPriority <= 100; existingPriority++) {
+            activeItemsAhead += view.activeCountByPriority()[existingPriority];
         }
-        long perCycleMs = avgDecisionIntervalMs();
-        // Ready members are request-accounted: the delivery cap may permit only
-        // individual deliveries, so each one charges a whole cycle instead of
-        // collapsing into a shared logical batch.
-        long readyDrainMs = (long) view.readySize() * perCycleMs;
-        long activeDrainMs =
-                (long) (activeItemsAhead / maxDecisionRequests()) * perCycleMs;
-        return readyDrainMs + activeDrainMs
-                + remainingWindowMs(view.oldestEnqueuedAtMs(), arrivalMs);
+        int membersAtOrBehindProbe = view.activeSize() - activeItemsAhead + 1;
+        int openSlots = maxRequests - activeItemsAhead % maxRequests;
+        return membersAtOrBehindProbe >= openSlots ? 0L : collectionWindowMs();
     }
 
-    /**
-     * Unelapsed part of the collection window the queued work already sits in.
-     * An incoming probe cannot know which group the batcher will pick next, so
-     * the window is measured over the whole active queue: its longest-waiting
-     * member bounds how much of the window any picked group has consumed.
-     */
-    private long remainingWindowMs(long windowOpenedAtMs, long nowMs) {
-        if (windowOpenedAtMs == Long.MAX_VALUE) {
+    /** Same collection-delay estimate for a FIFO probe appended at the tail. */
+    long estimateFifoWaitMs() {
+        int maxRequests = maxDecisionRequests();
+        if (maxRequests <= 1) {
             return 0L;
         }
-        long elapsedMs = Math.max(0L, nowMs - windowOpenedAtMs);
-        return Math.max(0L, collectionWindowMs() - elapsedMs);
-    }
-
-    int queueWaitViewRetainedItemsForTest() {
-        QueueWaitView view = queueWaitView;
-        return view == null ? 0 : view.activeItems().length;
+        int activeItemsAhead = activeSize();
+        int openSlots = maxRequests - activeItemsAhead % maxRequests;
+        return openSlots == 1 ? 0L : collectionWindowMs();
     }
 
     BatchItem findQueued(long requestId) {
@@ -621,12 +657,6 @@ public class BatcherContext {
      * before calling this.
      */
     void stageForDelivery(List<BatchItem> items, DecisionGroupMetadata metadata) {
-        // The decision-interval EMA only feeds the PRIORITY queue-wait
-        // estimate (PrefillQueueManager.estimateWaitMs); FIFO does not need
-        // this synchronized bookkeeping.
-        if (cfg.isPriorityOrdering()) {
-            recordDecisionInterval(now());
-        }
         deliverStaged(stageRequests(items), metadata);
     }
 
@@ -655,9 +685,6 @@ public class BatcherContext {
             return;
         }
 
-        if (cfg.isPriorityOrdering()) {
-            recordDecisionInterval(now());
-        }
         List<BatchItem> staged = stageDecisionGroup(
                 logicalGroup, availableDeliverySlots(), metadata.reason());
         deliverStaged(staged,
@@ -713,12 +740,27 @@ public class BatcherContext {
                     != expectedPredictorGeneration)) {
                 return false;
             }
-            if (cfg.isPriorityOrdering()) {
-                recordDecisionInterval(now());
+            long nowMs = now();
+            for (BatchItem item : logicalGroup) {
+                if (item.ctx().requestExpired(nowMs)) {
+                    return false;
+                }
+            }
+            // Read request-mode capacity once inside the atomic staging
+            // section. Besides making this one coherent staging decision, the
+            // snapshot prevents a cap transition between a first zero-check
+            // and a second value passed to stageDecisionGroup.
+            int availableRouteSlots = containsRouteDecision
+                    ? availableDeliverySlots() : Integer.MAX_VALUE;
+            // When no route slot is available, keep the group active. This is
+            // especially important for SINGLE: "cannot decide yet" means the
+            // request remains ordered in the worker queue.
+            if (containsRouteDecision && availableRouteSlots == 0) {
+                return false;
             }
             if (containsRouteDecision) {
                 staged = stageDecisionGroup(
-                        logicalGroup, availableDeliverySlots(), metadata.reason());
+                        logicalGroup, availableRouteSlots, metadata.reason());
                 stagedMetadata = new DecisionGroupMetadata(
                         metadata.reason(), liveQueuedDepth());
             } else {
@@ -773,7 +815,13 @@ public class BatcherContext {
         }
         deliverStaged(readyStage.items(),
                 new DecisionGroupMetadata(readyStage.reason(), readyStage.queueDepth()));
-        return ReadyDeliveryResult.DELIVERED;
+        // A hard Decode claim can fail after the advisory Prefill request-slot
+        // gate passed. The scheduler then restores the item to this ready
+        // backlog. Report that as capacity-blocked so the worker may process
+        // unrelated active work instead of retrying the same ready head forever.
+        return readyStage.items().get(0).readyDeliveryReason() != null
+                ? ReadyDeliveryResult.CAPACITY_BLOCKED
+                : ReadyDeliveryResult.DELIVERED;
     }
 
     private void deliverStaged(List<BatchItem> staged, DecisionGroupMetadata metadata) {
@@ -1100,11 +1148,42 @@ public class BatcherContext {
             if (pending.restoresToReadyQueue()) {
                 readyDeliveryQueue.add(item);
                 readyDeliveryCount++;
+                readyDeliveryRetryPending = true;
             } else {
                 queue.add(item);
+                activeDeliveryRetryPending = true;
+                if (activeDeliveryRetryItem == null
+                        || queueOrder.compare(item, activeDeliveryRetryItem) < 0) {
+                    activeDeliveryRetryItem = item;
+                }
             }
             queueVersion.incrementAndGet();
             return PendingRestoreResult.RESTORED;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /**
+     * Consume the coalesced restore signal without allocating on the normal
+     * no-restore path. Multiple members restored by one callback share one
+     * retry interval; for active work the earliest restored queue member is the
+     * retry fence, so a newly-arrived higher-priority head is never delayed.
+     */
+    DeliveryRetrySignal consumeDeliveryRetrySignal() {
+        queueLock.lock();
+        try {
+            if (!activeDeliveryRetryPending && !readyDeliveryRetryPending) {
+                return null;
+            }
+            DeliveryRetrySignal signal = new DeliveryRetrySignal(
+                    activeDeliveryRetryPending,
+                    readyDeliveryRetryPending,
+                    activeDeliveryRetryItem);
+            activeDeliveryRetryPending = false;
+            readyDeliveryRetryPending = false;
+            activeDeliveryRetryItem = null;
+            return signal;
         } finally {
             queueLock.unlock();
         }
@@ -1175,31 +1254,9 @@ public class BatcherContext {
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
-        remove(head);
-        decisionHandler.onExpired(head);
-    }
-
-    // ---- decision interval estimation (design doc 8.4) ----
-
-    private synchronized void recordDecisionInterval(long nowMs) {
-        if (lastDecisionAtMs > 0 && nowMs > lastDecisionAtMs) {
-            long intervalMs = nowMs - lastDecisionAtMs;
-            decisionIntervalEmaMs = decisionIntervalEmaMs <= 0
-                    ? intervalMs
-                    : 0.3 * intervalMs + 0.7 * decisionIntervalEmaMs;
+        if (remove(head)) {
+            decisionHandler.onExpired(head);
         }
-        lastDecisionAtMs = nowMs;
     }
 
-    /**
-     * Sliding-average interval between logical decision releases; before any
-     * release is observed, falls back to the fixed grouping window.
-     */
-    long avgDecisionIntervalMs() {
-        double ema = decisionIntervalEmaMs;
-        if (ema > 0) {
-            return Math.max(1, Math.round(ema));
-        }
-        return Math.max(1, collectionWindowMs());
-    }
 }

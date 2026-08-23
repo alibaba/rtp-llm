@@ -18,8 +18,12 @@
         }
       }
     },
+    "decision": {
+      "type": "SINGLE"
+    },
     "capacity": {
-      "maxOutstandingRequestsGlobal": 500000
+      "maxOutstandingRequestsGlobal": 500000,
+      "maxWaitingRequestsPerPrefillWorker": 102400
     },
     "lifecycle": {
       "staleInflightTimeoutMs": 300000,

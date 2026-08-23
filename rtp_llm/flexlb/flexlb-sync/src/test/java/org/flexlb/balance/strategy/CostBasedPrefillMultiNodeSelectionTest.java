@@ -102,14 +102,17 @@ class CostBasedPrefillMultiNodeSelectionTest {
 
     @Test
     void autoTpmScoringPrefersEndpointWhoseQueueYieldsToIncomingPriority() {
-        // w1 队列 40 个 P70（全部排在 P50 前 → 4 个 batch cycle ≈ 4000ms），
-        // w2 队列 40 个 P30（全部排在 P50 后 → 0ms）。除队列优先级构成外
-        // 两 endpoint 完全对称 → 必选 w2，证明评分是优先级感知的。
+        // w1 队列 40 个 P70：P50 probe 会开启一个不完整的新组，额外 collection
+        // delay=1000ms；w2 的 40 个 P30 可直接填满 probe 所在组，delay=0。
+        // 除队列优先级构成外两 endpoint 完全对称 → 必选 w2。
         setUpAutoTpmBatcherConfig();
         PrefillEndpoint w1 = parkedEndpoint("10.0.0.1");
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
         fillQueue(w1, 70, 40, 1000);
         fillQueue(w2, 30, 40, 2000);
+
+        assertEquals(1_000L, w1.batcherEstimatedWaitMs(50, 9001L));
+        assertEquals(0L, w2.batcherEstimatedWaitMs(50, 9001L));
 
         ServerStatus result = strategy.select(
                 priorityContext(9001L, 50), RoleType.PREFILL, null);
@@ -127,6 +130,9 @@ class CostBasedPrefillMultiNodeSelectionTest {
         PrefillEndpoint w2 = parkedEndpoint("10.0.0.2");
         fillQueue(w1, 30, 40, 1000);
         fillQueue(w2, 70, 40, 2000);
+
+        assertEquals(0L, w1.batcherEstimatedWaitMs(50, 9002L));
+        assertEquals(1_000L, w2.batcherEstimatedWaitMs(50, 9002L));
 
         ServerStatus result = strategy.select(
                 priorityContext(9002L, 50), RoleType.PREFILL, null);
@@ -203,7 +209,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
                 RoleType.PREFILL, ip + ":8080", w);
         createdEndpoints.add(ep);
         // 两 endpoint 使用同样的 predictMs，endpointWaitMs 对称抵消（几 ms 漂移
-        // 远小于 batcherEstimatedWaitMs 的 cycle 差 4000ms）
+        // 远小于 1000ms 的 collection-delay 差）
         ep.commitBatch(800_000L + ip.hashCode(), 60_000, List.of());
         return ep;
     }

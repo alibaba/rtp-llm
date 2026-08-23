@@ -51,8 +51,10 @@ class PriorityAdmissionTimeoutClassificationTest {
     void setUp() {
         config = new FlexlbConfig();
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config)
+                .setMaxCollectionWaitMs(3_600_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(100);
         startScheduler();
     }
@@ -208,7 +210,7 @@ class PriorityAdmissionTimeoutClassificationTest {
 
     @Test
     @Timeout(5)
-    void fifoNonBatchCapacityReleaseWakesReadyRequestWithoutDeadlineOrNewRequest()
+    void fifoNonBatchCapacityReleaseWakesActiveRequestWithoutDeadlineOrNewRequest()
             throws Exception {
         restartFifoNonBatchWithOneInflight();
         assertTrue(prefillEndpoint.tryCommitRequest(9_997L, 1_000L, 1));
@@ -216,7 +218,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         long beforeSubmitVersion = batcher.queueVersion();
 
         CompletableFuture<Response> future = scheduler.submit(expiringContext(57L));
-        awaitCapacityBlockedReadyState(batcher, beforeSubmitVersion);
+        awaitCapacityBlockedActiveState(batcher, beforeSubmitVersion);
         assertFalse(future.isDone());
 
         assertTrue(prefillEndpoint.releaseRequest(9_997L));
@@ -254,6 +256,7 @@ class PriorityAdmissionTimeoutClassificationTest {
             throws Exception {
         scheduler.shutdown();
         SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useSingleDecision(config);
         SchedulingTestConfig.useNonBatchDispatcher(config)
                 .setMaxInflightRequestsPerPrefillWorker(10);
         ControlledRouteDelivery delivery = new ControlledRouteDelivery();
@@ -292,6 +295,7 @@ class PriorityAdmissionTimeoutClassificationTest {
     private void restartFifoNonBatchWithOneInflight() {
         scheduler.shutdown();
         SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useSingleDecision(config);
         SchedulingTestConfig.useNonBatchDispatcher(config)
                 .setMaxInflightRequestsPerPrefillWorker(1);
         startScheduler();
@@ -314,18 +318,19 @@ class PriorityAdmissionTimeoutClassificationTest {
         assertEquals(expected, prefillEndpoint.getBatcher().queueSize());
     }
 
-    private static void awaitCapacityBlockedReadyState(
+    private static void awaitCapacityBlockedActiveState(
             WorkerBatcher batcher, long beforeSubmitVersion) {
+        long enqueuedVersion = beforeSubmitVersion + 1;
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
         while (!(batcher.queueSize() == 1
-                && batcher.queueVersion() >= beforeSubmitVersion + 2
+                && batcher.queueVersion() == enqueuedVersion
                 && batcher.isWaitingForSignal())
                 && System.nanoTime() < deadlineNanos) {
             Thread.onSpinWait();
         }
         assertEquals(1, batcher.queueSize());
-        assertTrue(batcher.queueVersion() >= beforeSubmitVersion + 2,
-                "request did not transition from active FIFO work to ready delivery");
+        assertEquals(enqueuedVersion, batcher.queueVersion(),
+                "capacity-blocked SINGLE request must remain in the active queue");
         assertTrue(batcher.isWaitingForSignal(),
                 "capacity-blocked FIFO worker did not park on the shared condition");
     }

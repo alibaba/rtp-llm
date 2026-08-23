@@ -54,8 +54,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -84,8 +84,9 @@ class PrioritySchedulerTest {
         cancelChannel = mock(EngineCancelChannel.class);
 
         config = new FlexlbConfig();
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(2);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(10_000);
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.tombstoned()));
@@ -154,8 +155,9 @@ class PrioritySchedulerTest {
     @Test
     void canonicalDiagnosticsReadWorkerQueueAndSchedulerLifecycle() throws Exception {
         SchedulingTestConfig.useFifoQueue(config);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(2);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(60_000);
 
         CompletableFuture<Response> pending = scheduler.submit(context(90_010L));
         awaitCondition(() -> scheduler.getQueuedRequestCount() == 1);
@@ -229,8 +231,9 @@ class PrioritySchedulerTest {
     void decodeDispatchLimit_sameDpBatchSendsOnlyFreeSlot_thenDispatchesEachItemOnce()
             throws Exception {
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(20);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(20);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(0);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(5L);
         PrefillEndpoint prefill = replacePrefillEndpoint();
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
@@ -267,9 +270,7 @@ class PrioritySchedulerTest {
         // Free exactly one slot. The next head may dispatch once, while all
         // other members remain charged and queued at the limit.
         decode.release(firstSent.getFirst());
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(19);
         awaitCondition(() -> sentBatches.size() == 2
-                && prefill.getBatcher().pendingDeliveryCount() == 0
                 && prefill.getBatcher().queueSize() == 18
                 && futures.stream().filter(CompletableFuture::isDone).count() >= 2);
         List<Long> allSent = sentBatches.stream()
@@ -284,7 +285,7 @@ class PrioritySchedulerTest {
     @Test
     void decodeDispatchClaimException_completesPendingAndTerminatesMember() throws Exception {
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
         PrefillEndpoint prefill = replacePrefillEndpoint();
         DecodeEndpoint realDecode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         DecodeEndpoint throwingDecode = org.mockito.Mockito.spy(realDecode);
@@ -314,8 +315,8 @@ class PrioritySchedulerTest {
     @Test
     void decodeDispatchLimit_fullDpDoesNotBlockAnotherDpInSameBatch() throws Exception {
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(2);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(60_000);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(2);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(60_000);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(5L);
         PrefillEndpoint prefill = replacePrefillEndpoint();
         DecodeEndpoint full = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
@@ -418,7 +419,7 @@ class PrioritySchedulerTest {
 
     @Test
     void worker_completion_before_enqueue_ack_still_completes_schedule_future() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ackFuture = new CompletableFuture<>();
         CountDownLatch enqueueStarted = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
@@ -472,6 +473,7 @@ class PrioritySchedulerTest {
     void routeDecisionMode_honorsRequestCap_withoutBatchEnqueue_andReleasesOnTerminal()
             throws Exception {
         SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useSingleDecision(config);
         SchedulingTestConfig.useNonBatchDispatcher(config)
                 .setMaxInflightRequestsPerPrefillWorker(1);
 
@@ -1131,7 +1133,7 @@ class PrioritySchedulerTest {
 
     @Test
     void submit_rejects_when_global_inflight_limit_reached() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
         config.queueScheduler().getCapacity().setMaxOutstandingRequestsGlobal(1);
 
         CountDownLatch batchBlocked = new CountDownLatch(1);
@@ -1507,7 +1509,7 @@ class PrioritySchedulerTest {
 
     @Test
     void mismatched_generate_input_request_id_fails_before_batch_enqueue() throws Exception {
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
 
         CompletableFuture<Response> future = scheduler.submit(context(31, 999));
 
@@ -1678,7 +1680,7 @@ class PrioritySchedulerTest {
 
         SchedulingTestConfig.useBatchDispatcher(config)
                 .setMaxInflightBatchesPerPrefillWorker(1);
-        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
         assertTrue(scheduler.submit(context(304)).get(2, TimeUnit.SECONDS).isSuccess());
         assertEquals(1, sentBatches.size(),
                 "after authoritative settlement, maxInflight=1 admits the next batch");

@@ -43,9 +43,9 @@ class LeakCanaryLongRunE2ETest {
             h.allowPreemption(VictimStage.PREFILL_QUEUED);
             // PR-D: rescue removed — reducer deadline + AdmissionLease handle expiry
             // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
-            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(64);
-            h.config.batchDispatcher().setMaxRequests(4);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(5);
+            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(64);
+            h.fixedWindowDecision().setMaxRequests(4);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             // This canary verifies queue eviction and the two injected
             // EnqueueBatch fault windows. Keep the independent post-success
             // backpressure gate out of the way, otherwise it can reject the

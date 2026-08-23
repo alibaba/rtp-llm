@@ -45,6 +45,23 @@ final class FlexlbConfigValidator {
         require(queue.getLifecycle() != null, "scheduler.lifecycle", "is required for QUEUE");
         positive(queue.getCapacity().getMaxOutstandingRequestsGlobal(),
                 "scheduler.capacity.maxOutstandingRequestsGlobal");
+        Integer perWorkerCapacity = queue.getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker();
+        if (perWorkerCapacity != null) {
+            positive(perWorkerCapacity,
+                    "scheduler.capacity.maxWaitingRequestsPerPrefillWorker");
+        }
+        DecisionPolicyConfig decision = queue.getDecision();
+        if (decision instanceof FixedWindowDecisionConfig fixedWindow) {
+            positive(fixedWindow.getMaxRequests(),
+                    "scheduler.decision.maxRequests");
+            nonNegative(fixedWindow.getMaxCollectionWaitMs(),
+                    "scheduler.decision.maxCollectionWaitMs");
+            if (fixedWindow.getMaxPredictedExecutionMs() != null) {
+                positive(fixedWindow.getMaxPredictedExecutionMs(),
+                        "scheduler.decision.maxPredictedExecutionMs");
+            }
+        }
         positive(queue.getLifecycle().getStaleInflightTimeoutMs(),
                 "scheduler.lifecycle.staleInflightTimeoutMs");
         positive(queue.getLifecycle().getDeliveredNotAcceptedTimeoutMs(),

@@ -14,10 +14,10 @@ import java.util.List;
  * active queue plus ready-delivery backlog stay the single source of truth
  * and every mutation goes through the shared queue lock.
  *
- * <p>Read operations ({@link #snapshot()}, {@link #estimateWaitMs}) capture a
- * consistent view under the queue lock. Victim replacement validates the
- * selected victims under that same lock rather than invalidating a plan for
- * unrelated queue mutations.
+ * <p>Snapshots capture removable identities under the queue lock. The hot wait
+ * probe uses a versioned primitive priority histogram and therefore retains no
+ * request object or future. Victim replacement validates the selected victims
+ * under the queue lock rather than invalidating a plan for unrelated mutations.
  */
 public final class PrefillQueueManager {
 
@@ -66,11 +66,10 @@ public final class PrefillQueueManager {
     }
 
     /**
-     * Estimated queue wait for an incoming request (design doc 8.4):
-     * active {@code itemsAhead → batchCyclesAhead}, plus a request-accounted
-     * drain estimate for route decisions whose logical group is already
-     * ready. The decision-interval sliding average is the per-cycle cost and
-     * the active head's remaining window is the partial first cycle.
+     * Estimated additional fixed-window collection delay for an incoming
+     * request. Endpoint ledgers account for engine execution and inflight work;
+     * this method deliberately does not reinterpret decision timestamps as a
+     * request-completion rate.
      */
     public long estimateWaitMs(int priority, long requestId) {
         long now = ctx.now();
