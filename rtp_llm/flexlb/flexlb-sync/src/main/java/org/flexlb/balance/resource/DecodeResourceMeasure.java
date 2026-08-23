@@ -77,6 +77,16 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         return available;
     }
 
+    /**
+     * A QUEUE placement is not an engine dispatch. As long as the worker is
+     * alive, transient concurrency/KV pressure must leave the request queued
+     * instead of turning it into a retry storm. The dispatch claim performs
+     * the authoritative concurrency and KV gate later.
+     */
+    public boolean isQueuePlacementAvailable(DecodeEndpoint endpoint) {
+        return endpoint != null && endpoint.getStatus().isAlive();
+    }
+
     @Override
     public ResourceMeasureIndicatorEnum getResourceMeasureIndicator() {
         return ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;

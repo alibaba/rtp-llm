@@ -70,6 +70,22 @@ class DecodeResourceMeasureTest {
     }
 
     @Test
+    void fifoQueuePlacementIgnoresTransientPressure_butNormalAdmissionDoesNot() {
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(1L);
+        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
+        DecodeEndpoint endpoint = createAliveDecodeEndpoint();
+        endpoint.getStatus().getAvailableKvCacheTokens().set(0);
+        endpoint.reserveQueued(1L, 80, 80, 50);
+
+        assertFalse(measure.isResourceAvailable(endpoint));
+        assertTrue(measure.isQueuePlacementAvailable(endpoint));
+
+        endpoint.getStatus().setAlive(false);
+        assertFalse(measure.isQueuePlacementAvailable(endpoint));
+    }
+
+    @Test
     void concurrency_water_level_should_contribute_to_serviceability() {
         config.getRouter().getRoles().getDecode().getAvailability()
                 .setMaxEngineRequests(4L);

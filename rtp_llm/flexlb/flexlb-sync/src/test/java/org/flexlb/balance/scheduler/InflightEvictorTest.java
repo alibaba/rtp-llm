@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -77,6 +78,18 @@ class InflightEvictorTest {
 
         evictor.evictExpired(60_000);
         assertEquals(2, callbackCount.get());
+    }
+
+    @Test
+    void keyAwareCallbackReceivesTheExactEvictedKey() {
+        Map<Long, TestEntry> map = new ConcurrentHashMap<>();
+        map.put(41L, new TestEntry(System.currentTimeMillis() - 100_000));
+        AtomicLong evictedKey = new AtomicLong();
+        InflightEvictor<Long, TestEntry> evictor = InflightEvictor.withKeyCallback(
+                map, (key, value) -> evictedKey.set(key));
+
+        assertEquals(1, evictor.evictExpired(60_000));
+        assertEquals(41L, evictedKey.get());
     }
 
     @Test

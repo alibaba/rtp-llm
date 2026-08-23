@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import java.util.Map;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -23,7 +24,7 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
     }
 
     private final Map<K, V> map;
-    private final Consumer<V> onEvict;
+    private final BiConsumer<K, V> onEvict;
 
     /**
      * @param map     the map to evict from (not owned by this evictor)
@@ -31,6 +32,21 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
      *                may be null if no side effects are needed
      */
     public InflightEvictor(Map<K, V> map, Consumer<V> onEvict) {
+        this(map, onEvict == null
+                ? (BiConsumer<K, V>) null
+                : (ignored, value) -> onEvict.accept(value));
+    }
+
+    /**
+     * Key-aware eviction callback for owners whose secondary accounting is
+     * indexed by the same request key.
+     */
+    public static <K, V extends TtlTracked> InflightEvictor<K, V> withKeyCallback(
+            Map<K, V> map, BiConsumer<K, V> onEvict) {
+        return new InflightEvictor<>(map, onEvict);
+    }
+
+    private InflightEvictor(Map<K, V> map, BiConsumer<K, V> onEvict) {
         this.map = map;
         this.onEvict = onEvict;
     }
@@ -64,7 +80,7 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
                 if (map.remove(entry.getKey(), candidate)) {
                     count++;
                     if (onEvict != null) {
-                        onEvict.accept(candidate);
+                        onEvict.accept(entry.getKey(), candidate);
                     }
                 }
             }

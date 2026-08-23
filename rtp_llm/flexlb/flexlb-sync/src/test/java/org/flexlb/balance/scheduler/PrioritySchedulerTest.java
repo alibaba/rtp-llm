@@ -312,6 +312,54 @@ class PrioritySchedulerTest {
     }
 
     @Test
+    void decodeDispatchKvFence_restoresBlockedMember_thenDispatchesItOnceCapacityFrees()
+            throws Exception {
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(2);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(0);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(256L);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxKvUsagePercent(90);
+        PrefillEndpoint prefill = replacePrefillEndpoint();
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        decode.getStatus().getTotalKvCacheTokens().set(1_000);
+        decode.getStatus().getAvailableKvCacheTokens().set(1_000);
+        decode.onWorkerStatusUpdate(decode.getStatus(), new WorkerStatusResponse());
+
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            long expectedKv = ctx.getRequestId() == 3_100L ? 900 : 100;
+            decode.reserve(ctx.getRequestId(), 100, expectedKv, 50);
+            return successRoute(ctx.getRequestId());
+        });
+
+        CompletableFuture<Response> first = scheduler.submit(context(3_100L));
+        CompletableFuture<Response> second = scheduler.submit(context(3_101L));
+
+        awaitCondition(() -> sentBatches.size() == 1
+                && prefill.getBatcher().pendingDeliveryCount() == 0
+                && prefill.getBatcher().queueSize() == 1);
+        List<Long> firstSent = batchInputs(sentBatches.getFirst()).stream()
+                .map(EngineRpcService.GenerateInputPB::getRequestId).toList();
+        assertEquals(List.of(3_100L), firstSent);
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertFalse(second.isDone());
+        assertTrue(decode.layeredAdmissionView().queued().contains(3_101L));
+
+        decode.release(3_100L);
+        awaitCondition(() -> sentBatches.size() == 2
+                && prefill.getBatcher().queueSize() == 0);
+        assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
+        List<Long> allSent = sentBatches.stream()
+                .flatMap(batch -> batchInputs(batch).stream())
+                .map(EngineRpcService.GenerateInputPB::getRequestId)
+                .toList();
+        assertEquals(List.of(3_100L, 3_101L), allSent);
+    }
+
+    @Test
     void decodeDispatchClaimException_completesPendingAndTerminatesMember() throws Exception {
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(1);
@@ -321,7 +369,8 @@ class PrioritySchedulerTest {
         long requestId = 2_100;
         realDecode.reserve(requestId, 128, 136, 50);
         realDecode.markQueuedPhase(requestId);
-        when(throwingDecode.tryClaimEngineDispatch(eq(requestId), anyLong()))
+        when(throwingDecode.tryClaimEngineDispatch(
+                eq(requestId), anyLong(), anyLong()))
                 .thenThrow(new IllegalStateException("claim failed"));
 
         BatchItem item = new BatchItem(context(requestId), new CompletableFuture<>(),

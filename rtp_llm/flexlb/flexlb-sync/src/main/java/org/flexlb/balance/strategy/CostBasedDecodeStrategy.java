@@ -47,8 +47,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 (RoutingConfig.KvUsageWeightedRandomConfig) config.getRouter().getRoles()
                         .getDecode().getSelector();
 
+        // FIFO queues may wait for transient Decode pressure to drain. A
+        // PRIORITY queue deliberately retains the inclusive KV gate because
+        // route failure is what enters its typed admission/preemption path.
+        boolean softQueuePlacement = config.isQueue() && !config.isPriorityOrdering();
         EndpointFilterResult filterResult = getAvailableEndpoints(
-                roleType, group, config.resourceMeasureFor(roleType));
+                roleType, group, config.resourceMeasureFor(roleType), softQueuePlacement);
         List<DecodeEndpoint> eligible = filterResult.endpoints();
         if (CollectionUtils.isEmpty(eligible)) {
             Logger.debug("Decode select failed: no available endpoints, request_id={}, registered={}, eligible=0, rejections={}",
@@ -56,7 +60,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, selector);
+        FilterResult hardFilterResult = applyHardFilters(
+                eligible, seqLen, selector, softQueuePlacement);
         List<DecodeEndpoint> survivors = hardFilterResult.endpoints();
 
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(
@@ -77,7 +82,9 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     private record EndpointFilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections, int registered) {}
     private record FilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections) {}
 
-    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group,
+                                                       ResourceMeasureIndicatorEnum indicator,
+                                                       boolean softQueuePlacement) {
         DecodeResourceMeasure measure = (DecodeResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
             return new EndpointFilterResult(new ArrayList<>(), Map.of("NO_REGISTERED", 1), 0);
@@ -92,7 +99,10 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }
-            if (!measure.isResourceAvailable(de)) {
+            boolean available = softQueuePlacement
+                    ? measure.isQueuePlacementAvailable(de)
+                    : measure.isResourceAvailable(de);
+            if (!available) {
                 rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
                 return;
             }
@@ -116,7 +126,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     private FilterResult applyHardFilters(
             List<DecodeEndpoint> eligible,
             long seqLen,
-            RoutingConfig.KvUsageWeightedRandomConfig selector) {
+            RoutingConfig.KvUsageWeightedRandomConfig selector,
+            boolean softQueuePlacement) {
         RoutingConfig.DecodeOutlierRejectionConfig outlier = selector.getOutlierRejection();
         double hotspotMultiplier = outlier == null
                 ? 0.0 : outlier.getMaxEngineLoadVsAverageMultiplier();
@@ -143,8 +154,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         Map<String, Integer> rejections = new java.util.HashMap<>();
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
-            long availableKv = ep.realKvAvailable();
             long totalKv = ep.realKvTotal();
+            long availableKv = softQueuePlacement ? totalKv : ep.realKvAvailable();
             if (totalKv > 0 && availableKv < seqLen) {
                 rejections.merge("KV_CAPACITY", 1, Integer::sum);
                 continue;
@@ -248,8 +259,15 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                             optimalEndpoint.realKvTotal());
             // Carry the Auto-TPM priority into the shadow reservation so it
             // can be ranked as a decode eviction candidate (Phase 4).
-            optimalEndpoint.reserve(requestId, Math.max(0L, seqLen), expectedKvTokens,
-                    balanceContext.getPriority());
+            if (balanceContext.getConfig().isQueue()) {
+                optimalEndpoint.reserveQueued(
+                        requestId, Math.max(0L, seqLen), expectedKvTokens,
+                        balanceContext.getPriority());
+            } else {
+                optimalEndpoint.reserve(
+                        requestId, Math.max(0L, seqLen), expectedKvTokens,
+                        balanceContext.getPriority());
+            }
 
             result.setSuccess(true);
             result.setRole(roleType);

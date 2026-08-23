@@ -126,6 +126,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
 
+    /** Prompt-only KV held by reservations which are still Prefill-queued. */
+    private final AtomicLong queuedHardKvReservedTotal = new AtomicLong(0);
+
+    /** Expected KV held by reservations which are still Prefill-queued. */
+    private final AtomicLong queuedExpectedKvReservedTotal = new AtomicLong(0);
+
     /**
      * Serializes admission-state mutations (reserve / release / calibrate /
      * expired eviction) so that {@link #tryReleaseVictimsAndReserveIncoming}
@@ -144,10 +150,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
-        this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
-            inflightKvReservedTotal.addAndGet(-req.kvTokens());
-            inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
-        });
+        this.requestEvictor = InflightEvictor.withKeyCallback(
+                inflightRequests, (requestId, req) -> {
+                    removeQueuedPhaseLocked(requestId, req);
+                    inflightKvReservedTotal.addAndGet(-req.kvTokens());
+                    inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
+                });
     }
 
     public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
@@ -166,9 +174,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens, priority);
             // A (re-)reserve puts the request back into the pre-queue state.
-            if (queuedPhase.remove(requestId)) {
-                queuedPhaseCount.decrementAndGet();
-            }
+            removeQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
             RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
             if (prev != null) {
                 // requestId already exists — subtract the old kvTokens before overwriting,
@@ -185,14 +191,30 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /**
+     * Atomically create a reservation in the Master-queued phase. This closes
+     * the otherwise observable reserve-then-mark gap while concurrent
+     * dispatch callbacks evaluate engine-facing capacity.
+     */
+    public void reserveQueued(long requestId, long kvTokens,
+                              long expectedKvTokens, int priority) {
+        admissionLock.lock();
+        try {
+            // Reentrant by design: reserve owns all counter/version updates,
+            // while this outer critical section keeps the queued mark atomic.
+            reserve(requestId, kvTokens, expectedKvTokens, priority);
+            addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
     public void release(long requestId) {
         admissionLock.lock();
         try {
             boolean protectionRemoved = clearEngineFenceProtectionLocked(requestId);
             RequestInflight removed = inflightRequests.remove(requestId);
-            if (queuedPhase.remove(requestId)) {
-                queuedPhaseCount.decrementAndGet();
-            }
+            removeQueuedPhaseLocked(requestId, removed);
             if (removed != null) {
                 inflightKvReservedTotal.addAndGet(-removed.kvTokens());
                 inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
@@ -230,9 +252,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return false;
             }
             inflightRequests.remove(requestId);
-            if (queuedPhase.remove(requestId)) {
-                queuedPhaseCount.decrementAndGet();
-            }
+            removeQueuedPhaseLocked(requestId, expectedReservation);
             inflightKvReservedTotal.addAndGet(-expectedReservation.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(
                     -expectedReservation.expectedKvTokens());
@@ -786,9 +806,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 inflightKvReservedTotal.addAndGet(-removed.kvTokens());
                 inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
             }
-            if (queuedPhase.remove(requestId)) {
-                queuedPhaseCount.decrementAndGet();
-            }
+            removeQueuedPhaseLocked(requestId, removed);
         } else {
             trackedConfirmed.remove(requestId);
             if (!genericFenceRetainsAccounting) {
@@ -988,6 +1006,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     actualConfirmed++;
                     RequestInflight removed = inflightRequests.remove(requestId);
                     if (removed != null) {
+                        removeQueuedPhaseLocked(requestId, removed);
                         inflightKvReservedTotal.addAndGet(-removed.kvTokens());
                         inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
                     }
@@ -1064,18 +1083,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
 
-        // N2: keep the queued-phase set consistent with the reserved entries
-        // (calibrate removes confirmed/finished entries directly, bypassing
-        // release()). Drop stale queued ids one-by-one so the O(1) counter
-        // stays in sync (PR-C).
-        java.util.Iterator<Long> queuedIt = queuedPhase.iterator();
-        while (queuedIt.hasNext()) {
-            Long requestId = queuedIt.next();
-            if (!inflightRequests.containsKey(requestId)) {
-                queuedIt.remove();
-                queuedPhaseCount.decrementAndGet();
-            }
-        }
     }
 
     /**
@@ -1138,8 +1145,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             inflightExpectedKvReservedTotal.addAndGet(-shadow.expectedKvTokens());
             changed = true;
         }
-        if (queuedPhase.remove(requestId)) {
-            queuedPhaseCount.decrementAndGet();
+        if (removeQueuedPhaseLocked(requestId, shadow)) {
             changed = true;
         }
         // A generic EngineFence and an explicit TOMBSTONED acknowledgement both
@@ -1343,6 +1349,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
+     * KV demand which may reach the engine now. Reservations parked in a
+     * Prefill queue are soft placement hints: charging all of them against the
+     * hard availability gate makes a long scheduler queue report every Decode
+     * worker unavailable even though none of that work has been dispatched.
+     */
+    public long engineFacingKvUsed() {
+        long totalCap = status.getTotalKvCacheTokens().get();
+        long avail = status.getAvailableKvCacheTokens().get();
+        long reportedUsed = totalCap > 0 ? Math.max(0, totalCap - avail) : 0;
+        long localEngineFacing = Math.max(0L,
+                inflightKvReserved() - queuedExpectedKvReservedTotal.get());
+        return reportedUsed + localEngineFacing + engineFenceHeldExpectedKv.get();
+    }
+
+    /**
      * Real KV available: engine-reported available minus local shadow,
      * priority-fence, and generic EngineFence hard reservations.
      *
@@ -1358,6 +1379,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public long realKvAvailable() {
         return Math.max(0, reportedKvAvailable.get()
                 - inflightHardKvReserved()
+                - priorityPreemptionHeldKv.get()
+                - engineFenceHeldKv.get());
+    }
+
+    /** Hard prompt KV available to the next engine dispatch, excluding soft queued holds. */
+    public long engineFacingKvAvailable() {
+        long localEngineFacing = Math.max(0L,
+                inflightHardKvReserved() - queuedHardKvReservedTotal.get());
+        return Math.max(0, status.getAvailableKvCacheTokens().get()
+                - localEngineFacing
                 - priorityPreemptionHeldKv.get()
                 - engineFenceHeldKv.get());
     }
@@ -1413,16 +1444,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     ttlMs, requestId -> !schedulerOwnsRequest.test(requestId)
                             && !preemptionClaims.containsKey(requestId)
                             && !engineFenceProtections.containsKey(requestId));
-            // Drop stale queued ids one-by-one so the O(1) counter stays in
-            // sync (PR-C) — evictExpired may have removed inflight entries.
-            java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();
-            while (queuedEvictIt.hasNext()) {
-                Long requestId = queuedEvictIt.next();
-                if (!inflightRequests.containsKey(requestId)) {
-                    queuedEvictIt.remove();
-                    queuedPhaseCount.decrementAndGet();
-                }
-            }
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
             java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedEvictIt =
@@ -1459,10 +1480,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Engine-facing load (N2): confirmed running/accepted requests plus
      * reserved entries that are <b>not</b> parked in a prefill queue. Queued
-     * reservations only guard KV against oversell — they must not close the
-     * decode concurrency gate while the engine is idle (root cause C of the
-     * 8400 storm). {@link #getTotalLoad()} keeps the full shadow view for
-     * observability and eviction planning.
+     * reservations remain in the full placement/priority view, but they must
+     * not close the decode concurrency gate while the engine is idle (root
+     * cause C of the 8400 storm). {@link #getTotalLoad()} keeps the full shadow
+     * view for observability and eviction planning.
      *
      * <p>O(1) formula (PR-C): {@code confirmedRunningCount
      * + max(0, inflightRequests.size() − queuedPhaseCount)}. The
@@ -1497,14 +1518,34 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public void markQueuedPhase(long requestId) {
         admissionLock.lock();
         try {
-            if (inflightRequests.containsKey(requestId)) {
-                if (queuedPhase.add(requestId)) {
-                    queuedPhaseCount.incrementAndGet();
-                }
-            }
+            addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    private boolean addQueuedPhaseLocked(long requestId, RequestInflight reservation) {
+        if (reservation == null || !queuedPhase.add(requestId)) {
+            return false;
+        }
+        queuedPhaseCount.incrementAndGet();
+        queuedHardKvReservedTotal.addAndGet(reservation.kvTokens());
+        queuedExpectedKvReservedTotal.addAndGet(reservation.expectedKvTokens());
+        return true;
+    }
+
+    private boolean removeQueuedPhaseLocked(long requestId, RequestInflight reservation) {
+        if (!queuedPhase.remove(requestId)) {
+            return false;
+        }
+        queuedPhaseCount.decrementAndGet();
+        if (reservation == null) {
+            throw new IllegalStateException(
+                    "queued Decode reservation missing for request " + requestId);
+        }
+        queuedHardKvReservedTotal.addAndGet(-reservation.kvTokens());
+        queuedExpectedKvReservedTotal.addAndGet(-reservation.expectedKvTokens());
+        return true;
     }
 
     /** Outcome of an engine-dispatch ownership claim. */
@@ -1536,10 +1577,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public DispatchClaimResult tryClaimEngineDispatch(long requestId,
                                                        long concurrencyLimit) {
+        return tryClaimEngineDispatch(requestId, concurrencyLimit, -1L);
+    }
+
+    /**
+     * Claim one queued reservation against both Decode concurrency and KV.
+     * The queued reservation is a soft placement hint until this atomic gate;
+     * only a successful claim converts it into engine-facing demand.
+     */
+    public DispatchClaimResult tryClaimEngineDispatch(long requestId,
+                                                       long concurrencyLimit,
+                                                       long maxKvUsagePercent) {
         admissionLock.lock();
         try {
-            if (!inflightRequests.containsKey(requestId)
-                    || preemptionClaims.containsKey(requestId)) {
+            RequestInflight reservation = inflightRequests.get(requestId);
+            if (reservation == null || preemptionClaims.containsKey(requestId)) {
                 return DispatchClaimResult.NOT_OWNED;
             }
             if (!queuedPhase.contains(requestId)) {
@@ -1553,10 +1605,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return DispatchClaimResult.CAPACITY_FULL;
             }
 
+            long totalKv = status.getTotalKvCacheTokens().get();
+            if (totalKv > 0 && maxKvUsagePercent >= 0) {
+                if (engineFacingKvAvailable() < reservation.kvTokens()) {
+                    return DispatchClaimResult.CAPACITY_FULL;
+                }
+                if (maxKvUsagePercent > 0
+                        && engineFacingKvUsed() * 100.0 / totalKv
+                        >= maxKvUsagePercent) {
+                    return DispatchClaimResult.CAPACITY_FULL;
+                }
+            }
+
             // queuedPhase membership was checked under this same lock. The
             // remove must therefore succeed unless the invariant is broken.
-            queuedPhase.remove(requestId);
-            queuedPhaseCount.decrementAndGet();
+            removeQueuedPhaseLocked(requestId, reservation);
             admissionVersion.incrementAndGet();
             return DispatchClaimResult.CLAIMED;
         } finally {

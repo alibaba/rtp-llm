@@ -205,11 +205,7 @@ class DecodeEndpointTest {
 
     // ==================== P1-6: evictExpiredRequests counter (PR-C) ====================
 
-    /**
-     * evictExpiredRequests must prune queuedPhase entries that are no longer in
-     * inflightRequests and decrement queuedPhaseCount accordingly, so that
-     * getEngineLoad() returns 0 after all entries are evicted.
-     */
+    /** Expiration removes the queued phase and all incremental counters together. */
     @Test
     void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad() throws InterruptedException {
         updateStatus(null, null, 10000);
@@ -233,6 +229,9 @@ class DecodeEndpointTest {
         assertTrue(endpoint.layeredAdmissionView().queued().isEmpty());
         assertEquals(0, endpoint.getEngineLoad());
         assertEquals(0, endpoint.getTotalLoad());
+        assertEquals(0, endpoint.inflightHardKvReserved());
+        assertEquals(0, endpoint.inflightExpectedKvReserved());
+        assertEquals(0, endpoint.engineFacingKvUsed());
     }
 
     /** Directly mutate the private counter to simulate drift. */

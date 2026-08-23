@@ -6,6 +6,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DirectSchedulerConfig;
+import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -67,6 +69,11 @@ class CostBasedDecodeStrategyTest {
         return registry;
     }
 
+    private void allowDecodeSelection(DecodeResourceMeasure measure) {
+        Mockito.when(measure.isResourceAvailable(any())).thenReturn(true);
+        Mockito.when(measure.isQueuePlacementAvailable(any())).thenReturn(true);
+    }
+
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = new EndpointRegistry(configService, () -> null,
@@ -119,7 +126,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        allowDecodeSelection(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -162,7 +169,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        allowDecodeSelection(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -194,7 +201,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        allowDecodeSelection(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -231,7 +238,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        allowDecodeSelection(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -287,7 +294,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        allowDecodeSelection(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(
                 engineWorkerStatus, resourceMeasureFactory);
 
@@ -313,6 +320,7 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_skip_worker_with_insufficient_kv_cache_capacity() {
+        configService.loadBalanceConfig().setScheduler(new DirectSchedulerConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -336,7 +344,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        allowDecodeSelection(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -351,6 +359,7 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_return_error_when_all_workers_kv_insufficient() {
+        configService.loadBalanceConfig().setScheduler(new DirectSchedulerConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -374,7 +383,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        allowDecodeSelection(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -385,5 +394,47 @@ class CostBasedDecodeStrategyTest {
 
         Assertions.assertFalse(status.isSuccess());
         Assertions.assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), status.getCode());
+    }
+
+    @Test
+    void fifoQueueCanPlaceBehindTransientKvPressure_whilePriorityKeepsAdmissionGate() {
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        worker.getTotalKvCacheTokens().set(1_000);
+        worker.getAvailableKvCacheTokens().set(1_000);
+        decodeMap.put("127.0.0.1:8080", worker);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
+        endpoint.reserveQueued(1L, 400, 700, 50);
+        endpoint.reserveQueued(2L, 400, 700, 50);
+
+        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
+        Assertions.assertFalse(measure.isResourceAvailable(endpoint));
+
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new EngineWorkerStatus(registry), factory);
+
+        Request request = new Request();
+        request.setSeqLen(100);
+        request.setRequestId(3L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus fifoResult = strategy.select(context, RoleType.DECODE, null);
+        Assertions.assertTrue(fifoResult.isSuccess());
+        Assertions.assertTrue(endpoint.layeredAdmissionView().queued().contains(3L));
+
+        strategy.rollBack(endpoint, 3L);
+        configService.loadBalanceConfig().queueScheduler()
+                .setOrdering(new PriorityOrderingConfig());
+        request.setRequestId(4L);
+        ServerStatus priorityResult = strategy.select(context, RoleType.DECODE, null);
+        Assertions.assertFalse(priorityResult.isSuccess(),
+                "PRIORITY must preserve the inclusive admission gate for preemption/classification");
     }
 }

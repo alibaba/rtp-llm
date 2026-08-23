@@ -2814,6 +2814,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 .getRoles().getDecode().getAvailability().getMaxEngineRequests();
         long decodeConcurrencyLimit = configuredDecodeLimit == null
                 ? 0 : configuredDecodeLimit;
+        long decodeKvUsageLimit = configService.loadBalanceConfig().getRouter()
+                .getRoles().getDecode().getAvailability().getMaxKvUsagePercent();
         List<BatchItem> readyForEnqueue = new ArrayList<>(items.size());
         for (BatchItem item : items) {
             boolean callbackOwnsPending = false;
@@ -2845,7 +2847,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         DecodeEndpoint.DispatchClaimResult claim = item.decodeEp() == null
                                 ? DecodeEndpoint.DispatchClaimResult.CLAIMED
                                 : item.decodeEp().tryClaimEngineDispatch(
-                                        item.requestId(), decodeConcurrencyLimit);
+                                        item.requestId(), decodeConcurrencyLimit,
+                                        decodeKvUsageLimit);
                         if (claim == DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL) {
                             restorePendingDelivery(batcher, item);
                         } else if (claim == DecodeEndpoint.DispatchClaimResult.CLAIMED) {
@@ -3055,6 +3058,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 .getAvailability().getMaxEngineRequests();
         long decodeConcurrencyLimit = configuredDecodeLimit == null
                 ? 0 : configuredDecodeLimit;
+        long decodeKvUsageLimit = config.getRouter().getRoles().getDecode()
+                .getAvailability().getMaxKvUsagePercent();
         List<BatchItem> deliverable = new ArrayList<>(items.size());
 
         for (BatchItem item : items) {
@@ -3095,7 +3100,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     DecodeEndpoint.DispatchClaimResult claim = item.decodeEp() == null
                             ? DecodeEndpoint.DispatchClaimResult.CLAIMED
                             : item.decodeEp().tryClaimEngineDispatch(
-                                    item.requestId(), decodeConcurrencyLimit);
+                                    item.requestId(), decodeConcurrencyLimit,
+                                    decodeKvUsageLimit);
                     if (claim == DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL) {
                         prefillEp.releaseRequest(item.requestId());
                         requestLedgerCommitted = false;

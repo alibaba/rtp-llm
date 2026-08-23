@@ -217,6 +217,34 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
+    void queuedKvIsSoftUntilDispatchClaim_thenKvLimitIsAuthoritative() {
+        status.getTotalKvCacheTokens().set(1_000);
+        updateStatus(null, null, 1_000);
+
+        endpoint.reserveQueued(1L, 400, 900, 50);
+
+        assertEquals(900, endpoint.realKvUsed(),
+                "placement scoring must retain queued expected KV");
+        assertEquals(0, endpoint.engineFacingKvUsed(),
+                "queued expected KV must not poison the dispatch gate");
+        assertEquals(600, endpoint.realKvAvailable());
+        assertEquals(1_000, endpoint.engineFacingKvAvailable());
+
+        assertEquals(DecodeEndpoint.DispatchClaimResult.CLAIMED,
+                endpoint.tryClaimEngineDispatch(1L, 256, 90));
+        assertEquals(900, endpoint.engineFacingKvUsed());
+        assertEquals(600, endpoint.engineFacingKvAvailable());
+
+        endpoint.reserveQueued(2L, 100, 100, 50);
+        assertEquals(DecodeEndpoint.DispatchClaimResult.CAPACITY_FULL,
+                endpoint.tryClaimEngineDispatch(2L, 256, 90),
+                "a claim observed at the configured 90% KV fence must wait");
+        assertTrue(endpoint.layeredAdmissionView().queued().contains(2L));
+        assertEquals(900, endpoint.engineFacingKvUsed(),
+                "a failed claim must remain a soft queued reservation");
+    }
+
+    @Test
     void batchDispatchClaim_reportsNotOwnedAfterReleaseOrPreemptionClaim() {
         endpoint.reserve(1L, 100, 110, 30);
         endpoint.markQueuedPhase(1L);
