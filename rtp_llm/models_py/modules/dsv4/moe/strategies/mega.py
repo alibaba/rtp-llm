@@ -250,7 +250,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         # creation kwargs so the buffer (and the small bf16 output staging buffer)
         # can be dropped at engine sleep and lazily re-created on the first
         # forward after wake -- see _ensure_mega_buffers / release_mega_symm_buffers
-        # (sleep release is opt-in via RTP_LLM_SLEEP_FREE_MEGA_SYMM=1).
+        # (sleep release is opt-in via RTP_LLM_SLEEP_FREE_RUNTIME_CACHES=1).
         self._mega_buf_kwargs = dict(
             num_experts=cfg.n_routed_experts,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),

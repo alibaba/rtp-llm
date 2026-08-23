@@ -1,7 +1,6 @@
 """CUDA FP8 DeepGEMM quantized Linear implementation"""
 
 import logging
-import os
 import weakref
 from typing import Optional
 
@@ -33,14 +32,16 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     @classmethod
     def release_runtime_caches_for_sleep(cls) -> int:
         """Drop optional per-token scale caches; they are rebuilt lazily."""
-        if os.environ.get("RTP_LLM_SLEEP_FREE_DEEPGEMM_SCALES", "0") != "1":
-            return 0
         try:
-            from rtp_llm.models_py.utils.cuda_graph_state import cuda_graph_baked
+            from rtp_llm.models_py.utils.cuda_graph_state import (
+                cuda_graph_baked,
+                runtime_cache_release_enabled,
+            )
 
-            if cuda_graph_baked():
+            if not runtime_cache_release_enabled() or cuda_graph_baked():
                 logger.info(
-                    "Keeping DeepGEMM scale caches: CUDA graph pointers must remain stable"
+                    "Keeping DeepGEMM scale caches: runtime-cache release disabled "
+                    "or CUDA graph pointers must remain stable"
                 )
                 return 0
         except Exception:

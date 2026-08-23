@@ -1,7 +1,6 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/bf214ca22625e311a2c4c0dfbf7af19128f4919c/vllm/distributed/device_communicators/symm_mem.py
 import logging
 import math
-import os
 from typing import Optional, Union
 
 import torch
@@ -255,14 +254,16 @@ def release_symm_mem_communicator_for_sleep() -> int:
     the caller performs ``empty_cache`` after all Python references are gone.
     """
     global _symm_mem_comm
-    if os.environ.get("RTP_LLM_SLEEP_FREE_TP_SYMM_MEM", "0") != "1":
-        return 0
     try:
-        from rtp_llm.models_py.utils.cuda_graph_state import cuda_graph_baked
+        from rtp_llm.models_py.utils.cuda_graph_state import (
+            cuda_graph_baked,
+            runtime_cache_release_enabled,
+        )
 
-        if cuda_graph_baked():
+        if not runtime_cache_release_enabled() or cuda_graph_baked():
             logging.info(
-                "Keeping TP symmetric-memory communicator: CUDA graph pointers must remain stable"
+                "Keeping TP symmetric-memory communicator: runtime-cache release disabled "
+                "or CUDA graph pointers must remain stable"
             )
             return 0
     except Exception:

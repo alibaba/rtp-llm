@@ -11,10 +11,17 @@ VMM fixed-VA allocation/graph invalidation protocol once each allocator-backed
 cache has a rank-symmetric recapture path.
 """
 
+import os
 import threading
 
 _GRAPH_BAKED = False
 _LOCK = threading.Lock()
+
+# One operator-facing switch controls all optional Python-owned runtime caches
+# released by sleep.  Keep the old Mega-only name as a compatibility alias for
+# launch scripts created before the unified switch was introduced.
+RUNTIME_CACHE_RELEASE_ENV = "RTP_LLM_SLEEP_FREE_RUNTIME_CACHES"
+_LEGACY_RUNTIME_CACHE_RELEASE_ENV = "RTP_LLM_SLEEP_FREE_MEGA_SYMM"
 
 
 def mark_cuda_graph_baked(enabled: bool) -> None:
@@ -30,3 +37,16 @@ def cuda_graph_baked() -> bool:
     """Return whether graph-safe sleep reclaim is required in this process."""
     with _LOCK:
         return _GRAPH_BAKED
+
+
+def runtime_cache_release_enabled() -> bool:
+    """Whether sleep may release optional runtime caches.
+
+    The canonical switch is ``RTP_LLM_SLEEP_FREE_RUNTIME_CACHES=1``.  The
+    legacy Mega switch is accepted as a global alias so existing launchers keep
+    their behavior during migration; it is not needed in new deployments.
+    """
+    return (
+        os.environ.get(RUNTIME_CACHE_RELEASE_ENV, "0") == "1"
+        or os.environ.get(_LEGACY_RUNTIME_CACHE_RELEASE_ENV, "0") == "1"
+    )

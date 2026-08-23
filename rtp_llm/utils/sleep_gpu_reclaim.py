@@ -24,7 +24,6 @@ throw there would be mistaken for a hook failure and push the controller to ERRO
 
 import gc
 import logging
-import os
 
 import torch
 
@@ -52,13 +51,22 @@ def _cuda_graph_baked() -> bool:
         return False
 
 
-def _optional_release_allowed(env_name: str, graph_baked: bool) -> bool:
+def _optional_release_allowed(graph_baked: bool) -> bool:
     """Explicit opt-in release, never allowed for graph-baked pointers.
 
-    The switches intentionally default to ``0``.  Operators can opt into
-    reclaim on a no-graph role, while a graph role always wins the safety check.
+    ``RTP_LLM_SLEEP_FREE_RUNTIME_CACHES`` intentionally defaults to ``0``.
+    Operators can opt into reclaim on a no-graph role, while a graph role always
+    wins the safety check.
     """
-    return not graph_baked and os.environ.get(env_name, "0") == "1"
+    try:
+        from rtp_llm.models_py.utils.cuda_graph_state import (
+            runtime_cache_release_enabled,
+        )
+
+        release_enabled = runtime_cache_release_enabled()
+    except Exception:
+        release_enabled = False
+    return not graph_baked and release_enabled
 
 
 def _clear_module_device_caches() -> list[str]:
@@ -79,7 +87,7 @@ def _clear_module_device_caches() -> list[str]:
     # is rank-symmetric and completes before any post-wake replay.
     notes.append("DSV4 RoPE caches KEPT (CUDA-graph pointer stability)")
 
-    if _optional_release_allowed("RTP_LLM_SLEEP_FREE_CUBLAS_WORKSPACE", graph_baked):
+    if _optional_release_allowed(graph_baked):
         try:
             clear_cublas = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
             if clear_cublas is not None:
@@ -97,7 +105,7 @@ def _clear_module_device_caches() -> list[str]:
             CudaFp8DeepGEMMLinear,
         )
 
-        if _optional_release_allowed("RTP_LLM_SLEEP_FREE_DEEPGEMM_SCALES", graph_baked):
+        if _optional_release_allowed(graph_baked):
             scale_bytes = CudaFp8DeepGEMMLinear.release_runtime_caches_for_sleep()
             notes.append(
                 f"DeepGEMM runtime scale caches RELEASED {scale_bytes / _MiB:.1f} MiB"
@@ -112,7 +120,7 @@ def _clear_module_device_caches() -> list[str]:
             release_symm_mem_communicator_for_sleep,
         )
 
-        if _optional_release_allowed("RTP_LLM_SLEEP_FREE_TP_SYMM_MEM", graph_baked):
+        if _optional_release_allowed(graph_baked):
             symm_bytes = release_symm_mem_communicator_for_sleep()
             notes.append(
                 f"TP symmetric-memory communicator RELEASED {symm_bytes / _MiB:.1f} MiB"
@@ -129,8 +137,9 @@ def _clear_module_device_caches() -> list[str]:
         # (``_mega_buf``, ~4.4 GiB/rank) and the bf16 output staging buffer
         # (``_mega_y``) -- both feed the same MoE kernel and have their pointers
         # baked into the same captured decode graph, so they are ONE coupled unit:
-        # released together or kept together. Release is a single opt-in switch,
-        # ``RTP_LLM_SLEEP_FREE_MEGA_SYMM=1`` -- ``release_mega_symm_buffers()`` drops
+        # released together or kept together. Release uses the same unified
+        # switch as the other runtime caches, ``RTP_LLM_SLEEP_FREE_RUNTIME_CACHES=1``
+        # -- ``release_mega_symm_buffers()`` drops
         # the symm buffer AND the output buffer (destroy + collective re-rendezvous
         # lazily on the first post-wake forward, run in lockstep). The symm buffer's
         # cross-rank state (CUDA multicast binding + peer P2P imports, keyed to the
@@ -159,7 +168,7 @@ def _clear_module_device_caches() -> list[str]:
                 f"mega buffers kept ~{output_gib:.3f} GiB output + ~{symm_gib:.3f} GiB "
                 "symm (baked into CUDA graph)"
             )
-        elif os.environ.get("RTP_LLM_SLEEP_FREE_MEGA_SYMM", "0") == "1":
+        elif _optional_release_allowed(graph_baked):
             try:
                 freed = mega_buf.release_mega_symm_buffers()
                 notes.append(
@@ -171,7 +180,7 @@ def _clear_module_device_caches() -> list[str]:
         else:
             notes.append(
                 f"mega buffers kept ~{output_gib:.3f} GiB output + ~{symm_gib:.3f} GiB "
-                "symm (RTP_LLM_SLEEP_FREE_MEGA_SYMM not set)"
+                "symm (RTP_LLM_SLEEP_FREE_RUNTIME_CACHES not set)"
             )
     except Exception as e:  # module may be absent on non-dsv4 models
         notes.append(f"mega_buf cache skip: {e}")

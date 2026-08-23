@@ -28,10 +28,22 @@ class TestCudaGraphSleepReclaim(unittest.TestCase):
         from rtp_llm.utils.sleep_gpu_reclaim import _optional_release_allowed
 
         with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(_optional_release_allowed("TEST_SLEEP_CACHE", False))
-        with mock.patch.dict(os.environ, {"TEST_SLEEP_CACHE": "1"}, clear=True):
-            self.assertTrue(_optional_release_allowed("TEST_SLEEP_CACHE", False))
-            self.assertFalse(_optional_release_allowed("TEST_SLEEP_CACHE", True))
+            self.assertFalse(_optional_release_allowed(False))
+        with mock.patch.dict(
+            os.environ, {"RTP_LLM_SLEEP_FREE_RUNTIME_CACHES": "1"}, clear=True
+        ):
+            self.assertTrue(_optional_release_allowed(False))
+            self.assertFalse(_optional_release_allowed(True))
+
+    def test_legacy_mega_switch_is_accepted_as_compatibility_alias(self):
+        from rtp_llm.models_py.utils.cuda_graph_state import (
+            runtime_cache_release_enabled,
+        )
+
+        with mock.patch.dict(
+            os.environ, {"RTP_LLM_SLEEP_FREE_MEGA_SYMM": "1"}, clear=True
+        ):
+            self.assertTrue(runtime_cache_release_enabled())
 
     def test_graph_guard_keeps_allocator_empty_cache_from_python(self):
         from rtp_llm.utils import sleep_gpu_reclaim
