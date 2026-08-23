@@ -220,6 +220,68 @@ def quantize_and_insert_k_cache(
     )
 
 
+@triton.jit
+def _insert_packed_k_cache_flat_kernel(
+    packed_ptr,
+    slot_mapping_ptr,
+    cache_ptr,
+    num_tokens,
+    cache_block_size: tl.constexpr,
+    block_stride,
+):
+    token = tl.program_id(0).to(tl.int64)
+    if token >= num_tokens:
+        return
+    slot = tl.load(slot_mapping_ptr + token).to(tl.int64)
+    block = slot // cache_block_size
+    pos = slot % cache_block_size
+    block_ptr = cache_ptr + block * block_stride.to(tl.int64)
+    data_offsets = tl.arange(0, 1024)
+    data_mask = data_offsets < 576
+    scale_offsets = tl.arange(0, 8)
+    tl.store(
+        block_ptr + pos * 576 + data_offsets,
+        tl.load(packed_ptr + token * 584 + data_offsets, mask=data_mask),
+        mask=data_mask,
+    )
+    tl.store(
+        block_ptr + cache_block_size * 576 + pos * 8 + scale_offsets,
+        tl.load(packed_ptr + token * 584 + 576 + scale_offsets),
+    )
+def insert_packed_k_cache_flat(
+    packed: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor | None = None,
+) -> None:
+    assert packed.ndim == 2 and packed.shape[1] == 584
+    assert packed.dtype == torch.uint8 and packed.is_contiguous()
+    assert k_cache.ndim == 3 and k_cache.shape[-1] == 584
+    assert k_cache.dtype == torch.uint8
+    num_tokens = int(packed.shape[0])
+    if num_tokens == 0:
+        return
+    if slot_mapping is None:
+        slot_mapping = torch.arange(
+            num_tokens, dtype=torch.int64, device=packed.device
+        )
+    else:
+        assert slot_mapping.shape == (num_tokens,)
+        slot_mapping = slot_mapping.to(device=packed.device, dtype=torch.int64)
+    validate_slot_mapping(
+        "swa.insert_packed.slot_mapping",
+        slot_mapping,
+        block_size=int(k_cache.shape[1]),
+        num_blocks=int(k_cache.shape[0]),
+        negative_mode="invalid",
+    )
+    _insert_packed_k_cache_flat_kernel[(num_tokens,)](
+        packed,
+        slot_mapping,
+        k_cache,
+        num_tokens,
+        cache_block_size=int(k_cache.shape[1]),
+        block_stride=int(k_cache.stride(0)),
+    )
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,

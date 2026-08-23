@@ -95,6 +95,11 @@ def fp8_paged_indexer_score(
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
     """
+    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+        return _fp8_paged_indexer_score_sm120(
+            q_fp8, w_fold, kv_pool_uint8, block_table, context_lens,
+            block_size, max_ctx_len,
+        )
     assert _HAS_DEEP_GEMM, "deep_gemm.fp8_paged_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
     assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
@@ -128,6 +133,51 @@ def fp8_paged_indexer_score(
     )
 
 
+def _fp8_paged_indexer_score_sm120(
+    q_fp8: torch.Tensor,
+    w_fold: torch.Tensor,
+    kv_pool_uint8: torch.Tensor,
+    block_table: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_size: int,
+    max_ctx_len: int,
+) -> torch.Tensor:
+    B, next_n, H, D = q_fp8.shape
+    rows = B * next_n
+    out = torch.full(
+        (rows, max_ctx_len), float("-inf"), dtype=torch.float32,
+        device=q_fp8.device,
+    )
+    q = q_fp8.float().view(rows, H, D)
+    weights = w_fold.float().view(rows, H)
+    byte_pool = kv_pool_uint8.reshape(-1, block_size * INDEXER_ENTRY_BYTES)
+    capturing = torch.cuda.is_current_stream_capturing()
+    for b in range(B):
+        for n in range(next_n):
+            row = b * next_n + n
+            length = max_ctx_len if capturing else min(
+                int(context_lens[b, n].item()), max_ctx_len
+            )
+            if length <= 0:
+                continue
+            pos = torch.arange(length, device=q_fp8.device, dtype=torch.long)
+            block_ids = block_table[b].long().index_select(
+                0, pos // block_size
+            ).clamp_min_(0)
+            block_rows = byte_pool.index_select(0, block_ids)
+            offsets = pos.remainder(block_size)
+            k_cols = offsets[:, None] * D + torch.arange(D, device=q_fp8.device)
+            k_fp8 = block_rows.gather(1, k_cols).contiguous().view(torch.float8_e4m3fn).float()
+            s_cols = block_size * D + offsets[:, None] * 4 + torch.arange(4, device=q_fp8.device)
+            k_scale = block_rows.gather(1, s_cols).contiguous().view(torch.float32).view(-1)
+            k = k_fp8 * k_scale[:, None]
+            per_head = torch.einsum("hd,td->ht", q[row], k).relu_()
+            score = torch.einsum("h,ht->t", weights[row], per_head)
+            if capturing:
+                out[row] = torch.where(pos < context_lens[b, n], score, out[row])
+            else:
+                out[row, :length] = score
+    return out
 # ---------------------------------------------------------------------------
 # Prefill (non-paged) wrapper around ``deep_gemm.fp8_mqa_logits``.
 #
@@ -166,6 +216,25 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
+    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+        from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
+            v4_indexer_score,
+        )
+        q_bf16 = q_fp8.to(torch.bfloat16).unsqueeze(0).contiguous()
+        k_bf16 = (k_quant.float() * k_scale.float()[:, None]).to(
+            torch.bfloat16
+        ).unsqueeze(0).contiguous()
+        out = v4_indexer_score(
+            q_bf16, k_bf16, w_fold.float().unsqueeze(0).contiguous()
+        ).squeeze(0)
+        rows, cols = out.shape
+        if clean_logits:
+            positions = torch.arange(cols, device=q_fp8.device).unsqueeze(0)
+            valid = (positions >= cu_seqlen_ks.long().unsqueeze(1)) & (
+                positions < cu_seqlen_ke.long().unsqueeze(1)
+            )
+            out.masked_fill_(~valid, float("-inf"))
+        return out
     assert _HAS_DEEP_GEMM_MQA, "deep_gemm.fp8_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn and q_fp8.dim() == 3
     assert q_fp8.shape[-1] == INDEXER_HEAD_DIM

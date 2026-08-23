@@ -24,10 +24,8 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
 def _requested_backend() -> str:
     requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
     if requested in ("", "auto"):
-        # Experiment branch: enable DeepGEMM by default to validate DSV4
-        # greedy/golden semantics under the full SM100 smoke suite. This is
-        # intentionally hard: DeepGEMM/JIT failures must surface directly.
-        return "deepgemm"
+        capability = torch.cuda.get_device_capability()
+        return "tilelang_single" if capability[0] >= 12 else "deepgemm"
     aliases = {
         "dg": "deepgemm",
         "tilelang": "tilelang_single",

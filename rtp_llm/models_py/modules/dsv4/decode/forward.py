@@ -322,7 +322,7 @@ def forward_layers(
             _rt_on = False
 
     if prepare_hidden_fn is None:
-        h = v4.embed(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
+        h = v4.embed_full(input_ids).view(B, q_len, -1)  # [B, q_len, dim]
         if _rt_on:
             _rt.record("decode_embed_out", h)
         h = h.unsqueeze(2).repeat(1, 1, v4.hc_mult, 1)  # [B, q_len, hc, dim]

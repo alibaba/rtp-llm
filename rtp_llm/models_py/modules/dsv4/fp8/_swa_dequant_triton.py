@@ -598,6 +598,66 @@ def gather_k_cache_packed(
 
 
 @triton.jit
+def _gather_k_cache_slots_packed_kernel(
+    out_ptr,
+    pool_ptr,
+    slots_ptr,
+    n_slots,
+    cache_block_size: tl.constexpr,
+    block_stride,
+    token_data_size: tl.constexpr,
+    scale_dim: tl.constexpr,
+):
+    row = tl.program_id(0)
+    if row >= n_slots:
+        return
+    slot = tl.load(slots_ptr + row).to(tl.int64)
+    valid = slot >= 0
+    safe_slot = tl.where(valid, slot, 0)
+    block = safe_slot // cache_block_size
+    pos = safe_slot - block * cache_block_size
+    block_ptr = pool_ptr + block * block_stride
+    out_row = out_ptr + row * (token_data_size + scale_dim)
+    data_off = tl.arange(0, 1024)
+    data_mask = data_off < token_data_size
+    data = tl.load(
+        block_ptr + pos * token_data_size + data_off,
+        mask=data_mask & valid,
+        other=0,
+    )
+    tl.store(out_row + data_off, data, mask=data_mask)
+    scale_off = tl.arange(0, 8)
+    scale_mask = scale_off < scale_dim
+    scales = tl.load(
+        block_ptr + cache_block_size * token_data_size + pos * scale_dim + scale_off,
+        mask=scale_mask & valid,
+        other=0,
+    )
+    tl.store(out_row + token_data_size + scale_off, scales, mask=scale_mask)
+def gather_k_cache_slots_packed(
+    k_cache: torch.Tensor, slot_indices: torch.Tensor
+) -> torch.Tensor:
+    assert k_cache.dim() == 3 and k_cache.shape[-1] == ENTRY_BYTES
+    assert k_cache.dtype == torch.uint8
+    assert k_cache.stride(2) == 1 and k_cache.stride(1) == ENTRY_BYTES
+    slots = slot_indices.reshape(-1).to(
+        device=k_cache.device, dtype=torch.int64
+    ).contiguous()
+    out = torch.empty((slots.numel(), ENTRY_BYTES), dtype=torch.uint8, device=k_cache.device)
+    if slots.numel() == 0:
+        return out
+    _gather_k_cache_slots_packed_kernel[(slots.numel(),)](
+        out,
+        k_cache,
+        slots,
+        slots.numel(),
+        cache_block_size=int(k_cache.shape[1]),
+        block_stride=int(k_cache.stride(0)),
+        token_data_size=TOKEN_DATA_SIZE,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+    )
+    return out
+@triton.jit
 def _dequantize_packed_k_cache_flat_kernel(
     out_ptr,
     out_stride0,

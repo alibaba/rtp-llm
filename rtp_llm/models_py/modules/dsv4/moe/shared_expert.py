@@ -29,6 +29,8 @@ def _mode() -> str:
 
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
+def _requires_sm120_linear(x: torch.Tensor) -> bool:
+    return x.is_cuda and torch.cuda.get_device_capability(x.device)[0] == 12
 
 
 def _normalize_cuda_device(device: torch.device) -> torch.device | None:
@@ -188,6 +190,8 @@ class FusedSharedExpertFastPath:
     @staticmethod
     def can_run(shared_experts: nn.Module, x: torch.Tensor) -> bool:
         if not (x.is_cuda and x.dtype == torch.bfloat16 and x.dim() == 2):
+            return False
+        if _requires_sm120_linear(x):
             return False
         return all(hasattr(shared_experts, name) for name in ("w13", "w2"))
 
@@ -510,7 +514,7 @@ def _run_shared_expert(
         except Exception:
             if strict_fused_moe_enabled():
                 raise
-    if strict_fused_moe_enabled():
+    if strict_fused_moe_enabled() and not _requires_sm120_linear(x):
         raise RuntimeError(
             "DSV4_MOE_STRICT_FUSED=1 forbids generic Expert.forward shared path"
         )

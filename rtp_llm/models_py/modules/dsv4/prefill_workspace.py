@@ -40,6 +40,20 @@ import torch
 # small ``align_bytes`` (e.g. 1) so the rounding does not force a 1 GiB host
 # allocation.
 _PREFILL_WS_ALIGN_BYTES = 1 << 30
+def resolve_prefill_workspace_rows(
+    configured_q_rows: int, configured_full_rows: int,
+    live_q_rows: int, cp_size: int,
+    *,
+    allow_dynamic_growth: bool,
+) -> tuple[int, int]:
+    q_rows = int(configured_q_rows)
+    full_rows = int(configured_full_rows)
+    if not allow_dynamic_growth:
+        return q_rows, full_rows
+    q_rows = max(q_rows, int(live_q_rows))
+    if full_rows > 0:
+        full_rows = max(full_rows, q_rows * max(int(cp_size), 1))
+    return q_rows, full_rows
 
 
 def _dtype_size(dtype: torch.dtype) -> int:
