@@ -44,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -148,6 +149,7 @@ class AutoTpmSchedulingOverheadPerfTest {
             futures.add(harness.submit(i, syntheticPriority(i), syntheticSeqLen(i)));
         }
         harness.awaitSuccessful(futures, WARMUP_REQUESTS);
+        harness.flushDecodeAccepted();
     }
 
     private RoundResult runRateLimited(PerfHarness harness) throws Exception {
@@ -174,6 +176,7 @@ class AutoTpmSchedulingOverheadPerfTest {
         CompletableFuture.allOf(latencyObservers.toArray(CompletableFuture[]::new))
                 .get(PHASE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         long elapsedNanos = System.nanoTime() - startNanos;
+        harness.flushDecodeAccepted();
 
         Arrays.sort(completionLatencies);
         double qps = REQUEST_COUNT * 1_000_000_000.0 / elapsedNanos;
@@ -299,6 +302,8 @@ class AutoTpmSchedulingOverheadPerfTest {
         private final Map<Long, Integer> decodeAssignment = new ConcurrentHashMap<>();
         private final List<Map<Long, TaskInfo>> activeDecodeTasks = new ArrayList<>();
         private final List<Object> decodeStatusLocks = new ArrayList<>();
+        private final ConcurrentLinkedQueue<Long> pendingDecodeAcceptances =
+                new ConcurrentLinkedQueue<>();
         private final AtomicLong dispatchCount = new AtomicLong();
         private final AtomicLong completionCount = new AtomicLong();
         private final AtomicInteger maxDecisionGroupSize = new AtomicInteger();
@@ -359,22 +364,14 @@ class AutoTpmSchedulingOverheadPerfTest {
                                                 .setRequestId(requestId));
                             }
                         }
-                        try {
-                            // Acceptance is part of this synthetic RPC's success
-                            // contract. Publish dispatch only after every endpoint
-                            // status reducer completed, matching the phase gate used
-                            // by NON_BATCH delivery.
-                            reportDecodeAccepted(accepted);
-                            dispatchCount.addAndGet(accepted.size());
-                            return CompletableFuture.completedFuture(response.build());
-                        } catch (Throwable acceptanceFailure) {
-                            firstFailure.compareAndSet(null,
-                                    "batch_id=" + request.getBatchId()
-                                            + " decode_acceptance=" + acceptanceFailure);
-                            // Preserve the real dispatcher's asynchronous RPC
-                            // failure path instead of throwing only from Mockito.
-                            return CompletableFuture.failedFuture(acceptanceFailure);
-                        }
+                        // A real EnqueueBatch RPC returns independently from the
+                        // periodic Decode WorkerStatus stream. Keep that boundary in
+                        // the performance harness: synchronously rebuilding a growing
+                        // full-status snapshot here serializes all dispatcher threads
+                        // and measures an artificial O(requests^2) mock bottleneck.
+                        pendingDecodeAcceptances.addAll(accepted);
+                        dispatchCount.addAndGet(accepted.size());
+                        return CompletableFuture.completedFuture(response.build());
                     });
 
             dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
@@ -466,7 +463,7 @@ class AutoTpmSchedulingOverheadPerfTest {
                     }
                     if (!mode.batch) {
                         if (mode.queue) {
-                            reportDecodeAccepted(List.of(requestId));
+                            pendingDecodeAcceptances.add(requestId);
                         } else {
                             decodeAssignment.remove(requestId);
                         }
@@ -543,6 +540,25 @@ class AutoTpmSchedulingOverheadPerfTest {
                     + " completed=" + completionCount.get()
                     + " queued=" + (mode.queue ? scheduler.getQueuedRequestCount() : 0)
                     + " first_failure=" + firstFailure.get();
+        }
+
+        private void flushDecodeAccepted() {
+            List<Long> accepted = new ArrayList<>();
+            Long requestId;
+            while ((requestId = pendingDecodeAcceptances.poll()) != null) {
+                accepted.add(requestId);
+            }
+            if (!accepted.isEmpty()) {
+                reportDecodeAccepted(accepted);
+            }
+            String failure = firstFailure.get();
+            assertTrue(failure == null,
+                    () -> mode.label + " failed to reduce Decode acceptance: " + failure);
+            assertTrue(pendingDecodeAcceptances.isEmpty(),
+                    () -> mode.label + " retained pending Decode acceptances");
+            assertTrue(decodeAssignment.isEmpty(),
+                    () -> mode.label + " retained " + decodeAssignment.size()
+                            + " Decode assignments after status reduction");
         }
 
         private void reportDecodeAccepted(List<Long> requestIds) {
