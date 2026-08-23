@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
@@ -168,6 +169,34 @@ class PrioritySchedulerTest {
         assertEquals(1, snapshot.size());
         assertEquals(90_010L, snapshot.getFirst().requestId());
         assertEquals(RequestLifecycleState.QUEUED, snapshot.getFirst().state());
+    }
+
+    @Test
+    void fifoQueuedDecodeReservationsDoNotConsumeEngineConcurrency() throws Exception {
+        SchedulingTestConfig.useFifoQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxRequests(100);
+        SchedulingTestConfig.useFixedWindowDecision(config).setMaxCollectionWaitMs(60_000);
+        config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(4L);
+        PrefillEndpoint prefill = replacePrefillEndpoint();
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            decode.reserve(ctx.getRequestId(), 128, 136);
+            return successRoute(ctx.getRequestId());
+        });
+
+        List<CompletableFuture<Response>> pending = new ArrayList<>();
+        for (long requestId = 90_020L; requestId < 90_024L; requestId++) {
+            pending.add(scheduler.submit(context(requestId)));
+        }
+        awaitCondition(() -> prefill.getBatcher().queueSize() == 4);
+
+        assertTrue(pending.stream().noneMatch(CompletableFuture::isDone));
+        assertEquals(4, decode.getTotalLoad());
+        assertEquals(0, decode.getEngineLoad());
+        assertTrue(new DecodeResourceMeasure(configService).isResourceAvailable(decode));
     }
 
     @Test

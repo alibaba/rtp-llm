@@ -479,6 +479,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         } else {
                             observeExternalFutureTerminal(entry);
                             ctx.setRouteSubmittedNanos(System.nanoTime());
+                            // Routing already reserved Decode capacity. While the request is
+                            // parked in a Prefill queue, keep that reservation out of the
+                            // engine-facing concurrency count.
+                            if (decodeEp != null) {
+                                decodeEp.markQueuedPhase(ctx.getRequestId());
+                            }
                             try {
                                 if (!prefillEp.getBatcher().tryOffer(item)) {
                                     synchronized (entry) {
