@@ -13,7 +13,14 @@ import rtp_llm.utils.meta_pickler as meta_pickler
 from rtp_llm.utils.time_util import Timer
 
 # ROCm DMA pinning COWs MAP_PRIVATE pages; copying out keeps them file-backed.
-ROCM_COPY_OUT = torch.version.hip is not None
+# Copying out also decouples returned tensors from the mmap, which is the
+# precondition for CkptDatabase recycling (unmapping) consumed shard handles.
+# Without recycling every touched checkpoint page stays mapped for the whole
+# load, so page cache grows to the full checkpoint size and can trip a
+# container memory cgroup. Opt in on CUDA with RTP_LLM_CKPT_COPY_OUT=1.
+ROCM_COPY_OUT = (
+    torch.version.hip is not None or os.environ.get("RTP_LLM_CKPT_COPY_OUT", "0") == "1"
+)
 
 
 class CkptType(enum.Enum):

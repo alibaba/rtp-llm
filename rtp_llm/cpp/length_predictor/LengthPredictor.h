@@ -92,6 +92,11 @@ public:
     const LengthPredictorConfig& config() const {
         return config_;
     }
+    // True when the weight pack carries a separate prefill-specialised anchor
+    // stack; false when the anchor reuses the history encoder and head.
+    bool hasAnchorModel() const {
+        return has_anchor_model_;
+    }
     // True when decode step t is on the anchor/observation/prediction grid.
     // Lets the caller skip entry construction for rows the worker would drop.
     bool wantsStep(int64_t decode_step) const {
@@ -111,9 +116,28 @@ public:
     void processRowForTest(LengthPredictorState& state, const float* feature, int64_t decode_step) const;
 
 private:
+    // Selects which frozen head/encoder stack a computation runs against.
+    // The deployed predictor pairs a prefill-specialised anchor model with a
+    // separate history model, so both stacks have identical shapes but
+    // different weights. When no anchor stack is present in the weight pack
+    // both selectors resolve to the history weights (single-stack packs).
+    struct HeadWeights {
+        const std::vector<float>* time_w      = nullptr;
+        const std::vector<float>* time_b      = nullptr;
+        const std::vector<float>* fusion1_w   = nullptr;
+        const std::vector<float>* fusion1_b   = nullptr;
+        const std::vector<float>* fusion2_w   = nullptr;
+        const std::vector<float>* fusion2_b   = nullptr;
+        const std::vector<float>* bin_centers = nullptr;
+    };
+
     struct Slot {
         torch::Tensor pinned;  // [capacity, F] fp32, pinned when CUDA is available
         torch::Tensor device;  // [capacity, F] fp32 CUDA scratch (undefined on CPU path)
+        // Second pair holding anchor-stack features; only filled for packets
+        // that carry a t==0 row and only when an anchor stack was loaded.
+        torch::Tensor anchor_pinned;
+        torch::Tensor anchor_device;
         int64_t       capacity = 0;
     };
     struct StepPacket {
@@ -133,11 +157,16 @@ private:
     void processPacket(StepPacket& packet);
 
     // Hand-written fp32 math (worker thread only).
-    void encodeRowCpu(const float* hidden, float* feature) const;
-    void processRow(LengthPredictorState& state, const float* feature, int64_t decode_step) const;
+    void encodeRowCpu(const float* hidden, float* feature, bool use_anchor) const;
+    // `anchor_feature` may be null when the row is not on the anchor step or no
+    // anchor stack is loaded; the history feature is then used for the anchor.
+    void processRow(LengthPredictorState& state,
+                    const float*          feature,
+                    const float*          anchor_feature,
+                    int64_t               decode_step) const;
     void gruUpdate(std::vector<float>& state, const float* feature, double delta_step) const;
     // Writes num_bins logits into scratch and returns expm1(expected log1p).
-    double headExpectedLength(const float* feature, double decode_step) const;
+    double headExpectedLength(const HeadWeights& head, const float* feature, double decode_step) const;
     void   modulate(const float* feature, const float* state, float* modulated) const;
 
     LengthPredictorConfig config_;
@@ -147,6 +176,12 @@ private:
     torch::Tensor encoder_bias_cpu_;
     torch::Tensor encoder_weight_t_device_;
     torch::Tensor encoder_bias_device_;
+    // Prefill-specialised anchor encoder; undefined when absent from the pack.
+    torch::Tensor anchor_encoder_weight_t_cpu_;
+    torch::Tensor anchor_encoder_bias_cpu_;
+    torch::Tensor anchor_encoder_weight_t_device_;
+    torch::Tensor anchor_encoder_bias_device_;
+    bool          has_anchor_model_     = false;
     bool          device_weights_ready_ = false;
     std::mutex    device_mutex_;
 
@@ -159,6 +194,13 @@ private:
     std::vector<float> fusion1_w_, fusion1_b_;
     std::vector<float> fusion2_w_, fusion2_b_;
     std::vector<float> bin_centers_;  // log1p space
+    // Anchor-stack head weights; empty when the pack has no anchor stack.
+    std::vector<float> anchor_time_w_, anchor_time_b_;
+    std::vector<float> anchor_fusion1_w_, anchor_fusion1_b_;
+    std::vector<float> anchor_fusion2_w_, anchor_fusion2_b_;
+    std::vector<float> anchor_bin_centers_;
+    HeadWeights        history_head_;
+    HeadWeights        anchor_head_;
 
     // Worker scratch, sized at init (worker thread only).
     struct Scratch {

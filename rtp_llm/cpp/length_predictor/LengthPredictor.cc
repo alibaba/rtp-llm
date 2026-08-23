@@ -107,7 +107,8 @@ LengthPredictor* LengthPredictor::instance() {
         try {
             auto result = std::make_unique<LengthPredictor>(std::string(path));
             RTP_LLM_LOG_INFO("length predictor enabled from %s (hidden_dim=%ld, t_cap=%.0f, "
-                             "history_stride=%ld, predict_stride=%ld, hard_anchor=%.0f, half_life=%.0f, max_w=%.2f)",
+                             "history_stride=%ld, predict_stride=%ld, hard_anchor=%.0f, half_life=%.0f, max_w=%.2f, "
+                             "anchor_stack=%s)",
                              path,
                              result->config().hidden_dim,
                              result->config().t_cap,
@@ -115,7 +116,8 @@ LengthPredictor* LengthPredictor::instance() {
                              result->config().predict_stride,
                              result->config().hard_anchor_until,
                              result->config().half_life_tokens,
-                             result->config().max_history_weight);
+                             result->config().max_history_weight,
+                             result->hasAnchorModel() ? "prefill-specialised" : "shared-with-history");
             return result;
         } catch (const std::exception& e) {
             RTP_LLM_LOG_ERROR("length predictor disabled: failed to load %s: %s", path, e.what());
@@ -231,6 +233,45 @@ void LengthPredictor::init(const LengthPredictorConfig&                   config
     }
     bin_centers_ = toVector(centers);
 
+    // Optional prefill-specialised anchor stack. The deployed predictor pairs a
+    // prefill-only anchor model with the history model, so t == 0 must run
+    // against its own encoder and head. Packs without these tensors keep the
+    // single-stack behaviour where the anchor reuses the history weights.
+    has_anchor_model_ = weights.count("anchor_encoder_linear_weight") > 0;
+    if (has_anchor_model_) {
+        auto a_gamma                 = takeWeight(weights, "anchor_encoder_ln_weight", {hidden});
+        auto a_beta                  = takeWeight(weights, "anchor_encoder_ln_bias", {hidden});
+        auto a_enc_w                 = takeWeight(weights, "anchor_encoder_linear_weight", {feature, hidden});
+        auto a_enc_b                 = takeWeight(weights, "anchor_encoder_linear_bias", {feature});
+        auto a_folded_w              = a_enc_w * a_gamma.unsqueeze(0);
+        auto a_folded_b              = a_enc_b + a_enc_w.matmul(a_beta);
+        anchor_encoder_weight_t_cpu_ = a_folded_w.t().contiguous();
+        anchor_encoder_bias_cpu_     = a_folded_b.contiguous();
+
+        anchor_time_w_    = toVector(takeWeight(weights, "anchor_time_linear_weight", {time, 2}));
+        anchor_time_b_    = toVector(takeWeight(weights, "anchor_time_linear_bias", {time}));
+        anchor_fusion1_w_ = toVector(takeWeight(weights, "anchor_fusion1_weight", {feature, feature + time}));
+        anchor_fusion1_b_ = toVector(takeWeight(weights, "anchor_fusion1_bias", {feature}));
+        anchor_fusion2_w_ = toVector(takeWeight(weights, "anchor_fusion2_weight", {bins, feature}));
+        anchor_fusion2_b_ = toVector(takeWeight(weights, "anchor_fusion2_bias", {bins}));
+
+        auto a_centers = takeWeight(weights, "anchor_bin_centers", {bins});
+        if (bins > 1 && !(a_centers.slice(0, 1) > a_centers.slice(0, 0, bins - 1)).all().item<bool>()) {
+            throw std::runtime_error("length predictor anchor bin centers must be strictly increasing");
+        }
+        anchor_bin_centers_ = toVector(a_centers);
+    }
+
+    history_head_ = HeadWeights{&time_w_, &time_b_, &fusion1_w_, &fusion1_b_, &fusion2_w_, &fusion2_b_, &bin_centers_};
+    anchor_head_  = has_anchor_model_ ? HeadWeights{&anchor_time_w_,
+                                                   &anchor_time_b_,
+                                                   &anchor_fusion1_w_,
+                                                   &anchor_fusion1_b_,
+                                                   &anchor_fusion2_w_,
+                                                   &anchor_fusion2_b_,
+                                                   &anchor_bin_centers_} :
+                                        history_head_;
+
     scratch_.adapted.resize(adapter + 2);
     scratch_.gates_i.resize(3 * state);
     scratch_.gates_h.resize(3 * state);
@@ -290,7 +331,11 @@ bool LengthPredictor::ensureDeviceWeights(const torch::Device& device) {
     }
     encoder_weight_t_device_ = encoder_weight_t_cpu_.to(device);
     encoder_bias_device_     = encoder_bias_cpu_.to(device);
-    device_weights_ready_    = true;
+    if (has_anchor_model_) {
+        anchor_encoder_weight_t_device_ = anchor_encoder_weight_t_cpu_.to(device);
+        anchor_encoder_bias_device_     = anchor_encoder_bias_cpu_.to(device);
+    }
+    device_weights_ready_ = true;
     return true;
 }
 
@@ -381,6 +426,19 @@ void LengthPredictor::processPacket(StepPacket& packet) {
     }
     Slot& slot = slots_[slot_index];
 
+    // The anchor stack only matters on the prefill step, which carries at most
+    // one row per request, so the second encode is skipped on ordinary decode
+    // steps.
+    bool needs_anchor = false;
+    if (has_anchor_model_) {
+        for (const auto& entry : packet.entries) {
+            if (entry.decode_step == 0) {
+                needs_anchor = true;
+                break;
+            }
+        }
+    }
+
     if (hidden.is_cuda()) {
 #if USING_CUDA
         if (!ensureDeviceWeights(hidden.device())) {
@@ -403,58 +461,81 @@ void LengthPredictor::processPacket(StepPacket& packet) {
             slot.device   = torch::empty({batch, config_.feature_dim},
                                        torch::TensorOptions().dtype(torch::kFloat32).device(hidden.device()));
             slot.capacity = batch;
+            slot.anchor_pinned.reset();
+            slot.anchor_device.reset();
         }
-        const float* weight_t = encoder_weight_t_device_.data_ptr<float>();
-        const float* bias     = encoder_bias_device_.data_ptr<float>();
-        float*       out      = slot.device.data_ptr<float>();
-        const int    b        = static_cast<int>(batch);
-        const int    h        = static_cast<int>(config_.hidden_dim);
-        const int    f        = static_cast<int>(config_.feature_dim);
-        switch (hidden.scalar_type()) {
-            case torch::kFloat32:
-                invokeLengthEncoderForward<float>(hidden.data_ptr<float>(),
-                                                  weight_t,
-                                                  bias,
-                                                  out,
-                                                  b,
-                                                  h,
-                                                  f,
-                                                  static_cast<float>(config_.layernorm_eps),
-                                                  stream.stream());
-                break;
-            case torch::kHalf:
-                invokeLengthEncoderForward<__half>(reinterpret_cast<const __half*>(hidden.data_ptr()),
-                                                   weight_t,
-                                                   bias,
-                                                   out,
-                                                   b,
-                                                   h,
-                                                   f,
-                                                   static_cast<float>(config_.layernorm_eps),
-                                                   stream.stream());
-                break;
-            case torch::kBFloat16:
-                invokeLengthEncoderForward<__nv_bfloat16>(reinterpret_cast<const __nv_bfloat16*>(hidden.data_ptr()),
-                                                          weight_t,
-                                                          bias,
-                                                          out,
-                                                          b,
-                                                          h,
-                                                          f,
-                                                          static_cast<float>(config_.layernorm_eps),
-                                                          stream.stream());
-                break;
-            default:
-                RTP_LLM_LOG_ERROR("length predictor disabled: unsupported hidden dtype");
-                runtime_disabled_.store(true, std::memory_order_relaxed);
-                releaseSlot(slot_index);
-                return;
+        if (needs_anchor && !slot.anchor_device.defined()) {
+            slot.anchor_pinned =
+                torch::empty({batch, config_.feature_dim},
+                             torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true));
+            slot.anchor_device = torch::empty({batch, config_.feature_dim},
+                                              torch::TensorOptions().dtype(torch::kFloat32).device(hidden.device()));
+        }
+        const int  b              = static_cast<int>(batch);
+        const int  h              = static_cast<int>(config_.hidden_dim);
+        const int  f              = static_cast<int>(config_.feature_dim);
+        const auto launch_encoder = [&](const float* weight_t, const float* bias, float* out) -> bool {
+            switch (hidden.scalar_type()) {
+                case torch::kFloat32:
+                    invokeLengthEncoderForward<float>(hidden.data_ptr<float>(),
+                                                      weight_t,
+                                                      bias,
+                                                      out,
+                                                      b,
+                                                      h,
+                                                      f,
+                                                      static_cast<float>(config_.layernorm_eps),
+                                                      stream.stream());
+                    return true;
+                case torch::kHalf:
+                    invokeLengthEncoderForward<__half>(reinterpret_cast<const __half*>(hidden.data_ptr()),
+                                                       weight_t,
+                                                       bias,
+                                                       out,
+                                                       b,
+                                                       h,
+                                                       f,
+                                                       static_cast<float>(config_.layernorm_eps),
+                                                       stream.stream());
+                    return true;
+                case torch::kBFloat16:
+                    invokeLengthEncoderForward<__nv_bfloat16>(reinterpret_cast<const __nv_bfloat16*>(hidden.data_ptr()),
+                                                              weight_t,
+                                                              bias,
+                                                              out,
+                                                              b,
+                                                              h,
+                                                              f,
+                                                              static_cast<float>(config_.layernorm_eps),
+                                                              stream.stream());
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        if (!launch_encoder(encoder_weight_t_device_.data_ptr<float>(),
+                            encoder_bias_device_.data_ptr<float>(),
+                            slot.device.data_ptr<float>())) {
+            RTP_LLM_LOG_ERROR("length predictor disabled: unsupported hidden dtype");
+            runtime_disabled_.store(true, std::memory_order_relaxed);
+            releaseSlot(slot_index);
+            return;
         }
         cudaMemcpyAsync(slot.pinned.data_ptr<float>(),
-                        out,
+                        slot.device.data_ptr<float>(),
                         static_cast<size_t>(batch) * config_.feature_dim * sizeof(float),
                         cudaMemcpyDeviceToHost,
                         stream.stream());
+        if (needs_anchor) {
+            launch_encoder(anchor_encoder_weight_t_device_.data_ptr<float>(),
+                           anchor_encoder_bias_device_.data_ptr<float>(),
+                           slot.anchor_device.data_ptr<float>());
+            cudaMemcpyAsync(slot.anchor_pinned.data_ptr<float>(),
+                            slot.anchor_device.data_ptr<float>(),
+                            static_cast<size_t>(batch) * config_.feature_dim * sizeof(float),
+                            cudaMemcpyDeviceToHost,
+                            stream.stream());
+        }
         // Blocks only this worker thread on its own stream.
         cudaStreamSynchronize(stream.stream());
 #else
@@ -467,19 +548,37 @@ void LengthPredictor::processPacket(StepPacket& packet) {
             slot.pinned   = torch::empty({batch, config_.feature_dim},
                                        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
             slot.capacity = batch;
+            slot.anchor_pinned.reset();
+        }
+        if (needs_anchor && !slot.anchor_pinned.defined()) {
+            slot.anchor_pinned = torch::empty({batch, config_.feature_dim},
+                                              torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
         }
         auto         source = hidden.to(torch::kFloat32).contiguous();
         const float* src    = source.data_ptr<float>();
         float*       dst    = slot.pinned.data_ptr<float>();
         for (const auto& entry : packet.entries) {
-            encodeRowCpu(src + static_cast<size_t>(entry.row) * config_.hidden_dim,
-                         dst + static_cast<size_t>(entry.row) * config_.feature_dim);
+            const float* row = src + static_cast<size_t>(entry.row) * config_.hidden_dim;
+            encodeRowCpu(row, dst + static_cast<size_t>(entry.row) * config_.feature_dim, /*use_anchor=*/false);
+            if (needs_anchor && entry.decode_step == 0) {
+                encodeRowCpu(row,
+                             slot.anchor_pinned.data_ptr<float>()
+                                 + static_cast<size_t>(entry.row) * config_.feature_dim,
+                             /*use_anchor=*/true);
+            }
         }
     }
 
     const float* features = slot.pinned.data_ptr<float>();
+    const float* anchors  = needs_anchor ? slot.anchor_pinned.data_ptr<float>() : nullptr;
     for (const auto& entry : packet.entries) {
-        processRow(*entry.state, features + static_cast<size_t>(entry.row) * config_.feature_dim, entry.decode_step);
+        const float* anchor_feature = (anchors != nullptr && entry.decode_step == 0) ?
+                                          anchors + static_cast<size_t>(entry.row) * config_.feature_dim :
+                                          nullptr;
+        processRow(*entry.state,
+                   features + static_cast<size_t>(entry.row) * config_.feature_dim,
+                   anchor_feature,
+                   entry.decode_step);
     }
     releaseSlot(slot_index);
 }
@@ -514,7 +613,7 @@ void LengthPredictor::drainForTest() {
     drained_cv_.wait(lock, [this] { return in_flight_ == 0; });
 }
 
-void LengthPredictor::encodeRowCpu(const float* hidden, float* feature) const {
+void LengthPredictor::encodeRowCpu(const float* hidden, float* feature, bool use_anchor) const {
     const int h = static_cast<int>(config_.hidden_dim);
     const int f = static_cast<int>(config_.feature_dim);
 
@@ -528,8 +627,9 @@ void LengthPredictor::encodeRowCpu(const float* hidden, float* feature) const {
     const float  rstd     = static_cast<float>(1.0 / std::sqrt(variance + config_.layernorm_eps));
     const float  mean_f   = static_cast<float>(mean);
 
-    const float* weight_t = encoder_weight_t_cpu_.data_ptr<float>();  // [H, F]
-    const float* bias     = encoder_bias_cpu_.data_ptr<float>();
+    const bool   anchor   = use_anchor && has_anchor_model_;
+    const float* weight_t = (anchor ? anchor_encoder_weight_t_cpu_ : encoder_weight_t_cpu_).data_ptr<float>();
+    const float* bias     = (anchor ? anchor_encoder_bias_cpu_ : encoder_bias_cpu_).data_ptr<float>();
     for (int j = 0; j < f; ++j) {
         feature[j] = bias[j];
     }
@@ -545,7 +645,7 @@ void LengthPredictor::encodeRowCpu(const float* hidden, float* feature) const {
     }
 }
 
-double LengthPredictor::headExpectedLength(const float* feature, double decode_step) const {
+double LengthPredictor::headExpectedLength(const HeadWeights& head, const float* feature, double decode_step) const {
     const int f    = static_cast<int>(config_.feature_dim);
     const int time = static_cast<int>(config_.time_dim);
     const int bins = static_cast<int>(config_.num_bins);
@@ -558,25 +658,26 @@ double LengthPredictor::headExpectedLength(const float* feature, double decode_s
     for (int j = 0; j < f; ++j) {
         fused[j] = feature[j];
     }
-    gemv(time_w_, time_b_, time_features, fused + f, time, 2);
+    gemv(*head.time_w, *head.time_b, time_features, fused + f, time, 2);
     for (int j = 0; j < time; ++j) {
         fused[f + j] = geluErf(fused[f + j]);
     }
-    gemv(fusion1_w_, fusion1_b_, fused, scratch_.inner.data(), f, f + time);
+    gemv(*head.fusion1_w, *head.fusion1_b, fused, scratch_.inner.data(), f, f + time);
     for (int j = 0; j < f; ++j) {
         scratch_.inner[j] = geluErf(scratch_.inner[j]);
     }
-    gemv(fusion2_w_, fusion2_b_, scratch_.inner.data(), scratch_.logits.data(), bins, f);
+    gemv(*head.fusion2_w, *head.fusion2_b, scratch_.inner.data(), scratch_.logits.data(), bins, f);
 
     float max_logit = scratch_.logits[0];
     for (int j = 1; j < bins; ++j) {
         max_logit = std::max(max_logit, scratch_.logits[j]);
     }
-    double normalizer = 0.0, expected = 0.0;
+    double                    normalizer = 0.0, expected = 0.0;
+    const std::vector<float>& centers = *head.bin_centers;
     for (int j = 0; j < bins; ++j) {
         const double p = std::exp(static_cast<double>(scratch_.logits[j]) - max_logit);
         normalizer += p;
-        expected += p * bin_centers_[j];
+        expected += p * centers[j];
     }
     return std::max(std::expm1(expected / normalizer), 0.0);
 }
@@ -624,14 +725,22 @@ void LengthPredictor::gruUpdate(std::vector<float>& state, const float* feature,
     state.assign(scratch_.new_state.begin(), scratch_.new_state.end());
 }
 
-void LengthPredictor::processRow(LengthPredictorState& state, const float* feature, int64_t decode_step) const {
+void LengthPredictor::processRow(LengthPredictorState& state,
+                                 const float*          feature,
+                                 const float*          anchor_feature,
+                                 int64_t               decode_step) const {
     if (decode_step == 0) {
         if (state.anchor_ready) {
             return;
         }
-        // Prefill Once: remaining == total at t=0. Predict-then-consume: the
-        // prefill feature enters the GRU only after the anchor is computed.
-        state.anchor_total = headExpectedLength(feature, 0.0);
+        // Prefill Once: remaining == total at t=0. The anchor runs against the
+        // prefill-specialised stack when the pack carries one; the GRU is always
+        // seeded with the history-stack feature so decode observations stay in
+        // the history model's feature space. Predict-then-consume: the anchor is
+        // computed before the feature enters the GRU.
+        const float*       anchor_input = anchor_feature != nullptr ? anchor_feature : feature;
+        const HeadWeights& head         = anchor_feature != nullptr ? anchor_head_ : history_head_;
+        state.anchor_total              = headExpectedLength(head, anchor_input, 0.0);
         state.predicted_total.store(state.anchor_total, std::memory_order_relaxed);
         state.gru_state.assign(config_.state_dim, 0.0f);
         gruUpdate(state.gru_state, feature, 0.0);
@@ -655,7 +764,7 @@ void LengthPredictor::processRow(LengthPredictorState& state, const float* featu
         } else {
             modulate(feature, state.gru_state.data(), scratch_.modulated.data());
             const double history_remaining =
-                headExpectedLength(scratch_.modulated.data(), static_cast<double>(decode_step));
+                headExpectedLength(history_head_, scratch_.modulated.data(), static_cast<double>(decode_step));
             const double history_total = history_remaining + static_cast<double>(decode_step);
             state.predicted_total.store(fuseTotals(state.anchor_total, history_total, alpha),
                                         std::memory_order_relaxed);
@@ -668,11 +777,11 @@ void LengthPredictor::processRow(LengthPredictorState& state, const float* featu
 }
 
 void LengthPredictor::encodeRowForTest(const float* hidden, float* feature) const {
-    encodeRowCpu(hidden, feature);
+    encodeRowCpu(hidden, feature, /*use_anchor=*/false);
 }
 
 void LengthPredictor::processRowForTest(LengthPredictorState& state, const float* feature, int64_t decode_step) const {
-    processRow(state, feature, decode_step);
+    processRow(state, feature, /*anchor_feature=*/nullptr, decode_step);
 }
 
 }  // namespace rtp_llm
