@@ -92,12 +92,21 @@ class LazyModuleRegistry:
 @lru_cache(maxsize=1)
 def has_internal_source() -> bool:
     """
-    检查项目根目录下是否存在 internal_source 目录。
-    结果会被缓存，避免重复检查文件系统。
+    检查 internal_source 是否可用。
+    首先尝试 importlib 检测（适用于 wheel 安装和任意 sys.path 布局），
+    再回退到相对目录检测（适用于源码开发环境）。
+    结果会被缓存，避免重复检查。
 
     Returns:
-        bool: 如果 internal_source 目录存在则返回 True，否则返回 False
+        bool: 如果 internal_source 可用则返回 True，否则返回 False
     """
+    # Gate 1: importlib-based detection — works regardless of filesystem layout.
+    spec = importlib.util.find_spec("internal_source")
+    if spec is not None:
+        logging.debug("internal_source detected via importlib: %s", spec.origin)
+        return True
+
+    # Gate 2: filesystem heuristic — relative to this file's location.
     current_dir = os.path.dirname(os.path.abspath(__file__))  # rtp_llm/utils/
     rtp_llm_dir = os.path.dirname(current_dir)               # rtp_llm/
     project_root = os.path.dirname(rtp_llm_dir)              # workspace root
