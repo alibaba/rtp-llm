@@ -47,8 +47,18 @@ public class ConfigService {
         try {
             JsonNode tree = STRICT_MAPPER.readTree(document);
             rejectJsonNull(tree, "$");
-            FlexlbConfig config = STRICT_MAPPER.treeToValue(tree, FlexlbConfig.class);
+            FlexlbConfigStartupMigrator.MigrationResult migration =
+                    FlexlbConfigStartupMigrator
+                            .migrateToCurrentSchema(tree);
+            FlexlbConfig config = STRICT_MAPPER.treeToValue(
+                    migration.document(), FlexlbConfig.class);
             FlexlbConfigValidator.validate(config);
+            if (migration.migrated()) {
+                log.info("FlexLB config schema migrated at startup: "
+                                + "sourceSchemaVersion={}, targetSchemaVersion={}",
+                        migration.sourceSchemaVersion(),
+                        FlexlbConfig.CURRENT_SCHEMA_VERSION);
+            }
             return config;
         } catch (ConfigValidationException error) {
             throw error;

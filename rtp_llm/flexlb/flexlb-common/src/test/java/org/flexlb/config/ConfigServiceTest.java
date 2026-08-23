@@ -34,9 +34,17 @@ class ConfigServiceTest {
     }
 
     @Test
-    void rejects_schema_v1_after_canonical_v2_cutover() {
-        assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"schemaVersion\":1}"));
+    void migrates_supported_schema_v1_before_binding() {
+        FlexlbConfig config = ConfigService.parse("{\"schemaVersion\":1}");
+
+        assertEquals(FlexlbConfig.CURRENT_SCHEMA_VERSION,
+                config.getSchemaVersion());
+        assertTrue(config.isFixedWindowDecision());
+        assertEquals(8, config.fixedWindowDecision().getMaxRequests());
+        assertEquals(300L,
+                config.fixedWindowDecision().getMaxCollectionWaitMs());
+        assertEquals(1024, config.queueScheduler().getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker());
     }
 
     @Test

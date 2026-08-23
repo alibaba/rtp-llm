@@ -289,8 +289,18 @@ decision-group limits live only under `scheduler.decision`, waiting-queue limits
 live only under `scheduler.capacity`, and `dispatcher` contains only delivery and
 delivery-backpressure settings. Omitting `scheduler.decision` uses
 `FIXED_WINDOW`; select `SINGLE` explicitly when that behavior is required.
-Documents declaring `schemaVersion: 1` are rejected rather than silently
-translated.
+An explicitly declared `schemaVersion: 1` is migrated once at startup before
+binding to the schema-v2 runtime model. A v1 `NON_BATCH` queue with no decision
+becomes `SINGLE`; a v1 `BATCH` queue with no decision becomes `FIXED_WINDOW`,
+and its `maxRequests`, `maxCollectionWaitMs`, and
+`maxWaitingRequestsPerPrefillWorker` fields move to their v2 owners. Existing
+`scheduler.decision` and `scheduler.capacity` fields remain authoritative after
+the shadowed legacy values pass their original v1 validation. An active
+`earlyDispatchPredictedExecutionMs` is rejected because its equality boundary
+cannot be represented exactly by `maxPredictedExecutionMs`. A v1 explicit
+`maxPredictedExecutionMs` is rejected for the same reason: equality did not
+trigger immediate dispatch under v1 but does under v2. Omitting `schemaVersion`
+means v2; other explicit versions are rejected.
 
 Production-style examples migrated from the former field-level environment variables:
 

@@ -213,13 +213,23 @@ group. `scheduler.capacity` owns queue bounds. `dispatcher` owns only delivery
 and its backpressure limits. Select `SINGLE` explicitly instead of relying on a
 dispatcher type to choose a decision policy.
 
-Documents declaring `schemaVersion: 1` are rejected. To migrate, move the former
-BATCH decision size and collection-window values to
-`scheduler.decision.{maxRequests,maxCollectionWaitMs}`, move the per-worker
-waiting bound to `scheduler.capacity.maxWaitingRequestsPerPrefillWorker`, and use
-`scheduler.decision.maxPredictedExecutionMs` for the prediction cap. The v2 cap
-includes a member that makes the prediction exactly equal to the cap and then
-dispatches immediately; a member that would exceed it remains queued.
+An explicitly declared `schemaVersion: 1` passes through a startup-only migration
+before the strict schema-v2 bind. Omitted `schemaVersion` is interpreted as v2;
+unsupported explicit versions are rejected. For v1 QUEUE documents, omitted
+decision policy maps to `SINGLE` for `NON_BATCH` and `FIXED_WINDOW` for `BATCH`.
+The v1 BATCH fields `maxRequests` and `maxCollectionWaitMs` move to
+`scheduler.decision`, and `maxWaitingRequestsPerPrefillWorker` moves to
+`scheduler.capacity`. If those canonical owners were already explicit in v1,
+they keep precedence; shadowed legacy values are still validated before removal.
+
+Neither v1 prediction boundary is automatically migrated. The legacy
+`earlyDispatchPredictedExecutionMs` leaves an additional member queued when its
+prediction equals the threshold. A v1 explicit `maxPredictedExecutionMs` keeps
+that equal member but does not release solely because equality was reached. The
+v2 cap keeps the equal member and immediately releases the group. Startup
+rejects both lossy cases; the operator must use schema v2 and confirm the
+inclusive cap semantics. After migration, only the canonical schema-v2 runtime
+model exists.
 
 ### Dispatcher
 
@@ -439,8 +449,9 @@ hub.docker.alibaba-inc.com/isearch/flexlb:0.2.0_0.2.0_2026_08_23_22_08_739a87e57
 ```
 
 The deployment still used the image's schema-v1 compatibility parser. The
-current source tree and the examples in this document use schema v2. Do not
-copy the legacy production payload into a current build. During this test the
+current source tree and the examples in this document use schema v2; the exact
+recorded v1 payload is accepted only through the startup migration described
+above. New configurations should use schema v2 directly. During this test the
 legacy `FLEXLB_CONFIG` and `NON_BATCH_FLEXLB_CONFIG` environment variables were
 kept identical. A sample was considered stable only after both Master replicas
 reported `SVT_AVAILABLE`, `HT_ALIVE`, `WT_READY`, and `更新完成`.
