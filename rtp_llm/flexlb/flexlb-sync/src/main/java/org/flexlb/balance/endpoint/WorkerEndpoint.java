@@ -69,8 +69,8 @@ public abstract class WorkerEndpoint {
      * Replaces the endpoint's internal {@link #status} reference with
      * the one already updated by
      * {@link WorkerStatus#updateFromResponse(WorkerStatusResponse)}.
-     * Triggers role-specific calibration (inflight reconciliation) via
-     * subclass overrides.
+     * Triggers role-specific per-EP state refresh (ledger counter
+     * snapshots) via subclass overrides.
      *
      * <p>Topology labels ({@code site}, {@code group}) are already
      * part of the incoming status — they belong to
@@ -89,9 +89,10 @@ public abstract class WorkerEndpoint {
 
     /**
      * Release EP-level resources tracked for the given request.
-     * <p>Default implementation is a no-op. Subclasses with local inflight
-     * state ({@link PrefillEndpoint}, {@link DecodeEndpoint}) override to
-     * decrement counters and remove inflight entries.
+     * <p>Default implementation is a no-op. {@link DecodeEndpoint} overrides
+     * to release the ledger-side KV reservation; prefill-side terminal
+     * settlement lives in the state ledger's single settle exit, so
+     * {@link PrefillEndpoint} no longer overrides this.
      *
      * @param requestId the request identifier whose EP-level reservation
      *                  should be released

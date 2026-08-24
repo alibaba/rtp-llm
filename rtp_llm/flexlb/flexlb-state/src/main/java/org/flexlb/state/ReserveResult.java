@@ -14,6 +14,6 @@ public enum ReserveResult {
     /** 拒绝：同 requestId 命中墓碑。 */
     DUPLICATE_TOMBSTONE,
 
-    /** 拒绝：容量闸门（M2 预留值，当前容量组件未接入，reserve 不会返回）。 */
+    /** 拒绝：容量闸门（预留值，当前容量组件未接入，reserve 不会返回）。 */
     CAPACITY_REJECTED
 }

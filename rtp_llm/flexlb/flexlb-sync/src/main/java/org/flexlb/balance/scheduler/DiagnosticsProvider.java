@@ -7,9 +7,9 @@ import java.util.Map;
  * state to the HTTP diagnostic endpoints ({@code /inflight_status},
  * {@code /rtp_llm/master/info}).
  *
- * <p>Implemented by {@link AbstractScheduler} (schedulers), {@link InflightStore}
- * (global inflight tracking), and {@code EndpointRegistry} (EP counts).
- * {@code RouteService} collects all providers and exposes them via
+ * <p>Implemented by {@link AbstractScheduler} (schedulers) and
+ * {@code EndpointRegistry} (EP counts). {@code RouteService} collects all
+ * providers and exposes them via
  * {@code getDiagnosticsProviders()} so that {@code HttpLoadBalanceServer}
  * can aggregate diagnostics without hard-coded QUEUE-specific method calls
  * on individual components.

@@ -80,12 +80,10 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
-        // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is settled by BatchScheduler / PrefillEndpoint
-        // (BatchItem terminal transitions) — no-op here.
-        if (ep instanceof PrefillEndpoint pe) {
-            pe.releaseBatch(requestId);
-        }
+        // Prefill-side accounting lives in the state ledger (non-batch
+        // requests are committed via PrefillEndpoint#commitRequest); routing
+        // failure settles through the request future's terminal hook. No
+        // local per-EP inflight entry exists to release — no-op.
     }
 
     /** Internal record holding TTFT score and cache hit for a single endpoint. */

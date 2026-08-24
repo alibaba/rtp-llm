@@ -7,7 +7,6 @@ import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.DirectScheduler;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
@@ -42,11 +41,11 @@ public class SyncSchedulerConfig {
     // ==================== Scheduler beans ====================
 
     /**
-     * G1 影子门面单例 Bean：开关（flexlbStateV2ShadowEnabled / env
+     * 状态账本门面单例 Bean：开关（flexlbStateV2ShadowEnabled / env
      * FLEXLB_STATE_V2_SHADOW_ENABLED）启动时定、不热切——关时返回
-     * {@link StateShadowBridge#DISABLED} no-op 单例，注入各挂点的影子调用
-     * 全部字节码级短路（零行为变化）；开时构建 StateLedger/Translator/
-     * DiffCollector 并注册影子指标、打印启用回显。
+     * {@link StateShadowBridge#DISABLED} no-op 单例（退化模式：无判重/
+     * 全局取消/账本指标），注入各挂点的账本调用全部短路；开时构建
+     * StateLedger/Translator/DiffCollector/Janitor 并注册指标、打印启用回显。
      */
     @Bean
     public StateShadowBridge stateShadowBridge(ConfigService configService, FlexMonitor flexMonitor) {
@@ -65,13 +64,12 @@ public class SyncSchedulerConfig {
                                         DefaultRouter router,
                                         EndpointRegistry endpointRegistry,
                                         BatchSchedulerReporter reporter,
-                                        InflightStore globalInflightStore,
                                         FlexMonitor flexMonitor,
                                         StateShadowBridge shadowBridge) {
         FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_BATCH);
         batchHelper.register();
         return new BatchScheduler(configService, router, endpointRegistry, reporter,
-                globalInflightStore, batchHelper, shadowBridge);
+                batchHelper, shadowBridge);
     }
 
     /**
@@ -84,12 +82,11 @@ public class SyncSchedulerConfig {
                                          ConfigService configService,
                                          RoutingQueueReporter routingQueueReporter,
                                          DynamicWorkerManager dynamicWorkerManager,
-                                         InflightStore globalInflightStore,
                                          FlexMonitor flexMonitor) {
         FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_QUEUE);
         queueHelper.register();
         return new QueueScheduler(router, configService, routingQueueReporter,
-                dynamicWorkerManager, globalInflightStore, queueHelper);
+                dynamicWorkerManager, queueHelper);
     }
 
     /**
@@ -97,10 +94,9 @@ public class SyncSchedulerConfig {
      */
     @Bean
     public DirectScheduler directScheduler(DefaultRouter router,
-                                           InflightStore globalInflightStore,
                                            FlexMonitor flexMonitor) {
         FlexlbMetricHelper directHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_DIRECT);
         directHelper.register();
-        return new DirectScheduler(router, globalInflightStore, directHelper);
+        return new DirectScheduler(router, directHelper);
     }
 }

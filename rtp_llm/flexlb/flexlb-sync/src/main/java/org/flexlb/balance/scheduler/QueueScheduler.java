@@ -36,12 +36,11 @@ import java.util.concurrent.TimeoutException;
  *       threads complete</li>
  *   <li>Wrap it in a reactive pipeline: generate-timeout, queue-exception
  *       mapping, and route-execution-time reporting</li>
- *   <li>Register the pipeline-derived future in the global
- *       {@link InflightStore} so that timeout-driven terminal transitions are
- *       captured (cancel completes the raw future exceptionally through the
- *       item, which propagates through the pipeline). Duplicate request IDs
- *       are rejected with {@link StrategyErrorType#INVALID_REQUEST} without
- *       enqueuing</li>
+ *   <li>Register the pipeline-derived future in the base-class pending
+ *       registry so that terminal transitions are captured (cancel
+ *       completes the pipeline future, which propagates through the
+ *       item-free path). Duplicate request IDs are rejected with
+ *       {@link StrategyErrorType#INVALID_REQUEST} without enqueuing</li>
  *   <li>Enqueue; a full queue completes the request with
  *       {@link StrategyErrorType#QUEUE_FULL}</li>
  * </ol>
@@ -55,9 +54,8 @@ public class QueueScheduler extends DirectScheduler {
                           ConfigService configService,
                           RoutingQueueReporter queueReporter,
                           DynamicWorkerManager dynamicWorkerManager,
-                          InflightStore globalStore,
                           FlexlbMetricHelper metricHelper) {
-        super(router, globalStore, metricHelper);
+        super(router, metricHelper);
         this.queueReporter = queueReporter;
         this.queueing = new QueueingComponent(
                 configService, queueReporter, dynamicWorkerManager, this::consume);
@@ -97,12 +95,11 @@ public class QueueScheduler extends DirectScheduler {
                 })
                 .toFuture();
 
-        // Atomic registration — duplicate request IDs (active or tombstone
-        // within TTL) are rejected with INVALID_REQUEST, aligning with the
+        // Atomic registration — duplicate request IDs (previous submission
+        // still pending) are rejected with INVALID_REQUEST, aligning with the
         // BATCH path behaviour. The duplicate is never enqueued, preventing
         // the same request from occupying two sets of resources.
-        InflightItem existing = register(ctx, resultFuture);
-        if (existing != null) {
+        if (!register(ctx, resultFuture)) {
             Response errorResp = Response.error(StrategyErrorType.INVALID_REQUEST);
             errorResp.setErrorMessage("duplicate request_id: " + ctx.getRequestId());
             workerFuture.complete(errorResp);
@@ -127,15 +124,22 @@ public class QueueScheduler extends DirectScheduler {
     }
 
     /**
-     * Cancel cascade: best-effort removal of the request from the routing
-     * queue so a cancelled request never keeps occupying a queue slot. The
-     * cancel already settled the pipeline future via the item's CAS; the raw
-     * worker future stays incomplete, so the worker-loop settled-skip is the
+     * Local-terminal cascade: best-effort removal of the request from the
+     * routing queue so a cancelled request never keeps occupying a queue
+     * slot, plus immediate completion of the raw worker future with a
+     * CANCELLED error — the reactive pipeline (and its timeout timer)
+     * settles right away instead of waiting for the generate-timeout.
+     * The pipeline future was already completed by the cancel caller
+     * (first completion wins), so the worker-loop settled-skip remains the
      * second line of defence if the removal races a concurrent dequeue.
      */
     @Override
-    protected void onCancel(InflightItem item) {
-        queueing.removeIfQueued(item.ctx());
+    protected void onLocalTerminal(BalanceContext ctx) {
+        queueing.removeIfQueued(ctx);
+        CompletableFuture<Response> workerFuture = ctx.getFuture();
+        if (workerFuture != null && !workerFuture.isDone()) {
+            workerFuture.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"));
+        }
     }
 
     /**

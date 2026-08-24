@@ -3,7 +3,7 @@ package org.flexlb.state;
 import java.util.List;
 
 /**
- * D 侧端点级派生计数快照（不可变；读取换权阶段 G4 的调度读数数据源）。
+ * D 侧端点级派生计数快照（不可变；调度读数数据源）。
  *
  * <p>由 {@code DecodeSideStore} 按需对单端点名下活跃条目聚合（量级 =
  * 每端点活跃条目数，非全账本扫描）。语义与旧双层 inflight 账本的读点

@@ -17,7 +17,7 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * G1 影子翻译器：WorkerStatusResponse（flexlb-sync 引擎状态轮询报文）→
+ * 状态账本翻译器：WorkerStatusResponse（flexlb-sync 引擎状态轮询报文）→
  * {@link EngineObservation}（flexlb-state 引擎观察契约）。
  *
  * <h2>endpointId / generation（端点世代注册）</h2>
@@ -33,7 +33,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 同报内并列（相位裁决矩阵对并列版本按迟到/重复语义丢弃）。
  *
  * <h2>上报完整性</h2>
- * detailCount 直传 {@code runningDetailCount}（M1 契约字段）：
+ * detailCount 直传 {@code runningDetailCount}（引擎契约字段）：
  * {@code runningDetailCount == runningTaskInfo.size()} 即完整；旧引擎未填（0）
  * 而 running 非空时自然判为不完整（{@link EngineObservation#isComplete()}）。
  *
@@ -58,7 +58,7 @@ final class WorkerStatusObservationTranslator {
 
     /**
      * 翻译一条引擎状态报文。roleType 非 PREFILL/DECODE（如 PDFUSION/VIT）时返回
-     * null（影子挂载（G1）只覆盖 P/D 分离两侧——融合模式同一引擎兼具 P/D 相位，
+     * null（账本挂载只覆盖 P/D 分离两侧——融合模式同一引擎兼具 P/D 相位，
      * 单侧账本语义待后续里程碑定义）。
      */
     EngineObservation translate(WorkerStatusResponse response, RoleType roleType, String ipPort) {

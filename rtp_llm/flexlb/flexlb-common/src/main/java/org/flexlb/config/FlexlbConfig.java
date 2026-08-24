@@ -335,40 +335,6 @@ public class FlexlbConfig {
     private long flexlbBatchEnqueueDeadlineMs = 5000;
 
     /**
-     * TTL for inflight entries before eviction (used by all routing paths).
-     * Only a safety net — calibrate() cleans up normally.  This catches stale
-     * entries left by engine crashes, lost status reports, or bugs.
-     * 5 min is generous for network/engine-report jitter but short enough
-     * that stale inflight won't distort prefillEstimatedWaitTimeMs for long.
-     */
-    private long flexlbInflightTtlMs = 300_000L;
-
-    /**
-     * EP-level (layer-2 engineWork) inflight TTL — a separate, longer TTL
-     * for engine-acknowledged entries that have migrated to layer 2.
-     * Defaults to 600s (vs 300s for scheduler-level {@link #flexlbInflightTtlMs}),
-     * because engine-accepted tasks legitimately run longer (decode generation)
-     * and should not be prematurely evicted by the wall-clock backstop.
-     * Environment variable: FLEXLB_EP_INFLIGHT_TTL_MS.
-     */
-    private long flexlbEpInflightTtlMs = 600_000L;
-
-    /**
-     * Tombstone retention period in the {@link org.flexlb.balance.scheduler.InflightStore}.
-     * Terminal items remain as tombstones for this long after termination, so that
-     * late cancel lookups return {@code false} (already terminal) rather than
-     * {@code null} (not found). Environment variable: FLEXLB_TOMBSTONE_TTL_MS.
-     */
-    private long flexlbTombstoneTtlMs = 60_000L;
-
-    /**
-     * Number of consecutive calibrate rounds an engineWork entry can be absent
-     * from both running and finished reports before being evicted as stale
-     * (lost completion report). Environment variable: FLEXLB_STALE_EVICT_ROUNDS.
-     */
-    private int flexlbStaleEvictRounds = 3;
-
-    /**
      * Default KV token estimate used when a cross-EP failover task is reported
      * by the engine but has no local reservation (foreign key). Falls back to
      * this value when the engine-reported {@code input_length} is 0 or missing.
@@ -532,7 +498,7 @@ public class FlexlbConfig {
     // ========== Metrics Reporting Configuration ==========
 
     /**
-     * FlexLB state v2 shadow mode (G1): when enabled, the new flexlb-state
+     * FlexLB state v2 shadow mode: when enabled, the new flexlb-state
      * StateLedger consumes the same engine status event stream and local
      * lifecycle events in parallel with the legacy path, purely for
      * observation and terminal-state diff accounting. The legacy routing /
@@ -562,7 +528,8 @@ public class FlexlbConfig {
      * FlexLB state v2 time-channel (F3) TTL in milliseconds: ledger entries
      * older than this (measured from createdAtMs, which is final and never
      * renewed by any touch/observe) are settled as TTL_EXPIRED by the
-     * LedgerJanitor. Default 300s, aligned with the legacy InflightStore TTL.
+     * LedgerJanitor. Default 300s (carried over from the legacy scheduler
+     * TTL backstop).
      *
      * <p>Fenced entries are exempt (guard-rail 3) until the fence expires
      * or is lifted. Environment variable: FLEXLB_STATE_V2_TTL_MS.
@@ -583,72 +550,43 @@ public class FlexlbConfig {
      * FlexLB state v2 LedgerJanitor maintenance tick interval in milliseconds:
      * the low-frequency scheduled scan (TTL + hard cap rotation, absence-orphan
      * cleanup, tombstone/fence expiry) driven by the shadow bridge when
-     * flexlbStateV2ShadowEnabled is on. Not started when shadow mode is off
-     * (the legacy path keeps its own InflightEvictor).
+     * flexlbStateV2ShadowEnabled is on. Not started when the ledger is off
+     * (degraded mode has no accounting to maintain).
      *
      * <p>Environment variable: FLEXLB_STATE_V2_JANITOR_INTERVAL_MS. Default 10s.
      */
     private long flexlbStateV2JanitorIntervalMs = 10_000L;
 
     /**
-     * FlexLB state v2 settlement authority switch (G3 — 终态结算换权): when
-     * enabled, terminal settlement of BATCH-path requests converges on the
-     * StateLedger as the authoritative bookkeeper, while the legacy callback
-     * chain keeps driving the client future unchanged (client-visible behavior
-     * is identical):
-     * <ul>
-     *   <li>Legacy COMPLETED (engine ACK of enqueue) does NOT pre-settle the
-     *       ledger — engine-execution phases and the KV billing handover
-     *       (engine-reported KV takes over the local reservation only after
-     *       the engine confirms allocation) stay intact. The terminal metric
-     *       is parked in a pending table inside the shadow bridge and is
-     *       produced at the ledger's own terminal exit (decode tombstone
-     *       first, prefill tombstone as fallback).</li>
-     *   <li>Legacy FAILED / TIMED_OUT / CANCELLED proactively settle both
-     *       ledger sides — the master has already declared the request dead —
-     *       and the terminal metric is reported immediately at the settle
-     *       exit (single production point per request).</li>
-     * </ul>
+     * FlexLB state v2 settlement authority switch — <b>deprecated (legacy
+     * inflight path removed)</b>: terminal settlement now always converges on
+     * the StateLedger whenever the state ledger is enabled
+     * ({@link #flexlbStateV2ShadowEnabled}). Settled semantics (kept for
+     * reference): legacy COMPLETED (engine ACK of enqueue) does not
+     * pre-settle the ledger — engine-execution phases and the KV billing
+     * handover stay intact, and the terminal metric is produced at the
+     * ledger's own terminal exit; legacy FAILED / TIMED_OUT / CANCELLED
+     * proactively settle both ledger sides.
      *
-     * <p>Prerequisite: {@link #flexlbStateV2ShadowEnabled} must be on; startup
-     * fails fast otherwise (settlement authority requires the shadow ledger
-     * to be running). DIRECT / QUEUE routing paths are unaffected (the shadow
-     * ledger only covers the BATCH path). Resolved once at startup (no runtime
-     * hot-toggle). Environment variable: FLEXLB_STATE_V2_SETTLE_ENABLED.
+     * <p>The field is retained only so that existing deployments setting
+     * FLEXLB_STATE_V2_SETTLE_ENABLED keep parsing; the bridge logs a startup
+     * warning and treats the authority as permanently ON. DIRECT / QUEUE
+     * routing paths remain outside the ledger (BATCH path only).
      */
     private boolean flexlbStateV2SettleEnabled = false;
 
     /**
-     * FlexLB state v2 read authority switch (G4 — 读取换权): when enabled,
-     * scheduling read points and endpoint-level KV bookkeeping switch their
-     * authoritative data source from the legacy two-layer inflight maps to
-     * the StateLedger per-endpoint counters:
-     * <ul>
-     *   <li>DecodeEndpoint read views (total load / real KV used / real KV
-     *       available / layer counters / reporter metrics) read the ledger's
-     *       per-endpoint snapshot instead of {@code inflightRequests} +
-     *       {@code engineWork}; the hard-capacity gate and concurrency limit
-     *       therefore act on ledger numbers.</li>
-     *   <li>DecodeEndpoint.reserve / release become real bookkeeping on
-     * {@code ledger.decode()} (reserve/release single entry, generation
-     * bound); the legacy layer-1 map is no longer written in this mode.</li>
-     *   <li>PrefillEndpoint pending-request counting reads the ledger's
-     * per-endpoint prefill counters; the calibrate-time inflight counter
-     * bookkeeping stops writing (the counter has no readers left). The
-     * dispatch orchestration (batcher queue, prediction, batch commit) is
-     * untouched.</li>
-     * </ul>
+     * FlexLB state v2 read authority switch — <b>deprecated (legacy inflight
+     * path removed)</b>: all scheduling read points and endpoint-level KV
+     * bookkeeping now always use the StateLedger per-endpoint counters
+     * whenever the state ledger is enabled
+     * ({@link #flexlbStateV2ShadowEnabled}). Scheduling read points in
+     * ledger-disabled (degraded) mode return zero — there is no accounting
+     * source without the ledger.
      *
-     * <p>Prerequisite: {@link #flexlbStateV2ShadowEnabled} and
-     * {@link #flexlbStateV2SettleEnabled} must both be on; startup fails fast
-     * otherwise (read authority requires the shadow ledger running AND
-     * settlement authority so that terminal accounting keeps a single exit).
-     * Client-visible routing behavior is unchanged; scheduling decisions may
-     * shift slightly because the ledger's accounting lifecycle (reserve →
-     * engine-confirmed → settle) differs at the boundaries from the legacy
-     * two-layer maps — that semantic handover is the point of this switch.
-     * Resolved once at startup (no runtime hot-toggle).
-     * Environment variable: FLEXLB_STATE_V2_READ_ENABLED.
+     * <p>The field is retained only so that existing deployments setting
+     * FLEXLB_STATE_V2_READ_ENABLED keep parsing; the bridge logs a startup
+     * warning and treats the authority as permanently ON.
      */
     private boolean flexlbStateV2ReadEnabled = false;
 

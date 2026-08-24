@@ -21,11 +21,11 @@ import org.flexlb.state.spi.StateEndpointRef;
 import org.flexlb.state.spi.StateRole;
 
 /**
- * 账本清理层（M4）：条目从活跃态被移除的四条受控通道 + 三护栏。
+ * 账本清理层：条目从活跃态被移除的四条受控通道 + 三护栏。
  *
  * <h2>四通道（F1-F4）</h2>
  * <ol>
- *   <li><b>F1 因果通道</b>：事件驱动，M2 的跨侧规则已覆盖（D finished(success) ⇒ P 收缩为
+ *   <li><b>F1 因果通道</b>：事件驱动，状态核心的跨侧规则已覆盖（D finished(success) ⇒ P 收缩为
  *       COMPLETED / CAUSAL_CLOSURE）——janitor 不做额外事，只透传观测计数
  *       （{@link JanitorStats#causalClosureSettles()}），零常驻成本。</li>
  *   <li><b>F2 证据通道（核心）</b>：连续 N 轮（{@code staleRounds}）完整 tick 缺席推定死亡
@@ -64,7 +64,7 @@ import org.flexlb.state.spi.StateRole;
  * <ul>
  *   <li>VANISHED → {@link TerminalState#SLO_TIMEOUT} + {@link TerminalReason#VANISHED}
  *       （缺席判死是"等待超时"的轮次版；与旧路径 TTL-evict 的 TIMED_OUT 终局对齐，
- *       M3 diff 等价类内——缺席几秒触发 vs 旧路径 300s TTL 兜底是同一请求的
+ *       对账 diff 等价类内——缺席几秒触发 vs 旧路径 300s TTL 兜底是同一请求的
  *       两种速度兜底）。</li>
  *   <li>TTL_EXPIRED → {@link TerminalState#SLO_TIMEOUT} + TTL_EXPIRED（对齐旧 TIMED_OUT）。</li>
  *   <li>HARD_CAP → {@link TerminalState#FAILED} + HARD_CAP（强制通道非正常终局）。</li>
@@ -98,7 +98,7 @@ public final class LedgerJanitor {
     }
 
     /**
-     * janitor 胜者结算监听（M3 影子 diff 补全：janitor settle 产生的新侧终态
+     * janitor 胜者结算监听（对账窗口补全：janitor settle 产生的新侧终态
      * 也需进入对账窗口，否则旧侧终态后到会误报 missing_on_new）。
      */
     @FunctionalInterface
@@ -184,7 +184,7 @@ public final class LedgerJanitor {
     }
 
     /**
-     * 注册 janitor 胜者结算监听（M3 影子 diff 补全；监听异常被吞掉不影响 janitor）。
+     * 注册 janitor 胜者结算监听（对账窗口补全；监听异常被吞掉不影响 janitor）。
      */
     public void setSettleListener(SettleListener listener) {
         this.settleListener = listener;
@@ -314,7 +314,7 @@ public final class LedgerJanitor {
             maintenanceTicks.increment();
             scanTtlAndHardCap(nowMs);
             cleanOrphanAbsence();
-            // M2 占位 Runnable 职责并入：墓碑/fence TTL 过期清理
+            // 墓碑/fence TTL 过期清理（早期占位 Runnable 职责并入）
             pStore.tombstones().evictExpired(nowMs);
             dStore.tombstones().evictExpired(nowMs);
             fences.evictExpired(nowMs);

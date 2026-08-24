@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
@@ -39,13 +38,12 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final List<String> modelNames = new ArrayList<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
-    private final InflightStore globalInflightStore;
     private final EndpointRegistry endpointRegistry;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
     private volatile int completedSyncCount = 0;
-    /** G1 影子门面：开关关时为 no-op 单例（零行为变化）。 */
+    /** 状态账本门面：开关关时为 DISABLED 单例（退化模式）。 */
     private final StateShadowBridge shadowBridge;
 
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
@@ -54,8 +52,6 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     EngineGrpcService engineGrpcService,
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService localKvCacheAwareManager,
-                                    @org.springframework.beans.factory.annotation.Autowired(required = false)
-                                    InflightStore globalInflightStore,
                                     EndpointRegistry endpointRegistry,
                                     ConfigService configService,
                                     @org.springframework.beans.factory.annotation.Autowired(required = false)
@@ -65,7 +61,6 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
         this.engineGrpcService = engineGrpcService;
         this.localKvCacheAwareManager = localKvCacheAwareManager;
-        this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
         this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
 
@@ -113,7 +108,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                globalInflightStore, endpointRegistry,
+                                endpointRegistry,
                                 flexlbConfig.isWhaleCacheDebugMode(),
                                 shadowBridge
                         ));

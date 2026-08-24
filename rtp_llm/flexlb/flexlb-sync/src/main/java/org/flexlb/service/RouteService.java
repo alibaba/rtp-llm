@@ -7,9 +7,6 @@ import org.flexlb.balance.scheduler.AbstractScheduler;
 import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DiagnosticsProvider;
 import org.flexlb.balance.scheduler.DirectScheduler;
-import org.flexlb.balance.scheduler.InflightItem;
-import org.flexlb.balance.scheduler.InflightState;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -36,12 +33,11 @@ public class RouteService {
     private final EndpointRegistry endpointRegistry;
     private final BatchSchedulerReporter reporter;
 
-    // --- the three scheduling paths + global inflight store ---
+    // --- the three scheduling paths ---
 
     private final BatchScheduler batchScheduler;
     private final QueueScheduler queueScheduler;
     private final DirectScheduler directScheduler;
-    private final InflightStore globalInflightStore;
 
     /** Last execution timestamp for metrics report throttle. */
     private volatile long lastMetricsReportTime = 0;
@@ -53,31 +49,29 @@ public class RouteService {
     private final List<AbstractScheduler> schedulers;
 
     /**
-     * All diagnostics providers (schedulers + inflightStore + endpointRegistry),
-     * used by {@code HttpLoadBalanceServer} to aggregate diagnostics without
+     * All diagnostics providers (schedulers + endpointRegistry), used by
+     * {@code HttpLoadBalanceServer} to aggregate diagnostics without
      * hard-coded QUEUE-specific method calls.
      */
     private final List<DiagnosticsProvider> diagnosticsProviders;
 
-    /** G1 影子门面：开关关时为 no-op 单例（零行为变化）。 */
+    /** 状态账本门面：开关关时为 no-op 单例（退化模式）。 */
     private final StateShadowBridge shadowBridge;
 
     public RouteService(ConfigService configService,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
-                        InflightStore globalInflightStore,
                         EndpointRegistry endpointRegistry,
                         BatchSchedulerReporter reporter,
                         BatchScheduler batchScheduler,
                         QueueScheduler queueScheduler,
                         DirectScheduler directScheduler) {
-        this(configService, recentCacheKeyTraceReporter, globalInflightStore, endpointRegistry,
+        this(configService, recentCacheKeyTraceReporter, endpointRegistry,
                 reporter, batchScheduler, queueScheduler, directScheduler, StateShadowBridge.DISABLED);
     }
 
     @Autowired
     public RouteService(ConfigService configService,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
-                        InflightStore globalInflightStore,
                         EndpointRegistry endpointRegistry,
                         BatchSchedulerReporter reporter,
                         BatchScheduler batchScheduler,
@@ -86,7 +80,6 @@ public class RouteService {
                         StateShadowBridge shadowBridge) {
         this.configService = configService;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
-        this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
         this.reporter = reporter;
         this.batchScheduler = batchScheduler;
@@ -95,7 +88,7 @@ public class RouteService {
         this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
         this.schedulers = List.of(batchScheduler, queueScheduler, directScheduler);
         this.diagnosticsProviders = List.of(batchScheduler, queueScheduler, directScheduler,
-                globalInflightStore, endpointRegistry);
+                endpointRegistry);
     }
 
     /**
@@ -146,38 +139,29 @@ public class RouteService {
     /**
      * Cancel an inflight request by its string-form request ID.
      *
-     * <p>Looks up the {@link InflightItem} in the global {@link InflightStore},
-     * atomically cancels it via CAS (completing the future with an error
-     * {@link Response} of type {@link StrategyErrorType#CANCELLED}), and — when
-     * the cancel wins the CAS — triggers the owning scheduler's
-     * {@link AbstractScheduler#onCancel} hook through
-     * {@link InflightItem#fireOnCancel()} to release path-specific resources
-     * (e.g. a queue slot). The owning scheduler is resolved via
-     * {@link InflightItem#scheduler()}, so all three scheduling paths
-     * (BATCH/QUEUE/DIRECT) are covered by the same store.
+     * <p>Resolves the pending submission across all three scheduling paths
+     * (BATCH/QUEUE/DIRECT — each scheduler owns its pending registry),
+     * completes its future with a CANCELLED error (first completion wins),
+     * and — when the cancel wins — triggers the owning scheduler's
+     * {@link AbstractScheduler#onLocalTerminal} hook to release
+     * path-specific resources (e.g. a queue slot).
      *
-     * <p>Returns {@code false} if the request was not found (already evicted
-     * or never tracked) or is already terminal.
+     * <p>Returns {@code false} if the request was not found (never submitted
+     * or already terminal).
      *
      * @param requestId string-form request ID
      * @return {@code true} if the request was found and cancelled
      */
     public boolean cancel(String requestId) {
-        InflightItem item = globalInflightStore.get(requestId);
-        if (item == null) {
-            return false;
+        long id = shadowRequestId(requestId);
+        // 账本双侧 pendingCancel 意图标记（终局由终态结算单出口收敛）。
+        shadowBridge.onLocalCancelRequested(id);
+        for (AbstractScheduler scheduler : schedulers) {
+            if (scheduler.cancelIfPending(id)) {
+                return true;
+            }
         }
-        // Shadow (G1): mark pending-cancel intent on both sides before the CAS —
-        // intent only, never replaces legacy terminal logic; the shadow terminal
-        // settle happens in AbstractScheduler.register whenComplete (onOldTerminal).
-        shadowBridge.onLocalCancelRequested(shadowRequestId(requestId));
-        boolean cancelled = item.complete(
-                Response.error(StrategyErrorType.CANCELLED, "cancelled"),
-                InflightState.CANCELLED);
-        if (cancelled) {
-            item.fireOnCancel();
-        }
-        return cancelled;
+        return false;
     }
 
     /** 影子侧 requestId 解析（防御性）：非数字 ID 返回 -1（账本无对应条目，no-op）。 */
@@ -190,14 +174,18 @@ public class RouteService {
     }
 
     /**
-     * Return the number of active (non-terminal) inflight items in the
-     * global store. Tombstones within TTL are excluded — external monitors
-     * treat this as the live inflight count.
+     * Return the number of pending (not yet terminal) submissions across
+     * all three scheduling paths — external monitors treat this as the
+     * live inflight count.
      *
-     * @return active inflight count
+     * @return pending submission count
      */
     public int globalInflightSize() {
-        return globalInflightStore.activeCount();
+        int total = 0;
+        for (AbstractScheduler scheduler : schedulers) {
+            total += scheduler.pendingCount();
+        }
+        return total;
     }
 
     /**
@@ -241,7 +229,6 @@ public class RouteService {
     @PreDestroy
     public void shutdown() {
         schedulers.forEach(AbstractScheduler::shutdown);
-        globalInflightStore.shutdown();
         endpointRegistry.close();
     }
 }

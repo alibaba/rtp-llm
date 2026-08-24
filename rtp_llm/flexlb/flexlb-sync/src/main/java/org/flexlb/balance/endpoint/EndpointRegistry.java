@@ -2,7 +2,6 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.BatchIdGenerator;
 import org.flexlb.balance.scheduler.DiagnosticsProvider;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -12,7 +11,6 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.util.Logger;
 import org.springframework.core.env.Environment;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.net.InetAddress;
@@ -32,25 +30,24 @@ public class EndpointRegistry implements DiagnosticsProvider {
     private final ConfigService configService;
     private final EngineGrpcClient grpcClient;
     private final BatchDispatchExecutor dispatchExecutor;
-    private final InflightStore inflightStore;
     private final BatchSchedulerReporter reporter;
     private final BatchIdGenerator batchIdGenerator;
-    /** 影子门面（读取换权模式下 EP 记账与读点切 StateLedger；关态 DISABLED 短路）。 */
+    /** 状态账本门面（EP 记账与读点的数据源；关态 DISABLED 短路）。 */
     private final StateShadowBridge shadowBridge;
 
     public EndpointRegistry(ConfigService configService,
                             EngineGrpcClient grpcClient,
                             BatchDispatchExecutor dispatchExecutor,
-                            InflightStore inflightStore,
                             BatchSchedulerReporter reporter,
                             Environment environment,
                             StateShadowBridge shadowBridge) {
         this.configService = configService;
         this.grpcClient = grpcClient;
         this.dispatchExecutor = dispatchExecutor;
-        this.inflightStore = inflightStore;
         this.reporter = reporter;
-        this.shadowBridge = shadowBridge;
+        // null 归一为 DISABLED 单例：下游（ACK 回调的活跃计数 supplier、
+        // endpoint 建造）恒非空，退化模式行为统一为 no-op。
+        this.shadowBridge = shadowBridge != null ? shadowBridge : StateShadowBridge.DISABLED;
         // Initialize Snowflake batch ID generator with master identity;
         // one shared instance for all prefill endpoints.
         this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort(environment));
@@ -238,17 +235,21 @@ public class EndpointRegistry implements DiagnosticsProvider {
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
-        // 读取换权门面仅注入 P/D 分离的 prefill 角色：PDFUSION 的引擎状态
-        // 报文不进影子账本（事件泵对非 P/D 分离角色短路），若注入门面会让
+        // 账本门面仅注入 P/D 分离的 prefill 角色：PDFUSION 的引擎状态
+        // 报文不进账本（事件泵对非 P/D 分离角色短路），若注入门面会让
         // P 条目绑定到永不推进的世代上（只能靠 janitor TTL 兑底清理）。
         StateShadowBridge bridgeForRole = roleType == RoleType.PREFILL ? shadowBridge : null;
+        // 全局活跃计数（完成回显的队列长度口径）来自账本 P 侧快照；
+        // 账本关（退化模式）无计数源，返回 0。
+        java.util.function.IntSupplier globalActiveCount =
+                () -> (int) shadowBridge.prefillActiveCountOrZero();
         return new PrefillEndpoint(status, config, grpcClient, dispatchExecutor,
-                batchIdGenerator, inflightStore::activeCount, reporter, inflightStore, bridgeForRole);
+                batchIdGenerator, globalActiveCount, reporter, bridgeForRole);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
         prepareEndpointMetrics(RoleType.DECODE, status);
-        return new DecodeEndpoint(status, configService.loadBalanceConfig(), inflightStore, shadowBridge);
+        return new DecodeEndpoint(status, configService.loadBalanceConfig(), shadowBridge);
     }
 
     private SimpleWorkerEndpoint createSimpleEndpoint(WorkerStatus status, RoleType roleType) {
@@ -283,39 +284,6 @@ public class EndpointRegistry implements DiagnosticsProvider {
 
     public int getEndpointCount(RoleType roleType) {
         return getEndpoints(roleType).size();
-    }
-
-    /**
-     * Trigger TTL eviction on all prefill and decode endpoints.
-     *
-     * @param ttlMs max age before eviction
-     */
-    private void evictExpiredAll(long ttlMs) {
-        prefillEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
-        decodeEndpoints.values().forEach(ep -> {
-            ep.evictExpiredRequests(ttlMs);
-            ep.evictExpiredEngineWork(ttlMs);
-        });
-        pdFusionEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
-    }
-
-    /**
-     * Periodic TTL eviction for all endpoints.
-     * <p>Each endpoint is responsible for its own inflight lifecycle.
-     * This scheduled method provides a safety-net fallback for entries
-     * that were not cleaned up by {@code calibrate()} (e.g., engine crash,
-     * network partition, status report delay).
-     *
-     * <p>Uses the EP-level TTL ({@code flexlbEpInflightTtlMs}, default 600s),
-     * which is longer than the scheduler-level inflight TTL
-     * ({@code flexlbInflightTtlMs}, default 300s) used by
-     * {@link InflightStore}. Engine-accepted tasks legitimately run longer
-     * (especially decode generation) and should not be prematurely evicted.
-     */
-    @Scheduled(fixedRate = 60000L)
-    public void scheduledEviction() {
-        long ttlMs = configService.loadBalanceConfig().getFlexlbEpInflightTtlMs();
-        evictExpiredAll(ttlMs);
     }
 
     /**

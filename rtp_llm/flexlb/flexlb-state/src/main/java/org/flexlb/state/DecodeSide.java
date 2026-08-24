@@ -12,7 +12,7 @@ public interface DecodeSide {
     /**
      * 预约（RESERVED 起步）：登记影子预占（reservedKv = expectedKv）并绑定世代三元组。
      *
-     * @param seqLen     序列长度（M2 记账字段，供上层容量推导）
+     * @param seqLen     序列长度（记账字段，供上层容量推导）
      * @param expectedKv 期望 KV（预占量）
      */
     ReserveResult reserve(long requestId, long seqLen, long expectedKv, GenerationTriple binding);
@@ -33,7 +33,7 @@ public interface DecodeSide {
     DecodeCounterSnapshot snapshot();
 
     /**
-     * 端点级派生计数（读取换权阶段 G4 调度读数数据源）：按需聚合该端点名下
+     * 端点级派生计数（调度读数数据源）：按需聚合该端点名下
      * 活跃条目（含未确认预占双轨 KV 口径）。无条目时返回全零视图。
      */
     DecodeEndpointCounters endpointCounters(int endpointId);

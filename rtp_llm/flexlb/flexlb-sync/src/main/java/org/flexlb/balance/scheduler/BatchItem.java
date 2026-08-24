@@ -7,11 +7,9 @@ import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -29,9 +27,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * ({@link #completeSuccess}) and the error paths ({@link #failExpired},
  * {@link #failOffer}, {@link #failDispatch}, {@link #failTimeout}) complete
  * the future and release EP-side resources without going through the
- * scheduler. All paths are idempotent: the future completes at most once,
+ * scheduler. All paths are idempotent: the future completes at most once and
  * the decode reservation is rolled back at most once ({@link #rolledBack}
- * CAS), and prefill batch repack uses {@code computeIfPresent}.
+ * CAS). Prefill-side settlement lives in the state ledger — terminal
+ * transitions drive the future, whose completion feeds the ledger's single
+ * settle exit; no local per-EP inflight entry exists to repack.
  */
 public final class BatchItem {
 
@@ -156,7 +156,6 @@ public final class BatchItem {
             return;
         }
         rollbackOnce();
-        removeFromPrefillBatch();
         completeError(StrategyErrorType.BATCH_SLO_EXPIRED,
                 "batch SLO expired before dispatch");
     }
@@ -181,7 +180,6 @@ public final class BatchItem {
             return;
         }
         rollbackOnce();
-        removeFromPrefillBatch();
         completeError(StrategyErrorType.BATCH_DISPATCH_FAILED, error.getMessage());
     }
 
@@ -191,7 +189,6 @@ public final class BatchItem {
             return;
         }
         rollbackOnce();
-        removeFromPrefillBatch();
         completeError(StrategyErrorType.BATCH_SLO_EXPIRED,
                 "EnqueueBatch deadline exceeded: " + error.getMessage());
     }
@@ -205,28 +202,6 @@ public final class BatchItem {
         if (rolledBack.compareAndSet(false, true)
                 && decodeEp != null && decode != null) {
             decodeEp.release(decode.getRequestId());
-        }
-    }
-
-    /**
-     * Remove a failed or timed-out request from its prefill batch entry.
-     * Uses {@link PrefillEndpoint#repackBatch} which:
-     * <ul>
-     *   <li>Single-request batch → removes the entire entry (batch becomes empty)</li>
-     *   <li>Multi-request batch → keeps survivors, removes only this request</li>
-     *   <li>Batch already removed (calibrate or releaseBatch ran first) → no-op</li>
-     * </ul>
-     * Safe to call multiple times (idempotent via ConcurrentHashMap.computeIfPresent).
-     */
-    public void removeFromPrefillBatch() {
-        long batchId = assignedBatchId;
-        if (batchId <= 0) {
-            return;
-        }
-        if (prefillEp != null) {
-            prefillEp.repackBatch(batchId, Set.of(requestId()));
-            Logger.info("FlexLB remove from prefill batch: request_id={} batch_id={} engine={}",
-                    requestId(), batchId, prefillEp.getIp());
         }
     }
 

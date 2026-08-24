@@ -100,44 +100,29 @@ public class MetricConstant {
     public static final String DECODE_ENGINE_RUNNING_COUNT = "app.flexlb.decode.engine.running.count";
 
     /**
-     * FlexLB prefill layer-1 inflight entry count — dispatched, not yet acknowledged by the engine
-     * ({@code PrefillEndpoint#prefillInflightCount}). Prefill/PDFusion roles only.
+     * FlexLB prefill unconfirmed entry count — dispatched, not yet acknowledged by
+     * the engine ({@code PrefillEndpoint#prefillActiveRequestCount} minus
+     * {@code PrefillEndpoint#prefillEngineOwnedCount}). Prefill/PDFusion roles only.
      */
     public static final String PREFILL_INFLIGHT_ENTRIES_COUNT = "app.flexlb.prefill.inflight.entries.count";
 
     /**
-     * FlexLB prefill layer-2 engine-acknowledged task count
-     * ({@code PrefillEndpoint#prefillEngineWorkCount}). Prefill/PDFusion roles only.
+     * FlexLB prefill engine-owned task count, observed from engine reports
+     * ({@code PrefillEndpoint#prefillEngineOwnedCount}). Prefill/PDFusion roles only.
      */
     public static final String PREFILL_ENGINE_WORK_COUNT = "app.flexlb.prefill.engine.work.count";
 
     /**
-     * FlexLB decode layer-1 inflight request count — reserved locally, not yet accepted by the engine
-     * ({@code DecodeEndpoint#decodeInflightCount}). Decode role only.
+     * FlexLB decode unconfirmed reservation count — reserved locally, not yet accepted
+     * by the engine ({@code DecodeEndpoint#decodeInflightCount}). Decode role only.
      */
     public static final String DECODE_INFLIGHT_REQUESTS_COUNT = "app.flexlb.decode.inflight.requests.count";
 
     /**
-     * FlexLB decode layer-2 engine-accepted task count
+     * FlexLB decode engine-owned task count
      * ({@code DecodeEndpoint#decodeEngineWorkCount}). Decode role only.
      */
     public static final String DECODE_ENGINE_WORK_COUNT = "app.flexlb.decode.engine.work.count";
-
-    /**
-     * FlexLB inflight TTL eviction QPS — count of RUNNING items timed out via
-     * {@code InflightItem#complete(Response.error(INFLIGHT_TTL_EXPIRED), TIMED_OUT)}
-     * in the evictor sweep.
-     * Reported by {@link org.flexlb.balance.scheduler.InflightStore#evict()}.
-     */
-    public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
-
-    /**
-     * FlexLB scheduler inflight total size — the store's total entry count
-     * including tombstones (terminal items within TTL). Complements
-     * {@link #SCHEDULER_INFLIGHT_SIZE} which reports only active (non-terminal) items.
-     * <p>Reported by {@link org.flexlb.balance.scheduler.InflightStore#reportInflightSize()}.
-     */
-    public static final String SCHEDULER_INFLIGHT_TOTAL_SIZE = "app.flexlb.scheduler.inflight.total.size";
 
     /**
      * FlexLB scheduler inflight KV cache reserved tokens per decode worker (local inflight reservation not yet confirmed by the engine)
@@ -213,15 +198,7 @@ public class MetricConstant {
      */
     public static final String ENGINE_ACTIVE_TASK_COUNT = "app.engine.health.check.active.task.count";
 
-    /**
-     * FlexLB scheduler inflight size — the scheduler's own inflight request count.
-     * <p>Reported by BatchSchedulerReporter using role=PREFILL + engineIp="scheduler" tags.
-     * Formerly kept as a separate name from the now-removed per-engine local inflight size metric
-     * to avoid tag schema conflict (per-engine vs scheduler-level).
-     */
-    public static final String SCHEDULER_INFLIGHT_SIZE = "app.flexlb.scheduler.inflight.size";
-
-    // ========== FlexLB state v2 shadow metrics (G1) ==========
+    // ========== FlexLB state ledger metrics ==========
 
     /** Shadow event-pump counter: one report per engine observation fed into the shadow StateLedger. */
     public static final String SHADOW_EVENT = "app.flexlb.shadow.event";

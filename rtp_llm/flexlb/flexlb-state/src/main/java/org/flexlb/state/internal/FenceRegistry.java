@@ -11,7 +11,7 @@ import org.flexlb.state.InternalApi;
  * 带 TTL 防永生。
  *
  * <p>fence 是意图标记不是锁：登记后对应条目在意图完成前不可被驱逐路径移除
- * （M4 janitor 接入；M2 提供登记/查询/断言/dump 基座）。</p>
+ * （janitor 建立在登记/查询/断言/dump 基座之上）。</p>
  */
 @InternalApi
 public final class FenceRegistry {

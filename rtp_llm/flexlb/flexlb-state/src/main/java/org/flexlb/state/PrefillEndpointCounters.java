@@ -1,5 +1,7 @@
 package org.flexlb.state;
 
+import org.flexlb.state.internal.prefill.PrefillPhase;
+
 import java.util.List;
 
 /**
@@ -29,5 +31,20 @@ public record PrefillEndpointCounters(
     /** 全零视图（端点无任何活跃条目时的语义等价常量）。 */
     public static PrefillEndpointCounters empty() {
         return new PrefillEndpointCounters(0, 0, 0L, List.of());
+    }
+
+    /** 引擎等待中条目数（KV 未装载 + 已装载待执行两个等待相位之和）。 */
+    public long engineWaitingCount() {
+        return phaseCount(PrefillPhase.P_WAITING_UNLOADED.ordinal())
+                + phaseCount(PrefillPhase.P_WAITING_LOADED.ordinal());
+    }
+
+    /** 引擎执行中条目数（prefill 迭代执行相位）。 */
+    public long engineRunningCount() {
+        return phaseCount(PrefillPhase.P_RUNNING.ordinal());
+    }
+
+    private long phaseCount(int ordinal) {
+        return ordinal < phaseCounts.size() ? phaseCounts.get(ordinal) : 0L;
     }
 }

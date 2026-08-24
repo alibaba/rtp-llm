@@ -23,8 +23,10 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>Responsibilities:
  * <ul>
- *   <li>Request admission: capacity gate and atomic duplicate detection via
- *       the global {@link InflightStore} (base-class {@code register})</li>
+ *   <li>Request admission: capacity gate on the state ledger's prefill
+ *       inflight count ({@code StateShadowBridge.prefillActiveCount}) and
+ *       atomic duplicate detection via the base-class pending registry
+ *       ({@code register})</li>
  *   <li>Routing: pick prefill/decode workers through the {@link Router}</li>
  *   <li>Hand-off: build a {@link BatchItem} and offer it to the target
  *       {@link PrefillEndpoint}'s {@link WorkerBatcher}</li>
@@ -35,12 +37,12 @@ import java.util.concurrent.CompletableFuture;
  * ({@link PrefillEndpoint#submitBatch}), and per-item settlement
  * ({@link BatchItem} terminal transitions). The scheduler keeps only a
  * {@code whenComplete} safety net that releases EP resources on any
- * non-success completion (TTL expiry, cancel); both operations are
+ * non-success completion (TTL expiry, cancel); the operation is
  * idempotent, so overlapping with the endpoint-side paths is safe.
  *
  * <p>TTL expiry of a batch item follows the unified inflight semantics:
- * {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED} (see
- * {@link InflightItem#complete(Response, InflightState)}); batch dispatch
+ * {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED} (terminal vocabulary
+ * preserved by {@code AbstractScheduler.oldTerminalState}); batch dispatch
  * timeouts keep {@code BATCH_SLO_EXPIRED} inside {@link BatchItem}.
  */
 public class BatchScheduler extends AbstractScheduler {
@@ -54,21 +56,19 @@ public class BatchScheduler extends AbstractScheduler {
                           Router router,
                           EndpointRegistry endpointRegistry,
                           BatchSchedulerReporter reporter,
-                          InflightStore globalStore,
                           FlexlbMetricHelper metricHelper) {
-        this(configService, router, endpointRegistry, reporter, globalStore, metricHelper,
+        this(configService, router, endpointRegistry, reporter, metricHelper,
                 StateShadowBridge.DISABLED);
     }
 
-    /** G1 影子装配入口：shadowBridge 开关关时为 no-op 单例（零行为变化）。 */
+    /** 账本装配入口：shadowBridge 开关关时为 no-op 单例（退化模式）。 */
     public BatchScheduler(ConfigService configService,
                           Router router,
                           EndpointRegistry endpointRegistry,
                           BatchSchedulerReporter reporter,
-                          InflightStore globalStore,
                           FlexlbMetricHelper metricHelper,
                           StateShadowBridge shadowBridge) {
-        super(globalStore, metricHelper, shadowBridge);
+        super(metricHelper, shadowBridge);
         this.configService = configService;
         this.router = router;
         this.endpointRegistry = endpointRegistry;
@@ -99,25 +99,27 @@ public class BatchScheduler extends AbstractScheduler {
                 return future;
             }
 
-            // BATCH-only admission gate: count only items this scheduler
-            // registered — DIRECT/QUEUE traffic must not consume the budget.
+            // BATCH-only admission gate: the state ledger's prefill inflight
+            // count covers only BATCH submissions (DIRECT/QUEUE traffic never
+            // enters the ledger). Ledger-disabled (degraded) mode returns -1
+            // and the gate is skipped — no accounting source without the ledger.
             int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
-            if (maxInflight > 0 && globalStore.activeCount(this) >= maxInflight) {
+            long inflight = shadowBridge.prefillActiveCount();
+            if (maxInflight > 0 && inflight >= 0 && inflight >= maxInflight) {
                 completeError(future, StrategyErrorType.QUEUE_FULL, null);
                 return future;
             }
 
-            // Atomic registration — duplicate request IDs (active or tombstone
-            // within TTL) are rejected here without a check-then-act window.
-            InflightItem existing = register(ctx, future);
-            if (existing != null) {
+            // Atomic registration — duplicate request IDs (previous submission
+            // still pending) are rejected here without a check-then-act window.
+            if (!register(ctx, future)) {
                 completeError(future, StrategyErrorType.INVALID_REQUEST,
                         "duplicate request_id: " + ctx.getRequestId());
                 return future;
             }
 
-            // G1 影子：P 侧入账（register+onQueued，散请求 batchId=-1）。
-            // 开关关时 bridge 内部短路；catch-all 包裹不外抛（零行为变化）。
+            // 账本 P 侧入账（register+onQueued，散请求 batchId=-1）。
+            // 开关关时 bridge 内部短路；catch-all 包裹不外抛。
             shadowBridge.onPrefillSubmit(ctx.getRequestId());
 
             RouteResult result = router.route(ctx);
@@ -141,26 +143,14 @@ public class BatchScheduler extends AbstractScheduler {
             ServerStatus prefill = findServer(result.serverStatusList(), RoleType.PREFILL);
             ServerStatus decode = findServer(result.serverStatusList(), RoleType.DECODE);
 
-            // Backfill EP references on the InflightItem so that TTL/cancel
-            // terminal transitions can directly release EP-level resources
-            // (review A1). Without this, InflightItem.terminate() always sees
-            // null prefillEp/decodeEp and EP release relies solely on the
-            // whenComplete safety net below.
-            //
-            // decodeEp.release(requestId) works immediately (always keyed by
-            // requestId). prefillEp.release(requestId) is a no-op for batch
-            // entries (keyed by batchId) but works for non-batch entries; the
-            // whenComplete safety net covers the batch prefill case via
-            // BatchItem.removeFromPrefillBatch(). Both paths are idempotent.
-            InflightItem inflightItem = globalStore.get(String.valueOf(ctx.getRequestId()));
-            if (inflightItem != null) {
-                inflightItem.setPrefillEp(prefillEp);
-                if (decodeEp != null) {
-                    inflightItem.setDecodeEp(decodeEp);
-                }
-            }
+            // Backfill EP references onto the pending submission (terminal
+            // metric's role/engineIp resolution — monitoring vocabulary
+            // continuity). EP-level resource release on TTL/cancel terminal
+            // transitions is owned by the whenComplete safety net below
+            // (rollbackOnce — idempotent).
+            bindPendingEndpoints(ctx.getRequestId(), prefillEp, decodeEp);
 
-            // G1 影子：D 侧预占（与旧路径 DecodeEndpoint.reserve 同语义点；
+            // D 侧预占（与 DecodeEndpoint.reserve 同语义点；
             // expectedKv 按旧公式 seqLen+maxNewTokens，cap totalKv）。
             if (decodeEp != null) {
                 shadowBridge.onDecodeReserve(ctx.getRequestId(),
@@ -176,13 +166,13 @@ public class BatchScheduler extends AbstractScheduler {
                     prefillEp, decodeEp, System.currentTimeMillis());
 
             // Safety net: any non-success completion (dispatch failure, timeout,
-            // TTL expiry, cancel) releases the decode reservation and repacks the
-            // prefill batch. Both operations are idempotent (CAS / computeIfPresent),
-            // so overlapping with the endpoint-side terminal paths is safe.
+            // TTL expiry, cancel) releases the decode reservation. Idempotent
+            // (CAS), so overlapping with the endpoint-side terminal paths is
+            // safe. Prefill-side settlement lives in the state ledger — driven
+            // by the future's completion through the bridge's settle hook.
             future.whenComplete((response, throwable) -> {
                 if (throwable != null || response == null || !response.isSuccess()) {
                     item.rollbackOnce();
-                    item.removeFromPrefillBatch();
                 }
             });
 
@@ -255,12 +245,14 @@ public class BatchScheduler extends AbstractScheduler {
     // ==================== Metrics ====================
 
     /**
-     * Report BATCH-specific metrics: the number of active (non-terminal)
-     * requests registered by this scheduler in the global inflight store —
-     * the same count gating admission via {@code flexlbBatchMaxInflight}.
+     * Report BATCH-specific metrics: the state ledger's prefill inflight
+     * count — the same count gating admission via
+     * {@code flexlbBatchMaxInflight}. Ledger-disabled (degraded) mode
+     * reports 0 (no accounting source without the ledger).
      */
     @Override
     public void reportMetrics() {
-        metricHelper.reportInflightSize("PREFILL", "scheduler", globalStore.activeCount(this));
+        metricHelper.reportInflightSize("PREFILL", "scheduler",
+                (int) Math.min(Integer.MAX_VALUE, shadowBridge.prefillActiveCountOrZero()));
     }
 }

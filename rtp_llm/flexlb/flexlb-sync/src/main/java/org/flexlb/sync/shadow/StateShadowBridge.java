@@ -30,7 +30,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * G1 影子门面：flexlb-state v2 账本以<b>影子模式</b>接入 flexlb-sync 的唯一桥。
+ * flexlb-state v2 账本接入 flexlb-sync 的唯一桥（账本启用后为全权模式：
+ * 终态结算单出口 + 调度读点唯一数据源）。
  *
  * <h2>影子语义（铁律）</h2>
  * <ul>
@@ -42,7 +43,7 @@ import java.util.concurrent.TimeUnit;
  *       + 本地生命周期点（submit/register 终局/cancel/decode reserve）。</li>
  * </ul>
  *
- * <h2>接入点（影子挂载 G1，M3 里程碑接入）</h2>
+ * <h2>接入点</h2>
  * <ol>
  *   <li>{@code GrpcWorkerStatusRunner.handleStatusResponse} versionAdvanced 分支：
  *       旧 calibrate/handleFinishedTasks 之后、latestFinishedVersion 水位推进之前。</li>
@@ -52,31 +53,31 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@code RouteService.cancel}：双侧 markPendingCancel（CAS 前意图标记）。</li>
  * </ol>
  *
- * <h2>开账语义（与 M2 ledger 契约对齐）</h2>
+ * <h2>开账语义（与 ledger 契约对齐）</h2>
  * 正常 observe 模式下，引擎 running/finished 明细对<b>未开账条目只计 unknown
  * 事件、不收养</b>（收养仅 rebuild 重放路径）——因此本地生命周期点是开账前置：
  * P 侧由 onPrefillSubmit（register+onQueued）开账，D 侧由 onDecodeReserve
  * 开账（binding 由 translator 惰性注册端点世代，不依赖事件泵先到）；
  * 引擎事件流随后推进相位与终局。
  *
- * <h2>结算换权（G3 — 终态结算换权，flexlbStateV2SettleEnabled）</h2>
- * 开启时 BATCH 路径的终态结算收敛到 ledger 权威单出口（
- * {@link #onOldTerminalAuthority}）：旧回调链只负责客户端 future（客户端可见行为
- * 不变）；终态 metric 生产点迁移到 ledger settle 出口（每请求恰好一次）。开关关时
- * 一切走 {@link #onOldTerminal} 影子语义（零行为变化）。
+ * <h2>结算换权（终态结算单出口，恒开）</h2>
+ * 账本启用时 BATCH 路径的终态结算收敛到 ledger 权威单出口（
+ * {@link #onOldTerminalAuthority}）：调度链只负责客户端 future（客户端可见行为
+ * 不变）；终态 metric 生产点在 ledger settle 出口（每请求恰好一次）。
+ * 旧全局 inflight 路径已移除——flexlbStateV2SettleEnabled 开关退化为 no-op
+ * （启动时 WARN 提示，恒视为开）。
  *
- * <h2>读取换权（G4 — 读取换权，flexlbStateV2ReadEnabled）</h2>
- * 开启时（前置：影子 + 结算换权均开，启动 parity 拒绝链 read ⇒ settle ⇒ shadow）：
+ * <h2>读取换权（调度读点切账本，恒开）</h2>
+ * 账本启用时（flexlbStateV2ReadEnabled 开关同样已废弃、恒视为开）：
  * <ul>
- *   <li>DecodeEndpoint 的 reserve/release 真实记账切到 {@link #decodeReserveAuthority}
- *       / {@link #decodeReleaseAuthority}（ledger.decode() 单入账；旧 layer-1 map 停写）；</li>
- *   <li>调度读点（总负载 / 真实 KV 用量与可用量 / 容量 gate / reporter）切
- *       {@link #decodeEndpointCounters} / {@link #prefillEndpointCounters}（端点级
- *       增量计数簿的无锁 O(1) 快照——读侧零条目遍历，调用方在引擎状态 tick
- *       时缓存刷新）；</li>
- *   <li>P 侧条目在派发提交时经 {@link #onPrefillDispatched} 绑定端点世代——
- *       补齐 M3 遗留的绑定缺口（原 P 条目恒 UNBOUND，引擎事件全被世代屏障拒绝），
- *       该挂点对影子/结算模式同样生效。</li>
+ *   <li>DecodeEndpoint 的 reserve/release 真实记账走 {@link #decodeReserveAuthority}
+ *       / {@link #decodeReleaseAuthority}（ledger.decode() 单入账）；</li>
+ *   <li>调度读点（总负载 / 真实 KV 用量与可用量 / 容量 gate / reporter）走
+ *       {@link #decodeEndpointCounters} / {@link #prefillEndpointCounters}
+ *       （端点级增量计数簿的无锁 O(1) 快照——读侧零条目遍历，调用方在引擎状态
+ *       tick 时缓存刷新）；BATCH 准入 gate 与调度指标走
+ *       {@link #prefillActiveCount()}（全账本活跃计数）；</li>
+ *   <li>P 侧条目在派发提交时经 {@link #onPrefillDispatched} 绑定端点世代。</li>
  * </ul>
  */
 public final class StateShadowBridge {
@@ -90,20 +91,12 @@ public final class StateShadowBridge {
     private final StateLedger ledger;
     private final WorkerStatusObservationTranslator translator;
     private final StateShadowDiffCollector diff;
-    /** M4 清理层（影子开时挂载；关态 null）。 */
+    /** 清理层（账本开时挂载；关态 null）。 */
     private final LedgerJanitor janitor;
     /** janitor 维护 tick 调度（autoStart=false 时 null；close 时停）。 */
     private final ScheduledExecutorService janitorScheduler;
 
-    // ---- G3（终态结算换权）----
-
-    /** 结算换权开关（创建时定；仅 enabled=true 时可真）。 */
-    private final boolean settleAuthority;
-
-    // ---- G4（读取换权）----
-
-    /** 读取换权开关（创建时定；仅 enabled && settleAuthority 时可真）。 */
-    private final boolean readAuthority;
+    // ---- 终态结算与调度读点（旧路径移除后恒开；开关已废弃） ----
 
     /** 终态 metric 统一出口 helper（与 BATCH 调度器同 path tag；monitor null 时 NullSafe）。 */
     private final FlexlbMetricHelper terminalMetricHelper;
@@ -122,8 +115,6 @@ public final class StateShadowBridge {
         this.diff = null;
         this.janitor = null;
         this.janitorScheduler = null;
-        this.settleAuthority = false;
-        this.readAuthority = false;
         this.terminalMetricHelper = null;
         this.pendingTerminalMetrics = null;
     }
@@ -133,8 +124,6 @@ public final class StateShadowBridge {
                               StateShadowDiffCollector diff,
                               LedgerJanitor janitor,
                               ScheduledExecutorService janitorScheduler,
-                              boolean settleAuthority,
-                              boolean readAuthority,
                               FlexlbMetricHelper terminalMetricHelper) {
         this.enabled = true;
         this.ledger = Objects.requireNonNull(ledger);
@@ -142,8 +131,6 @@ public final class StateShadowBridge {
         this.diff = Objects.requireNonNull(diff);
         this.janitor = janitor;
         this.janitorScheduler = janitorScheduler;
-        this.settleAuthority = settleAuthority;
-        this.readAuthority = readAuthority;
         this.terminalMetricHelper = terminalMetricHelper;
         this.pendingTerminalMetrics = new ConcurrentHashMap<>();
     }
@@ -162,31 +149,25 @@ public final class StateShadowBridge {
      */
     public static StateShadowBridge create(FlexlbConfig config, FlexMonitor monitor, boolean autoStartJanitor) {
         Objects.requireNonNull(config, "config");
-        // G3 parity 前置：结算换权依赖影子链路在跑——开 settle 不开 shadow 时拒启。
-        boolean settleAuthority = config.isFlexlbStateV2SettleEnabled();
-        if (settleAuthority && !config.isFlexlbStateV2ShadowEnabled()) {
-            throw new IllegalStateException("flexlbStateV2SettleEnabled requires flexlbStateV2ShadowEnabled "
-                    + "(settlement authority needs the shadow ledger running): "
-                    + "enable FLEXLB_STATE_V2_SHADOW_ENABLED first");
-        }
-        // G4 parity 前置：读取换权依赖结算换权的终态单出口（否则 KV 预占的
-        // 归还路径分裂在两套账本上，读数与记账不可对齐）——开 read 不开 settle 时拒启。
-        boolean readAuthority = config.isFlexlbStateV2ReadEnabled();
-        if (readAuthority && !settleAuthority) {
-            throw new IllegalStateException("flexlbStateV2ReadEnabled requires flexlbStateV2SettleEnabled "
-                    + "(read authority needs settlement authority as the single terminal exit): "
-                    + "enable FLEXLB_STATE_V2_SETTLE_ENABLED first");
-        }
         if (!config.isFlexlbStateV2ShadowEnabled()) {
-            logger.info("[state-shadow] flexlb-state v2 shadow mode disabled (flexlbStateV2ShadowEnabled=false)");
+            logger.info("[state-shadow] flexlb-state v2 ledger disabled (flexlbStateV2ShadowEnabled=false): "
+                    + "degraded mode — duplicate admission gate, global cancel and ledger metrics unavailable");
             return DISABLED;
+        }
+        // 开关收束：旧全局 inflight 路径已移除，结算/读取换权没有退路——
+        // flexlbStateV2SettleEnabled / flexlbStateV2ReadEnabled 配置已废弃，
+        // 账本启用即全权模式（终态结算与调度读点均以账本为唯一源）。
+        if (!config.isFlexlbStateV2SettleEnabled() || !config.isFlexlbStateV2ReadEnabled()) {
+            logger.warn("[state-shadow] flexlbStateV2SettleEnabled / flexlbStateV2ReadEnabled "
+                    + "are deprecated (legacy inflight path removed): both are permanently ON "
+                    + "while the state ledger is enabled; explicit false values are ignored");
         }
         StateLedger ledger = new StateLedger();
         StateShadowDiffCollector diff = new StateShadowDiffCollector(monitor);
         diff.registerMetrics();
         WorkerStatusObservationTranslator translator = new WorkerStatusObservationTranslator(ledger);
 
-        // M4：清理层四通道挂载；janitor 胜者结算同步进 diff 对账窗口（listener 在
+        // 清理层四通道挂载；janitor 胜者结算同步进 diff 对账窗口（listener 在
         // bridge 实例化后挂——见下方结算换权段，与调度线程启动前完成，无竞态）。
         LedgerJanitorConfig janitorConfig = new LedgerJanitorConfig(
                 config.getFlexlbStateV2StaleRounds(),
@@ -209,29 +190,26 @@ public final class StateShadowBridge {
                     intervalMs, intervalMs, TimeUnit.MILLISECONDS);
         }
 
-        // 结算换权（G3）：终态 metric 统一出口 helper（与 BATCH 调度器同 path tag，指标口径连续；
+        // 终态 metric 统一出口 helper（与 BATCH 调度器同 path tag，指标口径连续；
         // monitor null（测试）时 helper 全部 NullSafe no-op）。
         FlexlbMetricHelper terminalMetricHelper = new FlexlbMetricHelper(monitor, MetricConstant.PATH_BATCH);
         terminalMetricHelper.register();
 
         StateShadowBridge bridge = new StateShadowBridge(ledger, translator, diff, janitor, scheduler,
-                settleAuthority, readAuthority, terminalMetricHelper);
+                terminalMetricHelper);
         // janitor 胜者结算 → diff 对账 + 挂起 metric 消费（与引擎 finished 终局同语义）。
         // 首个维护 tick 至少在 intervalMs 之后，listener 同步挂载在前——无竞态。
         janitor.setSettleListener(bridge::onJanitorSettled);
 
-        logger.warn("[state-shadow] flexlb-state v2 shadow mode ENABLED "
+        logger.warn("[state-shadow] flexlb-state v2 ledger ENABLED "
                 + "(env FLEXLB_STATE_V2_SHADOW_ENABLED / flexlbStateV2ShadowEnabled=true): "
-                + "StateLedger now consuming the same event stream in shadow; legacy path unchanged; "
+                + "StateLedger is the single source of truth for terminal settlement, "
+                + "scheduling reads and admission gating; legacy inflight path removed; "
                 + "LedgerJanitor " + (autoStartJanitor ? "scheduled" : "mounted (manual tick)")
                 + " interval=" + config.getFlexlbStateV2JanitorIntervalMs() + "ms"
                 + " staleRounds=" + config.getFlexlbStateV2StaleRounds()
                 + " ttlMs=" + config.getFlexlbStateV2TtlMs()
-                + " hardCapMs=" + config.getFlexlbStateV2HardCapMs()
-                + "; settleAuthority=" + settleAuthority
-                + " (G3 terminal settlement convergence " + (settleAuthority ? "ON" : "off") + ")"
-                + "; readAuthority=" + readAuthority
-                + " (G4 scheduling read handover " + (readAuthority ? "ON" : "off") + ")");
+                + " hardCapMs=" + config.getFlexlbStateV2HardCapMs() + ");");
         return bridge;
     }
 
@@ -244,7 +222,7 @@ public final class StateShadowBridge {
         if (scheduler != null) {
             scheduler.shutdownNow();
         }
-        // shutdown summary：全量对账统计单行出口（G3/G4 验收 gate 数据源——
+        // shutdown summary：全量对账统计单行出口（验收 gate 数据源——
         // 指标通道未部署时（如压测环境无 pushgateway）日志即权威证据）。
         if (enabled && diff != null) {
             logger.warn("[state-shadow] shutdown summary: {}", diff.summaryLine());
@@ -268,7 +246,7 @@ public final class StateShadowBridge {
         try {
             EngineObservation observation = translator.translate(response, roleType, ipPort);
             if (observation == null) {
-                return; // 非 P/D 分离角色（PDFUSION/VIT）：影子挂载（G1）不覆盖
+                return; // 非 P/D 分离角色（PDFUSION/VIT）：事件泵不覆盖
             }
             ledger.observe(observation);
             diff.onEvent();
@@ -357,18 +335,42 @@ public final class StateShadowBridge {
         }
     }
 
-    // ==================== G3：结算换权（权威单出口） ====================
+    // ==================== 终态结算（权威单出口） ====================
 
-    /** 结算换权开关（关态/未启用时 false——旧路径走 {@link #onOldTerminal}）。 */
+    /** 终态结算单出口（旧路径移除后：账本启用即 true；关态 false）。 */
     public boolean isSettleAuthority() {
-        return enabled && settleAuthority;
+        return enabled;
     }
 
-    // ==================== G4：读取换权（调度读点与 EP 记账切门面） ====================
+    // ==================== 调度读点（账本为唯一数据源） ====================
 
-    /** 读取换权开关（关态/未启用时 false——EP 读点与记账走旧双层 map）。 */
+    /** 调度读点切账本（旧路径移除后：账本启用即 true；关态 false）。 */
     public boolean isReadAuthority() {
-        return enabled && settleAuthority && readAuthority;
+        return enabled;
+    }
+
+    /**
+     * P 侧全账本活跃条目数（BATCH 准入 gate 与调度指标的数据源）：刷新端点级
+     * 计数簿快照后读 inflight 总量。未启用（退化模式）返回 -1——调用方据此
+     * 跳过 gate（无账本即无计数源）。
+     */
+    public long prefillActiveCount() {
+        if (!enabled) {
+            return -1L;
+        }
+        try {
+            ledger.prefill().refreshSnapshot();
+            return ledger.prefill().snapshot().inflight();
+        } catch (Throwable t) {
+            diff.onError(t);
+            return -1L;
+        }
+    }
+
+    /** 同 {@link #prefillActiveCount()}，但未启用/异常时返回 0（指标读点不产负值）。 */
+    public long prefillActiveCountOrZero() {
+        long count = prefillActiveCount();
+        return count < 0 ? 0L : count;
     }
 
     /**
@@ -381,6 +383,13 @@ public final class StateShadowBridge {
      */
     public void decodeReserveAuthority(long requestId, long seqLen, long expectedKv, String ipPort) {
         if (!isReadAuthority()) {
+            return;
+        }
+        if (ipPort == null) {
+            // 端点身份缺失（WorkerStatus 未填 ip）：明确丢弃并告警，
+            // 不让 NPE 流入 shadow.error 计数污染对账指标。
+            logger.warn("[state-shadow] decode reserve authority: null endpoint, requestId={} dropped",
+                    requestId);
             return;
         }
         try {
@@ -482,8 +491,8 @@ public final class StateShadowBridge {
     }
 
     /**
-     * G3 权威结算入口（AbstractScheduler.register 的 whenComplete 分流调用，
-     * 仅结算换权开启时；开关关时旧路径继续走 {@link #onOldTerminal}）：
+     * 终态权威结算入口（AbstractScheduler.register 的 whenComplete 分流调用，
+     * 账本启用即生效；仅账本关时旧路径退化直报）：
      * <ul>
      *   <li>COMPLETED（引擎 ACK）不提前 settle——引擎执行相位与 KV 计费移交
      *       （引擎上报 KV 在确认分配后接管本地预占）保持完整；终态 metric 挂
@@ -499,7 +508,7 @@ public final class StateShadowBridge {
      *                    监控值域连续）
      */
     public void onOldTerminalAuthority(long requestId, String oldStateName, TerminalMetricContext metricCtx) {
-        if (!enabled || !settleAuthority) {
+        if (!enabled) {
             return;
         }
         try {
@@ -614,7 +623,7 @@ public final class StateShadowBridge {
 
     /**
      * 新侧主终态：D 侧墓碑优先（decode 完成即请求完成）、P 侧兜底（prefill 阶段
-     * 失败/取消，D 侧无条目时 P 终局即终局）。G3 开启时同步消费挂起 metric
+     * 失败/取消，D 侧无条目时 P 终局即终局）。结算换权模式下同步消费挂起 metric
      * （ledger 终局即单点生产出口）。
      *
      * <p>P 兜底仅在 D 侧无活跃条目时生效：P 完成 ≠ 请求完成（状态核心跨侧
@@ -652,7 +661,7 @@ public final class StateShadowBridge {
         return ledger;
     }
 
-    /** M4 清理层（关态 null；观察/装配测试用）。 */
+    /** 清理层（关态 null；观察/装配测试用）。 */
     public LedgerJanitor janitor() {
         return janitor;
     }

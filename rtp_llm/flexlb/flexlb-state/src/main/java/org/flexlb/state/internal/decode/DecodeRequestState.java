@@ -155,7 +155,7 @@ public final class DecodeRequestState {
         return createdAtMs;
     }
 
-    /** 序列长度（M2 记账字段，供上层容量推导）。 */
+    /** 序列长度（记账字段，供上层容量推导）。 */
     public long seqLen() {
         return seqLen;
     }

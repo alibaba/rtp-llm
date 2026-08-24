@@ -244,13 +244,16 @@ public class HttpLoadBalanceServer {
                 PrefillEndpoint prefill = entry.getValue();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                // Legacy two-layer sum, kept for external script compatibility
-                ep.put("inflight_batches", prefill.prefillInflightCount()
-                        + prefill.prefillEngineWorkCount());
-                // Layer 1: dispatched but not yet acknowledged by the engine
-                ep.put("inflight_entries", prefill.prefillInflightCount());
-                // Layer 2: engine-acknowledged work, with phase breakdown
-                ep.put("engine_work", prefill.prefillEngineWorkCount());
+                // Ledger per-EP view: activeTotal is the request-level active
+                // count (batch members counted individually); field names kept
+                // for external script compatibility.
+                int active = prefill.prefillActiveRequestCount();
+                int engineOwned = (int) prefill.prefillEngineOwnedCount();
+                ep.put("inflight_batches", active);
+                // Dispatched but not yet acknowledged by the engine
+                ep.put("inflight_entries", Math.max(0, active - engineOwned));
+                // Engine-acknowledged work, with phase breakdown
+                ep.put("engine_work", engineOwned);
                 ep.put("engine_waiting", prefill.prefillEngineWaitingCount());
                 ep.put("engine_running", prefill.prefillEngineRunningCount());
                 prefillList.add(ep);
@@ -262,12 +265,12 @@ public class HttpLoadBalanceServer {
                 DecodeEndpoint decode = entry.getValue();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                // Layer 1: dispatched but not yet acknowledged by the engine
+                // Unconfirmed reservations: dispatched but not yet acknowledged by the engine
                 ep.put("inflight_requests", decode.decodeInflightCount());
-                // Layer 2: engine-acknowledged work (LOADING/RUNNING)
+                // Engine-acknowledged work (WAITING/LOADING/RUNNING)
                 ep.put("engine_work", decode.decodeEngineWorkCount());
                 ep.put("total_load", decode.decodeTotalLoad());
-                // Layer-1 KV reservations: hard (seqLen) vs expected (seqLen + maxNewTokens)
+                // Unconfirmed KV reservations: hard (seqLen) vs expected (seqLen + maxNewTokens)
                 ep.put("kv_reserved_hard", decode.decodeInflightHardKvReserved());
                 ep.put("kv_reserved_expected", decode.decodeInflightExpectedKvReserved());
                 decodeList.add(ep);

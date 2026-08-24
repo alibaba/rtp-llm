@@ -3,9 +3,11 @@ package org.flexlb.balance.scheduler;
 import java.util.concurrent.CancellationException;
 
 /**
- * Reason why an inflight item transitioned to a terminal state.
+ * Reason why a scheduled request transitioned to a terminal state.
  *
- * <p>Used by {@link InflightItem} to record the terminal cause.
+ * <p>Used by {@link AbstractScheduler} to classify terminal responses
+ * (four-value vocabulary) for metrics reporting and the state ledger
+ * settle hook.
  */
 public enum TerminalReason {
     CANCELLED,

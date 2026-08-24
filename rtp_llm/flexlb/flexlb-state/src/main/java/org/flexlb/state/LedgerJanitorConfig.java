@@ -1,19 +1,19 @@
 package org.flexlb.state;
 
 /**
- * LedgerJanitor 配置（M4 清理层四通道参数，构造注入）。
+ * LedgerJanitor 配置（清理层四通道参数，构造注入）。
  *
  * <p>生产侧由 flexlb-sync 的 FlexlbConfig 映射（flexlbStateV2StaleRounds /
  * flexlbStateV2TtlMs / flexlbStateV2HardCapMs / flexlbStateV2JanitorIntervalMs，
- * env 覆盖 + 启动回显照 M3 模式）；调度周期（janitorIntervalMs）属于调度方
- * 不在本配置内。</p>
+ * env 覆盖 + 启动回显与事件泵装配同模式）；调度周期（janitorIntervalMs）属于
+ * 调度方不在本配置内。</p>
  *
  * @param staleRounds        证据通道缺席阈值：完整 tick 连续缺席跨度
  *                           超过 N 轮（{@code round - lastSeenRound > N}）才触发
  *                           VANISHED——天然防抖（护栏 1）。默认 3。
  * @param ttlMs              时间通道 TTL：createdAtMs 基准（创建时刻固定不可续命——任何
- *                           touch/observe 都不刷新基准）。默认 300s，对齐现状
- *                           InflightStore TTL。
+ *                           touch/observe 都不刷新基准）。默认 300s（承接旧账本
+ *                           TTL 兑底口径）。
  * @param hardCapMs          强制通道硬上限：createdAtMs + 上限，到期无条件清理
  *                           （fence 不豁免——宁清勿留决策，见 LedgerJanitor）。
  *                           <b>必须 &gt; ttlMs</b>。默认 900s。

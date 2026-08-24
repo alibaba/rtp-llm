@@ -2,11 +2,6 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.InflightItem;
-import org.flexlb.balance.scheduler.InflightStore;
-import org.flexlb.balance.scheduler.TerminalReason;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -40,7 +35,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final Map<String, WorkerStatus> workerStatusMap;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
-    private final InflightStore globalInflightStore;
     private final String ip;
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
@@ -49,7 +43,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final EndpointRegistry endpointRegistry;
     private final Executor callbackExecutor;
-    /** G1 影子门面：开关关时为 no-op 单例（零行为变化）。 */
+    /** 状态账本门面：开关关时为 DISABLED 单例（退化模式）。 */
     private final StateShadowBridge shadowBridge;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
@@ -58,12 +52,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
-                                  InflightStore globalInflightStore,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
         this(modelName, ipPort, site, roleType, group, workerStatus, workerStatusMap,
                 engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
-                globalInflightStore, endpointRegistry, callbackExecutor, StateShadowBridge.DISABLED);
+                endpointRegistry, callbackExecutor, StateShadowBridge.DISABLED);
     }
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
@@ -72,7 +65,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
-                                  InflightStore globalInflightStore,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor,
                                   StateShadowBridge shadowBridge) {
@@ -89,7 +81,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
         this.callbackExecutor = callbackExecutor;
         this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
@@ -180,30 +171,26 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     }
                 }
 
-                // 2. Notify EP (calibration) — passes both updated status and raw response
+                // 2. Notify EP (counter refresh) — passes both updated status and raw response
                 if (ep != null) {
                     ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
                 }
 
-                // 3. Update inflight items (cleanup finished requests)
-                if (globalInflightStore != null) {
-                    handleFinishedTasks(newWorkerStatus);
-                }
-
-                // 3.5 Shadow (G1): flexlb-state v2 ledger consumes the same response —
-                // strictly after legacy calibrate/finished handling (steps 2-3) and
-                // before the latestFinishedVersion watermark advance (step 4), so the
-                // shadow sees the same tick's event order as the legacy path
-                // (phase event ordering).
-                // catch-all + enablement short-circuit inside the bridge.
+                // 3. 状态账本事件泵：flexlb-state ledger 消费同一份报文——在
+                // EP 端点状态刷新（step 2）之后、latestFinishedVersion 水位
+                // 推进（step 4）之前，保证账本看到与本 tick 相同的事件顺序
+                //（相位事件定序）。引擎终局也由此路径驱动（引擎上报 = 唯一
+                // 事实源）。catch-all + enablement short-circuit inside the bridge.
                 shadowBridge.observeWorkerStatus(newWorkerStatus, roleType, ipPort);
 
                 Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
 
-                // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
-                // If this is done outside the version guard, a skipped calibrate (version not
-                // advanced) would still consume the incremental version, causing the engine to
-                // filter out those finished tasks on the next poll — leaking inflight entries.
+                // 4. Advance latestFinishedVersion only after the ledger event pump
+                // has consumed this tick's finished tasks. If this is done outside
+                // the version guard, a skipped tick (version not advanced) would
+                // still consume the incremental version, causing the engine to
+                // filter out those finished tasks on the next poll — leaking ledger
+                // entries.
                 if (latestFinishedVersion != null
                         && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
                     workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
@@ -230,38 +217,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
-        }
-    }
-
-    /**
-     * Process finished tasks from worker status response by updating inflight items
-     * in the global store. Prefill completions with success are skipped (decode is
-     * still running). All other completions terminate the inflight item.
-     */
-    private void handleFinishedTasks(WorkerStatusResponse response) {
-        Map<String, TaskInfo> finishedTaskInfo = response.getFinishedTaskInfo();
-        if (finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
-            return;
-        }
-        boolean isPrefill = response.getRole() == RoleType.PREFILL;
-        for (TaskInfo task : finishedTaskInfo.values()) {
-            // Prefill success: decode is still running, keep inflight entry alive
-            if (isPrefill && task.getErrorCode() == 0) {
-                continue;
-            }
-            String requestId = String.valueOf(task.getRequestId());
-            InflightItem item = globalInflightStore.get(requestId);
-            if (item == null) {
-                continue;
-            }
-            if (task.getErrorCode() == 0) {
-                Response success = new Response();
-                success.setSuccess(true);
-                success.setCode(200);
-                item.complete(success);
-            } else {
-                item.terminate(TerminalReason.FAILED);
-            }
         }
     }
 

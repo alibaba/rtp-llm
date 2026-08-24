@@ -34,12 +34,9 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_T
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
-import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_ENGINE_WORK_COUNT;
 import static org.flexlb.constant.MetricConstant.PREFILL_INFLIGHT_ENTRIES_COUNT;
-import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
-import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_TOTAL_SIZE;
 
 /**
  * Batch scheduling metrics reporter for FlexLB batch dispatch path.
@@ -84,8 +81,6 @@ public class BatchSchedulerReporter {
         // Inflight — batch count and request count per worker (FlexLB scheduler view, tagged by role)
         monitor.register(INFLIGHT_BATCH_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(INFLIGHT_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        // Scheduler-level inflight size — uses scheduler-level tags (role=PREFILL, engineIp="scheduler")
-        monitor.register(SCHEDULER_INFLIGHT_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -105,12 +100,6 @@ public class BatchSchedulerReporter {
         monitor.register(PREFILL_ENGINE_WORK_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_INFLIGHT_REQUESTS_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_ENGINE_WORK_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-
-        // Inflight TTL eviction QPS — reported by InflightStore.evict()
-        monitor.register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-
-        // Scheduler-level inflight total size (includes tombstones)
-        monitor.register(SCHEDULER_INFLIGHT_TOTAL_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -207,49 +196,6 @@ public class BatchSchedulerReporter {
                 "role", role,
                 "reason", reason);
         monitor.report(ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS, tags, totalTokens);
-    }
-
-    /**
-     * Report scheduler inflight size via {@code flexlb.scheduler.inflight.size}.
-     * <p>Uses an independent metric name (not {@code engine.health.check.local.inflight.size})
-     * because this is a scheduler-level metric with tag schema (role=PREFILL, engineIp="scheduler"),
-     * which differs from EngineHealthReporter's per-engine version tagged by
-     * (model, code, engineIp=real-engine-IP, role). Sharing the same metric name would cause
-     * tag schema conflicts in kmonitor grouping.
-     * Uses role=PREFILL + engineIp=scheduler tags to match the Grafana panel filter.
-     */
-    public void reportSchedulerInflightSize(int size) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "scheduler");
-        monitor.report(SCHEDULER_INFLIGHT_SIZE, tags, size);
-    }
-
-    /**
-     * Report scheduler inflight total size (including tombstones within TTL)
-     * via {@code app.flexlb.scheduler.inflight.total.size}.
-     * <p>Uses the same scheduler-level tag schema as {@link #reportSchedulerInflightSize}.
-     */
-    public void reportSchedulerInflightTotalSize(int size) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "scheduler");
-        monitor.report(SCHEDULER_INFLIGHT_TOTAL_SIZE, tags, size);
-    }
-
-    /**
-     * Report an inflight TTL eviction event (RUNNING item timed out via
-     * {@code InflightItem#complete(Response.error(INFLIGHT_TTL_EXPIRED), TIMED_OUT)})
-     * via {@code app.flexlb.inflight.ttl.expired.qps}.
-     * <p>Called by {@link org.flexlb.balance.scheduler.InflightStore#evict()} on each
-     * successful timeout. Uses scheduler-level tags (no engineIp — the TTL sweep is
-     * a scheduler-level operation, not per-engine).
-     */
-    public void reportInflightTtlExpired() {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", RoleType.PREFILL.name(),
-                "engineIp", "scheduler");
-        monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, 1.0);
     }
 
     /**

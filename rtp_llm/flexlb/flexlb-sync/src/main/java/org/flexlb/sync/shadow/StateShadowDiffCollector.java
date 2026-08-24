@@ -15,17 +15,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * G1 影子对账：旧路径终态（InflightStore InflightItem CAS 终局）与影子账本终态
- * （StateLedger 墓碑 TerminalOutcome）按 requestId 比对，产出 diff 计数——
- * M7 全链路验收的 gate 数据源。
+ * 状态对账：调度路径终态（scheduler future 终局，经 StateShadowBridge 上报）
+ * 与账本终态（StateLedger 墓碑 TerminalOutcome）按 requestId 比对，产出
+ * diff 计数——全链路验收的 gate 数据源。
  *
  * <h2>对比语义</h2>
  * <ul>
  *   <li><b>terminal_state</b>：等价类不一致（COMPLETED↔COMPLETED、FAILED↔FAILED、
  *       CANCELLED↔CANCELLED、TIMED_OUT↔SLO_TIMEOUT 之外均计 diff；
- *       PREEMPTED 为新语义回边态，旧路径无对应——计入 diff 供归因观测）。</li>
- *   <li><b>terminal_reason</b>：影子 TerminalReason 不在旧终态等价 reason 集内
- *       （按旧终态分组；state 与 reason 两指标独立计数——state 不一致时 reason
+ *       PREEMPTED 为新语义回边态，调度路径无对应——计入 diff 供归因观测）。</li>
+ *   <li><b>terminal_reason</b>：账本 TerminalReason 不在调度终态等价 reason 集内
+ *       （按调度终态分组；state 与 reason 两指标独立计数——state 不一致时 reason
  *       大概率同时不一致，各自计数供归因）。</li>
  *   <li><b>terminal_missing_on_new / _on_old</b>：单侧到达后对比窗口内对侧未达。</li>
  * </ul>
@@ -134,7 +134,7 @@ public final class StateShadowDiffCollector {
     }
 
     /**
-     * 旧路径终态（InflightItem 终局，state 为 InflightState 名称）。
+     * 调度路径终态（scheduler future 终局，state 为四值终态名）。
      * 到达即查新侧窗口：命中比对双清，未命中入窗。
      */
     public void recordOldTerminal(long requestId, String oldStateName) {
@@ -148,7 +148,7 @@ public final class StateShadowDiffCollector {
     }
 
     /**
-     * 新侧（影子账本）终态。到达即查旧侧窗口：命中比对双清，未命中入窗。
+     * 新侧（账本）终态。到达即查旧侧窗口：命中比对双清，未命中入窗。
      * 同 requestId 只记第一次（终态唯一性由 ledger CAS 单出口保证）；重复
      * 上报（如 P 引擎迟到 finished 在 D 终局后的再次触发）防重跳过。
      */
@@ -206,7 +206,7 @@ public final class StateShadowDiffCollector {
         }
     }
 
-    /** 新终态 → 旧路径等价终态名（InflightState 值域）。PREEMPTED 无对应（回边态）。 */
+    /** 新终态 → 调度路径等价终态名（四值终态词表）。PREEMPTED 无对应（回边态）。 */
     static String equivalentOldName(TerminalState newState) {
         return switch (newState) {
             case COMPLETED -> "COMPLETED";
@@ -217,7 +217,7 @@ public final class StateShadowDiffCollector {
         };
     }
 
-    /** 旧终态的等价 reason 集（宽松观测口径：同族 reason 不计 diff）。 */
+    /** 调度终态的等价 reason 集（宽松观测口径：同族 reason 不计 diff）。 */
     static boolean reasonInEquivalentSet(String oldState, String newReason) {
         if (newReason == null) {
             return false;
@@ -343,7 +343,7 @@ public final class StateShadowDiffCollector {
 
     /**
      * 全量统计单行摘要（shutdown 诊断日志用：全部计数读口聚合）。
-     * <p>指标通道未部署时（如压测环境无 pushgateway），本行即 G3/G4 验收
+     * <p>指标通道未部署时（如压测环境无 pushgateway），本行即换权验收
      * （missing/error/diff 归零 gate）的权威日志证据。</p>
      */
     public String summaryLine() {

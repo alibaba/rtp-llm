@@ -63,10 +63,10 @@ public final class StateLedger {
     private final EnumMap<PhaseVerdict, LongAdder> verdictCounts = new EnumMap<>(PhaseVerdict.class);
     private final LongAdder unknownRunningEvents = new LongAdder();
     private final LongAdder unknownFinishedEvents = new LongAdder();
-    /** F1 因果闭包触发计数（janitor 透传观测，M4）。 */
+    /** F1 因果闭包触发计数（janitor 透传观测）。 */
     private final LongAdder causalClosureSettles = new LongAdder();
 
-    /** M4 清理层实例（createJanitor 挂载；未创建时 observe 尾部零开销）。 */
+    /** 清理层实例（createJanitor 挂载；未创建时 observe 尾部零开销）。 */
     private volatile LedgerJanitor janitor;
 
     public StateLedger() {
@@ -183,7 +183,7 @@ public final class StateLedger {
 
     /**
      * 10s 对账扫描（周期由上层调度）：全量重算 vs 增量计数器比对。
-     * M2 只比对<b>不静默修正</b>（指标/告警 M6 接入）。
+     * 只比对<b>不静默修正</b>（指标/告警由观测层接入）。
      */
     public CounterDriftReport auditAndDrift() {
         List<String> drift = new ArrayList<>();
@@ -192,16 +192,16 @@ public final class StateLedger {
         return new CounterDriftReport(drift);
     }
 
-    //（M2 占位 ledgerJanitor() 已被 M4 的 createJanitor/LedgerJanitor 替换：
+    //（占位 ledgerJanitor() 已被 createJanitor/LedgerJanitor 替换：
     // 墓碑/fence TTL 过期清理并入 runMaintenanceTick，缺席判死/硬上限新增）
 
     /**
-     * M4 清理层工厂：创建并挂载 {@link LedgerJanitor}（四通道 F1-F4 + 三护栏）。
+     * 清理层工厂：创建并挂载 {@link LedgerJanitor}（四通道 F1-F4 + 三护栏）。
      *
      * <p>janitor 的 settle 与外部 settle 走同一 CAS 单出口（本类 settlePrefill/
      * settleDecode 的单侧委托回调）；observe 尾部（完整 tick）回调其缺席扫描。
      * 单例约定：一账本一 janitor，重复调用替换旧实例（旧实例的调度由持有方负责停止）。
-     * 调度（TTL/硬上限定时 tick）由上层驱动（flexlb-sync 影子装配处，M4）。</p>
+     * 调度（TTL/硬上限定时 tick）由上层驱动（flexlb-sync 账本装配处）。</p>
      */
     public LedgerJanitor createJanitor(LedgerJanitorConfig janitorConfig) {
         Objects.requireNonNull(janitorConfig, "janitorConfig");
@@ -219,7 +219,7 @@ public final class StateLedger {
     }
 
     /**
-     * 影子对账查询（影子挂载 G1 接口缺口最小补）：按 requestId + 侧查询终局条目的
+     * 对账查询视图（终局条目查询）：按 requestId + 侧查询终局条目的
      * 终态记录（墓碑内），条目存活/不存在/墓碑已过期均返回 empty。
      *
      * <p>只读视图，不参与裁决；供 flexlb-sync 影子 diff 对账消费。</p>
@@ -266,7 +266,7 @@ public final class StateLedger {
         for (EngineObservation.FinishedObservation f : obs.finished()) {
             dispatchFinished(f, ep, nowMs, rebuildMode);
         }
-        // M4 证据通道：完整 tick 尾部回调 janitor 缺席扫描（rebuild 重放不触发；
+        // 证据通道：完整 tick 尾部回调 janitor 缺席扫描（rebuild 重放不触发；
         // 不完整 tick 由 janitor 护栏 2 自行丢弃——不推进缺席计数）
         if (!rebuildMode) {
             LedgerJanitor j = janitor;

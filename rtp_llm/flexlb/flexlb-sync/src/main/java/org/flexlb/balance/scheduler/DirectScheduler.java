@@ -11,14 +11,13 @@ import java.util.concurrent.CompletableFuture;
  * Scheduler for DIRECT mode: route → complete, no queueing, no batching.
  *
  * <p>Composes a {@link Router} for worker selection and completes the result
- * future synchronously with the routing response. Requests are registered in
- * the global {@link InflightStore} for unified cancel lookup and metric
- * reporting; on completion the item remains as a tombstone until the TTL
- * evictor removes it.
+ * future synchronously with the routing response. Requests are admitted
+ * through the base-class pending registry (duplicate detection while a
+ * previous submission is pending; lifecycle ends at terminal completion).
  *
- * <p>Duplicate request IDs (an active item or tombstone already in the store)
- * are logged and processed untracked — the direct path never rejects a
- * request for tracking reasons, preserving the pre-registration behavior.
+ * <p>Duplicate request IDs (previous submission still pending) are logged
+ * and processed untracked — the direct path never rejects a request for
+ * tracking reasons, preserving the pre-registration behavior.
  *
  * <p>Also serves as the base class for {@link QueueScheduler}, which reuses
  * {@link #routeAndComplete} for the dequeue-then-route worker path and
@@ -28,17 +27,15 @@ public class DirectScheduler extends AbstractScheduler {
 
     protected final Router router;
 
-    public DirectScheduler(Router router, InflightStore globalStore,
-                           FlexlbMetricHelper metricHelper) {
-        super(globalStore, metricHelper);
+    public DirectScheduler(Router router, FlexlbMetricHelper metricHelper) {
+        super(metricHelper);
         this.router = router;
     }
 
     @Override
     public CompletableFuture<Response> submit(BalanceContext ctx) {
         CompletableFuture<Response> future = new CompletableFuture<>();
-        InflightItem existing = register(ctx, future);
-        if (existing != null) {
+        if (!register(ctx, future)) {
             Logger.warn("Duplicate request_id: {}, processing untracked", ctx.getRequestId());
         }
         routeAndComplete(ctx, future);

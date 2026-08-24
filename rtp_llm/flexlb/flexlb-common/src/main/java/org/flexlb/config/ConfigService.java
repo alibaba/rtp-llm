@@ -37,9 +37,6 @@ public class ConfigService {
             "costFormula",
             "prefillPredictorType",
             "hysteresisBiasPercent",
-            "flexlbEpInflightTtlMs",
-            "flexlbTombstoneTtlMs",
-            "flexlbStaleEvictRounds",
             "defaultKvTokens",
             "maxNewTokens");
 

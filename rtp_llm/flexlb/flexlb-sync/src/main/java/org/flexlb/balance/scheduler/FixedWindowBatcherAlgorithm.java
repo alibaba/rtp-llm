@@ -221,9 +221,15 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         return Math.min(total, available);
     }
 
-    /** Current inflight batch count on the prefill worker, for backpressure. */
+    /**
+     * Current dispatched-and-unsettled request count on the prefill worker
+     * (ledger per-EP view), for backpressure. Request-level accounting —
+     * batch members count individually — so the parking threshold fires
+     * earlier than the legacy entry-level (batch counts as one) view:
+     * conservative direction for admission.
+     */
     private int currentInflightCount() {
-        return prefillEp.prefillInflightCount() + prefillEp.prefillEngineWorkCount();
+        return prefillEp.prefillActiveRequestCount();
     }
 
     /** Prefill-time predictor for predictor-based early dispatch. */
