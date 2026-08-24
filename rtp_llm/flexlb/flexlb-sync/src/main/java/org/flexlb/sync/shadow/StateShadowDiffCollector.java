@@ -36,6 +36,14 @@ import java.util.concurrent.atomic.LongAdder;
  * {@value #DEFAULT_WINDOW_MS} ms）或容量超限时单侧条目淘汰并计 missing
  * （+超限丢弃计数）。淘汰为惰性触发（每秒至多一次过期扫描），无需后台线程。
  *
+ * <h2>新侧终态恰好一次（配对模型公理）</h2>
+ * 新侧终态记录带去重（容量同 maxEntries 的 FIFO 有界集）：同一
+ * requestId 只记第一次，后续重复上报防重跳过（计 duplicateNewSuppressed）。
+ * 防的正是跨侧语义下的阶段终局重复：D 引擎 finished 先到即终局请求级
+ * 终态（因果闭包同步收缩 P 条目），P 引擎 finished 迟到再次触发记录——
+ * 第二次无法与旧侧终态配对而永久滞留窗口（真机轮每请求一条滞留、
+ * 窗口满载滚动的第二根因）。
+ *
  * <p>线程安全：两侧 map 独立 ConcurrentHashMap，先到侧入窗、后到侧删除比对
  * （remove 返回值即竞争胜者，天然幂等——并发双到达只有一方能 remove 成功）。
  */
@@ -66,6 +74,14 @@ public final class StateShadowDiffCollector {
     private final java.util.concurrent.atomic.AtomicLong overflowWarnCounter =
             new java.util.concurrent.atomic.AtomicLong();
 
+    /** 新侧终态记录去重集（requestId → 首次已记）：防跨侧阶段终局重复上报。 */
+    private final ConcurrentHashMap<Long, Boolean> recordedNewTerminals = new ConcurrentHashMap<>();
+    /** 去重集 FIFO 逐出队列（容量同 maxEntries——覆盖引擎迟到终局的时间跨度）。 */
+    private final java.util.concurrent.ConcurrentLinkedQueue<Long> recordedNewFifo =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private final java.util.concurrent.atomic.AtomicInteger recordedNewCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     // ---- 计数（LongAdder：日志/诊断/指标双通道）----
 
     private final LongAdder eventCount = new LongAdder();
@@ -76,6 +92,7 @@ public final class StateShadowDiffCollector {
     private final LongAdder diffMissingOnOld = new LongAdder();
     private final LongAdder windowOverflowDropped = new LongAdder();
     private final LongAdder matchedCount = new LongAdder();
+    private final LongAdder duplicateNewSuppressed = new LongAdder();
 
     public StateShadowDiffCollector(FlexMonitor monitor) {
         this(monitor, DEFAULT_WINDOW_MS, DEFAULT_MAX_ENTRIES);
@@ -132,8 +149,23 @@ public final class StateShadowDiffCollector {
 
     /**
      * 新侧（影子账本）终态。到达即查旧侧窗口：命中比对双清，未命中入窗。
+     * 同 requestId 只记第一次（终态唯一性由 ledger CAS 单出口保证）；重复
+     * 上报（如 P 引擎迟到 finished 在 D 终局后的再次触发）防重跳过。
      */
     public void recordNewTerminal(long requestId, TerminalState newState, TerminalReason newReason) {
+        if (recordedNewTerminals.putIfAbsent(requestId, Boolean.TRUE) != null) {
+            // 已记录过（入窗或已配对）：防重跳过——否则迟到阶段终局的第二次
+            // 记录永久滞留窗口，高频下窗口满载滚动（真机轮第二根因）。
+            duplicateNewSuppressed.increment();
+            return;
+        }
+        recordedNewFifo.add(requestId);
+        if (recordedNewCount.incrementAndGet() > maxEntries) {
+            Long evicted = recordedNewFifo.poll();
+            if (evicted != null && recordedNewTerminals.remove(evicted) != null) {
+                recordedNewCount.decrementAndGet();
+            }
+        }
         TerminalRecord record = new TerminalRecord(newState.name(), newReason.name(), System.currentTimeMillis());
         TerminalRecord counterpart = oldTerminals.remove(requestId);
         if (counterpart != null) {
@@ -297,6 +329,10 @@ public final class StateShadowDiffCollector {
         return windowOverflowDropped.sum();
     }
 
+    public long duplicateNewSuppressed() {
+        return duplicateNewSuppressed.sum();
+    }
+
     public int pendingOld() {
         return oldTerminals.size();
     }
@@ -319,6 +355,7 @@ public final class StateShadowDiffCollector {
                 + " missingOnNew=" + diffMissingOnNew.sum()
                 + " missingOnOld=" + diffMissingOnOld.sum()
                 + " overflowDropped=" + windowOverflowDropped.sum()
+                + " duplicateNewSuppressed=" + duplicateNewSuppressed.sum()
                 + " pendingOld=" + oldTerminals.size()
                 + " pendingNew=" + newTerminals.size();
     }

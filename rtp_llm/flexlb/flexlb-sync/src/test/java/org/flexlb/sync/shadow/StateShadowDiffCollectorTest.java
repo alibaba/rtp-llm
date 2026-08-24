@@ -158,7 +158,9 @@ class StateShadowDiffCollectorTest {
 
     @Test
     void shouldNeverCountTwice_forConcurrentDoubleArrival() {
-        // remove 语义天然幂等：同 requestId 的新侧到达两次，第二次 remove miss 直接入窗
+        // 同 requestId 的新侧到达两次：第二次防重跳过（每请求新侧终态恰好一次，
+        // 终态唯一性由 ledger CAS 单出口保证——旧语义的第二次入窗正是迟到
+        // 阶段终局滞留窗口的源头）
         StateShadowDiffCollector collector = new StateShadowDiffCollector(null);
 
         collector.recordOldTerminal(13L, "COMPLETED");
@@ -166,7 +168,8 @@ class StateShadowDiffCollectorTest {
         collector.recordNewTerminal(13L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED);
 
         assertEquals(1L, collector.matchedCount(), "只匹配一次");
-        assertEquals(1, collector.pendingNew(), "重复到达的第二次入窗（等待后续淘汰或对账）");
+        assertEquals(1L, collector.duplicateNewSuppressed(), "重复到达的第二次防重跳过");
+        assertEquals(0, collector.pendingNew(), "防重后零滞留（旧语义第二次入窗是滞留源头）");
         assertEquals(0L, collector.diffTerminalState());
     }
 
@@ -200,6 +203,61 @@ class StateShadowDiffCollectorTest {
         collector.evictExpired(System.currentTimeMillis()); // 显式驱动：补结算
         assertEquals(1, collector.pendingOld(), "31L 未过期仍驻窗");
         assertEquals(1L, collector.diffMissingOnNew(), "显式扫描结算过期条目 30L 的 missing");
+    }
+
+    // ---- 新侧终态恰好一次（跨侧阶段终局重复上报防重） ----
+
+    /**
+     * 真机轮第二根因回归：D 终局（请求级终态 #1）配对后，P 引擎迟到
+     * finished 再次触发记录（#2）——防重跳过，窗口零滞留。否则第二次
+     * 永久滞留（旧侧终态已消费），高频下窗口满载滚动。
+     */
+    @Test
+    void duplicateNewTerminalSuppressedAfterMatched() {
+        StateShadowDiffCollector collector = new StateShadowDiffCollector(null);
+
+        collector.recordNewTerminal(21L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED); // #1 入窗
+        assertEquals(1, collector.pendingNew());
+        collector.recordOldTerminal(21L, "COMPLETED"); // 配对双清
+        assertEquals(1L, collector.matchedCount());
+
+        collector.recordNewTerminal(21L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED); // 迟到重复
+        assertEquals(1L, collector.duplicateNewSuppressed(), "配对后的迟到重复防重跳过");
+        assertEquals(1L, collector.matchedCount(), "matched 不变");
+        assertEquals(0, collector.pendingNew(), "配对后迟到重复零滞留（旧语义永久滞留窗口）");
+    }
+
+    /** 入窗未配对时的重复上报同样防重（不翻倍不覆盖不产生比对）。 */
+    @Test
+    void duplicateNewTerminalSuppressedBeforeMatched() {
+        StateShadowDiffCollector collector = new StateShadowDiffCollector(null);
+
+        collector.recordNewTerminal(22L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED);
+        collector.recordNewTerminal(22L, TerminalState.FAILED, TerminalReason.ENGINE_FAILED); // 重复且值不同
+
+        assertEquals(1L, collector.duplicateNewSuppressed());
+        assertEquals(1, collector.pendingNew(), "窗口内单条（首次记录，重复不覆盖）");
+        assertEquals(0L, collector.diffTerminalState(), "防重跳过不产生比对");
+
+        collector.recordOldTerminal(22L, "COMPLETED");
+        assertEquals(1L, collector.matchedCount(), "首次记录正常配对");
+    }
+
+    /**
+     * 去重集 FIFO 容量同 maxEntries：逐出后的 id 重复上报重新可记
+     * （防重失效边界可观测——引擎迟到终局时间跨度≫容量时不误吞首记）。
+     */
+    @Test
+    void dedupFifoEvictionAllowsRerecord() {
+        StateShadowDiffCollector collector = new StateShadowDiffCollector(null, 600_000L, 2);
+
+        collector.recordNewTerminal(23L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED);
+        collector.recordNewTerminal(24L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED);
+        collector.recordNewTerminal(25L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED); // FIFO 逐出 23L
+
+        collector.recordNewTerminal(23L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED); // 逐出后重新可记
+        assertEquals(2, collector.pendingNew(), "逐出后的 id 重复上报重新入窗（防重失效边界）");
+        assertEquals(0L, collector.duplicateNewSuppressed(), "首记/逐出后重记均不计防重");
     }
 
     // ---- shutdown summary：全部计数读口的单行聚合（日志即验收证据） ----
