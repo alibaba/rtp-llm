@@ -600,6 +600,12 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 32000)
         self.assertTrue(config.in_think_mode)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
 
     def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
         generate_env_config = GenerateEnvConfig()
@@ -614,6 +620,12 @@ class OpenaiGenerateConfigTest(TestCase):
 
         self.assertTrue(config.in_think_mode)
         self.assertEqual(config.max_thinking_tokens, 10)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
         self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
@@ -635,6 +647,12 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(config.in_think_mode)
         self.assertEqual(json.loads(config.json_schema), {"type": "object"})
         self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
+        self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
         )
@@ -655,6 +673,12 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(config.in_think_mode)
         self.assertEqual(json.loads(config.json_schema), {"type": "object"})
         self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
+        self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
         )
@@ -668,7 +692,8 @@ class OpenaiGenerateConfigTest(TestCase):
             messages=[],
             response_format={"type": "json_object"},
             extra_configs=GenerateConfig(
-                chat_template_kwargs={"enable_thinking": True}
+                chat_template_kwargs={"enable_thinking": True},
+                begin_think_token_ids=[7, 8],
             ),
         )
 
@@ -676,6 +701,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         self.assertTrue(config.in_think_mode)
         self.assertEqual(json.loads(config.json_schema), {"type": "object"})
+        self.assertEqual(config.begin_think_token_ids, [7, 8])
         self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
