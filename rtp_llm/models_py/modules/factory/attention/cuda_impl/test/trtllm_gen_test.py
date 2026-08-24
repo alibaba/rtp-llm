@@ -2,17 +2,21 @@ import math
 import os
 import random
 import sys
+from types import SimpleNamespace
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl import trtllm_gen
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util import (
     attention_prefill_ref,
     gen_attention_inputs,
     write_kv_cache,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
+    FlashInferTRTLLMDecodeImpl,
     FlashInferTRTLLMDecodeOp,
     FlashInferTRTLLMPrefillOp,
     _compute_cg_grid,
@@ -27,6 +31,71 @@ device = torch.device("cuda")
 
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+
+
+class FlashInferTRTLLMDecodeImplReplayTest(TestCase):
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            raise SkipTest("CUDA is not available")
+        self.device = torch.device("cuda")
+
+    def test_refreshes_and_rebinds_rope_buffer(self):
+        host_lengths = torch.tensor([8], dtype=torch.int32).pin_memory()
+        replay_inputs = PyAttentionInputs()
+        replay_inputs.sequence_lengths = host_lengths
+        replay_inputs.sequence_lengths_plus_1_device = torch.tensor(
+            [9], dtype=torch.int32, device=self.device
+        )
+        replay_inputs.kv_cache_kernel_block_id_device = torch.zeros(
+            (1, 1), dtype=torch.int32, device=self.device
+        )
+
+        class FakeKernel:
+            def __init__(self):
+                self.calls = 0
+
+            def __getitem__(self, grid):
+                def run(*args, **kwargs):
+                    self.calls += 1
+
+                return run
+
+        class FakeRope:
+            def __init__(self, device):
+                self.calls = 0
+                self.buffer = torch.empty(1, dtype=torch.int32, device=device)
+
+            def refresh_sequence_lengths(self, inputs, *, forbid_reallocation=False):
+                self.calls += 1
+                assert forbid_reallocation
+                self.buffer.copy_(inputs.sequence_lengths)
+                return self.buffer
+
+        fake_kernel = FakeKernel()
+        fake_rope = FakeRope(self.device)
+        impl = FlashInferTRTLLMDecodeImpl.__new__(FlashInferTRTLLMDecodeImpl)
+        impl._cg = SimpleNamespace(
+            grid=(1,),
+            seq_lens=torch.empty(1, dtype=torch.int32, device=self.device),
+            kv_cache_offset=torch.empty(1, dtype=torch.int32, device=self.device),
+            N=1,
+            M=1,
+            total_bm=1,
+            BLOCK_SIZE=1,
+        )
+        impl.need_rope_kv_cache = True
+        impl.rope_kvcache_impl = fake_rope
+        impl.rope_params = SimpleNamespace(
+            sequence_lengths=torch.empty(1, dtype=torch.int32, device=self.device)
+        )
+
+        with patch.object(trtllm_gen, "_prepare_cg_decode_kernel", fake_kernel):
+            impl.prepare_cuda_graph(replay_inputs)
+
+        self.assertEqual(fake_kernel.calls, 1)
+        self.assertEqual(fake_rope.calls, 1)
+        self.assertIs(impl.rope_params.sequence_lengths, fake_rope.buffer)
+        torch.testing.assert_close(fake_rope.buffer.cpu(), host_lengths)
 
 
 def set_seed(seed: int):

@@ -108,8 +108,17 @@ py_test(
         "attention_ref.py",
         "base_attention_test.py"
     ],
-    deps = py_test_deps,
-    tags = ["H20"],
+    deps = py_test_deps + [
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": ["//rtp_llm:rtp-kernel"],
+        "//conditions:default": [],
+    }),
+    tags = ["H20", "cuda12_9"],
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     exec_properties = {
         'gpu': 'H20',
     },
