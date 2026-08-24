@@ -49,6 +49,7 @@ from rtp_llm.dash_sc.codec import (
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
     parse_multimodal_parts_from_request,
+    parse_pretokenized_chat_controls,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -549,6 +550,7 @@ async def iter_real_model_stream_infer(
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: Any = None,
     mm_inputs: Optional[list] = None,
+    pretokenized_chat_constraint_applier: Optional[Callable] = None,
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -620,6 +622,26 @@ async def iter_real_model_stream_infer(
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, sampling, other, runtime)
+        if (
+            pretokenized_chat_constraint_applier is not None
+            and generate_config.structural_tag is None
+        ):
+            chat_controls = parse_pretokenized_chat_controls(request)
+            constraint_source = pretokenized_chat_constraint_applier(
+                chat_controls,
+                generate_config,
+                bool(getattr(generate_config, "in_think_mode", False)),
+            )
+            tools = chat_controls.get("tools")
+            logging.info(
+                "[DashScGrpc] [%s] pretokenized chat constraint selected: "
+                "source=%s tool_choice=%r tools_type=%s tool_count=%d",
+                tag,
+                constraint_source or "common_prompt_tail_fallback",
+                chat_controls.get("tool_choice"),
+                type(tools).__name__,
+                len(tools) if isinstance(tools, list) else -1,
+            )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -1190,6 +1212,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         think_runtime: Optional[_ThinkRuntime] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
+        pretokenized_chat_constraint_applier: Optional[Callable] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
@@ -1220,6 +1243,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._rank_id = rank_id
         self._server_id = to_optional_int(server_id)
         self._rep_cfg = repetition_monitor_config or RequestRepetitionMonitorConfig()
+        self._pretokenized_chat_constraint_applier = (
+            pretokenized_chat_constraint_applier
+        )
 
     def _record_and_report_chunk(
         self,
@@ -1441,6 +1467,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
                         mm_inputs=mm_inputs,
+                        pretokenized_chat_constraint_applier=(
+                            self._pretokenized_chat_constraint_applier
+                        ),
                         yield_access_stats=True,
                     ):
                         (

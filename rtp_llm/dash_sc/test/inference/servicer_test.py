@@ -299,6 +299,109 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             {"reasoning_effort": "xhigh"},
         )
 
+    async def test_pretokenized_tool_controls_reach_model_constraint_hook(self) -> None:
+        req = self._minimal_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "payload": {
+                    "parameters": {
+                        "tools": [
+                            {
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "parameters": {"type": "object"},
+                                },
+                            }
+                        ],
+                        "tool_choice": "auto",
+                    }
+                }
+            }
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        observed = {}
+
+        def apply_constraint(controls, generate_config, thinking):
+            observed.update(controls)
+            observed["thinking"] = thinking
+            generate_config.structural_tag = json.dumps(
+                {
+                    "type": "structural_tag",
+                    "format": {"type": "const_string", "value": "x"},
+                }
+            )
+            generate_config.in_think_mode = False
+            return "test_request_tools"
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=1,
+                pretokenized_chat_constraint_applier=apply_constraint,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(observed["tool_choice"], "auto")
+        self.assertEqual(observed["tools"][0]["function"]["name"], "bash")
+        self.assertFalse(visitor.last_generate_input.generate_config.in_think_mode)
+        self.assertIsNotNone(visitor.last_generate_input.generate_config.structural_tag)
+
+    async def test_pretokenized_stringified_tools_reach_constraint_hook(self) -> None:
+        req = self._minimal_request()
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"tools": json.dumps(tools), "tool_choice": '"auto"'}
+        )
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        observed = {}
+
+        def apply_constraint(controls, generate_config, thinking):
+            observed.update(controls)
+            return None
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(enable_thinking=True),
+                visitor,
+                rtp_llm_request_id=1,
+                pretokenized_chat_constraint_applier=apply_constraint,
+            )
+        )
+
+        self.assertEqual(observed["tools"], tools)
+        self.assertEqual(observed["tool_choice"], "auto")
+
     async def test_finished_at_max_new_tokens_reports_length_repro_p1(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(

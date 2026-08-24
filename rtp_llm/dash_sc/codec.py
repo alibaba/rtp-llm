@@ -304,6 +304,66 @@ def parse_ds_header_attributes(request) -> dict[str, Any]:
     return {str(k).lower(): v for k, v in attrs.items()}
 
 
+def parse_pretokenized_chat_controls(
+    request, ds_attrs: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Return chat controls retained alongside an already-tokenized prompt.
+
+    DashScope sends the rendered ``input_ids`` to RTP-LLM, so the ordinary
+    OpenAI renderer never sees the request-level tool contract.  Preserve the
+    semantic controls that a model renderer needs to build its decoding
+    grammar.  Direct ``ModelInferRequest.parameters`` values win, followed by
+    ``ds_header_attributes`` and the legacy ``parameters['payload']`` envelope.
+    """
+    attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
+    controls: dict[str, Any] = {}
+    for name in ("tools", "tool_choice", "parallel_tool_calls"):
+        value = _parse_pretokenized_chat_parameter(request, name)
+        if value is None:
+            value = _lookup_ds_request_control(attrs, name)
+        if value is not None:
+            controls[name] = _decode_pretokenized_chat_control(value)
+
+    if "tools" in controls:
+        return controls
+    payload = _load_multimodal_payload(request)
+    if not isinstance(payload, dict):
+        return controls
+    parameters = payload.get("parameters")
+    if not isinstance(parameters, dict):
+        return controls
+    for name in ("tools", "tool_choice", "parallel_tool_calls"):
+        if name not in controls and name in parameters:
+            controls[name] = _decode_pretokenized_chat_control(parameters[name])
+    return controls
+
+
+def _parse_pretokenized_chat_parameter(request, name: str) -> Any:
+    if name not in request.parameters:
+        return None
+    parameter = request.parameters[name]
+    if parameter.HasField("string_param"):
+        return parameter.string_param
+    if parameter.HasField("bool_param"):
+        return bool(parameter.bool_param)
+    if parameter.HasField("int64_param"):
+        return int(parameter.int64_param)
+    return None
+
+
+def _decode_pretokenized_chat_control(value: Any) -> Any:
+    """Decode controls that legacy forwarders preserve as JSON strings."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return value
+
+
 def _dict_get_case_insensitive(value: Any, key: str) -> Any:
     if not isinstance(value, dict):
         return None

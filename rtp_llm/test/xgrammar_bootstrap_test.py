@@ -15,8 +15,12 @@ class _Tokenizer:
     def get_vocab(self):
         return self._vocab
 
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return [ord(char) for char in text]
 
-def _model(tokenizer, vocab_size=4):
+
+def _model(tokenizer, vocab_size=4, model_type=""):
     special_tokens = SimpleNamespace(
         eos_token_id=3,
         stop_words_id_list=[[2], [1, 2]],
@@ -24,6 +28,7 @@ def _model(tokenizer, vocab_size=4):
     return SimpleNamespace(
         tokenizer=SimpleNamespace(tokenizer=tokenizer),
         model_config=SimpleNamespace(
+            model_type=model_type,
             vocab_size=vocab_size,
             special_tokens=special_tokens,
         ),
@@ -79,6 +84,118 @@ class XGrammarBootstrapTest(unittest.TestCase):
         engine = _engine("none")
         bootstrap_grammar_config(engine, _model(_Tokenizer({"A": 0})))
         self.assertEqual(engine.grammar_config.tokenizer_info_json, "")
+
+    def test_renderer_pretokenized_chat_constraints_reach_engine_config(self):
+        tokenizer = _Tokenizer({"A": 0})
+        tokenizer.backend_tokenizer = SimpleNamespace(to_str=lambda: "hf-json")
+        engine = _engine()
+
+        class _Renderer:
+            @classmethod
+            def pretokenized_chat_constraints(cls):
+                return {
+                    "reasoning": {
+                        "prompt_tail": "TR",
+                        "structural_tag": {"type": "reasoning"},
+                    },
+                    "response": {
+                        "prompt_tail": "RS",
+                        "structural_tag": {"type": "response"},
+                    },
+                }
+
+        with (
+            mock.patch(
+                "rtp_llm.ops.build_xgrammar_tokenizer_info_json",
+                return_value="hf-info",
+            ),
+            mock.patch(
+                "rtp_llm.openai.renderer_factory_register.get_renderer_class",
+                return_value=_Renderer,
+            ),
+        ):
+            bootstrap_grammar_config(engine, _model(tokenizer, model_type="test_model"))
+
+        grammar = engine.grammar_config
+        self.assertEqual(grammar.reasoning_prompt_tail_token_ids, [84, 82])
+        self.assertEqual(grammar.response_prompt_tail_token_ids, [82, 83])
+        self.assertEqual(
+            json.loads(grammar.reasoning_structural_tag), {"type": "reasoning"}
+        )
+        self.assertEqual(
+            json.loads(grammar.response_structural_tag), {"type": "response"}
+        )
+        self.assertEqual(grammar.reasoning_completion_boundary_token_ids, [])
+        self.assertEqual(grammar.response_completion_boundary_token_ids, [])
+
+    def test_renderer_completion_boundaries_reach_engine_config(self):
+        tokenizer = _Tokenizer({"A": 0})
+        tokenizer.backend_tokenizer = SimpleNamespace(to_str=lambda: "hf-json")
+        engine = _engine()
+
+        class _Renderer:
+            @classmethod
+            def pretokenized_chat_constraints(cls):
+                return {
+                    "reasoning": {
+                        "prompt_tail": "TR",
+                        "completion_boundary": "MC",
+                    },
+                    "response": {
+                        "prompt_tail": "RS",
+                        "completion_boundary": "MC",
+                    },
+                }
+
+        with (
+            mock.patch(
+                "rtp_llm.ops.build_xgrammar_tokenizer_info_json",
+                return_value="hf-info",
+            ),
+            mock.patch(
+                "rtp_llm.openai.renderer_factory_register.get_renderer_class",
+                return_value=_Renderer,
+            ),
+        ):
+            bootstrap_grammar_config(engine, _model(tokenizer, model_type="test_model"))
+
+        grammar = engine.grammar_config
+        self.assertEqual(grammar.reasoning_structural_tag, "")
+        self.assertEqual(grammar.response_structural_tag, "")
+        self.assertEqual(grammar.reasoning_completion_boundary_token_ids, [77, 67])
+        self.assertEqual(grammar.response_completion_boundary_token_ids, [77, 67])
+
+    def test_bad_pretokenized_defaults_do_not_disable_request_grammar(self):
+        tokenizer = _Tokenizer({"A": 0})
+        tokenizer.backend_tokenizer = SimpleNamespace(to_str=lambda: "hf-json")
+        engine = _engine()
+
+        class _BadRenderer:
+            @classmethod
+            def pretokenized_chat_constraints(cls):
+                return {
+                    "reasoning": {"prompt_tail": "", "structural_tag": {}},
+                    "response": {"prompt_tail": "", "structural_tag": {}},
+                }
+
+        with (
+            mock.patch(
+                "rtp_llm.ops.build_xgrammar_tokenizer_info_json",
+                return_value="hf-info",
+            ),
+            mock.patch(
+                "rtp_llm.openai.renderer_factory_register.get_renderer_class",
+                return_value=_BadRenderer,
+            ),
+            self.assertLogs(level="WARNING"),
+        ):
+            bootstrap_grammar_config(engine, _model(tokenizer, model_type="test_model"))
+
+        self.assertEqual(engine.grammar_config.tokenizer_info_json, "hf-info")
+        self.assertEqual(engine.grammar_config.reasoning_structural_tag, "")
+        self.assertEqual(
+            engine.grammar_config.reasoning_completion_boundary_token_ids, []
+        )
 
     def test_explicit_vocab_builder_decodes_byte_level_tokens(self):
         from rtp_llm.ops import (

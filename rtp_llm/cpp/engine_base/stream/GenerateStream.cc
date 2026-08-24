@@ -2,6 +2,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <sstream>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -26,6 +27,19 @@ namespace {
 bool useStreamAsyncReserveTokens() {
     static const bool enabled = autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false);
     return enabled;
+}
+
+std::string formatTokenIds(const std::vector<int>& token_ids) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < token_ids.size(); ++i) {
+        if (i != 0) {
+            oss << ",";
+        }
+        oss << token_ids[i];
+    }
+    oss << "]";
+    return oss.str();
 }
 
 }  // namespace
@@ -1202,7 +1216,21 @@ void GenerateStream::reportMetricOnce() {
     if (metrics_reported_) {
         return;
     }
-    metrics_reported_ = true;
+    metrics_reported_  = true;
+    const auto& config = generate_input_->generate_config;
+    if (config->structural_tag.has_value() || config->in_think_mode) {
+        const auto output_tail = getLatestTokens(16);
+        RTP_LLM_LOG_INFO("constrained stream completed: request_id=%ld trace_id=%s input_len=%d output_len=%d "
+                         "structural_tag=%d in_think_mode=%d status=%s output_tail_ids=%s",
+                         generate_input_->request_id,
+                         generate_input_->request_info.trace_id.c_str(),
+                         inputLength(),
+                         outputTokenLen(),
+                         config->structural_tag.has_value(),
+                         config->in_think_mode,
+                         statusInfo().ToString().c_str(),
+                         formatTokenIds(output_tail).c_str());
+    }
     reportMetric();
 }
 

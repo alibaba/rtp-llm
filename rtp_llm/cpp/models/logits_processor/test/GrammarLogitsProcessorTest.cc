@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/CompletionBoundaryLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/ReasoningGrammarLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 
@@ -34,10 +35,37 @@ std::string makeTokenizerInfoJson() {
     return info.SerializeJSON();
 }
 
+std::string makeKimiK3TokenizerInfoJson() {
+    std::vector<std::string> vocab;
+    vocab.reserve(260);
+    for (int i = 0; i < 256; ++i) {
+        vocab.emplace_back(1, static_cast<char>(i));
+    }
+    vocab.emplace_back("<|open|>");
+    vocab.emplace_back("<|close|>");
+    vocab.emplace_back("<|sep|>");
+    vocab.emplace_back("<|end_of_msg|>");
+    xgrammar::TokenizerInfo info(vocab,
+                                 xgrammar::VocabType::RAW,
+                                 /*vocab_size=*/260,
+                                 /*stop_token_ids=*/std::vector<int32_t>{259});
+    return info.SerializeJSON();
+}
+
+std::string makeConstStructuralTag(const std::string& value) {
+    return R"({"type":"structural_tag","format":{"type":"const_string","value":")" + value + R"("}})";
+}
+
 XGrammarBackendCpp makeBackend() {
     XGrammarBackendOptions options;
     options.max_compiler_threads = 1;
     return XGrammarBackendCpp(makeTokenizerInfoJson(), options);
+}
+
+XGrammarBackendCpp makeKimiK3Backend() {
+    XGrammarBackendOptions options;
+    options.max_compiler_threads = 1;
+    return XGrammarBackendCpp(makeKimiK3TokenizerInfoJson(), options);
 }
 
 bool packedBitmaskAllowsToken(const int32_t* bitmask, int32_t token_id) {
@@ -75,6 +103,129 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksDisallowedTokens) {
 
     EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+}
+
+TEST(GrammarLogitsProcessorTest, PretokenizedResponseRequiresContentBeforeClose) {
+    auto backend = makeBackend();
+    auto compiled =
+        backend
+            .compileNow(
+                {"structural_tag",
+                 R"({"type":"structural_tag","format":{"type":"sequence","elements":[{"type":"const_string","value":"R"},{"type":"tag","begin":"","content":{"type":"sequence","elements":[{"type":"regex","pattern":"[^E\\s]"},{"type":"any_text","excludes":["E"]}]},"end":"E"},{"type":"const_string","value":"M"}]}})"})
+            .compiled;
+    ASSERT_TRUE(compiled);
+
+    auto                   matcher = backend.createMatcher(compiled, false, std::nullopt);
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+    SamplerInputs          inputs;
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('R')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('E')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('R')}}, torch::kInt32), 1);
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('E')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('a')}}, torch::kInt32), 1);
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('E')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+}
+
+TEST(GrammarLogitsProcessorTest, KimiK3FallbackToolBoundaryAllowsToolsAndMessageClose) {
+    constexpr int32_t open_token_id  = 256;
+    constexpr int32_t close_token_id = 257;
+    constexpr int32_t sep_token_id   = 258;
+    constexpr int32_t eos_token_id   = 259;
+    auto              backend        = makeKimiK3Backend();
+    const std::string fallback_tag   = R"json({"type":"structural_tag","format":{"type":"sequence","elements":[)json"
+                                       R"json({"type":"tag","begin":"","content":)json"
+                                       R"json({"type":"any_text","excludes":["<|open|>","<|close|>"]},)json"
+                                       R"json("end":"<|close|>response<|sep|>"},)json"
+                                       R"json({"type":"optional","content":{"type":"tag",)json"
+                                       R"json("begin":"<|open|>tools<|sep|>",)json"
+                                       R"json("content":{"type":"tags_with_separator","tags":[)json"
+                                       R"json({"type":"tag","begin":"<|open|>call tool=\"",)json"
+                                       R"json("content":{"type":"sequence","elements":[)json"
+                                       R"json({"type":"regex","pattern":"[^\"<>\\r\\n]+"},)json"
+                                       R"json({"type":"const_string","value":"\" index=\""},)json"
+                                       R"json({"type":"regex","pattern":"\\d+"},)json"
+                                       R"json({"type":"const_string","value":"\"<|sep|>"},)json"
+                                       R"json({"type":"any_text","excludes":["<|close|>call<|sep|>"]}]},)json"
+                                       R"json("end":"<|close|>call<|sep|>"}],"separator":"",)json"
+                                       R"json("at_least_one":true,"stop_after_first":false},)json"
+                                       R"json("end":"<|close|>tools<|sep|>"}},)json"
+                                       R"json({"type":"const_string","value":"<|close|>message<|sep|>"}]}})json";
+    auto              compiled       = backend.compileNow({"structural_tag", fallback_tag}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto                 matcher = backend.createMatcher(compiled, false, std::nullopt);
+    std::vector<int32_t> initial_bitmask((260 + 31) / 32, 0);
+    int64_t              initial_shape[] = {1, static_cast<int64_t>(initial_bitmask.size())};
+    DLTensor             initial_mask{};
+    initial_mask.data   = initial_bitmask.data();
+    initial_mask.device = DLDevice{kDLCPU, 0};
+    initial_mask.ndim   = 2;
+    initial_mask.dtype  = DLDataType{kDLInt, 32, 1};
+    initial_mask.shape  = initial_shape;
+    ASSERT_TRUE(matcher->fillBitmask(&initial_mask, 0));
+    EXPECT_TRUE(packedBitmaskAllowsToken(initial_bitmask.data(), close_token_id));
+
+    ASSERT_TRUE(matcher->acceptToken(static_cast<int32_t>('\n')));
+    ASSERT_TRUE(matcher->acceptToken(close_token_id));
+    for (char c : std::string("response")) {
+        ASSERT_TRUE(matcher->acceptToken(static_cast<uint8_t>(c)));
+    }
+    ASSERT_TRUE(matcher->acceptToken(sep_token_id));
+
+    std::vector<int32_t> bitmask((260 + 31) / 32, 0);
+    int64_t              shape[] = {1, static_cast<int64_t>(bitmask.size())};
+    DLTensor             mask{};
+    mask.data   = bitmask.data();
+    mask.device = DLDevice{kDLCPU, 0};
+    mask.ndim   = 2;
+    mask.dtype  = DLDataType{kDLInt, 32, 1};
+    mask.shape  = shape;
+    ASSERT_TRUE(matcher->fillBitmask(&mask, 0));
+
+    EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data(), open_token_id));
+    EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data(), close_token_id));
+    EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data(), eos_token_id));
+
+    const auto accept_ascii = [&matcher](const std::string& text) {
+        for (const char c : text) {
+            if (!matcher->acceptToken(static_cast<uint8_t>(c))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    ASSERT_TRUE(matcher->acceptToken(open_token_id));
+    ASSERT_TRUE(accept_ascii("tools"));
+    ASSERT_TRUE(matcher->acceptToken(sep_token_id));
+    ASSERT_TRUE(matcher->acceptToken(open_token_id));
+    ASSERT_TRUE(accept_ascii("call tool=\"bash\" index=\"1\""));
+    ASSERT_TRUE(matcher->acceptToken(sep_token_id));
+    ASSERT_TRUE(accept_ascii("{}"));
+    ASSERT_TRUE(matcher->acceptToken(close_token_id));
+    ASSERT_TRUE(accept_ascii("call"));
+    ASSERT_TRUE(matcher->acceptToken(sep_token_id));
+    ASSERT_TRUE(matcher->acceptToken(close_token_id));
+    ASSERT_TRUE(accept_ascii("tools"));
+    ASSERT_TRUE(matcher->acceptToken(sep_token_id));
+    ASSERT_TRUE(matcher->acceptToken(close_token_id));
+    ASSERT_TRUE(accept_ascii("message"));
+    ASSERT_TRUE(matcher->acceptToken(sep_token_id));
+    ASSERT_TRUE(matcher->acceptToken(eos_token_id));
+    EXPECT_TRUE(matcher->isTerminated());
 }
 
 TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesMatcherToTerminal) {
@@ -116,6 +267,43 @@ TEST(GrammarLogitsProcessorTest, TerminateWithoutStopTokenForcesEosAndAcceptsCom
 
     processor.updateStatus(torch::tensor({{0}}, torch::kInt32), 1);
     EXPECT_EQ(processor.acceptedTokenLen(), 2);
+}
+
+TEST(GrammarLogitsProcessorTest, CreateMatcherMergesRequestStopTokens) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "[ab]c"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    // 'b' is grammar-allowed at the first step; adding it to the request stop
+    // set must mask it until the grammar completes, without dropping the base
+    // stop token 0 from the TokenizerInfo.
+    auto                   matcher = backend.createMatcher(compiled,
+                                         /*require_reasoning=*/false,
+                                         std::nullopt,
+                                         /*terminate_without_stop_token=*/false,
+                                         std::vector<int>{static_cast<int>('b')});
+    GrammarLogitsProcessor processor(matcher, /*eos_token_id=*/0);
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('a')}}, torch::kInt32), 1);
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('c')}}, torch::kInt32), 1);
+
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][0].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('d')].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('b')}}, torch::kInt32), 1);
+    EXPECT_TRUE(matcher->isTerminated());
 }
 
 TEST(GrammarLogitsProcessorTest, ReasoningModeWaitsForFullThinkEndSequence) {
@@ -595,6 +783,124 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsT
     EXPECT_NE(std::dynamic_pointer_cast<ReasoningGrammarLogitsProcessor>(processors[0]), nullptr);
     EXPECT_EQ(std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]), nullptr);
     EXPECT_EQ(std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]), nullptr);
+}
+
+TEST(LogitsProcessorFactoryTest, PretokenizedResponseTailSelectsModelDefaultGrammar) {
+    GrammarConfig grammar_config;
+    grammar_config.grammar_backend                 = "xgrammar";
+    grammar_config.tokenizer_info_json             = makeTokenizerInfoJson();
+    grammar_config.reasoning_prompt_tail_token_ids = {'T', 'R'};
+    grammar_config.response_prompt_tail_token_ids  = {'R', 'S'};
+    grammar_config.reasoning_structural_tag        = makeConstStructuralTag("a");
+    grammar_config.response_structural_tag         = makeConstStructuralTag("b");
+    LogitsProcessorFactory::init("", "", grammar_config);
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->request_id                             = 42;
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {'<'};
+    generate_input->generate_config->end_think_token_ids   = {'x', 'y'};
+    generate_input->input_ids                              = torch::tensor({1, 2, 'R', 'S'}, torch::kInt32);
+
+    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+        generate_input, /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+    ASSERT_EQ(processors.size(), 1);
+    EXPECT_NE(std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_EQ(std::dynamic_pointer_cast<ReasoningGrammarLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_EQ(generate_input->generate_config->structural_tag, grammar_config.response_structural_tag);
+    EXPECT_FALSE(generate_input->generate_config->in_think_mode);
+    EXPECT_TRUE(generate_input->generate_config->begin_think_token_ids.empty());
+    EXPECT_TRUE(generate_input->generate_config->end_think_token_ids.empty());
+    EXPECT_EQ(generate_input->generate_config->max_thinking_tokens, 0);
+}
+
+TEST(LogitsProcessorFactoryTest, PretokenizedResponseTailSelectsCompletionBoundaryGuard) {
+    GrammarConfig grammar_config;
+    grammar_config.grammar_backend                         = "xgrammar";
+    grammar_config.tokenizer_info_json                     = makeTokenizerInfoJson();
+    grammar_config.reasoning_prompt_tail_token_ids         = {'T', 'R'};
+    grammar_config.response_prompt_tail_token_ids          = {'R', 'S'};
+    grammar_config.reasoning_completion_boundary_token_ids = {7, 8};
+    grammar_config.response_completion_boundary_token_ids  = {7, 8};
+    LogitsProcessorFactory::init("", "", grammar_config);
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->request_id                             = 45;
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {'<'};
+    generate_input->generate_config->end_think_token_ids   = {'x', 'y'};
+    generate_input->generate_config->stop_words_list       = {{6}};
+    generate_input->input_ids                              = torch::tensor({1, 2, 'R', 'S'}, torch::kInt32);
+
+    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+        generate_input, /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+    ASSERT_EQ(processors.size(), 1);
+    EXPECT_NE(std::dynamic_pointer_cast<CompletionBoundaryLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_EQ(std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_EQ(std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_FALSE(generate_input->generate_config->structural_tag.has_value());
+    EXPECT_FALSE(generate_input->generate_config->in_think_mode);
+    EXPECT_TRUE(generate_input->generate_config->begin_think_token_ids.empty());
+    EXPECT_TRUE(generate_input->generate_config->end_think_token_ids.empty());
+    EXPECT_EQ(generate_input->generate_config->max_thinking_tokens, 0);
+}
+
+TEST(LogitsProcessorFactoryTest, PretokenizedConstraintRequiresExactPromptTail) {
+    GrammarConfig grammar_config;
+    grammar_config.grammar_backend                 = "xgrammar";
+    grammar_config.tokenizer_info_json             = makeTokenizerInfoJson();
+    grammar_config.reasoning_prompt_tail_token_ids = {'T', 'R'};
+    grammar_config.response_prompt_tail_token_ids  = {'R', 'S'};
+    grammar_config.reasoning_structural_tag        = makeConstStructuralTag("a");
+    grammar_config.response_structural_tag         = makeConstStructuralTag("b");
+    LogitsProcessorFactory::init("", "", grammar_config);
+
+    auto generate_input                                  = std::make_shared<GenerateInput>();
+    generate_input->request_id                           = 43;
+    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode       = true;
+    generate_input->generate_config->end_think_token_ids = {'x', 'y'};
+    generate_input->input_ids                            = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+        generate_input, /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+    ASSERT_EQ(processors.size(), 1);
+    EXPECT_NE(std::dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_EQ(std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_FALSE(generate_input->generate_config->structural_tag.has_value());
+    EXPECT_TRUE(generate_input->generate_config->in_think_mode);
+}
+
+TEST(LogitsProcessorFactoryTest, ExplicitRequestGrammarOverridesModelDefault) {
+    GrammarConfig grammar_config;
+    grammar_config.grammar_backend                 = "xgrammar";
+    grammar_config.tokenizer_info_json             = makeTokenizerInfoJson();
+    grammar_config.reasoning_prompt_tail_token_ids = {'T', 'R'};
+    grammar_config.response_prompt_tail_token_ids  = {'R', 'S'};
+    grammar_config.reasoning_structural_tag        = makeConstStructuralTag("a");
+    grammar_config.response_structural_tag         = makeConstStructuralTag("b");
+    LogitsProcessorFactory::init("", "", grammar_config);
+
+    const auto request_structural_tag               = makeConstStructuralTag("c");
+    auto       generate_input                       = std::make_shared<GenerateInput>();
+    generate_input->request_id                      = 44;
+    generate_input->generate_config                 = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->structural_tag = request_structural_tag;
+    generate_input->input_ids                       = torch::tensor({1, 2, 'R', 'S'}, torch::kInt32);
+
+    auto processors = LogitsProcessorFactory::createLogitsProcessors(
+        generate_input, /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
+
+    ASSERT_EQ(processors.size(), 1);
+    EXPECT_NE(std::dynamic_pointer_cast<GrammarLogitsProcessor>(processors[0]), nullptr);
+    EXPECT_EQ(generate_input->generate_config->structural_tag, request_structural_tag);
 }
 
 TEST(LogitsProcessorFactoryTest, GrammarThinkingWithoutEndIdsReportsInvalidParams) {

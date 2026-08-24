@@ -417,6 +417,17 @@ struct GrammarConfig {
     int                  num_workers                             = 8;
     std::string          tokenizer_info_json;
     std::vector<int32_t> override_stop_tokens;
+    // Optional model-provided defaults for pre-tokenized chat entry paths.
+    // The engine selects a tag only when the request has no explicit grammar.
+    std::vector<int32_t> reasoning_prompt_tail_token_ids;
+    std::vector<int32_t> response_prompt_tail_token_ids;
+    std::string          reasoning_structural_tag;
+    std::string          response_structural_tag;
+    // Optional completion boundaries for pre-tokenized requests whose original
+    // request schema is unavailable. The engine masks only stop tokens until
+    // the boundary is generated; all other logits remain untouched.
+    std::vector<int32_t> reasoning_completion_boundary_token_ids;
+    std::vector<int32_t> response_completion_boundary_token_ids;
     std::string          to_string() const;
 };
 
