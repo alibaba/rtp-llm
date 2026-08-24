@@ -1913,10 +1913,13 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& wire_requ
             reportCopyMetrics(true, timer.done_us(), copy_direction);
             return true;
         }
-        if (hasTypedLayerTagSlots(slots) && tryCopyCacheWithBatchedMemoryCopy(items, copy_direction, slots)) {
-            response.set_success(true);
-            reportCopyMetrics(true, timer.done_us(), copy_direction);
-            return true;
+        if (hasTypedLayerTagSlots(slots)) {
+            const auto batch_result = tryCopyCacheWithBatchedMemoryCopy(items, copy_direction, slots);
+            if (batch_result.has_value()) {
+                response.set_success(*batch_result);
+                reportCopyMetrics(*batch_result, timer.done_us(), copy_direction);
+                return *batch_result;
+            }
         }
     }
 
@@ -2229,18 +2232,19 @@ StagedMemoryCopyScratch& KVCacheMemoryConnector::stagedCopyScratchForDevice(int 
     return *scratch;
 }
 
-bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
-                                                               CopyDirection                    direction,
-                                                               const std::vector<LayerTagSlot>& slots) {
+std::optional<bool>
+KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
+                                                          CopyDirection                    direction,
+                                                          const std::vector<LayerTagSlot>& slots) {
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.plan_batch");
     if (!isDualPool() && block_pool_ == nullptr) {
-        return false;
+        return std::nullopt;
     }
     if (isDualPool() && !complete_pool_) {
-        return false;
+        return std::nullopt;
     }
     if (allocator_ == nullptr) {
-        return false;
+        return std::nullopt;
     }
 
     BatchedMemoryCopyParams params;
@@ -2253,16 +2257,16 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
         const bool  item_is_complete = item.is_complete;
 
         if (isNullBlockIdx(mem_block) || gpu_blocks.size() != slots.size()) {
-            return false;
+            return std::nullopt;
         }
 
         auto& pool_ref = isDualPool() ? (item_is_complete ? complete_pool_ : incomplete_pool_) : block_pool_;
         if (!pool_ref) {
-            return false;
+            return std::nullopt;
         }
         auto mem_buffers = pool_ref->convertIndexToBuffer(/*layer_id=*/0, mem_block);
         if (mem_buffers.size() != 1u || mem_buffers[0].addr == nullptr || mem_buffers[0].size_bytes == 0) {
-            return false;
+            return std::nullopt;
         }
         const auto& mem_buffer = mem_buffers[0];
 
@@ -2289,16 +2293,16 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
                     continue;
                 }
                 if (!gpu_buffer.is_cuda) {
-                    return false;
+                    return std::nullopt;
                 }
                 if (within_layer_off + gpu_buffer.size_bytes > layer_stride
                     || byte_off + within_layer_off + gpu_buffer.size_bytes > mem_buffer.size_bytes) {
-                    return false;
+                    return std::nullopt;
                 }
                 if (params.device_index < 0) {
                     params.device_index = gpu_buffer.device_index;
                 } else if (params.device_index != gpu_buffer.device_index) {
-                    return false;
+                    return std::nullopt;
                 }
 
                 auto* mem_addr = static_cast<void*>(static_cast<char*>(mem_buffer.addr) + byte_off + within_layer_off);
@@ -2326,7 +2330,11 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
                       payload_bytes,
                       params.device_index);
     RTP_LLM_PROFILE_SCOPE("reuse_cache.memory.copy.exec_batch");
-    return execBatchedMemoryCopy(params);
+    const auto status = execBatchedMemoryCopy(params);
+    if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
+        return std::nullopt;
+    }
+    return status == BatchedMemoryCopyStatus::SUCCESS;
 }
 
 bool KVCacheMemoryConnector::copyPrefixMemoryItems(const NormalizedCopyItems&       items,

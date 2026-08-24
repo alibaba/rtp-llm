@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <vector>
 
@@ -175,11 +176,11 @@ private:
 
     // Typed-group fast paths for the tag-keyed memory copy. Both consume already-normalized items, so the
     // per-slot gpu block for slots[i] is items[k].gpu_blocks[i] (see normalizeCopyItemGpuBlocks). Both are
-    // best-effort: they return false whenever the layout is not expressible as flat tiles, and the caller
-    // falls back to copyMemoryItemsGeneric.
-    bool                     tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
-                                                               CopyDirection                    direction,
-                                                               const std::vector<LayerTagSlot>& slots);
+    // best-effort: unsupported batch layouts return nullopt and fall back to copyMemoryItemsGeneric; a present
+    // false value means the CUDA batch was attempted and failed, so repeating the copy is unsafe.
+    std::optional<bool> tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
+                                                          CopyDirection                    direction,
+                                                          const std::vector<LayerTagSlot>& slots);
     bool                     tryCopyCacheWithStagedMemoryCopy(const NormalizedCopyItems&       items,
                                                               CopyDirection                    direction,
                                                               const std::vector<LayerTagSlot>& slots);
