@@ -22,15 +22,13 @@ std::vector<GroupSetPtr> makeGroupSets(size_t count) {
 std::vector<GroupSetPtr> makeFullSwaGroupSets() {
     std::vector<GroupSetPtr> group_sets{
         std::make_shared<FullGroupSet>(
-            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)},
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr),
+        std::make_shared<SWAGroupSet>(
+            128,
+            64,
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(1)},
             nullptr,
             nullptr),
-        std::make_shared<SWAGroupSet>(128,
-                                      64,
-                                      std::vector<DeviceBlockPoolPtr>{
-                                          block_tree_cache_test::makeStructuralDevicePool(1)},
-                                      nullptr,
-                                      nullptr),
     };
     block_tree_cache_test::prepareGroupSetsForTest(group_sets);
     return group_sets;
@@ -106,7 +104,7 @@ TEST(BlockTreeTest, InsertSinglePath) {
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_set_resources[0].device_blocks[0], 44);  // start_block + 2
-    EXPECT_EQ(tree.size(), 3u);  // 3 nodes created (not counting root)
+    EXPECT_EQ(tree.size(), 3u);                                    // 3 nodes created (not counting root)
 
     // Verify tree structure and per-node resources
     auto* root = tree.root();
@@ -219,7 +217,7 @@ TEST(BlockTreeTest, RemoveLeafNode) {
 TEST(BlockTreeTest, IsRemovableRequiresLeafWithRemovableGroupResources) {
     BlockTree                                  tree(makeGroupSets(2));
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
-    TreeNode* leaf = insertAndGetNode(tree, {100, 200}, resources);
+    TreeNode*                                  leaf = insertAndGetNode(tree, {100, 200}, resources);
     ASSERT_NE(leaf, nullptr);
 
     EXPECT_FALSE(tree.isRemovable(leaf->parent));
@@ -429,7 +427,7 @@ TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
 }
 
 TEST(BlockTreeTest, InsertHardStopsAtBusyFullGroup) {
-    BlockTree tree(makeGroupSets(2));
+    BlockTree                                  tree(makeGroupSets(2));
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(2));
     original[0][0].device_blocks = {NULL_BLOCK_IDX};
     original[0][1].device_blocks = {NULL_BLOCK_IDX};
@@ -457,7 +455,7 @@ TEST(BlockTreeTest, InsertHardStopsAtExistingHostFullNode) {
     TreeNode* host_node = insertAndGetNode(tree, {100, 200}, make2DResources(1, 2, 10));
     ASSERT_NE(host_node, nullptr);
 
-    GroupSetResource& host_resource = host_node->group_set_resources[0];
+    GroupSetResource&       host_resource = host_node->group_set_resources[0];
     const MultiNodeResource device_resource{0, Tier::DEVICE, {{host_node, host_resource.device_blocks}}};
     tree.groupSets()[0]->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
     host_resource.evictFromTier(Tier::DEVICE);
@@ -481,7 +479,7 @@ TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
     TreeNode* empty_node = insertAndGetNode(tree, {100, 200}, make2DResources(1, 2, 10));
     ASSERT_NE(empty_node, nullptr);
 
-    GroupSetResource& empty_resource = empty_node->group_set_resources[0];
+    GroupSetResource&       empty_resource = empty_node->group_set_resources[0];
     const MultiNodeResource device_resource{0, Tier::DEVICE, {{empty_node, empty_resource.device_blocks}}};
     tree.groupSets()[0]->unreferenceBlocks(device_resource, BlockTreeRefType::CACHE);
     empty_resource.evictFromTier(Tier::DEVICE);
@@ -499,7 +497,7 @@ TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
 
 TEST(BlockTreeTest, InsertAcceptsHostAndDiskIncomingResources) {
     for (Tier tier : {Tier::HOST, Tier::DISK}) {
-        BlockTree       tree(makeGroupSets(1));
+        BlockTree        tree(makeGroupSets(1));
         GroupSetResource resource;
         if (tier == Tier::HOST) {
             resource.host_block = 7;
@@ -515,10 +513,10 @@ TEST(BlockTreeTest, InsertAcceptsHostAndDiskIncomingResources) {
 }
 
 TEST(BlockTreeTest, LowerTierInsertDoesNotUseDeviceHardStop) {
-    BlockTree       tree(makeGroupSets(1));
+    BlockTree        tree(makeGroupSets(1));
     GroupSetResource existing_host;
     existing_host.host_block = 7;
-    TreeNode* node = insertAndGetNode(tree, {100}, {{existing_host}});
+    TreeNode* node           = insertAndGetNode(tree, {100}, {{existing_host}});
     ASSERT_NE(node, nullptr);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
@@ -554,7 +552,7 @@ TEST(BlockTreeTest, InsertReusesExistingDeviceFullNodeWithoutOverwritingIt) {
 }
 
 TEST(BlockTreeTest, BusySwaResourceDoesNotGateFullSuffixInsertion) {
-    BlockTree tree(makeFullSwaGroupSets());
+    BlockTree                                  tree(makeFullSwaGroupSets());
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(2));
     original[0][0].device_blocks = {10};
     original[0][1].device_blocks = {20};
@@ -584,6 +582,25 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {
     EXPECT_EQ(tree.removeNodeAndEmptyAncestors(node), node);
     EXPECT_EQ(tree.size(), 1u);
     EXPECT_EQ(node->parent, tree.root());
+}
+
+TEST(BlockTreeTest, VisitNodeRangeLockedStopsAtMaxNodes) {
+    BlockTree tree(makeGroupSets(1));
+    tree.insertNode({100, 200, 300}, make2DResources(1, 3, 10), /*collect_path=*/false);
+    ASSERT_EQ(tree.size(), 3u);
+
+    size_t     visited = 0;
+    const auto first   = tree.visitNodeRangeLocked(0, tree.size(), 2, [&](const TreeNode&) { ++visited; });
+    EXPECT_EQ(first.visited, 2u);
+    EXPECT_EQ(first.next_cursor, 2u);
+    EXPECT_EQ(first.tree_size, 3u);
+    EXPECT_FALSE(first.cycle_complete);
+
+    const auto second =
+        tree.visitNodeRangeLocked(first.next_cursor, tree.size(), 2, [&](const TreeNode&) { ++visited; });
+    EXPECT_EQ(second.visited, 1u);
+    EXPECT_TRUE(second.cycle_complete);
+    EXPECT_EQ(visited, 3u);
 }
 
 }  // namespace
