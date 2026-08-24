@@ -13,6 +13,7 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.kimi_linear.language import (
     KimiLinearForCausalLM,
     KimiLinearKDA,
+    _write_linear_cache_store,
 )
 from rtp_llm.models_py.registry import get_model_class
 from rtp_llm.ops import DataType, HybridAttentionType, RopeStyle
@@ -437,6 +438,38 @@ class KimiLinearNewLoaderTest(unittest.TestCase):
         module.load_weights({"A_log": torch.tensor([[[[7.0]]]])})
         self.assertEqual(module.A_log.shape, (1,))
         torch.testing.assert_close(module.A_log, torch.tensor([7.0]))
+
+    def test_linear_cache_store_uses_attention_input_writer(self):
+        calls = []
+
+        class RecordingWriter:
+            def write(self, cache_store_inputs, kv_cache):
+                calls.append((cache_store_inputs, kv_cache))
+
+        cache_store_inputs = object()
+        kv_cache = object()
+        writer = RecordingWriter()
+        attention_inputs = SimpleNamespace(
+            cache_store_inputs=cache_store_inputs,
+            cache_store_writer=writer,
+        )
+
+        _write_linear_cache_store(attention_inputs, kv_cache)
+        self.assertEqual(calls, [(cache_store_inputs, kv_cache)])
+
+        for missing_inputs, missing_writer, missing_cache in (
+            (None, writer, kv_cache),
+            (cache_store_inputs, None, kv_cache),
+            (cache_store_inputs, writer, None),
+        ):
+            _write_linear_cache_store(
+                SimpleNamespace(
+                    cache_store_inputs=missing_inputs,
+                    cache_store_writer=missing_writer,
+                ),
+                missing_cache,
+            )
+        self.assertEqual(calls, [(cache_store_inputs, kv_cache)])
 
     def test_tied_lm_head_can_be_omitted_from_checkpoint(self):
         raw = _raw_config()
