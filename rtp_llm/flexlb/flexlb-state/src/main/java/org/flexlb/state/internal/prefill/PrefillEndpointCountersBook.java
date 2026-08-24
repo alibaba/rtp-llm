@@ -26,6 +26,8 @@ final class PrefillEndpointCountersBook {
     private static final class Bucket {
         final LongAdder activeTotal = new LongAdder();
         final LongAdder engineOwned = new LongAdder();
+        /** Σ活跃条目分摊批次预测耗时（未记预测的条目计 0——等待估算读点）。 */
+        final LongAdder predictedMs = new LongAdder();
         final LongAdder[] phaseCounts;
 
         Bucket() {
@@ -62,7 +64,7 @@ final class PrefillEndpointCountersBook {
         }
     }
 
-    /** 条目移除归位（终局）：全账回退。 */
+    /** 条目移除归位（终局）：全账回退（预测耗时与入账同读当下值——DISPATCHED 后不可变保证对称）。 */
     void onRemoved(int endpointId, PrefillRequestState entry) {
         Bucket b = buckets.get(endpointId);
         if (b == null) {
@@ -70,6 +72,7 @@ final class PrefillEndpointCountersBook {
         }
         b.activeTotal.decrement();
         b.phaseCounts[entry.phase().ordinal()].decrement();
+        b.predictedMs.add(-Math.max(entry.predictedBatchMs(), 0L));
         if (entry.engineOwned()) {
             b.engineOwned.decrement();
         }
@@ -80,6 +83,7 @@ final class PrefillEndpointCountersBook {
         Bucket b = buckets.computeIfAbsent(endpointId, k -> new Bucket());
         b.activeTotal.increment();
         b.phaseCounts[entry.phase().ordinal()].increment();
+        b.predictedMs.add(Math.max(entry.predictedBatchMs(), 0L));
         if (entry.engineOwned()) {
             b.engineOwned.increment();
         }
@@ -109,6 +113,7 @@ final class PrefillEndpointCountersBook {
         return new PrefillEndpointCounters(
                 (int) b.activeTotal.sum(),
                 (int) b.engineOwned.sum(),
+                b.predictedMs.sum(),
                 List.of(counts));
     }
 
@@ -125,9 +130,11 @@ final class PrefillEndpointCountersBook {
             List<PrefillRequestState> entries = boundEntriesByEndpoint.getOrDefault(endpointId, List.of());
             long recountActive = entries.size();
             long recountOwned = 0;
+            long recountPredictedMs = 0;
             long[] recountPhases = new long[PrefillPhase.values().length];
             for (PrefillRequestState e : entries) {
                 recountPhases[e.phase().ordinal()]++;
+                recountPredictedMs += Math.max(e.predictedBatchMs(), 0L);
                 if (e.engineOwned()) {
                     recountOwned++;
                 }
@@ -144,6 +151,10 @@ final class PrefillEndpointCountersBook {
             }
             if (b.engineOwned.sum() != recountOwned) {
                 drift.add(prefix + " engineOwned: counter=" + b.engineOwned.sum() + " recount=" + recountOwned);
+            }
+            if (b.predictedMs.sum() != recountPredictedMs) {
+                drift.add(prefix + " predictedMs: counter=" + b.predictedMs.sum()
+                        + " recount=" + recountPredictedMs);
             }
             for (PrefillPhase p : PrefillPhase.values()) {
                 long counted = b.phaseCounts[p.ordinal()].sum();

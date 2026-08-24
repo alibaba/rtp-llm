@@ -73,6 +73,7 @@ class StateLedgerPerEndpointCounterTest {
                     PrefillEndpointCounters pc = ledger.prefill().endpointCounters(pEpIds[k]);
                     assertTrue(pc.activeTotal() >= 0);
                     assertTrue(pc.engineOwnedCount() >= 0);
+                    assertTrue(pc.estimatedWaitMs() >= 0);
                 }
             }
             return null;
@@ -121,11 +122,14 @@ class StateLedgerPerEndpointCounterTest {
                 int slot = idx % 3;
                 long id = 1_000L + idx;
                 long batch = 700L + idx;
+                long shareMs = 40L + (idx % 5) * 20L; // 分摊批次预测耗时（40~120 五档）
                 GenerationTriple pBinding = new GenerationTriple(pEpIds[slot], pGens[slot], batch);
                 TestEndpoints.Endpoint pEp = pEps[slot];
                 assertEquals(RegisterResult.OK, ledger.prefill().register(id, batch));
                 ledger.prefill().onQueued(id);
                 ledger.prefill().onDispatching(id, batch);
+                // 生产时序：派发流水线在 dispatch 绑定前记录分摊预测耗时
+                ledger.prefill().notePredictedBatchMs(id, shareMs);
                 assertTrue(ledger.prefill().onDispatched(id, pBinding));
                 EnginePhase observed = (slot == 2) ? EnginePhase.KV_ALLOCATED : EnginePhase.RUNNING;
                 ledger.observe(TestEndpoints.runningOnly(pEp, id, 1_000L + id,
@@ -186,14 +190,27 @@ class StateLedgerPerEndpointCounterTest {
         // P 侧：槽 0 终局归零；槽 1 留活跃在执行位（引擎已观察）；
         // 槽 2 留活跃停在 KV 装载位（引擎已观察）
         assertEquals(0, ledger.prefill().endpointCounters(1).activeTotal());
+        assertEquals(0L, ledger.prefill().endpointCounters(1).estimatedWaitMs(), "终局桶预测耗时随条目移除归零");
+        long expectedWaitSlot1 = 0L;
+        long expectedWaitSlot2 = 0L;
+        for (int i = 0; i < n; i++) {
+            long shareMs = 40L + (i % 5) * 20L;
+            if (i % 3 == 1) {
+                expectedWaitSlot1 += shareMs;
+            } else if (i % 3 == 2) {
+                expectedWaitSlot2 += shareMs;
+            }
+        }
         PrefillEndpointCounters pSlot1 = ledger.prefill().endpointCounters(3);
         assertEquals(activePerSlot, pSlot1.activeTotal());
         assertEquals(activePerSlot, pSlot1.engineOwnedCount());
         assertEquals(activePerSlot, pSlot1.phaseCounts().get(8)); // P_RUNNING
+        assertEquals(expectedWaitSlot1, pSlot1.estimatedWaitMs(), "留活跃条目分摊预测耗时——测试内独立重算");
         PrefillEndpointCounters pSlot2 = ledger.prefill().endpointCounters(5);
         assertEquals(activePerSlot, pSlot2.activeTotal());
         assertEquals(activePerSlot, pSlot2.engineOwnedCount());
         assertEquals(activePerSlot, pSlot2.phaseCounts().get(7)); // P_WAITING_LOADED
+        assertEquals(expectedWaitSlot2, pSlot2.estimatedWaitMs(), "留活跃条目分摊预测耗时——测试内独立重算");
         ledger.prefill().refreshSnapshot();
         assertEquals(2 * n / 3, ledger.prefill().snapshot().inflight());
     }
@@ -286,6 +303,57 @@ class StateLedgerPerEndpointCounterTest {
 
         // 释放不进墓碑（非终局）
         assertEquals(0L, ledger.snapshot().decodeTombstones());
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+    }
+
+    /**
+     * 批次预测耗时入账（单线程精确断言）：dispatch 绑定前记录的分摊值随
+     * 条目入桶；DISPATCHED 后迟到写入不再生效（计数簿入账/出账对称性
+     * 优先，与对账重算口径一致）；未记预测的条目计 0、负值钳位为 0；
+     * 终局归位时随条目清零。
+     */
+    @Test
+    void predictedBatchMsEntersBucketOnBindAndRetiresOnSettlement() {
+        StateLedger ledger = new StateLedger();
+        long pGen = ledger.newGeneration(TestEndpoints.ep(9L, StateRole.PREFILL, 0L));
+        TestEndpoints.Endpoint pEp = TestEndpoints.ep(9L, StateRole.PREFILL, pGen);
+        GenerationTriple binding = new GenerationTriple(9, pGen, 500L);
+
+        // 记录预测值（派发流水线窗口）→ dispatch 首绑入桶：分摊值精确入账
+        assertEquals(RegisterResult.OK, ledger.prefill().register(31L, 500L));
+        ledger.prefill().onQueued(31L);
+        ledger.prefill().onDispatching(31L, 500L);
+        ledger.prefill().notePredictedBatchMs(31L, 80L);
+        assertTrue(ledger.prefill().onDispatched(31L, binding));
+        // 未记预测的条目：只占活跃位，预测账计 0
+        assertEquals(RegisterResult.OK, ledger.prefill().register(32L, 500L));
+        ledger.prefill().onQueued(32L);
+        ledger.prefill().onDispatching(32L, 500L);
+        assertTrue(ledger.prefill().onDispatched(32L, binding));
+        // 负值防御：钳位为 0 入账
+        assertEquals(RegisterResult.OK, ledger.prefill().register(33L, 500L));
+        ledger.prefill().onQueued(33L);
+        ledger.prefill().onDispatching(33L, 500L);
+        ledger.prefill().notePredictedBatchMs(33L, -5L);
+        assertTrue(ledger.prefill().onDispatched(33L, binding));
+
+        PrefillEndpointCounters bound = ledger.prefill().endpointCounters(9);
+        assertEquals(3, bound.activeTotal());
+        assertEquals(80L, bound.estimatedWaitMs());
+
+        // DISPATCHED 后迟到写入：不再生效
+        ledger.prefill().notePredictedBatchMs(31L, 999L);
+        assertEquals(80L, ledger.prefill().endpointCounters(9).estimatedWaitMs());
+
+        // 终局归位：预测账随条目移除清零（引擎观察先确认归属）
+        ledger.observe(TestEndpoints.runningOnly(pEp, 1L, 1_000L,
+                TestEndpoints.running(31L, StateRole.PREFILL, EnginePhase.RUNNING, 500L, 128L, 1L)));
+        ledger.observe(TestEndpoints.finishedOnly(pEp, 2L, 1_100L,
+                TestEndpoints.finished(31L, StateRole.PREFILL, 0, 1_100L, 2L)));
+        PrefillEndpointCounters settled = ledger.prefill().endpointCounters(9);
+        assertEquals(2, settled.activeTotal());
+        assertEquals(0L, settled.estimatedWaitMs(), "终局条目预测耗时随移除归零");
+
         assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
     }
 }

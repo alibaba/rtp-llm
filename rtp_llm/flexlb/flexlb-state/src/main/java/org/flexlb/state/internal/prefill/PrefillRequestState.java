@@ -43,6 +43,13 @@ public final class PrefillRequestState {
     private volatile long batchId;
     private volatile long dispatchedAtMs = -1L;
 
+    /**
+     * 批次预测耗时（分摊口径：批次成员各记 predictBatchMs / memberCount，
+     * 求和 ≈ Σ批次耗时——等待估算读点用）。派发前可写（DISPATCHED 后不再
+     * 变更，保证端点计数簿入账/出账对称）；-1 = 未知（入账记 0）。
+     */
+    private volatile long predictedBatchMs = -1L;
+
     // ---- 引擎上报观察账区段（可从上报重建）----
     private volatile long kvTokensReported;
     private volatile long lastSeenRound = -1L;
@@ -148,6 +155,17 @@ public final class PrefillRequestState {
         this.dispatchedAtMs = nowMs;
     }
 
+    /**
+     * 派发流水线：批次预测耗时入账（幂等；DISPATCHED 后调用的值不再生效——
+     * 计数簿入账/出账对称性优先，迟到写入会被对账报漂移）。
+     */
+    public synchronized void notePredictedBatchMs(long predictedBatchMs) {
+        if (phase.ordinal() >= PrefillPhase.DISPATCHED.ordinal()) {
+            return;
+        }
+        this.predictedBatchMs = predictedBatchMs;
+    }
+
     // ---- 只读 ----
 
     public long requestId() {
@@ -184,6 +202,10 @@ public final class PrefillRequestState {
 
     public long dispatchedAtMs() {
         return dispatchedAtMs;
+    }
+
+    public long predictedBatchMs() {
+        return predictedBatchMs;
     }
 
     public long kvTokensReported() {

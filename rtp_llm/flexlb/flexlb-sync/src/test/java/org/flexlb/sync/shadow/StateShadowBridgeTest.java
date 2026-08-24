@@ -550,7 +550,7 @@ class StateShadowBridgeTest {
 
         // 主验证：dispatch 挂点绑定后引擎事件推进相位
         bridge.onPrefillSubmit(54L);
-        bridge.onPrefillDispatched(54L, 900L, ipPort);
+        bridge.onPrefillDispatched(54L, 900L, ipPort, 0L);
         assertEquals(4, bridge.ledger().prefill().get(54L).orElseThrow().phaseOrdinal(),
                 "dispatch 挂点应推进到 DISPATCHED 并绑定世代");
 
@@ -569,7 +569,7 @@ class StateShadowBridgeTest {
         assertEquals(0, bridge.prefillEndpointCounters(ipPort.hashCode()).activeTotal(),
                 "未派发条目不在端点索引（排队/攒批窗口由 batcher 覆盖）");
 
-        bridge.onPrefillDispatched(56L, -1L, ipPort);
+        bridge.onPrefillDispatched(56L, -1L, ipPort, 0L);
 
         assertEquals(1, bridge.prefillEndpointCounters(ipPort.hashCode()).activeTotal(),
                 "派发后条目进入端点索引");
@@ -591,7 +591,7 @@ class StateShadowBridgeTest {
 
         // 开账：P submit+dispatch 绑定；D reserve（两阶段请求的全生命周期起点）
         bridge.onPrefillSubmit(60L);
-        bridge.onPrefillDispatched(60L, -1L, ipPortP);
+        bridge.onPrefillDispatched(60L, -1L, ipPortP, 0L);
         bridge.onDecodeReserve(60L, 100L, 200L, RoleType.DECODE, ipPortD);
 
         // P 引擎 finished 先终局：P 墓碑落地，但 D 条目活跃——不得记录新侧终态
@@ -622,7 +622,7 @@ class StateShadowBridgeTest {
         String ipPortP = "10.0.0.33:9000";
 
         bridge.onPrefillSubmit(61L);
-        bridge.onPrefillDispatched(61L, -1L, ipPortP);
+        bridge.onPrefillDispatched(61L, -1L, ipPortP, 0L);
 
         bridge.observeWorkerStatus(prefillFinishedResponse(61L, 5L), RoleType.PREFILL, ipPortP);
 

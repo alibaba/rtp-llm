@@ -20,6 +20,14 @@ public interface PrefillSide {
     void onDispatching(long requestId, long batchId);
 
     /**
+     * 本地决策事件：记录批次预测耗时（分摊口径——批次成员各记
+     * predictBatchMs / memberCount）。须在 {@link #onDispatched} 前调用：
+     * DISPATCHED 后条目进入端点计数簿，迟到写入不再生效（入账/出账对称）。
+     * 未记录的条目在等待估算读点计 0。
+     */
+    void notePredictedBatchMs(long requestId, long predictedBatchMs);
+
+    /**
      * 派发完成：绑定世代三元组（发送前可重绑；DISPATCHED 后不可变，见 setBindingOnce 语义）
      * 并推进到 DISPATCHED。
      *

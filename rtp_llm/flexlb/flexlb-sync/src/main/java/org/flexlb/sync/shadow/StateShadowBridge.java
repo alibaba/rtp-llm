@@ -448,11 +448,13 @@ public final class StateShadowBridge {
 
     /**
      * P 侧条目派发提交挂点（batch 提交/单发提交时）：onDispatching（批次外键）
-     * + onDispatched（绑定端点世代）。对影子/结算/读取模式均生效——补齐
-     * P 条目绑定缺口（原恒 UNBOUND，引擎事件全被世代屏障拒绝，只能依赖
-     * D 侧因果闭包/终局清理收敛）。幂等（已在 DISPATCHED 及以上静默）。
+     * + notePredictedBatchMs（分摊批次预测耗时——等待估算读点数据源）
+     * + onDispatched（绑定端点世代）。幂等（已在 DISPATCHED 及以上静默）。
+     *
+     * @param predictedBatchMs 分摊到该请求的批次预测耗时（批次总预测 /
+     *                         成员数；散请求即单请求预测。调用方计算）
      */
-    public void onPrefillDispatched(long requestId, long batchId, String ipPort) {
+    public void onPrefillDispatched(long requestId, long batchId, String ipPort, long predictedBatchMs) {
         if (!enabled) {
             return;
         }
@@ -463,6 +465,9 @@ public final class StateShadowBridge {
                 return;
             }
             ledger.prefill().onDispatching(requestId, batchId);
+            if (predictedBatchMs > 0) {
+                ledger.prefill().notePredictedBatchMs(requestId, predictedBatchMs);
+            }
             ledger.prefill().onDispatched(requestId,
                     new GenerationTriple((int) binding.endpointId(), binding.generation(), -1L));
         } catch (Throwable t) {

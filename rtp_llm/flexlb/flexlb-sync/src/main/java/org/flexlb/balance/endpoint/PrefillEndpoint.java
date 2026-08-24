@@ -244,11 +244,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
         putInflightEntry(batchId,
                 new PrefillInflightBatch(batchId, predictMs, requests, System.currentTimeMillis()));
-        // 影子/读取换权：P 条目派发提交挂点——onDispatching（批次外键）
-        // + onDispatched（绑定端点世代）。开关关时门面内部短路（零行为变化）。
+        // 账本挂点：P 条目派发提交——onDispatching（批次外键）+ 分摊批次预测
+        // 耗时（等待估算读点数据源）+ onDispatched（绑定端点世代）。开关关时
+        // 门面内部短路（零行为变化）。
         if (shadowBridge != null && shadowBridge.isEnabled()) {
+            long shareMs = requests.isEmpty() ? 0L : predictMs / requests.size();
             for (BatchItem item : requests) {
-                shadowBridge.onPrefillDispatched(item.requestId(), batchId, ipPort());
+                shadowBridge.onPrefillDispatched(item.requestId(), batchId, ipPort(), shareMs);
             }
         }
     }
@@ -261,9 +263,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public void commitRequest(long requestId, long predictMs) {
         putInflightEntry(requestId,
                 new PrefillInflightRequest(requestId, predictMs, System.currentTimeMillis()));
-        // 同上：散请求提交挂点（batchId=-1）。
+        // 同上：散请求提交挂点（batchId=-1，分摊即单请求预测）。
         if (shadowBridge != null && shadowBridge.isEnabled()) {
-            shadowBridge.onPrefillDispatched(requestId, -1L, ipPort());
+            shadowBridge.onPrefillDispatched(requestId, -1L, ipPort(), predictMs);
         }
     }
 

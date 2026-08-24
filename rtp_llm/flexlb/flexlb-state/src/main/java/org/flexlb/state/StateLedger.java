@@ -565,6 +565,14 @@ public final class StateLedger {
         }
 
         @Override
+        public void notePredictedBatchMs(long requestId, long predictedBatchMs) {
+            PrefillRequestState e = pStore.get(requestId);
+            if (e != null) {
+                e.notePredictedBatchMs(predictedBatchMs);
+            }
+        }
+
+        @Override
         public boolean onDispatched(long requestId, GenerationTriple binding) {
             PrefillRequestState e = pStore.get(requestId);
             if (e == null) {
