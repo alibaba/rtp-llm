@@ -3,6 +3,7 @@ package org.flexlb.state.internal.prefill;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import org.flexlb.state.InternalApi;
 import org.flexlb.state.PhaseVerdict;
 
 /**
@@ -10,7 +11,8 @@ import org.flexlb.state.PhaseVerdict;
  *
  * <p>无状态、全静态、纯函数——不持任何可变状态，天然线程安全。</p>
  */
-final class PrefillLattice {
+@InternalApi
+public final class PrefillLattice {
 
     private PrefillLattice() {
     }
@@ -20,7 +22,7 @@ final class PrefillLattice {
      * 处于相位 p 蕴含"已经过全部更低相位"，即 {@code EnumSet.range(INIT, p)}。
      * （D 侧才需要跨侧蕴含；P 侧无跨侧相位。）
      */
-    static EnumSet<PrefillPhase> implies(PrefillPhase phase) {
+    public static EnumSet<PrefillPhase> implies(PrefillPhase phase) {
         return EnumSet.range(PrefillPhase.INIT, phase);
     }
 
@@ -32,7 +34,7 @@ final class PrefillLattice {
      * {@code to <= from} 无前向推进（迟到事件由 {@link #arbitrate} 先行丢弃），
      * 防御性返回 {@code [from]} 单元素。</p>
      */
-    static List<PrefillPhase> closureBetween(PrefillPhase from, PrefillPhase to) {
+    public static List<PrefillPhase> closureBetween(PrefillPhase from, PrefillPhase to) {
         if (to.ordinal() <= from.ordinal()) {
             return List.of(from);
         }
@@ -70,7 +72,7 @@ final class PrefillLattice {
      *       不经过格。</li>
      * </ol>
      */
-    static PhaseVerdict arbitrate(PrefillPhase current,
+    public static PhaseVerdict arbitrate(PrefillPhase current,
                                   long currentVersion,
                                   PrefillPhase eventPhase,
                                   long eventVersion,

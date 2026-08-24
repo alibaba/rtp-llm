@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReferenceArray;
+import org.flexlb.state.InternalApi;
 
 /**
  * 8 槽相位进入历史环形缓冲（packed 编码，单条目零分配读取）。
@@ -31,10 +32,11 @@ import java.util.concurrent.atomic.AtomicReferenceArray;
  * </ul>
  * 相位序号到枚举名的解释由调用方完成（ring 不感知具体相位枚举类型）。
  */
-final class EntryTraceRing {
+@InternalApi
+public final class EntryTraceRing {
 
     /** 槽数（设计：8 槽足够覆盖越级闭包补记的沿途相位数）。 */
-    static final int SLOTS = 8;
+    public static final int SLOTS = 8;
 
     private static final int PHASE_SHIFT = 56;
     private static final long DT_MASK = (1L << PHASE_SHIFT) - 1;
@@ -53,7 +55,7 @@ final class EntryTraceRing {
      * @param dtMs         进入该相位的相对毫秒（自请求创建起，非负且 &lt; 2^56）
      * @throws IllegalArgumentException 参数越界
      */
-    void append(long phaseOrdinal, long dtMs) {
+    public void append(long phaseOrdinal, long dtMs) {
         if (phaseOrdinal < 0 || phaseOrdinal > 0xFF) {
             throw new IllegalArgumentException("phaseOrdinal must be in [0, 255]: " + phaseOrdinal);
         }
@@ -79,7 +81,7 @@ final class EntryTraceRing {
      * 快照读取：按写入顺序（最旧 → 最新）返回人类可读历史，最多 {@value SLOTS} 条。
      * 写满环形覆盖后仅保留最新 {@value SLOTS} 条。
      */
-    List<String> drain() {
+    public List<String> drain() {
         int total = writeCount.get();
         int visible = Math.min(total, SLOTS);
         List<String> out = new ArrayList<>(visible);

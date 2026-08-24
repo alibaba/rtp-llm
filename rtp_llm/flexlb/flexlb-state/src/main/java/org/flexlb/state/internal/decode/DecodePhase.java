@@ -1,5 +1,6 @@
 package org.flexlb.state.internal.decode;
 
+import org.flexlb.state.InternalApi;
 import org.flexlb.state.spi.EnginePhase;
 
 /**
@@ -12,7 +13,8 @@ import org.flexlb.state.spi.EnginePhase;
  *
  * <p>格内无终态值：终局判定归 {@code org.flexlb.state.TerminalState/TerminalOutcome}。</p>
  */
-enum DecodePhase {
+@InternalApi
+public enum DecodePhase {
 
     /** 已预留在目标 D 端点（KV 尚未开始迁移）。 */
     RESERVED,
@@ -38,7 +40,7 @@ enum DecodePhase {
      * RECEIVED→DISPATCHED、KV_ALLOCATED→D_LOADING、RUNNING→D_RUNNING、
      * PENDING→DISPATCHED（保守最低观察位，L18：引擎无显式中间相位时只能倒推）。
      */
-    static DecodePhase fromEnginePhase(EnginePhase enginePhase) {
+    public static DecodePhase fromEnginePhase(EnginePhase enginePhase) {
         return switch (enginePhase) {
             case PENDING, RECEIVED -> DISPATCHED;
             case KV_ALLOCATED -> D_LOADING;

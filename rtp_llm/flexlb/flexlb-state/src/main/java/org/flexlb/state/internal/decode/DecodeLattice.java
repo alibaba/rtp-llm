@@ -3,6 +3,7 @@ package org.flexlb.state.internal.decode;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import org.flexlb.state.InternalApi;
 import org.flexlb.state.PhaseVerdict;
 
 /**
@@ -11,7 +12,8 @@ import org.flexlb.state.PhaseVerdict;
  * <p>与 {@code org.flexlb.state.internal.prefill.PrefillLattice} 同构：
  * 无状态、全静态、纯函数——不持任何可变状态，天然线程安全。</p>
  */
-final class DecodeLattice {
+@InternalApi
+public final class DecodeLattice {
 
     private DecodeLattice() {
     }
@@ -21,7 +23,7 @@ final class DecodeLattice {
      * 处于相位 p 蕴含"已经过全部更低相位"，即 {@code EnumSet.range(RESERVED, p)}。
      * （D 侧对 P 侧的跨侧蕴含由上层组合裁决，格内只管 D 侧链。）
      */
-    static EnumSet<DecodePhase> implies(DecodePhase phase) {
+    public static EnumSet<DecodePhase> implies(DecodePhase phase) {
         return EnumSet.range(DecodePhase.RESERVED, phase);
     }
 
@@ -33,7 +35,7 @@ final class DecodeLattice {
      * {@code to <= from} 无前向推进（迟到事件由 {@link #arbitrate} 先行丢弃），
      * 防御性返回 {@code [from]} 单元素。</p>
      */
-    static List<DecodePhase> closureBetween(DecodePhase from, DecodePhase to) {
+    public static List<DecodePhase> closureBetween(DecodePhase from, DecodePhase to) {
         if (to.ordinal() <= from.ordinal()) {
             return List.of(from);
         }
@@ -51,7 +53,7 @@ final class DecodeLattice {
      * （ACCEPT_ADVANCE / WARN_FINISH_PRIORITY）→ 同相位 finish（ACCEPT_TERMINAL）
      * → 同相位无推进（DROP_DUP）。
      */
-    static PhaseVerdict arbitrate(DecodePhase current,
+    public static PhaseVerdict arbitrate(DecodePhase current,
                                   long currentVersion,
                                   DecodePhase eventPhase,
                                   long eventVersion,

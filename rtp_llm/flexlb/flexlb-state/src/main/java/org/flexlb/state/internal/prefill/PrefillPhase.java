@@ -1,5 +1,6 @@
 package org.flexlb.state.internal.prefill;
 
+import org.flexlb.state.InternalApi;
 import org.flexlb.state.spi.EnginePhase;
 
 /**
@@ -12,7 +13,8 @@ import org.flexlb.state.spi.EnginePhase;
  * <p>格内无终态值：终局判定归 {@code org.flexlb.state.TerminalState/TerminalOutcome}
  * （{@link #isTerminal()} 恒 false；PREFILL_DONE 是格顶而非吸收终态）。</p>
  */
-enum PrefillPhase {
+@InternalApi
+public enum PrefillPhase {
 
     /** 已创建，尚未路由。 */
     INIT,
@@ -56,7 +58,7 @@ enum PrefillPhase {
      * RECEIVED→P_RECEIVED、KV_ALLOCATED→P_WAITING_LOADED、RUNNING→P_RUNNING、
      * PENDING→P_RECEIVED（保守最低观察位，L18：引擎无显式中间相位时只能倒推）。
      */
-    static PrefillPhase fromEnginePhase(EnginePhase enginePhase) {
+    public static PrefillPhase fromEnginePhase(EnginePhase enginePhase) {
         return switch (enginePhase) {
             case PENDING, RECEIVED -> P_RECEIVED;
             case KV_ALLOCATED -> P_WAITING_LOADED;
