@@ -69,6 +69,15 @@ def _is_aiter_flydsl_gdn_prefill_disabled() -> bool:
     return env_flag("DISABLE_AITER_FLYDSL_GDN_PREFILL")
 
 
+def is_aiter_flydsl_gdn_prefill_available() -> bool:
+    """Return whether the complete optional ROCm backend is available."""
+    return (
+        not _is_aiter_flydsl_gdn_prefill_disabled()
+        and torch.version.hip is not None
+        and _get_aiter_flydsl_gdn_prefill_ops() is not None
+    )
+
+
 def is_aiter_flydsl_gdn_prefill_supported(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -77,9 +86,7 @@ def is_aiter_flydsl_gdn_prefill_supported(
     beta: torch.Tensor,
 ) -> bool:
     """Return whether the fixed FlyDSL K1-K5 pipeline supports the inputs."""
-    if _is_aiter_flydsl_gdn_prefill_disabled():
-        return False
-    if torch.version.hip is None or q.device.type != "cuda":
+    if not is_aiter_flydsl_gdn_prefill_available() or q.device.type != "cuda":
         return False
     if any(tensor.device != q.device for tensor in (k, v, g, beta)):
         return False

@@ -732,9 +732,13 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 
     graph_state_         = CudaGraphState();
     auto empty           = torch::Tensor();
+    // buildPyAttentionInputs() has already copied combo_position_ids to the
+    // device.  Keep the top-level PyModelInputs field consistent with the
+    // nested attention field: CudaGraphRunner validates and copies the
+    // top-level tensor during replay preparation.
     auto py_model_inputs = PyModelInputs({empty,
                                           empty,
-                                          empty,
+                                          attention_inputs_.combo_position_ids,
                                           torch_ext::PyEmbeddingInputs(),
                                           torch_ext::PyMultimodalInputs(),
                                           attention_inputs_,
@@ -760,7 +764,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
         auto empty           = torch::Tensor();
         auto py_model_inputs = PyModelInputs({empty,
                                               empty,
-                                              empty,
+                                              attention_inputs_.combo_position_ids,
                                               torch_ext::PyEmbeddingInputs(),
                                               torch_ext::PyMultimodalInputs(),
                                               attention_inputs_,
