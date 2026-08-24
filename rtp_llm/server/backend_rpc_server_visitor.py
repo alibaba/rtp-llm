@@ -332,10 +332,12 @@ class BackendRPCServerVisitor:
             )
         except BaseException as e:
             exception_json = format_exception(e)
+            metric_tags = dict(getattr(input, "frontend_metric_tags", {}) or {})
+            metric_tags["error_code"] = exception_json.get("error_code_str", "")
             kmonitor.report(
                 AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
                 1,
-                {"error_code": exception_json.get("error_code_str", "")},
+                metric_tags,
             )
             raise
 
@@ -378,10 +380,12 @@ class BackendRPCServerVisitor:
                 route_result.error_message or "master route failed",
             )
             error_code = format_exception(route_error)["error_code_str"]
+        metric_tags = dict(getattr(input, "frontend_metric_tags", {}) or {})
+        metric_tags["error_code"] = error_code
         kmonitor.report(
             AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
             1,
-            {"error_code": error_code},
+            metric_tags,
         )
         return route_result
 

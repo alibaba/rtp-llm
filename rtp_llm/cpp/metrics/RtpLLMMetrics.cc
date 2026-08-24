@@ -61,6 +61,10 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(remote_allocate_resource_rt_us_metric, "rtp_llm_rpc_remote_allocate_resource_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(enqueue_request_rt_us_metric, "rtp_llm_rpc_enqueue_request_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_load_cache_start_rt_us_metric, "rtp_llm_rpc_remote_load_cache_start_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_load_cache_wait_stream_rt_us_metric,
+                                  "rtp_llm_rpc_remote_load_cache_wait_stream_rt_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(remote_load_cache_write_request_rt_us_metric,
+                                  "rtp_llm_rpc_remote_load_cache_write_request_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(poll_local_output_rt_us_metric, "rtp_llm_rpc_poll_local_output_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_load_cache_end_rt_us_metric, "rtp_llm_rpc_remote_load_cache_end_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(remote_generate_rt_us_metric, "rtp_llm_rpc_remote_generate_rt_us");
@@ -206,6 +210,8 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(remote_allocate_resource_rt_us);
     REPORT_GAUGE(enqueue_request_rt_us);
     REPORT_GAUGE(remote_load_cache_start_rt_us);
+    REPORT_GAUGE(remote_load_cache_wait_stream_rt_us);
+    REPORT_GAUGE(remote_load_cache_write_request_rt_us);
     REPORT_GAUGE(poll_local_output_rt_us);
     REPORT_GAUGE(remote_load_cache_end_rt_us);
     REPORT_GAUGE(remote_generate_rt_us);
@@ -237,9 +243,14 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(first_token_latency_us_metric, "rtp_llm_first_token_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_wait_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(enqueue_to_canrun_us_metric, "rtp_llm_stream_enqueue_to_canrun_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(canrun_to_running_us_metric, "rtp_llm_stream_canrun_to_running_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_latency_us_metric, "rtp_llm_stream_loading_cache_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(load_done_to_running_us_metric, "rtp_llm_stream_load_done_to_running_us");
     REGISTER_GAUGE_MUTABLE_METRIC(pause_latency_us_metric, "rtp_llm_pause_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(iterate_count_metric, "rtp_llm_iterate_count");
     REGISTER_GAUGE_MUTABLE_METRIC(reuse_length_metric, "rtp_llm_reuse_length");
+    REGISTER_GAUGE_MUTABLE_METRIC(effective_context_length_metric, "rtp_llm_effective_context_length");
     REGISTER_GAUGE_MUTABLE_METRIC(input_token_length_metric, "rtp_llm_input_token_length");
     REGISTER_GAUGE_MUTABLE_METRIC(output_token_length_metric, "rtp_llm_output_token_length");
     REGISTER_GAUGE_MUTABLE_METRIC(timeout_latency_us_metric, "rtp_llm_timeout_lantency_us");
@@ -263,9 +274,14 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(total_latency_us);
     REPORT_GAUGE(first_token_latency_us);
     REPORT_GAUGE(wait_latency_us);
+    REPORT_GAUGE(enqueue_to_canrun_us);
+    REPORT_GAUGE(canrun_to_running_us);
+    REPORT_GAUGE(loading_cache_latency_us);
+    REPORT_GAUGE(load_done_to_running_us);
     REPORT_GAUGE(pause_latency_us);
     REPORT_GAUGE(iterate_count);
     REPORT_GAUGE(reuse_length);
+    REPORT_GAUGE(effective_context_length);
     REPORT_GAUGE(input_token_length);
     REPORT_GAUGE(output_token_length);
     REPORT_GAUGE(timeout_latency_us);

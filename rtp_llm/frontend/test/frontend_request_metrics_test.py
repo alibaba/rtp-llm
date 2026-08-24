@@ -32,14 +32,31 @@ class FrontendRequestMetricsTest(unittest.TestCase):
         self.sink = _MetricSink()
         self.metrics = FrontendRequestMetrics(self.sink, clock=lambda: 1.0)
 
-    def begin(self, *, streaming=True, speculative_steps=0):
+    def begin(self, *, streaming=True, speculative_steps=0, priority="0"):
         return self.metrics.begin(
             rank_id="0",
             server_id="1",
             source="test",
             streaming=streaming,
             speculative_steps=speculative_steps,
+            priority=priority,
         )
+
+    def test_request_metrics_keep_priority_tag(self):
+        state = self.begin(priority="70")
+        state.finish(now_ms=1100)
+        request_rt_calls = [
+            tags
+            for metric, _, tags in self.sink.calls
+            if metric == GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC
+        ]
+        self.assertEqual(request_rt_calls, [{
+            "rank_id": "0",
+            "server_id": "1",
+            "source": "test",
+            "streaming": "true",
+            "priority": "70",
+        }])
 
     def test_reports_container_tps_lengths_cache_and_latency(self):
         state = self.begin()

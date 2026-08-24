@@ -107,10 +107,12 @@ class _FakeRouteTokenIds:
 class _FakeRouteInput:
     request_id = 456
     token_ids = _FakeRouteTokenIds()
+    prompt_length = 3
 
     def __init__(self):
         self.generate_config = _FakeGenerateConfig()
         self.enqueued_by_master = False
+        self.frontend_metric_tags = {}
 
 
 class _FakeHostService:
@@ -270,20 +272,21 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             AccMetrics.MASTER_ROUTE_QPS_METRIC, 1
         )
 
-    async def test_non_200_master_response_reports_route_error_once(self):
+    async def test_router_queue_full_reports_exact_code_with_priority(self):
         master_client = MasterClient(
             host_service=_FakeHostService(), master_config=_FakeMasterConfig()
         )
         master_client._send_schedule_request = AsyncMock(
             return_value=SimpleNamespace(
-                code=int(ExceptionType.PRIORITY_ADMISSION_REJECTED),
-                error_message="same-priority request ahead",
-                admission_reject_reason=int(AdmissionRejectReason.SAME_PRIORITY_AHEAD),
+                code=int(ExceptionType.ROUTER_QUEUE_FULL),
+                error_message="router queue is full",
+                admission_reject_reason=int(AdmissionRejectReason.UNSPECIFIED),
                 queue_length=7,
             )
         )
         visitor = self._master_route_visitor(master_client)
         input = _FakeRouteInput()
+        input.frontend_metric_tags = {"priority": "70"}
 
         with patch(
             "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
@@ -299,12 +302,12 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             ctx.exception.exception_type,
-            ExceptionType.PRIORITY_ADMISSION_REJECTED,
+            ExceptionType.ROUTER_QUEUE_FULL,
         )
         report.assert_called_once_with(
             AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
             1,
-            {"error_code": "8430_PRIORITY_ADMISSION_REJECTED"},
+            {"priority": "70", "error_code": "8502_ROUTER_QUEUE_FULL"},
         )
 
     async def test_master_connection_failure_reports_route_error_once(self):

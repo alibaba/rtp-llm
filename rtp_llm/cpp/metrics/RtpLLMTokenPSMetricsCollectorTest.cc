@@ -7,6 +7,27 @@
 
 namespace rtp_llm {
 
+TEST(GenerateStreamMetricTagsTest, AlwaysCarriesPriority) {
+    const auto tags = buildStreamMetricTagMap(50, false);
+
+    ASSERT_EQ(tags.size(), 1);
+    EXPECT_EQ(tags.at("priority"), "50");
+    EXPECT_EQ(tags.count("timeout"), 0);
+}
+
+TEST(GenerateStreamMetricTagsTest, TimeoutKeepsPriorityAndAddsTimeout) {
+    const auto tags = buildStreamMetricTagMap(30, true);
+
+    ASSERT_EQ(tags.size(), 2);
+    EXPECT_EQ(tags.at("priority"), "30");
+    EXPECT_EQ(tags.at("timeout"), "true");
+}
+
+TEST(GenerateStreamMetricTagsTest, MissingPriorityUsesExplicitZeroBucket) {
+    const auto tags = buildStreamMetricTagMap(0, false);
+    EXPECT_EQ(tags.at("priority"), "0");
+}
+
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
     RtpLLMTokenPSMetricsCollector collector;
 

@@ -1567,6 +1567,8 @@ void GenerateStream::reportStreamMetrics() {
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();
+            collector.effective_context_length =
+                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
@@ -1590,10 +1592,13 @@ void GenerateStream::reportStreamMetrics() {
                 collector.timeout_latency_us = getTimeoutMs() * 1000;
             }
         }
-        // pass tag will cause default tags deep copy
-        static kmonitor::MetricsTags timeout_tag("timeout", "true");
-        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
-                                                                                     &collector);
+        // Query metrics must always carry the Auto-TPM priority dimension.
+        // A timeout is an additional property of the same request, not an
+        // alternative tag set; dropping priority here makes timeout/error
+        // series disappear from priority-scoped queries.
+        const auto            tag_map = buildStreamMetricTagMap(priority(), timeout);
+        kmonitor::MetricsTags tags(tag_map);
+        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(&tags, &collector);
     }
 }
 

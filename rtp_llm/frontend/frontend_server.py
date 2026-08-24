@@ -23,7 +23,13 @@ from rtp_llm.frontend.frontend_request_metrics import (
 )
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
-from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
+from rtp_llm.metrics import (
+    QOS_PRIORITY_HEADER,
+    AccMetrics,
+    GaugeMetrics,
+    kmonitor,
+    qos_priority_tag,
+)
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
@@ -249,6 +255,22 @@ class FrontendServer(object):
             return bool(config["force_disable_sp_run"])
         return False
 
+    def _request_metric_tags(
+        self,
+        request: Any,
+        headers: Dict[str, str] | None = None,
+    ) -> Dict[str, str]:
+        request_dict = request if isinstance(request, dict) else {}
+        normalized_headers = headers or {}
+        return {
+            "rank_id": self.rank_id,
+            "server_id": self.server_id,
+            "source": str(request_dict.get("source", "unknown")),
+            "priority": qos_priority_tag(
+                normalized_headers.get(QOS_PRIORITY_HEADER)
+            ),
+        }
+
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         try:
@@ -298,7 +320,9 @@ class FrontendServer(object):
         self,
         request: Dict[str, Any],
         response: CompleteResponseAsyncGenerator,
+        metric_tags: Dict[str, str] | None = None,
     ):
+        metric_tags = dict(metric_tags or self._request_metric_tags(request))
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
         generation_finished = False
@@ -338,11 +362,7 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
                 1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unkown"),
-                },
+                metric_tags,
             )
             raise
         except BaseException as e:
@@ -352,12 +372,7 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unkown"),
-                    "error_code": str(format_e.get("error_code_str", -1)),
-                },
+                {**metric_tags, "error_code": str(format_e.get("error_code_str", -1))},
             )
             client_error = self._client_exception_payload(request, format_e)
             yield response_data_prefix + json.dumps(
@@ -367,7 +382,7 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
-        request_headers: Dict[str, str] = {}
+        request_headers = extract_request_headers(raw_request.headers)
         try:
             if isinstance(req, str):
                 req = json.loads(req)
@@ -379,19 +394,18 @@ class FrontendServer(object):
                 self.server_id,
                 sequence,
             )
-            request_headers = extract_request_headers(raw_request.headers)
             generation_req = copy.deepcopy(req)
             self._force_internal_aux_info(generation_req)
         except Exception as e:
-            return self._handle_exception(req, e)
+            return self._handle_exception(
+                req if isinstance(req, dict) else {},
+                e,
+                self._request_metric_tags(req, request_headers),
+            )
+        metric_tags = self._request_metric_tags(req, request_headers)
 
         def generate_call(_request_metrics: FrontendRequestMetricState):
             assert self._frontend_worker is not None
-            metric_tags = {
-                "rank_id": self.rank_id,
-                "server_id": self.server_id,
-                "source": str(req.get("source", "unknown")),
-            }
             if request_headers:
                 return self._frontend_worker.inference(
                     **generation_req,
@@ -406,7 +420,9 @@ class FrontendServer(object):
             )
 
         try:
-            rep = await self._infer_wrap(req, raw_request, generate_call)
+            rep = await self._infer_wrap(
+                req, raw_request, generate_call, metric_tags
+            )
         except BaseException as e:
             self._global_controller.decrement()
             raise e
@@ -423,11 +439,12 @@ class FrontendServer(object):
         generate_call: Callable[
             [FrontendRequestMetricState], CompleteResponseAsyncGenerator
         ],
+        metric_tags: Dict[str, str],
     ):
         try:
-            rep = await self._infer_impl(req, raw_request, generate_call)
+            rep = await self._infer_impl(req, raw_request, generate_call, metric_tags)
         except BaseException as e:
-            rep = self._handle_exception(req, e)
+            rep = self._handle_exception(req, e, metric_tags)
         return rep
 
     async def chat_completion(
@@ -442,6 +459,10 @@ class FrontendServer(object):
         )
 
         internal_request = request.model_copy(update={"aux_info": True})
+        request_dict = request.model_dump(exclude_none=True)
+        request_dict[request_id_field_name] = request_id
+        request_headers = extract_request_headers(raw_request.headers)
+        metric_tags = self._request_metric_tags(request_dict, request_headers)
 
         def generate_call(request_metrics: FrontendRequestMetricState):
             assert self._openai_endpoint != None
@@ -449,11 +470,7 @@ class FrontendServer(object):
                 request_id,
                 internal_request,
                 raw_request,
-                frontend_metric_tags={
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": str(getattr(request, "source", "unknown")),
-                },
+                frontend_metric_tags=metric_tags,
                 frontend_metric_observer=request_metrics.observe_tps,
             )
             assert isinstance(
@@ -462,9 +479,9 @@ class FrontendServer(object):
             return response
 
         try:
-            request_dict = request.model_dump(exclude_none=True)
-            request_dict[request_id_field_name] = request_id
-            rep = await self._infer_wrap(request_dict, raw_request, generate_call)
+            rep = await self._infer_wrap(
+                request_dict, raw_request, generate_call, metric_tags
+            )
         except BaseException as e:
             self._global_controller.decrement()
             raise e
@@ -481,20 +498,22 @@ class FrontendServer(object):
         except Exception as e:
             return ORJSONResponse(format_exception(e), status_code=500)
 
-    def _handle_exception(self, request: Dict[str, Any], e: BaseException):
+    def _handle_exception(
+        self,
+        request: Dict[str, Any],
+        e: BaseException,
+        metric_tags: Dict[str, str] | None = None,
+    ):
+        metric_tags = dict(metric_tags or self._request_metric_tags(request))
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
         if isinstance(e, ConcurrencyException):
-            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
+            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC, 1, metric_tags)
         elif isinstance(e, asyncio.CancelledError):
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
                 1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unknown"),
-                },
+                metric_tags,
             )
             self._access_logger.log_exception_access(request, e)
         else:
@@ -502,12 +521,7 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
                 1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                    "source": request.get("source", "unknown"),
-                    "error_code": error_code_str,
-                },
+                {**metric_tags, "error_code": error_code_str},
             )
 
         rep = ORJSONResponse(
@@ -522,6 +536,7 @@ class FrontendServer(object):
         ],
         request_metrics: FrontendRequestMetricState,
         expose_aux_info: bool,
+        metric_tags: Dict[str, str],
     ):
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
@@ -574,10 +589,7 @@ class FrontendServer(object):
                 kmonitor.report(
                     AccMetrics.SUCCESS_QPS_METRIC,
                     1,
-                    {
-                        "rank_id": self.rank_id,
-                        "server_id": self.server_id,
-                    },
+                    metric_tags,
                 )
             finally:
                 request_metrics.finish()
@@ -610,16 +622,13 @@ class FrontendServer(object):
         generate_call: Callable[
             [FrontendRequestMetricState], CompleteResponseAsyncGenerator
         ],
+        metric_tags: Dict[str, str],
     ):
         assert self._frontend_worker is not None
         kmonitor.report(
             AccMetrics.QPS_METRIC,
             1,
-            {
-                "rank_id": self.rank_id,
-                "server_id": self.server_id,
-                "source": req.get("source", "unkown"),
-            },
+            metric_tags,
         )
         self._access_logger.log_query_access(req)
         is_streaming = self._frontend_worker.is_streaming(req)
@@ -633,6 +642,7 @@ class FrontendServer(object):
                 if self._request_disables_speculative(req)
                 else self._speculative_steps
             ),
+            priority=metric_tags["priority"],
         )
         try:
             if await raw_request.is_disconnected():
@@ -641,6 +651,7 @@ class FrontendServer(object):
                 generate_call,
                 request_metrics,
                 self._request_aux_info_enabled(req),
+                metric_tags,
             )
         except BaseException:
             request_metrics.finish()
@@ -648,7 +659,8 @@ class FrontendServer(object):
 
         if is_streaming:
             return StreamingResponse(
-                self.stream_response(req, res), media_type="text/event-stream"
+                self.stream_response(req, res, metric_tags),
+                media_type="text/event-stream",
             )
         generation_finished = False
         async for x in res:

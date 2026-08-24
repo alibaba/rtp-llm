@@ -18,6 +18,14 @@ class MutableMetric;
 
 namespace rtp_llm {
 
+inline std::map<std::string, std::string> buildStreamMetricTagMap(int32_t priority, bool timeout) {
+    std::map<std::string, std::string> tags{{"priority", std::to_string(priority)}};
+    if (timeout) {
+        tags["timeout"] = "true";
+    }
+    return tags;
+}
+
 class RpcMetricsCollector final {
 public:
     // rpc server metrics

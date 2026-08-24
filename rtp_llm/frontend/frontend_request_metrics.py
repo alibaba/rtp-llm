@@ -730,12 +730,14 @@ class FrontendRequestMetrics:
         source: str,
         streaming: bool,
         speculative_steps: int,
+        priority: str = "0",
     ) -> FrontendRequestMetricState:
         tags = {
             "rank_id": rank_id,
             "server_id": server_id,
             "source": source,
             "streaming": str(streaming).lower(),
+            "priority": priority,
         }
         container_tags = {
             "rank_id": rank_id,

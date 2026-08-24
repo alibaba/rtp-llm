@@ -2,11 +2,14 @@ import asyncio
 import json
 from typing import Any
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.metrics import AccMetrics
 from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
@@ -53,7 +56,8 @@ class FakeFrontendWorker(object):
 
 
 class FakeRawRequest(object):
-    headers = {}
+    def __init__(self, headers=None):
+        self.headers = headers or {}
 
     async def is_disconnected(self):
         return False
@@ -101,6 +105,54 @@ class FrontendServerTest(TestCase):
         )
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
+        )
+
+    def test_qos_priority_reaches_frontend_metrics_and_backend(self):
+        raw_request = FakeRawRequest(
+            {"x-dashscope-inner-qos-level": "70"}
+        )
+        with patch("rtp_llm.frontend.frontend_server.kmonitor.report") as report:
+            asyncio.run(
+                self._async_run(req={"prompt": "hello"}, raw_request=raw_request)
+            )
+
+        backend_tags = self.frontend_server._frontend_worker.last_inference_kwargs[
+            "frontend_metric_tags"
+        ]
+        self.assertEqual(backend_tags["priority"], "70")
+        qps_calls = [
+            call
+            for call in report.call_args_list
+            if call.args[0] == AccMetrics.QPS_METRIC
+        ]
+        self.assertEqual(qps_calls[0].args[2]["priority"], "70")
+
+    def test_router_queue_full_error_metric_keeps_priority(self):
+        error = FtRuntimeException(
+            ExceptionType.ROUTER_QUEUE_FULL,
+            "router queue is full",
+        )
+        metric_tags = {
+            "rank_id": "0",
+            "server_id": "0",
+            "source": "test",
+            "priority": "70",
+        }
+        with patch("rtp_llm.frontend.frontend_server.kmonitor.report") as report:
+            response = self.frontend_server._handle_exception(
+                {
+                    "source": "test",
+                    request_id_field_name: 1,
+                },
+                error,
+                metric_tags,
+            )
+
+        self.assertEqual(json.loads(response.body)["error_code"], 8502)
+        report.assert_called_once_with(
+            AccMetrics.ERROR_QPS_METRIC,
+            1,
+            {**metric_tags, "error_code": "8502_ROUTER_QUEUE_FULL"},
         )
 
     def test_encode(self):
