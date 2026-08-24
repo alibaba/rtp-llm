@@ -7,7 +7,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase, main, skipUnless
 from unittest.mock import AsyncMock, Mock
 
 from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
@@ -73,8 +73,6 @@ class FakeTokenizer:
 
 
 def _make_renderer(encoding_module):
-    from rtp_llm.config.generate_config import ThinkingMode
-
     renderer = DeepseekV4Renderer.__new__(DeepseekV4Renderer)
     renderer.encoding_module = encoding_module
     renderer.tokenizer = FakeTokenizer()
@@ -266,7 +264,9 @@ class DeepseekV4RendererTest(TestCase):
         self.assertEqual(self.renderer.tokenizer.decode(rendered.input_ids), expected)
 
     def test_existing_think_mode_env_path_is_unchanged(self):
+        # The real renderer constructor derives both fields from THINK_MODE.
         self.renderer.think_mode = True
+        self.renderer.default_thinking_mode = ThinkingMode.ENABLED
         messages = [{"role": "user", "content": "Hello"}]
         request = ChatCompletionRequest(messages=messages)
 
@@ -301,7 +301,7 @@ class DeepseekV4RendererTest(TestCase):
             messages=messages,
             extra_configs=GenerateConfig(max_thinking_tokens=0),
             enable_thinking=True,
-            chat_template_kwargs={"thinking_mode": "thinking"},
+            chat_template_kwargs={"thinking_mode": "enabled"},
         )
 
         rendered = self.renderer.render_chat(request)
@@ -309,11 +309,11 @@ class DeepseekV4RendererTest(TestCase):
 
         self.assertEqual(rendered.rendered_prompt, expected)
 
-    def test_thinking_mode_kwarg_still_overrides_encoding_config(self):
+    def test_enabled_thinking_mode_maps_to_thinking_encoding_prompt(self):
         messages = [{"role": "user", "content": "Hello"}]
         request = ChatCompletionRequest(
             messages=messages,
-            chat_template_kwargs={"thinking_mode": "thinking"},
+            chat_template_kwargs={"thinking_mode": "enabled"},
         )
 
         rendered = self.renderer.render_chat(request)
@@ -321,6 +321,22 @@ class DeepseekV4RendererTest(TestCase):
             self.encoding,
             messages,
             thinking_mode="thinking",
+        )
+
+        self.assertEqual(rendered.rendered_prompt, expected)
+
+    def test_adaptive_thinking_uses_chat_encoding_prompt(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        request = ChatCompletionRequest(
+            messages=messages,
+            chat_template_kwargs={"thinking_mode": "adaptive"},
+        )
+
+        rendered = self.renderer.render_chat(request)
+        expected = _rtp_expected_prompt(
+            self.encoding,
+            messages,
+            thinking_mode="chat",
         )
 
         self.assertEqual(rendered.rendered_prompt, expected)
@@ -340,7 +356,7 @@ class DeepseekV4RendererTest(TestCase):
                 request = ChatCompletionRequest(
                     messages=messages,
                     reasoning_effort=effort,
-                    chat_template_kwargs={"thinking_mode": "thinking"},
+                    chat_template_kwargs={"thinking_mode": "enabled"},
                 )
                 rendered = self.renderer.render_chat(request)
                 expected = _rtp_expected_prompt(
@@ -356,7 +372,7 @@ class DeepseekV4RendererTest(TestCase):
         request = ChatCompletionRequest(
             messages=messages,
             chat_template_kwargs={
-                "thinking_mode": "thinking",
+                "thinking_mode": "enabled",
                 "reasoning_effort": "xhigh",
             },
         )
@@ -375,7 +391,7 @@ class DeepseekV4RendererTest(TestCase):
         request = ChatCompletionRequest(
             messages=[{"role": "user", "content": "Hello"}],
             reasoning_effort="minimum",
-            chat_template_kwargs={"thinking_mode": "thinking"},
+            chat_template_kwargs={"thinking_mode": "enabled"},
         )
 
         with self.assertRaisesRegex(
@@ -390,10 +406,10 @@ class DeepseekV4RendererTest(TestCase):
         request = ChatCompletionRequest(
             messages=messages,
             reasoning_effort="high",
-            chat_template_kwargs={"thinking_mode": "thinking"},
+            chat_template_kwargs={"thinking_mode": "enabled"},
             extra_configs=GenerateConfig(
                 chat_template_kwargs={
-                    "thinking_mode": "chat",
+                    "thinking_mode": "disabled",
                     "reasoning_effort": "max",
                 }
             ),
