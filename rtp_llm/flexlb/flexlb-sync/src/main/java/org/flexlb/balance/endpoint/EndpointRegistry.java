@@ -9,6 +9,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.util.Logger;
 import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -34,18 +35,22 @@ public class EndpointRegistry implements DiagnosticsProvider {
     private final InflightStore inflightStore;
     private final BatchSchedulerReporter reporter;
     private final BatchIdGenerator batchIdGenerator;
+    /** 影子门面（读取换权模式下 EP 记账与读点切 StateLedger；关态 DISABLED 短路）。 */
+    private final StateShadowBridge shadowBridge;
 
     public EndpointRegistry(ConfigService configService,
                             EngineGrpcClient grpcClient,
                             BatchDispatchExecutor dispatchExecutor,
                             InflightStore inflightStore,
                             BatchSchedulerReporter reporter,
-                            Environment environment) {
+                            Environment environment,
+                            StateShadowBridge shadowBridge) {
         this.configService = configService;
         this.grpcClient = grpcClient;
         this.dispatchExecutor = dispatchExecutor;
         this.inflightStore = inflightStore;
         this.reporter = reporter;
+        this.shadowBridge = shadowBridge;
         // Initialize Snowflake batch ID generator with master identity;
         // one shared instance for all prefill endpoints.
         this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort(environment));
@@ -233,13 +238,17 @@ public class EndpointRegistry implements DiagnosticsProvider {
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
+        // 读取换权门面仅注入 P/D 分离的 prefill 角色：PDFUSION 的引擎状态
+        // 报文不进影子账本（事件泵对非 P/D 分离角色短路），若注入门面会让
+        // P 条目绑定到永不推进的世代上（只能靠 janitor TTL 兑底清理）。
+        StateShadowBridge bridgeForRole = roleType == RoleType.PREFILL ? shadowBridge : null;
         return new PrefillEndpoint(status, config, grpcClient, dispatchExecutor,
-                batchIdGenerator, inflightStore::activeCount, reporter, inflightStore);
+                batchIdGenerator, inflightStore::activeCount, reporter, inflightStore, bridgeForRole);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
         prepareEndpointMetrics(RoleType.DECODE, status);
-        return new DecodeEndpoint(status, configService.loadBalanceConfig(), inflightStore);
+        return new DecodeEndpoint(status, configService.loadBalanceConfig(), inflightStore, shadowBridge);
     }
 
     private SimpleWorkerEndpoint createSimpleEndpoint(WorkerStatus status, RoleType roleType) {

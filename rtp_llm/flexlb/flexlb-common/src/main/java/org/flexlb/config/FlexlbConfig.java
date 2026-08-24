@@ -619,6 +619,40 @@ public class FlexlbConfig {
     private boolean flexlbStateV2SettleEnabled = false;
 
     /**
+     * FlexLB state v2 read authority switch (G4 — 读取换权): when enabled,
+     * scheduling read points and endpoint-level KV bookkeeping switch their
+     * authoritative data source from the legacy two-layer inflight maps to
+     * the StateLedger per-endpoint counters:
+     * <ul>
+     *   <li>DecodeEndpoint read views (total load / real KV used / real KV
+     *       available / layer counters / reporter metrics) read the ledger's
+     *       per-endpoint snapshot instead of {@code inflightRequests} +
+     *       {@code engineWork}; the hard-capacity gate and concurrency limit
+     *       therefore act on ledger numbers.</li>
+     *   <li>DecodeEndpoint.reserve / release become real bookkeeping on
+     * {@code ledger.decode()} (reserve/release single entry, generation
+     * bound); the legacy layer-1 map is no longer written in this mode.</li>
+     *   <li>PrefillEndpoint pending-request counting reads the ledger's
+     * per-endpoint prefill counters; the calibrate-time inflight counter
+     * bookkeeping stops writing (the counter has no readers left). The
+     * dispatch orchestration (batcher queue, prediction, batch commit) is
+     * untouched.</li>
+     * </ul>
+     *
+     * <p>Prerequisite: {@link #flexlbStateV2ShadowEnabled} and
+     * {@link #flexlbStateV2SettleEnabled} must both be on; startup fails fast
+     * otherwise (read authority requires the shadow ledger running AND
+     * settlement authority so that terminal accounting keeps a single exit).
+     * Client-visible routing behavior is unchanged; scheduling decisions may
+     * shift slightly because the ledger's accounting lifecycle (reserve →
+     * engine-confirmed → settle) differs at the boundaries from the legacy
+     * two-layer maps — that semantic handover is the point of this switch.
+     * Resolved once at startup (no runtime hot-toggle).
+     * Environment variable: FLEXLB_STATE_V2_READ_ENABLED.
+     */
+    private boolean flexlbStateV2ReadEnabled = false;
+
+    /**
      * Metrics report interval in milliseconds.
      * Controls the periodic reporting frequency for scheduler-level and
      * per-endpoint metrics via {@code @Scheduled} throttle.

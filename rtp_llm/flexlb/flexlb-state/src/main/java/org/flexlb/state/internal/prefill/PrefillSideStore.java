@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.LongAdder;
 import org.flexlb.state.GenerationTriple;
 import org.flexlb.state.InternalApi;
 import org.flexlb.state.PrefillCounterSnapshot;
+import org.flexlb.state.PrefillEndpointCounters;
 import org.flexlb.state.RegisterResult;
 import org.flexlb.state.SettleReason;
 import org.flexlb.state.TerminalOutcome;
@@ -230,6 +231,31 @@ public final class PrefillSideStore {
     /** 已登记端点集合快照（janitor 轮转游标用）。 */
     public Set<Integer> trackedEndpointIds() {
         return Set.copyOf(byEndpoint.keySet());
+    }
+
+    /**
+     * 端点级派生计数（读取换权阶段 G4 调度读数数据源）：按需对单端点名下
+     * 活跃条目聚合。条目在 onDispatched 绑定后进端点索引——排队/攒批窗口
+     * 由派发编排侧（batcher 队列深度）单独覆盖，此处不含。
+     */
+    public PrefillEndpointCounters endpointCounters(int endpointId) {
+        List<PrefillRequestState> entries = entriesByEndpoint(endpointId);
+        if (entries.isEmpty()) {
+            return PrefillEndpointCounters.empty();
+        }
+        long[] phases = new long[PrefillPhase.values().length];
+        int engineOwnedCount = 0;
+        for (PrefillRequestState e : entries) {
+            phases[e.phase().ordinal()]++;
+            if (e.engineOwned()) {
+                engineOwnedCount++;
+            }
+        }
+        List<Long> phaseCounts = new ArrayList<>(phases.length);
+        for (long v : phases) {
+            phaseCounts.add(v);
+        }
+        return new PrefillEndpointCounters(entries.size(), engineOwnedCount, phaseCounts);
     }
 
     /** 按批次聚类（BatchShadowView 数据源）。 */

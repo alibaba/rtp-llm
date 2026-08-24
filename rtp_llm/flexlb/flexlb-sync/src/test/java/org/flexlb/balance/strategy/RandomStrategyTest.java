@@ -51,7 +51,8 @@ class RandomStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         endpointRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
                 Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
-                Mockito.mock(BatchSchedulerReporter.class), null);
+                Mockito.mock(BatchSchedulerReporter.class), null,
+                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
         resourceMeasure = Mockito.mock(ResourceMeasure.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);

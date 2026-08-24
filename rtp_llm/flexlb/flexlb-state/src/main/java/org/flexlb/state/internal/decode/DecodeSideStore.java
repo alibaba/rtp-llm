@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import org.flexlb.state.DecodeCounterSnapshot;
+import org.flexlb.state.DecodeEndpointCounters;
 import org.flexlb.state.GenerationTriple;
 import org.flexlb.state.InternalApi;
 import org.flexlb.state.ReserveResult;
@@ -260,6 +261,45 @@ public final class DecodeSideStore {
     /** 已登记端点集合快照（janitor 轮转游标用）。 */
     public Set<Integer> trackedEndpointIds() {
         return Set.copyOf(byEndpoint.keySet());
+    }
+
+    /**
+     * 端点级派生计数（读取换权阶段 G4 调度读数数据源）：按需对单端点名下
+     * 活跃条目聚合（量级 = 每端点活跃条目数；索引自愈语义同
+     * {@link #entriesByEndpoint(int)}）。未确认口径（phase &lt; D_LOADING）
+     * 对应旧双层账本 layer-1 预占的期望 KV / prompt KV 双轨计数。
+     */
+    public DecodeEndpointCounters endpointCounters(int endpointId) {
+        List<DecodeRequestState> entries = entriesByEndpoint(endpointId);
+        if (entries.isEmpty()) {
+            return DecodeEndpointCounters.empty();
+        }
+        long[] phases = new long[DecodePhase.values().length];
+        int unconfirmedCount = 0;
+        long unconfirmedExpectedKv = 0L;
+        long unconfirmedSeqKv = 0L;
+        int engineOwnedCount = 0;
+        long kvReportedTotal = 0L;
+        int unconfirmedOrdinal = DecodePhase.D_LOADING.ordinal();
+        for (DecodeRequestState e : entries) {
+            phases[e.phase().ordinal()]++;
+            if (e.phase().ordinal() < unconfirmedOrdinal) {
+                unconfirmedCount++;
+                unconfirmedExpectedKv += e.reservedKv();
+                unconfirmedSeqKv += e.seqLen();
+            }
+            if (e.engineOwned()) {
+                engineOwnedCount++;
+            }
+            kvReportedTotal += e.kvTokensReported();
+        }
+        List<Long> phaseCounts = new ArrayList<>(phases.length);
+        for (long v : phases) {
+            phaseCounts.add(v);
+        }
+        return new DecodeEndpointCounters(entries.size(), unconfirmedCount,
+                unconfirmedExpectedKv, unconfirmedSeqKv, engineOwnedCount,
+                kvReportedTotal, phaseCounts);
     }
 
     public long size() {

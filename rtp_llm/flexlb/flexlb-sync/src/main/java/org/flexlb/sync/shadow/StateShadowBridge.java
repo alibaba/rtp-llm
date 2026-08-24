@@ -6,8 +6,10 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.state.DecodeEndpointCounters;
 import org.flexlb.state.GenerationTriple;
 import org.flexlb.state.LedgerJanitorConfig;
+import org.flexlb.state.PrefillEndpointCounters;
 import org.flexlb.state.RegisterResult;
 import org.flexlb.state.SettleReason;
 import org.flexlb.state.StateLedger;
@@ -62,6 +64,19 @@ import java.util.concurrent.TimeUnit;
  * {@link #onOldTerminalAuthority}）：旧回调链只负责客户端 future（客户端可见行为
  * 不变）；终态 metric 生产点迁移到 ledger settle 出口（每请求恰好一次）。开关关时
  * 一切走 {@link #onOldTerminal} 影子语义（零行为变化）。
+ *
+ * <h2>读取换权（G4 — 读取换权，flexlbStateV2ReadEnabled）</h2>
+ * 开启时（前置：影子 + 结算换权均开，启动 parity 拒绝链 read ⇒ settle ⇒ shadow）：
+ * <ul>
+ *   <li>DecodeEndpoint 的 reserve/release 真实记账切到 {@link #decodeReserveAuthority}
+ *       / {@link #decodeReleaseAuthority}（ledger.decode() 单入账；旧 layer-1 map 停写）；</li>
+ *   <li>调度读点（总负载 / 真实 KV 用量与可用量 / 容量 gate / reporter）切
+ *       {@link #decodeEndpointCounters} / {@link #prefillEndpointCounters}（per-EP
+ *       按需聚合，调用方在引擎状态 tick 时缓存刷新）；</li>
+ *   <li>P 侧条目在派发提交时经 {@link #onPrefillDispatched} 绑定端点世代——
+ *       补齐 M3 遗留的绑定缺口（原 P 条目恒 UNBOUND，引擎事件全被世代屏障拒绝），
+ *       该挂点对影子/结算模式同样生效。</li>
+ * </ul>
  */
 public final class StateShadowBridge {
 
@@ -84,6 +99,11 @@ public final class StateShadowBridge {
     /** 结算换权开关（创建时定；仅 enabled=true 时可真）。 */
     private final boolean settleAuthority;
 
+    // ---- G4（读取换权）----
+
+    /** 读取换权开关（创建时定；仅 enabled && settleAuthority 时可真）。 */
+    private final boolean readAuthority;
+
     /** 终态 metric 统一出口 helper（与 BATCH 调度器同 path tag；monitor null 时 NullSafe）。 */
     private final FlexlbMetricHelper terminalMetricHelper;
 
@@ -102,6 +122,7 @@ public final class StateShadowBridge {
         this.janitor = null;
         this.janitorScheduler = null;
         this.settleAuthority = false;
+        this.readAuthority = false;
         this.terminalMetricHelper = null;
         this.pendingTerminalMetrics = null;
     }
@@ -112,6 +133,7 @@ public final class StateShadowBridge {
                               LedgerJanitor janitor,
                               ScheduledExecutorService janitorScheduler,
                               boolean settleAuthority,
+                              boolean readAuthority,
                               FlexlbMetricHelper terminalMetricHelper) {
         this.enabled = true;
         this.ledger = Objects.requireNonNull(ledger);
@@ -120,6 +142,7 @@ public final class StateShadowBridge {
         this.janitor = janitor;
         this.janitorScheduler = janitorScheduler;
         this.settleAuthority = settleAuthority;
+        this.readAuthority = readAuthority;
         this.terminalMetricHelper = terminalMetricHelper;
         this.pendingTerminalMetrics = new ConcurrentHashMap<>();
     }
@@ -144,6 +167,14 @@ public final class StateShadowBridge {
             throw new IllegalStateException("flexlbStateV2SettleEnabled requires flexlbStateV2ShadowEnabled "
                     + "(settlement authority needs the shadow ledger running): "
                     + "enable FLEXLB_STATE_V2_SHADOW_ENABLED first");
+        }
+        // G4 parity 前置：读取换权依赖结算换权的终态单出口（否则 KV 预占的
+        // 归还路径分裂在两套账本上，读数与记账不可对齐）——开 read 不开 settle 时拒启。
+        boolean readAuthority = config.isFlexlbStateV2ReadEnabled();
+        if (readAuthority && !settleAuthority) {
+            throw new IllegalStateException("flexlbStateV2ReadEnabled requires flexlbStateV2SettleEnabled "
+                    + "(read authority needs settlement authority as the single terminal exit): "
+                    + "enable FLEXLB_STATE_V2_SETTLE_ENABLED first");
         }
         if (!config.isFlexlbStateV2ShadowEnabled()) {
             logger.info("[state-shadow] flexlb-state v2 shadow mode disabled (flexlbStateV2ShadowEnabled=false)");
@@ -183,7 +214,7 @@ public final class StateShadowBridge {
         terminalMetricHelper.register();
 
         StateShadowBridge bridge = new StateShadowBridge(ledger, translator, diff, janitor, scheduler,
-                settleAuthority, terminalMetricHelper);
+                settleAuthority, readAuthority, terminalMetricHelper);
         // janitor 胜者结算 → diff 对账 + 挂起 metric 消费（与引擎 finished 终局同语义）。
         // 首个维护 tick 至少在 intervalMs 之后，listener 同步挂载在前——无竞态。
         janitor.setSettleListener(bridge::onJanitorSettled);
@@ -197,7 +228,9 @@ public final class StateShadowBridge {
                 + " ttlMs=" + config.getFlexlbStateV2TtlMs()
                 + " hardCapMs=" + config.getFlexlbStateV2HardCapMs()
                 + "; settleAuthority=" + settleAuthority
-                + " (G3 terminal settlement convergence " + (settleAuthority ? "ON" : "off") + ")");
+                + " (G3 terminal settlement convergence " + (settleAuthority ? "ON" : "off") + ")"
+                + "; readAuthority=" + readAuthority
+                + " (G4 scheduling read handover " + (readAuthority ? "ON" : "off") + ")");
         return bridge;
     }
 
@@ -328,6 +361,112 @@ public final class StateShadowBridge {
     /** 结算换权开关（关态/未启用时 false——旧路径走 {@link #onOldTerminal}）。 */
     public boolean isSettleAuthority() {
         return enabled && settleAuthority;
+    }
+
+    // ==================== G4：读取换权（调度读点与 EP 记账切门面） ====================
+
+    /** 读取换权开关（关态/未启用时 false——EP 读点与记账走旧双层 map）。 */
+    public boolean isReadAuthority() {
+        return enabled && settleAuthority && readAuthority;
+    }
+
+    /**
+     * D 侧预占权威记账（读取换权模式下 DecodeEndpoint.reserve 的真实入账）：
+     * 绑定世代后经 ledger.decode().reserve 单入账（判重拒绝保持首账——重复
+     * reserve 不覆盖既有条目）。异常吞入 shadow.error（读数与记账同为 ledger，
+     * 不回写旧 map——避免双源分裂）。
+     *
+     * @param ipPort 端点 ip:port（与事件泵同键——translator 惰性注册世代）
+     */
+    public void decodeReserveAuthority(long requestId, long seqLen, long expectedKv, String ipPort) {
+        if (!isReadAuthority()) {
+            return;
+        }
+        try {
+            WorkerStatusObservationTranslator.GenerationTripleLike binding =
+                    translator.bindingOf(RoleType.DECODE, ipPort);
+            if (binding == null) {
+                logger.warn("[state-shadow] decode reserve authority: endpoint {} unresolved, requestId={} dropped",
+                        ipPort, requestId);
+                return;
+            }
+            ledger.decode().reserve(requestId, seqLen, expectedKv,
+                    new GenerationTriple((int) binding.endpointId(), binding.generation(), -1L));
+        } catch (Throwable t) {
+            diff.onError(t);
+        }
+    }
+
+    /**
+     * D 侧预占释放权威记账（读取换权模式下 DecodeEndpoint.release 的真实入账）：
+     * 撤预占账并移除条目（未终态主动放弃；终局归 settle 单出口）。幂等。
+     */
+    public void decodeReleaseAuthority(long requestId) {
+        if (!isReadAuthority()) {
+            return;
+        }
+        try {
+            ledger.decode().release(requestId);
+        } catch (Throwable t) {
+            diff.onError(t);
+        }
+    }
+
+    /**
+     * D 侧端点级计数（读取换权模式下 DecodeEndpoint 读点的数据源）：
+     * per-EP 按需聚合（含未确认预占双轨 KV 口径）。异常时返回全零视图
+     * （读数退化方向为低估——不阻断调度）。
+     */
+    public DecodeEndpointCounters decodeEndpointCounters(int endpointId) {
+        if (!isReadAuthority()) {
+            return DecodeEndpointCounters.empty();
+        }
+        try {
+            return ledger.decode().endpointCounters(endpointId);
+        } catch (Throwable t) {
+            diff.onError(t);
+            return DecodeEndpointCounters.empty();
+        }
+    }
+
+    /**
+     * P 侧端点级计数（读取换权模式下 PrefillEndpoint pending 读点的数据源）：
+     * per-EP 按需聚合（仅已派发绑定条目；排队/攒批窗口由 batcher 队列覆盖）。
+     */
+    public PrefillEndpointCounters prefillEndpointCounters(int endpointId) {
+        if (!isReadAuthority()) {
+            return PrefillEndpointCounters.empty();
+        }
+        try {
+            return ledger.prefill().endpointCounters(endpointId);
+        } catch (Throwable t) {
+            diff.onError(t);
+            return PrefillEndpointCounters.empty();
+        }
+    }
+
+    /**
+     * P 侧条目派发提交挂点（batch 提交/单发提交时）：onDispatching（批次外键）
+     * + onDispatched（绑定端点世代）。对影子/结算/读取模式均生效——补齐
+     * P 条目绑定缺口（原恒 UNBOUND，引擎事件全被世代屏障拒绝，只能依赖
+     * D 侧因果闭包/终局清理收敛）。幂等（已在 DISPATCHED 及以上静默）。
+     */
+    public void onPrefillDispatched(long requestId, long batchId, String ipPort) {
+        if (!enabled) {
+            return;
+        }
+        try {
+            WorkerStatusObservationTranslator.GenerationTripleLike binding =
+                    translator.bindingOf(RoleType.PREFILL, ipPort);
+            if (binding == null) {
+                return;
+            }
+            ledger.prefill().onDispatching(requestId, batchId);
+            ledger.prefill().onDispatched(requestId,
+                    new GenerationTriple((int) binding.endpointId(), binding.generation(), -1L));
+        } catch (Throwable t) {
+            diff.onError(t);
+        }
     }
 
     /** 挂起终态 metric 表当前大小（测试观测钩子）。 */

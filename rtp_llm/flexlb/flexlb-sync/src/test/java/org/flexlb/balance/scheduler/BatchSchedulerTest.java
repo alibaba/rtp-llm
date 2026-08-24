@@ -84,7 +84,8 @@ class BatchSchedulerTest {
         dispatchExecutor = new BatchDispatchExecutor(configService, null);
         inflightStore = new InflightStore(reporter, configService);
         endpointRegistry = new EndpointRegistry(configService, grpcClient, dispatchExecutor,
-                inflightStore, reporter, null);
+                inflightStore, reporter, null,
+                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
         scheduler = new BatchScheduler(configService, router,
                 endpointRegistry, reporter, inflightStore,
                 new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH));

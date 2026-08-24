@@ -152,7 +152,8 @@ class EngineSyncRunnerTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         EndpointRegistry registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
                 Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
-                Mockito.mock(BatchSchedulerReporter.class), null);
+                Mockito.mock(BatchSchedulerReporter.class), null,
+                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
         String ipPort = "127.0.0.1:8080";
         WorkerStatus status = new WorkerStatus();

@@ -126,7 +126,8 @@ class CostBasedPrefillRoutingPerformanceTest {
         BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class, withSettings().stubOnly());
         endpointRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
                 Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
-                reporter, null);
+                reporter, null,
+                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
 
         for (int index = 0; index < ENGINE_COUNT; index++) {
             int port = 61_000 + index;

@@ -59,7 +59,8 @@ class CostBasedDecodeStrategyTest {
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
         EndpointRegistry registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
                 Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
-                Mockito.mock(BatchSchedulerReporter.class), null);
+                Mockito.mock(BatchSchedulerReporter.class), null,
+                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
             ws.setGrpcPort(9090);
@@ -75,7 +76,8 @@ class CostBasedDecodeStrategyTest {
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
                 Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
-                Mockito.mock(BatchSchedulerReporter.class), null);
+                Mockito.mock(BatchSchedulerReporter.class), null,
+                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService, emptyRegistry);

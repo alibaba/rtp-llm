@@ -134,4 +134,66 @@ class StateLedgerCounterTest {
         assertEquals(5L, s.decodeTombstones());
         assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
     }
+
+    /**
+     * per-EP 派生计数（读取换权阶段 G4 调度读数数据源）：D 侧按端点聚合活跃条目，
+     * 未确认双轨口径（unconfirmed = phase < D_LOADING 的影子预占）；KV_ALLOCATED
+     * 确认后逐条撤出 unconfirmed、引擎事实 KV 接管；终局后计数归零。
+     */
+    @Test
+    void decodeEndpointCountersTrackUnconfirmedDualTrackPerEndpoint() {
+        StateLedger ledger = new StateLedger();
+        long dGen = ledger.newGeneration(D_EP0);
+        TestEndpoints.Endpoint dEp = TestEndpoints.ep(2L, StateRole.DECODE, dGen);
+        GenerationTriple dBinding = new GenerationTriple(2, dGen, -1L);
+
+        // 51：RESERVED（seqLen=100, expectedKv=200——影子预占在账）
+        // 52：DISPATCHED → D_LOADING 并 KV 确认（预占撤出、引擎事实 KV=1024 接管）
+        assertEquals(ReserveResult.OK, ledger.decode().reserve(51L, 100L, 200L, dBinding));
+        assertEquals(ReserveResult.OK, ledger.decode().reserve(52L, 300L, 400L, dBinding));
+        assertTrue(ledger.decode().onDispatched(52L, dBinding));
+        ledger.observe(TestEndpoints.runningOnly(dEp, 1L, 1_000L,
+                TestEndpoints.running(52L, StateRole.DECODE, EnginePhase.KV_ALLOCATED, -1L, 1024L, 1L)));
+
+        DecodeEndpointCounters c = ledger.decode().endpointCounters(2);
+        assertEquals(2, c.activeTotal(), "端点名下两活跃条目");
+        assertEquals(1, c.unconfirmedCount(), "仅 RESERVED 条目计 unconfirmed（52 已 D_LOADING）");
+        assertEquals(200L, c.unconfirmedExpectedKv(), "unconfirmed Σ reservedKv（仅 51）");
+        assertEquals(100L, c.unconfirmedSeqKv(), "unconfirmed Σ seqLen（仅 51）");
+        assertEquals(1024L, c.kvTokensReportedTotal(), "引擎事实 KV 合计（52 确认接管）");
+        assertEquals(1, c.engineOwnedCount(), "52 引擎已观察");
+        assertEquals(1L, c.phaseCounts().get(0)); // 51 RESERVED
+        assertEquals(1L, c.phaseCounts().get(2)); // 52 D_LOADING
+
+        // 异端点隔离：不存在条目的端点返回全零视图
+        assertEquals(0, ledger.decode().endpointCounters(999).activeTotal());
+
+        // 终局后归零
+        ledger.observe(TestEndpoints.finishedOnly(dEp, 2L, 1_100L,
+                TestEndpoints.finished(51L, StateRole.DECODE, 0, 1_100L, 2L)));
+        ledger.observe(TestEndpoints.finishedOnly(dEp, 3L, 1_200L,
+                TestEndpoints.finished(52L, StateRole.DECODE, 0, 1_200L, 3L)));
+        assertEquals(0, ledger.decode().endpointCounters(2).activeTotal(), "终局后 per-EP 计数归零");
+    }
+
+    /** P 侧 per-EP 派生计数：仅已派发（onDispatched 绑定世代）条目进入端点索引。 */
+    @Test
+    void prefillEndpointCountersOnlyCoverDispatchedEntries() {
+        StateLedger ledger = new StateLedger();
+        long pGen = ledger.newGeneration(P_EP0);
+        GenerationTriple pBinding = new GenerationTriple(1, pGen, -1L);
+
+        assertEquals(RegisterResult.OK, ledger.prefill().register(61L, -1L));
+        ledger.prefill().onQueued(61L);
+        assertEquals(0, ledger.prefill().endpointCounters(1).activeTotal(),
+                "排队窗口条目（UNBOUND）不在端点索引");
+
+        ledger.prefill().onDispatching(61L, -1L);
+        assertTrue(ledger.prefill().onDispatched(61L, pBinding));
+
+        PrefillEndpointCounters pc = ledger.prefill().endpointCounters(1);
+        assertEquals(1, pc.activeTotal(), "派发后进入端点索引");
+        assertEquals(1L, pc.phaseCounts().get(4)); // DISPATCHED
+        assertEquals(0, pc.engineOwnedCount());
+    }
 }

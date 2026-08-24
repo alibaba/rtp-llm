@@ -24,6 +24,8 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.state.PrefillEndpointCounters;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -85,6 +87,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Monotonic calibrate round counter driving stale engineWork eviction. */
     private final AtomicLong calibrateRound = new AtomicLong(0);
 
+    // ---- G4 读取换权（pending 读点切 StateLedger per-EP 视图） ----
+
+    /** 影子门面（装配点注入；测试可传 null——完全退回旧双层 map 行为）。 */
+    private final StateShadowBridge shadowBridge;
+
+    /** 端点稳定 ID（ipPort 哈希——与影子 translator 的 endpointId 同映射）。 */
+    private final int endpointId;
+
+    /** per-EP 账本计数缓存：calibrate tick 刷新，读点零锁 volatile 读。 */
+    private volatile PrefillEndpointCounters ledgerCounters;
+
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            EngineGrpcClient grpcClient,
                            BatchDispatchExecutor dispatchExecutor,
@@ -92,6 +105,23 @@ public class PrefillEndpoint extends WorkerEndpoint {
                            IntSupplier globalActiveCount,
                            BatchSchedulerReporter reporter,
                            InflightStore inflightStore) {
+        this(status, config, grpcClient, dispatchExecutor, batchIdGenerator,
+                globalActiveCount, reporter, inflightStore, null);
+    }
+
+    /**
+     * 读取换权装配构造：注入影子门面后（读取换权开启时）pending 计数读点切
+     * StateLedger per-EP 视图、calibrate 计账段停写；门面为 null / 开关关时
+     * 保持旧双层 map 行为（零行为变化）。派发编排（batcher / 预测 / 批提交）不变。
+     */
+    public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
+                           EngineGrpcClient grpcClient,
+                           BatchDispatchExecutor dispatchExecutor,
+                           BatchIdGenerator batchIdGenerator,
+                           IntSupplier globalActiveCount,
+                           BatchSchedulerReporter reporter,
+                           InflightStore inflightStore,
+                           StateShadowBridge shadowBridge) {
         super(status);
         this.config = config;
         this.grpcClient = grpcClient;
@@ -100,13 +130,31 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.globalActiveCount = globalActiveCount;
         this.reporter = reporter;
         this.inflightStore = inflightStore;
+        this.shadowBridge = shadowBridge;
+        this.endpointId = ipPort() != null ? ipPort().hashCode() : 0;
         this.predictor = createPredictor(config);
         this.batcher = new WorkerBatcher(status.getIpPort(), this, config, reporter);
         this.inflightEvictor = new InflightEvictor<>(inflightEntries,
-                entry -> inflightRequestCount.addAndGet(-entry.requestCount()));
+                entry -> trackInflight(-entry.requestCount()));
         this.engineWorkEvictor = new InflightEvictor<>(engineWork,
-                task -> inflightRequestCount.addAndGet(-task.entry().requestCount()));
+                task -> trackInflight(-task.entry().requestCount()));
         this.batcher.start();
+    }
+
+    /** 读取换权模式判定（门面 null / 开关关时 false——一切走旧路径）。 */
+    private boolean readAuthority() {
+        return shadowBridge != null && shadowBridge.isReadAuthority();
+    }
+
+    /**
+     * 双层 inflight 计数记账（读取换权模式下停写：读者已切账本 per-EP 视图，
+     * 计数器不再由 calibrate / 生命周期路径维护）。
+     */
+    private void trackInflight(int delta) {
+        if (readAuthority()) {
+            return;
+        }
+        inflightRequestCount.addAndGet(delta);
     }
 
     public WorkerBatcher getBatcher() {
@@ -196,6 +244,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
         putInflightEntry(batchId,
                 new PrefillInflightBatch(batchId, predictMs, requests, System.currentTimeMillis()));
+        // 影子/读取换权：P 条目派发提交挂点——onDispatching（批次外键）
+        // + onDispatched（绑定端点世代）。开关关时门面内部短路（零行为变化）。
+        if (shadowBridge != null && shadowBridge.isEnabled()) {
+            for (BatchItem item : requests) {
+                shadowBridge.onPrefillDispatched(item.requestId(), batchId, ipPort());
+            }
+        }
     }
 
     /**
@@ -206,6 +261,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public void commitRequest(long requestId, long predictMs) {
         putInflightEntry(requestId,
                 new PrefillInflightRequest(requestId, predictMs, System.currentTimeMillis()));
+        // 同上：散请求提交挂点（batchId=-1）。
+        if (shadowBridge != null && shadowBridge.isEnabled()) {
+            shadowBridge.onPrefillDispatched(requestId, -1L, ipPort());
+        }
     }
 
     private void putInflightEntry(long key, PrefillInflightEntry entry) {
@@ -213,20 +272,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (prev != null) {
             // key already exists — subtract the old request count before overwriting,
             // otherwise the old value is silently lost and the counter stays inflated.
-            inflightRequestCount.addAndGet(-prev.requestCount());
+            trackInflight(-prev.requestCount());
         }
-        inflightRequestCount.addAndGet(entry.requestCount());
+        trackInflight(entry.requestCount());
     }
 
     /** Remove the tracked entry for {@code batchId} from both inflight layers. */
     public void releaseBatch(long batchId) {
         EngineTask<PrefillInflightEntry> task = engineWork.remove(batchId);
         if (task != null) {
-            inflightRequestCount.addAndGet(-task.entry().requestCount());
+            trackInflight(-task.entry().requestCount());
         }
         PrefillInflightEntry entry = inflightEntries.remove(batchId);
         if (entry != null) {
-            inflightRequestCount.addAndGet(-entry.requestCount());
+            trackInflight(-entry.requestCount());
         }
     }
 
@@ -275,7 +334,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 if (!droppedRequestIds.contains(request.requestId())) {
                     yield request;
                 }
-                inflightRequestCount.addAndGet(-1);
+                trackInflight(-1);
                 yield null;
             }
             case PrefillInflightBatch batch -> {
@@ -285,7 +344,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 if (survivors.size() == batch.requestCount()) {
                     yield batch;
                 }
-                inflightRequestCount.addAndGet(-(batch.requestCount() - survivors.size()));
+                trackInflight(-(batch.requestCount() - survivors.size()));
                 if (survivors.isEmpty()) {
                     yield null;
                 }
@@ -643,6 +702,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * </ol>
      */
     private void calibrate(Map<String, TaskInfo> finishedTaskInfo, Map<String, TaskInfo> runningTaskInfo) {
+        if (readAuthority()) {
+            // G4 读取换权：per-EP 账本计数缓存随引擎状态 tick 刷新
+            //（旧 inflight 计数器在此模式下停写）。
+            this.ledgerCounters = shadowBridge.prefillEndpointCounters(endpointId);
+        }
         long statusMs = System.currentTimeMillis();
         long round = calibrateRound.incrementAndGet();
 
@@ -724,11 +788,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
             // migration window can only over-count (rejection-biased).
             EngineTask<PrefillInflightEntry> accepted = new EngineTask<>(entry, phase, round, statusMs);
             if (engineWork.putIfAbsent(key, accepted) == null) {
-                inflightRequestCount.addAndGet(entry.requestCount());
+                trackInflight(entry.requestCount());
             }
             PrefillInflightEntry removed = inflightEntries.remove(key);
             if (removed != null) {
-                inflightRequestCount.addAndGet(-removed.requestCount());
+                trackInflight(-removed.requestCount());
             }
         }
     }
@@ -799,7 +863,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 return;
             }
             if (engineWork.remove(requestId, accepted)) {
-                inflightRequestCount.addAndGet(-accepted.entry().requestCount());
+                trackInflight(-accepted.entry().requestCount());
             }
             return;
         }
@@ -816,7 +880,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             return;
         }
         if (inflightEntries.remove(requestId, entry)) {
-            inflightRequestCount.addAndGet(-entry.requestCount());
+            trackInflight(-entry.requestCount());
         }
     }
 
@@ -891,7 +955,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 continue;
             }
             if (engineWork.remove(entry.getKey(), task)) {
-                inflightRequestCount.addAndGet(-task.entry().requestCount());
+                trackInflight(-task.entry().requestCount());
                 logger.warn("Prefill calibrate: engineWork key={} phase={} unseen for {} rounds, evicting as stale",
                         entry.getKey(), task.phase(), round - task.lastSeenRound());
                 // A3: STALE eviction now drives the bound InflightItem to a
@@ -975,11 +1039,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Request-level pending count: total requests the engine will face.
-     * Includes master-tracked inflight requests (both layers) + batcher
-     * queue + engine-accepted tasks in the WAITING phase (queued on the
-     * engine side but not yet running).
+     * 读取换权模式下读账本 per-EP 已派发未终局条目数（含引擎侧排队窗口；
+     * 排队/攒批窗口仍由 batcher 队列深度覆盖）。
      */
     public long prefillPendingRequestCount() {
+        if (readAuthority()) {
+            PrefillEndpointCounters c = ledgerCounters;
+            return (c != null ? c.activeTotal() : 0) + batcher.queueSize();
+        }
         return inflightRequestCount.get() + batcher.queueSize()
                 + countEngineWorkInPhase(EngineTaskPhase.WAITING);
     }

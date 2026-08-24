@@ -8,6 +8,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.state.DecodeEndpointCounters;
 import org.flexlb.state.LedgerJanitorConfig;
 import org.flexlb.state.TerminalState;
 import org.junit.jupiter.api.Test;
@@ -453,6 +454,146 @@ class StateShadowBridgeTest {
         bridge.observeWorkerStatus(finishedResponse(40L), RoleType.DECODE, "10.0.0.13:9000");
 
         verify(monitor).report(eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
+    }
+
+    // ==================== G4：读取换权开关矩阵（调度读点与 EP 记账切门面）====================
+
+    /** G4 开 ⇒ settle 开是硬前置：read 开而 settle 关必须拒启（fail-fast）。 */
+    @Test
+    void failFastWhenReadAuthorityWithoutSettle() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(true);
+        config.setFlexlbStateV2ReadEnabled(true);
+
+        assertThrows(IllegalStateException.class,
+                () -> StateShadowBridge.create(config, null, false),
+                "读取换权依赖结算单出口——read 开而 settle 关必须 fail-fast 拒启");
+    }
+
+    /** 开关矩阵：read 开（shadow+settle 开）= 读权威；read 关 / settle 关 / DISABLED = 旧读点。 */
+    @Test
+    void readAuthorityMatrix() {
+        FlexlbConfig readOff = new FlexlbConfig();
+        readOff.setFlexlbStateV2ShadowEnabled(true);
+        readOff.setFlexlbStateV2SettleEnabled(true);
+        assertFalse(StateShadowBridge.create(readOff, null, false).isReadAuthority(),
+                "read 关（settle 开）不得进入读权威");
+        assertFalse(authorityBridge().isReadAuthority(), "settle 权威桥未开 read 时非读权威");
+        assertFalse(StateShadowBridge.DISABLED.isReadAuthority(), "DISABLED 恒非读权威");
+        assertTrue(readAuthorityBridge().isReadAuthority(), "三开 = 读权威");
+    }
+
+    /** D 侧权威预占入账 + per-EP 计数读数（读取换权的调度读点数据源）。 */
+    @Test
+    void decodeReserveAuthorityFeedsEndpointCounters() {
+        StateShadowBridge bridge = readAuthorityBridge();
+        String ipPort = "10.0.0.21:9000";
+        int endpointId = ipPort.hashCode();
+
+        bridge.decodeReserveAuthority(51L, 100L, 200L, ipPort);
+
+        assertTrue(bridge.ledger().decode().get(51L).isPresent(), "权威预占应入账 ledger");
+        DecodeEndpointCounters counters = bridge.decodeEndpointCounters(endpointId);
+        assertEquals(1, counters.activeTotal(), "per-EP 计数应含该预占条目");
+        assertEquals(1, counters.unconfirmedCount(), "RESERVED 相位条目计 unconfirmed");
+        assertEquals(200L, counters.unconfirmedExpectedKv(), "未确认预占 expected KV 口径");
+        assertEquals(100L, counters.unconfirmedSeqKv(), "未确认预占 seqLen 口径");
+        assertEquals(0, counters.engineOwnedCount(), "无引擎观察时非 engineOwned");
+    }
+
+    /** 权威释放撤账：release 后条目移除、per-EP 计数归零（幂等）。 */
+    @Test
+    void decodeReleaseAuthorityDropsEntryAndCounters() {
+        StateShadowBridge bridge = readAuthorityBridge();
+        String ipPort = "10.0.0.22:9000";
+        int endpointId = ipPort.hashCode();
+        bridge.decodeReserveAuthority(52L, 100L, 200L, ipPort);
+        assertEquals(1, bridge.decodeEndpointCounters(endpointId).activeTotal());
+
+        bridge.decodeReleaseAuthority(52L);
+
+        assertTrue(bridge.ledger().decode().get(52L).isEmpty(), "权威释放应移除条目");
+        assertEquals(0, bridge.decodeEndpointCounters(endpointId).activeTotal(), "释放后 per-EP 计数归零");
+        bridge.decodeReleaseAuthority(52L); // 幂等：重复释放不抛
+    }
+
+    /** read 关时记账/计数权威入口零执行（读点走旧双层 map，返回全零视图）。 */
+    @Test
+    void readAuthorityEntryPointsNoOpWhenReadDisabled() {
+        StateShadowBridge bridge = authorityBridge(); // shadow+settle 开、read 关
+        String ipPort = "10.0.0.23:9000";
+
+        bridge.decodeReserveAuthority(53L, 100L, 200L, ipPort);
+        bridge.decodeReleaseAuthority(53L);
+
+        assertTrue(bridge.ledger().decode().get(53L).isEmpty(), "read 关时权威预占零执行");
+        assertEquals(0, bridge.decodeEndpointCounters(ipPort.hashCode()).activeTotal(),
+                "read 关时计数恒全零视图");
+        assertEquals(0, bridge.prefillEndpointCounters(ipPort.hashCode()).activeTotal(),
+                "read 关时 P 侧计数恒全零视图");
+    }
+
+    /**
+     * P 条目派发绑定挂点：dispatch 后条目绑定端点世代，引擎事件可推进相位；
+     * 未绑定条目恒被世代屏障拒绝（对照证明挂点补齐了 M3 遗留的绑定缺口）。
+     */
+    @Test
+    void prefillDispatchBindsEndpointGenerationForEngineEvents() {
+        StateShadowBridge bridge = enabledBridge();
+        String ipPort = "10.0.0.24:9000";
+
+        // 对照：未 dispatch 的条目（UNBOUND）引擎事件被世代屏障拒绝
+        bridge.onPrefillSubmit(55L);
+        bridge.observeWorkerStatus(prefillRunningResponse(55L, 2L), RoleType.PREFILL, ipPort);
+        assertEquals(2, bridge.ledger().prefill().get(55L).orElseThrow().phaseOrdinal(),
+                "UNBOUND 条目引擎事件被世代屏障拒绝——相位停留在 QUEUED");
+
+        // 主验证：dispatch 挂点绑定后引擎事件推进相位
+        bridge.onPrefillSubmit(54L);
+        bridge.onPrefillDispatched(54L, 900L, ipPort);
+        assertEquals(4, bridge.ledger().prefill().get(54L).orElseThrow().phaseOrdinal(),
+                "dispatch 挂点应推进到 DISPATCHED 并绑定世代");
+
+        bridge.observeWorkerStatus(prefillRunningResponse(54L, 3L), RoleType.PREFILL, ipPort);
+        assertTrue(bridge.ledger().prefill().get(54L).orElseThrow().phaseOrdinal() >= 5,
+                "绑定后引擎事件应推进相位（P_RECEIVED 及以上）");
+    }
+
+    /** P 侧 per-EP 计数：仅已派发条目进入端点索引（排队窗口由 batcher 队列覆盖）。 */
+    @Test
+    void prefillEndpointCountersReflectDispatchedEntries() {
+        StateShadowBridge bridge = readAuthorityBridge();
+        String ipPort = "10.0.0.25:9000";
+        bridge.onPrefillSubmit(56L);
+
+        assertEquals(0, bridge.prefillEndpointCounters(ipPort.hashCode()).activeTotal(),
+                "未派发条目不在端点索引（排队/攒批窗口由 batcher 覆盖）");
+
+        bridge.onPrefillDispatched(56L, -1L, ipPort);
+
+        assertEquals(1, bridge.prefillEndpointCounters(ipPort.hashCode()).activeTotal(),
+                "派发后条目进入端点索引");
+    }
+
+    private static StateShadowBridge readAuthorityBridge() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(true);
+        config.setFlexlbStateV2SettleEnabled(true);
+        config.setFlexlbStateV2ReadEnabled(true);
+        return StateShadowBridge.create(config, null, false);
+    }
+
+    /** P 侧 running 报文（单请求，phase 未报 → PENDING 保守倒推；完整明细）。 */
+    private static WorkerStatusResponse prefillRunningResponse(long requestId, long statusVersion) {
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(requestId);
+        running.setBatchId(-1L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setStatusVersion(statusVersion);
+        response.setRole(RoleType.PREFILL);
+        response.setRunningDetailCount(1L);
+        response.setRunningTaskInfo(Map.of(String.valueOf(requestId), running));
+        return response;
     }
 
     private static StateShadowBridge authorityBridge() {

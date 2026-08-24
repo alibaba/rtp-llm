@@ -594,6 +594,11 @@ public final class StateLedger {
         }
 
         @Override
+        public PrefillEndpointCounters endpointCounters(int endpointId) {
+            return pStore.endpointCounters(endpointId);
+        }
+
+        @Override
         public void refreshSnapshot() {
             pStore.refreshSnapshot();
         }
@@ -658,6 +663,11 @@ public final class StateLedger {
         @Override
         public DecodeCounterSnapshot snapshot() {
             return dStore.snapshot();
+        }
+
+        @Override
+        public DecodeEndpointCounters endpointCounters(int endpointId) {
+            return dStore.endpointCounters(endpointId);
         }
 
         @Override

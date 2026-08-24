@@ -32,6 +32,12 @@ public interface DecodeSide {
     /** 已发布派生快照（零锁 volatile 读）。 */
     DecodeCounterSnapshot snapshot();
 
+    /**
+     * 端点级派生计数（读取换权阶段 G4 调度读数数据源）：按需聚合该端点名下
+     * 活跃条目（含未确认预占双轨 KV 口径）。无条目时返回全零视图。
+     */
+    DecodeEndpointCounters endpointCounters(int endpointId);
+
     /** 强制重算并发布快照。 */
     void refreshSnapshot();
 

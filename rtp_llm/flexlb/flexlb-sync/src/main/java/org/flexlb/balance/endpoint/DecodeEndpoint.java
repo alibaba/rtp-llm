@@ -13,6 +13,8 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.state.DecodeEndpointCounters;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,13 +58,39 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final InflightStore inflightStore;
     private final FlexlbConfig config;
 
+    // ---- G4 读取换权（调度读点与 KV 记账切 StateLedger per-EP 视图） ----
+
+    /** 影子门面（装配点注入；测试可传 null——完全退回旧双层 map 行为）。 */
+    private final StateShadowBridge shadowBridge;
+
+    /** 端点稳定 ID（ipPort 哈希——与影子 translator 的 endpointId 同映射）。 */
+    private final int endpointId;
+
+    /**
+     * per-EP 账本计数缓存：calibrate tick（引擎状态报文）刷新，读点零锁
+     * volatile 读——策略 select 热路径不触发按需聚合。关态恒 null。
+     */
+    private volatile DecodeEndpointCounters ledgerCounters;
+
     /** Monotonic calibrate round counter driving stale engineWork eviction. */
     private final AtomicLong calibrateRound = new AtomicLong(0);
 
     public DecodeEndpoint(WorkerStatus status, FlexlbConfig config, InflightStore inflightStore) {
+        this(status, config, inflightStore, null);
+    }
+
+    /**
+     * 读取换权装配构造：注入影子门面后（读取换权开启时）KV 预占记账与
+     * 全部调度读点切 StateLedger per-EP 视图；门面为 null / 开关关时保持
+     * 旧双层 map 行为（零行为变化）。
+     */
+    public DecodeEndpoint(WorkerStatus status, FlexlbConfig config, InflightStore inflightStore,
+                          StateShadowBridge shadowBridge) {
         super(status);
         this.config = config;
         this.inflightStore = inflightStore;
+        this.shadowBridge = shadowBridge;
+        this.endpointId = ipPort() != null ? ipPort().hashCode() : 0;
         this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
             inflightKvReservedTotal.addAndGet(-req.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
@@ -70,6 +98,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Layer-2 KV reservations were already released on acceptance, so no
         // counter adjustment is needed on eviction.
         this.engineWorkEvictor = new InflightEvictor<>(engineWork, null);
+    }
+
+    /** 读取换权模式判定（门面 null / 开关关时 false——一切走旧路径）。 */
+    private boolean readAuthority() {
+        return shadowBridge != null && shadowBridge.isReadAuthority();
+    }
+
+    /** per-EP 账本计数（未刷新时全零——读数退化方向为低估，不阻断调度）。 */
+    private DecodeEndpointCounters ledgerCountersOrZero() {
+        DecodeEndpointCounters c = ledgerCounters;
+        return c != null ? c : DecodeEndpointCounters.empty();
     }
 
     @Override
@@ -132,6 +171,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
+        if (readAuthority()) {
+            // G4 读取换权：真实记账切 ledger.decode().reserve 单入账（含世代
+            // 绑定与判重）；旧 layer-1 map 停写。异常由门面吞入 shadow.error，
+            // 不回写旧 map（读数与记账同源，避免双源分裂）。
+            shadowBridge.decodeReserveAuthority(requestId, kvTokens, expectedKvTokens, ipPort());
+            return;
+        }
         RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens);
         // Atomic compute eliminates the TOCTOU window between putIfAbsent and put:
         // if calibrate's removeInflight ran between the two steps, the old value
@@ -161,6 +207,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     @Override
     public void release(long requestId) {
+        if (readAuthority()) {
+            // G4 读取换权：释放也切 ledger（未终态主动放弃；终局归 settle
+            // 单出口）。旧 layer-1 map 在此模式下恒空，removeInflight 无需执行。
+            shadowBridge.decodeReleaseAuthority(requestId);
+            return;
+        }
         removeInflight(requestId);
     }
 
@@ -191,6 +243,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     private void calibrate(Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
         this.reportedKvAvailable.set(status.getAvailableKvCacheTokens().get());
+        if (readAuthority()) {
+            // G4 读取换权：per-EP 账本计数缓存随引擎状态 tick 刷新
+            //（旧双层 map 在此模式下不再产生调度读数）。
+            this.ledgerCounters = shadowBridge.decodeEndpointCounters(endpointId);
+        }
         long statusMs = System.currentTimeMillis();
         long round = calibrateRound.incrementAndGet();
 
@@ -330,6 +387,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Layer-1 entry count: dispatched, not yet accepted by the engine. */
     public int decodeInflightCount() {
+        if (readAuthority()) {
+            return ledgerCountersOrZero().unconfirmedCount();
+        }
         return inflightRequests.size();
     }
 
@@ -339,6 +399,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Backed by {@code inflightKvReservedTotal} — O(1) incremental maintenance.
      */
     public long decodeInflightHardKvReserved() {
+        if (readAuthority()) {
+            return ledgerCountersOrZero().unconfirmedSeqKv();
+        }
         return inflightKvReservedTotal.get();
     }
 
@@ -349,27 +412,57 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Backed by {@code inflightExpectedKvReservedTotal} — O(1) incremental maintenance.
      */
     public long decodeInflightExpectedKvReserved() {
+        if (readAuthority()) {
+            return ledgerCountersOrZero().unconfirmedExpectedKv();
+        }
         return inflightExpectedKvReservedTotal.get();
     }
 
     /** Layer-2 task count: requests the engine has accepted (LOADING/RUNNING). */
     public int decodeEngineWorkCount() {
+        if (readAuthority()) {
+            return ledgerCountersOrZero().engineOwnedCount();
+        }
         return engineWork.size();
     }
 
     /** Layer-2 tasks currently in the WAITING phase. */
     public int decodeEngineWaitingCount() {
+        if (readAuthority()) {
+            // 账本口径：已派发未确认（DISPATCHED）≈ 引擎侧排队窗口
+            return (int) phaseCountOrZero(DecodePhaseOrdinal.DISPATCHED);
+        }
         return countEngineWorkInPhase(EngineTaskPhase.WAITING);
     }
 
     /** Layer-2 tasks currently in the LOADING phase (remote KV loading). */
     public int decodeEngineLoadingCount() {
+        if (readAuthority()) {
+            return (int) phaseCountOrZero(DecodePhaseOrdinal.D_LOADING);
+        }
         return countEngineWorkInPhase(EngineTaskPhase.LOADING);
     }
 
     /** Layer-2 tasks currently in the RUNNING phase. */
     public int decodeEngineRunningCount() {
+        if (readAuthority()) {
+            return (int) phaseCountOrZero(DecodePhaseOrdinal.D_RUNNING);
+        }
         return countEngineWorkInPhase(EngineTaskPhase.RUNNING);
+    }
+
+    /** 账本相位人口下标（与 flexlb-state DecodePhase.ordinal 对齐）。 */
+    private static final class DecodePhaseOrdinal {
+        static final int RESERVED = 0;
+        static final int DISPATCHED = 1;
+        static final int D_LOADING = 2;
+        static final int D_RUNNING = 3;
+    }
+
+    private long phaseCountOrZero(int ordinal) {
+        DecodeEndpointCounters c = ledgerCountersOrZero();
+        List<Long> phases = c.phaseCounts();
+        return ordinal < phases.size() ? phases.get(ordinal) : 0L;
     }
 
     private int countEngineWorkInPhase(EngineTaskPhase phase) {
@@ -385,19 +478,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Total active load: engine-accepted tasks + local inflight
      * (countEngineWorkInPhase(RUNNING) + inflight in legacy terms).
+     * 读取换权模式下读账本 per-EP 活跃条目数（reserve 起至终局，全相位）。
      */
     public int decodeTotalLoad() {
+        if (readAuthority()) {
+            return ledgerCountersOrZero().activeTotal();
+        }
         return engineWork.size() + inflightRequests.size();
     }
 
     /**
      * Real KV used: engine-reported used (total - available) + local inflight
      * expected reservations.
+     * 读取换权模式下预占读账本 per-EP 未确认条目 Σ expectedKv（口径一致）。
      */
     public long decodeRealKvUsed() {
         long totalCap = status.getTotalKvCacheTokens().get();
         long avail = status.getAvailableKvCacheTokens().get();
         long reportedUsed = totalCap > 0 ? Math.max(0, totalCap - avail) : 0;
+        if (readAuthority()) {
+            return reportedUsed + ledgerCountersOrZero().unconfirmedExpectedKv();
+        }
         return reportedUsed + decodeInflightExpectedKvReserved();
     }
 
@@ -415,6 +516,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * scheduling decisions.
      */
     public long decodeRealKvAvailable() {
+        if (readAuthority()) {
+            // 账本口径：硬预占 = 未确认条目 Σ seqLen（与旧 layer-1 hard 口径一致）
+            return Math.max(0, reportedKvAvailable.get() - ledgerCountersOrZero().unconfirmedSeqKv());
+        }
         return Math.max(0, reportedKvAvailable.get() - decodeInflightHardKvReserved());
     }
 

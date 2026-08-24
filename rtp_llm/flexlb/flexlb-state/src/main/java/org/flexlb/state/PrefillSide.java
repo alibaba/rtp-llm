@@ -36,6 +36,12 @@ public interface PrefillSide {
     /** 已发布派生快照（零锁 volatile 读；精确值用 refreshSnapshot + snapshot）。 */
     PrefillCounterSnapshot snapshot();
 
+    /**
+     * 端点级派生计数（读取换权阶段 G4 调度读数数据源）：按需聚合该端点名下
+     * 已派发（绑定世代）未终局条目。排队/攒批窗口由派发编排侧覆盖，不含在内。
+     */
+    PrefillEndpointCounters endpointCounters(int endpointId);
+
     /** 强制重算并发布快照。 */
     void refreshSnapshot();
 
