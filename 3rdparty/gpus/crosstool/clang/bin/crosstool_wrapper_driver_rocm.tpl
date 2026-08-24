@@ -97,6 +97,12 @@ def GetHostCompilerOptions(argv):
   if args.sysroot:
     opts += ' --sysroot ' + args.sysroot[0]
 
+  # Tests use -fno-access-control to inspect private/protected state. Preserve
+  # explicit access-control options (and their order) when rebuilding HIP args.
+  for flag in argv:
+    if flag in ('-fno-access-control', '-faccess-control'):
+      opts += ' ' + flag
+
   return opts
 
 def GetHipccOptions(argv):

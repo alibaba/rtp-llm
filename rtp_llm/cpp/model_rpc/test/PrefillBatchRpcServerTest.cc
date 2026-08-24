@@ -6,6 +6,7 @@
 #include <future>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -509,8 +510,7 @@ TEST(PrefillBatchRpcServerTest, ContextCapturesAdmittedEnvelopeBeforeQueryConver
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_EQ(canceling.running_task_info_list[0].request_id, 63);
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 8);
-    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 }
 
 TEST(PrefillBatchRpcServerTest, PrepareRetryInitializesAbsoluteDeadlineBeforeAttempts) {
@@ -531,7 +531,7 @@ TEST(PrefillBatchRpcServerTest, PrepareRetryInitializesAbsoluteDeadlineBeforeAtt
 
 TEST(PrefillBatchRpcServerTest, PrepareRetryStartsNoAttemptForExpiredRequest) {
     TestPrefillBatchRpcServer server;
-    auto                      deferred = makeDeferred(server, 65);
+    auto                      deferred  = makeDeferred(server, 65);
     deferred->context->request_deadline = std::chrono::system_clock::now() - std::chrono::milliseconds(1);
 
     const auto result = server.prepareSlotWithRetry(*deferred->context,
@@ -620,8 +620,7 @@ TEST(PrefillBatchRpcServerTest, LatchedPriorityCancelBeforeEnqueuePreservesRaw84
     std::vector<PrefillBatchRpcServer::BatchSlot> slots;
     std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
     buildReadySlots(server, {1013}, slots, ready_slots);
-    ASSERT_EQ(ready_slots[0].deferred->context->requestPriorityPreempt(),
-              PriorityPreemptionRequestResult::INSTALLED);
+    ASSERT_EQ(ready_slots[0].deferred->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
 
     EnqueueBatchResponsePB response;
     ASSERT_TRUE(server.enqueueGroupStreams(ready_slots, &response).ok());
@@ -766,14 +765,14 @@ TEST(PrefillBatchRpcServerTest, NaturalFinishAndCancelHaveOneLinearizedOutcome) 
         std::atomic<int>     ready{0};
         std::atomic<bool>    start{false};
         PriorityCancelResult cancel_result = PriorityCancelResult::TOMBSTONED;
-        std::thread finish_thread([&] {
+        std::thread          finish_thread([&] {
             ready.fetch_add(1, std::memory_order_release);
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
             contexts->finish(request_id, deferred.get());
         });
-        std::thread cancel_thread([&] {
+        std::thread          cancel_thread([&] {
             ready.fetch_add(1, std::memory_order_release);
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
@@ -889,7 +888,7 @@ TEST(PrefillBatchRpcServerTest, TypedPriorityTerminalDowngradesActiveCancelAckTo
 
     EXPECT_EQ(contexts->cancelByPriorityPreemption(3017), PriorityCancelResult::TOMBSTONED);
     auto replacement = makeDeferred(server, 3017);
-    auto status = contexts->registerActive(3017, replacement);
+    auto status      = contexts->registerActive(3017, replacement);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
 }
 
@@ -900,9 +899,9 @@ TEST(PrefillBatchRpcServerTest, CancelAndRegisterHaveOneLinearizedOutcome) {
         auto contexts = std::make_shared<DeferredPrefillContextMap>();
         auto deferred = makeDeferred(server, request_id);
 
-        std::atomic<int>  ready{0};
-        std::atomic<bool> start{false};
-        grpc::Status      registration_status;
+        std::atomic<int>     ready{0};
+        std::atomic<bool>    start{false};
+        grpc::Status         registration_status;
         PriorityCancelResult cancel_result = PriorityCancelResult::NOT_FOUND;
 
         std::thread register_thread([&] {
@@ -971,10 +970,9 @@ TEST(PrefillBatchRpcServerTest, OtherTerminalBeforePriorityCancelReturnsNotFound
     ASSERT_TRUE(contexts->registerActive(3018, deferred).ok());
 
     ASSERT_TRUE(deferred->context->tryMarkOtherTerminal());
-    bool newly_installed = true;
+    bool                                    newly_installed = true;
     std::shared_ptr<DeferredPrefillContext> canceled;
-    EXPECT_EQ(contexts->cancelByPriorityPreemption(3018, canceled, &newly_installed),
-              PriorityCancelResult::NOT_FOUND);
+    EXPECT_EQ(contexts->cancelByPriorityPreemption(3018, canceled, &newly_installed), PriorityCancelResult::NOT_FOUND);
     EXPECT_FALSE(newly_installed);
     EXPECT_EQ(canceled, nullptr);
     EXPECT_EQ(deferred->context->terminalCause(), PrefillTerminalCause::OTHER);
@@ -986,10 +984,9 @@ TEST(PrefillBatchRpcServerTest, PriorityCancelBeforeOtherTerminalPreserves8429) 
     auto                  deferred = makeDeferred(server, 3019);
     ASSERT_TRUE(contexts->registerActive(3019, deferred).ok());
 
-    bool newly_installed = false;
+    bool                                    newly_installed = false;
     std::shared_ptr<DeferredPrefillContext> canceled;
-    ASSERT_EQ(contexts->cancelByPriorityPreemption(3019, canceled, &newly_installed),
-              PriorityCancelResult::ACCEPTED);
+    ASSERT_EQ(contexts->cancelByPriorityPreemption(3019, canceled, &newly_installed), PriorityCancelResult::ACCEPTED);
     EXPECT_TRUE(newly_installed);
     EXPECT_FALSE(deferred->context->tryMarkOtherTerminal());
     EXPECT_EQ(deferred->context->terminalCause(), PrefillTerminalCause::PRIORITY_PREEMPTION);
@@ -1003,24 +1000,24 @@ TEST(PrefillBatchRpcServerTest, PriorityAndOtherTerminalBarrierHasExactlyOneWinn
 
     std::atomic<int>  ready{0};
     std::atomic<bool> start{false};
-    bool              other_won    = false;
-    bool              priority_won = false;
+    bool              other_won       = false;
+    bool              priority_won    = false;
     bool              newly_installed = false;
-    std::thread other_thread([&] {
+    std::thread       other_thread([&] {
         ready.fetch_add(1);
         while (!start.load()) {
             std::this_thread::yield();
         }
         other_won = deferred->context->tryMarkOtherTerminal();
     });
-    std::thread priority_thread([&] {
+    std::thread       priority_thread([&] {
         ready.fetch_add(1);
         while (!start.load()) {
             std::this_thread::yield();
         }
         std::shared_ptr<DeferredPrefillContext> canceled;
-        priority_won = contexts->cancelByPriorityPreemption(3020, canceled, &newly_installed)
-                       == PriorityCancelResult::ACCEPTED;
+        priority_won =
+            contexts->cancelByPriorityPreemption(3020, canceled, &newly_installed) == PriorityCancelResult::ACCEPTED;
     });
     while (ready.load() != 2) {
         std::this_thread::yield();
@@ -1100,12 +1097,102 @@ TEST(PrefillBatchRpcServerTest, FetchAfterAcceptedPriorityCancelReturns8429Tombs
     ASSERT_EQ(contexts->cancelByPriorityPreemption(3015), PriorityCancelResult::ACCEPTED);
 
     std::shared_ptr<DeferredPrefillContext> fetched;
-    auto status = contexts->take(3015, fetched);
+    auto                                    status = contexts->take(3015, fetched);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
     ErrorDetailsPB details;
     ASSERT_TRUE(details.ParseFromString(status.error_details()));
     EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
     EXPECT_EQ(fetched, nullptr);
+}
+
+TEST(PrefillBatchRpcServerTest, FetchDetachesHandlerPointersBeforeDeferredCleanup) {
+    class ThrowOnceContext: public PrefillGenerateContext {
+    public:
+        using PrefillGenerateContext::PrefillGenerateContext;
+
+        bool isRequestCancelled() const override {
+            if (throw_once) {
+                throw_once = false;
+                throw std::runtime_error("test fetch failure");
+            }
+            return PrefillGenerateContext::isRequestCancelled();
+        }
+
+        mutable bool throw_once = false;
+    };
+    class FetchService: public RpcService::Service {
+    public:
+        explicit FetchService(PrefillBatchRpcServer& server): server_(server) {}
+
+        grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                                   const FetchRequestPB*                  request,
+                                   grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+            ++calls;
+            return server_.FetchResponse(context, request, writer);
+        }
+
+        std::atomic<int> calls{0};
+
+    private:
+        PrefillBatchRpcServer& server_;
+    };
+
+    for (const std::string mode : {"timeout", "cancelled", "exception"}) {
+        SCOPED_TRACE(mode);
+        PrefillBatchRpcServer server;
+        auto                  deferred = makeDeferred(server, 5101);
+        RPCContext            rpc_context{deferred->input.get(), nullptr};
+        auto                  context = std::make_unique<ThrowOnceContext>(
+            &server.resource(), rpc_context, 0, nullptr, server.metrics_reporter_, server.meta_);
+        context->throw_once = mode == "exception";
+        if (mode == "timeout") {
+            context->request_deadline = std::chrono::system_clock::now() - std::chrono::seconds(1);
+        }
+        context->cancel_state->store(mode == "cancelled");
+        deferred->context->markRpcHandlingCompleted();
+        deferred->context = std::move(context);
+        ASSERT_TRUE(server.deferred_contexts_->registerActive(5101, deferred).ok());
+        ASSERT_TRUE(server.deferred_contexts_->store(5101, deferred).ok());
+        EXPECT_FALSE(deferred->finishOperation());
+
+        // Use a real RPC so both borrowed handler pointers are valid and non-null.
+        FetchService        service(server);
+        grpc::ServerBuilder builder;
+        int                 port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto grpc_server = builder.BuildAndStart();
+        ASSERT_NE(grpc_server, nullptr);
+        auto stub = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext client_context;
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        FetchRequestPB request;
+        request.set_request_id(5101);
+        auto              reader = stub->FetchResponse(&client_context, request);
+        GenerateOutputsPB response;
+        const bool        has_output = reader->Read(&response);
+        const auto        status     = reader->Finish();
+        grpc_server->Shutdown();
+        grpc_server->Wait();
+
+        EXPECT_EQ(service.calls.load(), 1);
+        EXPECT_FALSE(has_output);
+        const auto expected_status = mode == "timeout"   ? grpc::StatusCode::DEADLINE_EXCEEDED :
+                                     mode == "cancelled" ? grpc::StatusCode::CANCELLED :
+                                                           grpc::StatusCode::INTERNAL;
+        EXPECT_EQ(status.error_code(), expected_status);
+        EXPECT_EQ(deferred->context->server_context, nullptr);
+        EXPECT_EQ(deferred->context->rpc_context.writer, nullptr);
+        // Detaching a non-cancelled RPC must not clear an existing cancellation.
+        EXPECT_EQ(deferred->context->cancel_state->load(), mode == "cancelled");
+
+        // The last owner releases the context after the RPC and its server are gone.
+        // This also exercises the real derived/base destructors under ASan.
+        grpc_server.reset();
+        auto cleanup = std::async(std::launch::async, [deferred = std::move(deferred)]() mutable { deferred.reset(); });
+        cleanup.get();
+    }
 }
 
 TEST(PrefillBatchRpcServerTest, PriorityPreemptionReturnsRaw8429InErrorDetails) {
@@ -1132,8 +1219,7 @@ TEST(PrefillBatchRpcServerTest, PrefillFinalizerPublishesCanceled8429ExactlyOnce
     auto canceling = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 99);
-    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     EXPECT_TRUE(deferred->context->finalizePriorityPreemption());
     EXPECT_TRUE(deferred->context->finalizePriorityPreemption());
@@ -1150,10 +1236,10 @@ TEST(PrefillBatchRpcServerTest, PrefillFinalizerPublishesCanceled8429ExactlyOnce
 
 TEST(PrefillBatchRpcServerTest, PriorityFirstCauseSuppressesOrdinaryDequeueTerminal) {
     PrefillBatchRpcServer server;
-    auto                  deferred = makeDeferred(server, 3024);
-    auto                  input    = makeGenerateInput(3024);
-    input->group_id                = 99;
-    auto                  stream   = makeGenerateStream(input);
+    auto                  deferred    = makeDeferred(server, 3024);
+    auto                  input       = makeGenerateInput(3024);
+    input->group_id                   = 99;
+    auto stream                       = makeGenerateStream(input);
     deferred->context->generate_input = input;
     deferred->context->setStream(stream);
     deferred->context->setLocalStreamSchedulerOwned(false);
@@ -1165,23 +1251,21 @@ TEST(PrefillBatchRpcServerTest, PriorityFirstCauseSuppressesOrdinaryDequeueTermi
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_TRUE(canceling.finished_task_info_list.empty());
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 99);
-    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     ASSERT_TRUE(deferred->context->finalizePriorityPreemption());
     auto canceled = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
     EXPECT_TRUE(canceled.running_task_info_list.empty());
     ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
     EXPECT_EQ(canceled.finished_task_info_list[0].batch_id, 99);
-    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
 }
 
 TEST(PrefillBatchRpcServerTest, PriorityFinalizerDoesNotWaitForSchedulerRejectedStream) {
     PrefillBatchRpcServer server;
-    auto                  deferred = makeDeferred(server, 3017);
-    auto                  input    = makeGenerateInput(3017);
-    auto                  stream   = makeGenerateStream(input);
+    auto                  deferred    = makeDeferred(server, 3017);
+    auto                  input       = makeGenerateInput(3017);
+    auto                  stream      = makeGenerateStream(input);
     deferred->context->generate_input = input;
     deferred->context->setStream(stream);
     deferred->context->setLocalStreamSchedulerOwned(false);
@@ -1194,8 +1278,7 @@ TEST(PrefillBatchRpcServerTest, PriorityFinalizerDoesNotWaitForSchedulerRejected
     ASSERT_EQ(status_info.finished_task_info_list.size(), 1);
     EXPECT_EQ(status_info.finished_task_info_list[0].priority_preemption_progress,
               PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(status_info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(status_info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
 TEST(PrefillBatchRpcServerTest, DeferredContextMapRejectsDuplicateRequestId) {

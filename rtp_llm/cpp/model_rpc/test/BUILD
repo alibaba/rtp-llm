@@ -76,6 +76,21 @@ cc_test(
 )
 
 cc_test(
+    name = "generate_context_lifecycle_test",
+    srcs = [
+        "GenerateContextLifecycleTest.cc",
+        "RpcHandlerLifecycleTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "query_converter_test",
     srcs = [
         "QueryConverterTest.cc",
