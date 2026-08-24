@@ -208,7 +208,7 @@ CacheStats BlockTreeCache::getStats() const {
 
 std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return metrics_reporter_.collectPoolMetricsSnapshots(tree_->groupSets(), evictor_);
+    return metrics_reporter_.collectPoolMetricsSnapshots(tree_->groupSets());
 }
 
 void BlockTreeCache::reportMetrics() const {

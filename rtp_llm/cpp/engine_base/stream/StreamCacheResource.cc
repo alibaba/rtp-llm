@@ -244,6 +244,7 @@ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& resul
     cache_reuse_metrics_.match_latency_us           = result.match_cost_time_us;
     cache_reuse_metrics_.report_match_latency       = result.match_end_time_us > 0;
     malloc_begin_time_us_                           = result.malloc_begin_time_us;
+    cache_reuse_metrics_.load_attempted             = result.load_attempted;
     if (!result.load_attempted) {
         if (result.match_end_time_us > 0) {
             cache_reuse_metrics_.match_to_ready_latency_us =

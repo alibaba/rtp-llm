@@ -31,7 +31,7 @@ struct KVCachePoolMetricsSnapshot {
     size_t      block_size_bytes          = 0;
     size_t      free_blocks               = 0;
     size_t      used_blocks               = 0;
-    size_t      active_tree_cached_blocks = 0;
+    size_t      active_blocks             = 0;
     size_t      total_blocks              = 0;
     size_t      reserve_blocks            = 0;
     size_t      request_ref_blocks        = 0;

@@ -27,7 +27,7 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      free_blocks{0};
     size_t      used_blocks{0};
     size_t      available_blocks{0};
-    size_t      active_tree_cached_blocks{0};
+    size_t      active_blocks{0};
     size_t      request_ref_blocks{0};
     size_t      block_cache_ref_blocks{0};
     size_t      load_ref_blocks{0};
@@ -88,8 +88,8 @@ public:
     void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
     bool enabled() const;
 
-    std::vector<BlockTreePoolMetricsSnapshot> collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
-                                                                          const BlockTreeEvictor& evictor) const;
+    std::vector<BlockTreePoolMetricsSnapshot>
+    collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const;
     std::vector<BlockTreeEvictableMetricsSnapshot>
     collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
@@ -102,12 +102,12 @@ public:
     void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
-    void    reportTransferFinished(CacheTransferOperation                  operation,
-                                   Tier                                    source_tier,
-                                   Tier                                    target_tier,
-                                   size_t                                  block_count,
-                                   int64_t                                 begin_time_us,
-                                   bool                                    success,
+    void    reportTransferFinished(CacheTransferOperation                 operation,
+                                   Tier                                   source_tier,
+                                   Tier                                   target_tier,
+                                   size_t                                 descriptor_count,
+                                   int64_t                                begin_time_us,
+                                   bool                                   success,
                                    const std::vector<TransferDescriptor>& successful_descriptors,
                                    const std::vector<GroupSetPtr>&        group_sets);
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;

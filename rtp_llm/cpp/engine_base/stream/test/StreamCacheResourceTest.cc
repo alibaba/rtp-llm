@@ -662,6 +662,7 @@ TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength
     ASSERT_TRUE(resource.initKVBlock().ok());
     EXPECT_EQ(resource.cache_reuse_metrics_.block_aligned_input_length, 6);
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.load_attempted);
     EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
 }
 
@@ -695,6 +696,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     EXPECT_TRUE(metrics.report_match_latency);
     EXPECT_TRUE(metrics.report_load_metrics);
     EXPECT_TRUE(metrics.load_success);
+    EXPECT_TRUE(metrics.load_attempted);
     EXPECT_TRUE(metrics.report_load_wait_latency);
     EXPECT_TRUE(metrics.report_match_to_ready_latency);
     EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
@@ -718,6 +720,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
     const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
     EXPECT_TRUE(metrics.report_load_metrics);
     EXPECT_FALSE(metrics.load_success);
+    EXPECT_TRUE(metrics.load_attempted);
     EXPECT_FALSE(metrics.report_load_wait_latency);
     EXPECT_TRUE(metrics.report_match_to_ready_latency);
     EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
