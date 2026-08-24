@@ -1,5 +1,13 @@
 load("//bazel:arch_select.bzl", "tokenspeed_mla_test_deps")
 
+py_test(
+    name = "flashmla_prefix_chunk_test",
+    srcs = ["flashmla_prefix_chunk_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
 # only can run in cu129 so mark as manual
 py_test(
     name = "sparse_mla_op_test",

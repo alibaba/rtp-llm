@@ -95,6 +95,12 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_mla_chunk_config_test",
+    srcs = ["kimi_k3_mla_chunk_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "kvv_request_validation_test",
     srcs = ["kvv_request_validation_test.py"],
     deps = ["//rtp_llm:testlib"],

@@ -1,21 +1,25 @@
 """Dense causal MLA Prefill backed by FlashMLA's SM100 kernel.
 
-Kimi K3 is a dense MLA model.  RTP's existing FlashMLA wrapper is sparse-only,
-so it is not selected for K3 and the generic path falls back to FlashInfer.
 This adapter keeps RTP's existing projections, RoPE/no-RoPE handling, cache
 write and output projection unchanged; only the dense causal attention core is
 replaced.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-    has_bf16_gemm_nt_skip_head_mid,
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_prefix_chunk import (
+    FlashMLAPrefixChunkSpec,
+    plan_flashmla_prefix_chunks,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_state_merge_triton import (
+    merge_attention_states_in_place,
 )
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
+from rtp_llm.models_py.modules.factory.linear.linear_base import LinearBase
 from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
@@ -25,7 +29,7 @@ _FLASHMLA_LOGGED_DEVICES: set[int] = set()
 # Log each static execution shape once. KV lengths are intentionally excluded:
 # target verification grows them every iteration while reusing the same plan
 # shape, so including them turns this guard into a per-step INFO log.
-_FLASHMLA_LOGGED_CONFIGS: set[tuple[int, int, tuple[int, ...], bool]] = set()
+_FLASHMLA_LOGGED_CONFIGS: set[tuple[int, int, tuple[int, ...], bool, int]] = set()
 _K3_PACKED_KV_HEAD_SPLITS = (128, 64, 128)
 
 
@@ -40,6 +44,108 @@ def _workspace(device: torch.device) -> torch.Tensor:
         workspace = torch.empty(32 * 1024 * 1024, dtype=torch.uint8, device=device)
         _FLASHMLA_WORKSPACES[device_index] = workspace
     return workspace
+
+
+@dataclass(frozen=True)
+class _FlashMLAPrefixChunk:
+    spec: FlashMLAPrefixChunkSpec
+    qo_indptr: torch.Tensor
+    kv_indptr: torch.Tensor
+    gather_qo_indptr: torch.Tensor
+    batch_reuse_info: torch.Tensor
+
+
+@dataclass
+class _FlashMLAPrefixChunkWorkspace:
+    """Invocation-local storage reused by every historical-prefix chunk.
+
+    The chunk loop is serialized on one CUDA stream, so one set of buffers is
+    sufficient.  Keeping this workspace local to one invocation avoids both
+    per-chunk allocator traffic and a large persistent allocation per MLA
+    layer.
+    """
+
+    compressed_kv: torch.Tensor
+    k_pe: Optional[torch.Tensor]
+    packed_kv: Optional[torch.Tensor]
+    attention_out: torch.Tensor
+    attention_lse_storage: torch.Tensor
+    num_heads: int
+
+    @classmethod
+    def allocate(
+        cls,
+        *,
+        chunks: Sequence[_FlashMLAPrefixChunk],
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        q: torch.Tensor,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        num_heads: int,
+        v_head_dim: int,
+        packed_features: Optional[int],
+        allocate_k_pe: bool,
+    ) -> "_FlashMLAPrefixChunkWorkspace":
+        if not chunks:
+            raise ValueError("FlashMLA prefix workspace requires at least one chunk")
+        max_kv_tokens = max(chunk.spec.kv_tokens for chunk in chunks)
+        max_q_tokens = max(chunk.spec.q_tokens for chunk in chunks)
+        packed_kv = (
+            compressed_kv.new_empty((max_kv_tokens, packed_features))
+            if packed_features is not None
+            else None
+        )
+        return cls(
+            compressed_kv=compressed_kv.new_empty((max_kv_tokens, kv_lora_rank)),
+            k_pe=(
+                k_pe.new_empty((max_kv_tokens, qk_rope_head_dim))
+                if allocate_k_pe
+                else None
+            ),
+            packed_kv=packed_kv,
+            attention_out=q.new_empty((max_q_tokens, num_heads, v_head_dim)),
+            attention_lse_storage=torch.empty(
+                max_q_tokens * num_heads,
+                dtype=torch.float32,
+                device=q.device,
+            ),
+            num_heads=num_heads,
+        )
+
+    def gather_buffers(self, kv_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.k_pe is None:
+            raise RuntimeError(
+                "FlashMLA prefix KPE workspace is unavailable for unfused gather"
+            )
+        return (
+            self.compressed_kv.narrow(0, 0, kv_tokens),
+            self.k_pe.narrow(0, 0, kv_tokens),
+        )
+
+    def packed_kv_buffer(self, kv_tokens: int) -> Optional[torch.Tensor]:
+        if self.packed_kv is None:
+            return None
+        return self.packed_kv.narrow(0, 0, kv_tokens)
+
+    def attention_buffers(self, q_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
+        out = self.attention_out.narrow(0, 0, q_tokens)
+        # FlashMLA writes natural-log LSE in the layout produced by
+        # empty([heads, tokens]).transpose(0, 1).  Reinterpret the reusable
+        # flat storage with the exact logical token stride for this chunk.
+        lse = torch.as_strided(
+            self.attention_lse_storage,
+            size=(q_tokens, self.num_heads),
+            stride=(1, q_tokens),
+        )
+        return out, lse
+
+
+def _indptr(lengths: Sequence[int]) -> list[int]:
+    values = [0]
+    for length in lengths:
+        values.append(values[-1] + int(length))
+    return values
 
 
 class FlashMLADeviceParams:
@@ -63,6 +169,7 @@ class FlashMLADeviceParams:
         batch_indice_d: torch.Tensor,
         reuse_cache_page_indice_d: torch.Tensor,
         batch_reuse_info_vec_d: torch.Tensor,
+        batch_reuse_info_host: tuple[tuple[int, int, int, int], ...],
         block_table_width: int,
     ) -> None:
         self.attn_inputs = attn_inputs
@@ -75,6 +182,7 @@ class FlashMLADeviceParams:
         self.batch_indice_d = batch_indice_d
         self.reuse_cache_page_indice_d = reuse_cache_page_indice_d
         self.batch_reuse_info_vec_d = batch_reuse_info_vec_d
+        self.batch_reuse_info_host = batch_reuse_info_host
         self.block_table_width = block_table_width
         self.has_reuse_cache = any(prefix_lens_host)
         # MlaKVCacheWriteOp asks the wrapper to derive this from live device
@@ -256,6 +364,15 @@ def build_flashmla_device_params(
         ),
         dim=1,
     )
+    batch_reuse_info_host = tuple(
+        (
+            batch_idx,
+            prefix_len,
+            batch_idx * max_blocks,
+            (prefix_len + page_size - 1) // page_size,
+        )
+        for batch_idx, prefix_len in enumerate(prefix_lens)
+    )
     flat_block_table = block_table.contiguous().view(-1)
     reuse_cache_page_indice_d = (
         flat_block_table if has_reuse_cache else flat_block_table[:0]
@@ -289,6 +406,7 @@ def build_flashmla_device_params(
         batch_indice_d=batch_indice_d,
         reuse_cache_page_indice_d=reuse_cache_page_indice_d,
         batch_reuse_info_vec_d=batch_reuse_info_vec_d,
+        batch_reuse_info_host=batch_reuse_info_host,
         block_table_width=max_blocks,
     )
 
@@ -309,13 +427,12 @@ class MlaFlashMLAPrefillOp:
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
         kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
+        prefix_chunk_tokens: int = 0,
     ) -> None:
         if weights is None:
             raise ValueError("FlashMLA Prefill requires MLA projection weights")
         if kv_cache_dtype != KvCacheDataType.BASE:
-            raise ValueError(
-                "Kimi K3 dense FlashMLA Prefill currently requires BF16 KV cache"
-            )
+            raise ValueError("dense FlashMLA Prefill currently requires BF16 KV cache")
 
         # Import lazily: selecting FlashInfer must not require FlashMLA, while an
         # explicitly selected FlashMLA backend must fail rather than fall back.
@@ -323,7 +440,7 @@ class MlaFlashMLAPrefillOp:
             import flash_mla.cuda as flash_mla_cuda
         except ImportError as error:
             raise RuntimeError(
-                "K3 Prefill requires the CUDA13 flash-mla package"
+                "dense FlashMLA Prefill requires the CUDA13 flash-mla package"
             ) from error
 
         self.flash_mla_cuda = flash_mla_cuda
@@ -333,6 +450,20 @@ class MlaFlashMLAPrefillOp:
         self.qk_nope_head_dim = qk_nope_head_dim
         self.v_head_dim = v_head_dim
         self.page_size = page_size
+        self.prefix_chunk_tokens = int(prefix_chunk_tokens)
+        if self.prefix_chunk_tokens < 0:
+            raise ValueError(
+                "FlashMLA prefix chunk capacity must be non-negative, got "
+                f"{self.prefix_chunk_tokens}"
+            )
+        if self.prefix_chunk_tokens and (
+            self.prefix_chunk_tokens < page_size or self.prefix_chunk_tokens % page_size
+        ):
+            raise ValueError(
+                "FlashMLA prefix chunk capacity must be at least one cache "
+                "page and divisible by it, got "
+                f"chunk={self.prefix_chunk_tokens} page={page_size}"
+            )
         self.scale = (
             (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
         ) * softmax_extra_scale
@@ -350,6 +481,10 @@ class MlaFlashMLAPrefillOp:
         self.batch_size = 0
         self.q_lens: List[int] = []
         self.kv_lens: List[int] = []
+        self.prefix_lens: List[int] = []
+        self.batch_reuse_info_host: tuple[tuple[int, int, int, int], ...] = ()
+        self.prefix_chunks: tuple[_FlashMLAPrefixChunk, ...] = ()
+        self._prefix_chunk_metadata: Optional[torch.Tensor] = None
         self._direct_attn_inputs: Optional[Any] = None
         self._direct_block_table_width = 0
 
@@ -361,6 +496,7 @@ class MlaFlashMLAPrefillOp:
             self.qo_indptr = mla_params.qo_indptr_d
             self.kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
             self.has_reuse_cache = mla_params.has_reuse_cache
+            batch_reuse_info_host = mla_params.batch_reuse_info_host
             self._direct_attn_inputs = mla_params.attn_inputs
             self._direct_block_table_width = mla_params.block_table_width
         else:
@@ -387,6 +523,9 @@ class MlaFlashMLAPrefillOp:
             reuse_host = mla_params.batch_reuse_info_vec_h
             if reuse_host is None or reuse_host.numel() == 0:
                 prefix_lens = [0] * len(self.q_lens)
+                batch_reuse_info_host = tuple(
+                    (batch_idx, 0, 0, 0) for batch_idx in range(len(self.q_lens))
+                )
             else:
                 reuse_rows = reuse_host.reshape(-1, 4)
                 if reuse_rows.shape[0] != len(self.q_lens):
@@ -395,7 +534,11 @@ class MlaFlashMLAPrefillOp:
                         f"batch={len(self.q_lens)}, "
                         f"reuse_rows={reuse_rows.shape[0]}"
                     )
-                prefix_lens = [int(row[1]) for row in reuse_rows.tolist()]
+                batch_reuse_info_host = tuple(
+                    (int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+                    for row in reuse_rows.tolist()
+                )
+                prefix_lens = [row[1] for row in batch_reuse_info_host]
             self._direct_attn_inputs = None
             self._direct_block_table_width = 0
 
@@ -403,6 +546,8 @@ class MlaFlashMLAPrefillOp:
         self.max_kv_len = max(self.kv_lens)
         self.total_kv_lens = sum(self.kv_lens)
         self.batch_size = len(self.q_lens)
+        self.prefix_lens = prefix_lens
+        self.batch_reuse_info_host = batch_reuse_info_host
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         expected_kv_lens = [
@@ -413,6 +558,127 @@ class MlaFlashMLAPrefillOp:
                 "FlashMLA Q/KV lengths disagree with cache reuse metadata: "
                 f"expected={expected_kv_lens}, actual={self.kv_lens}"
             )
+        self._materialize_prefix_chunks()
+
+    def _materialize_prefix_chunks(self) -> None:
+        specs = plan_flashmla_prefix_chunks(
+            self.q_lens,
+            self.prefix_lens,
+            chunk_tokens=self.prefix_chunk_tokens,
+            page_size=self.page_size,
+        )
+        if not specs:
+            self.prefix_chunks = ()
+            self._prefix_chunk_metadata = None
+            return
+        if self.qo_indptr is None:
+            raise RuntimeError(
+                "FlashMLA prefix chunks require query and cache-reuse metadata"
+            )
+        if len(self.batch_reuse_info_host) != self.batch_size or any(
+            len(row) != 4 for row in self.batch_reuse_info_host
+        ):
+            raise RuntimeError(
+                "FlashMLA host cache-reuse metadata must be [batch, 4], got "
+                f"batch={self.batch_size} rows={self.batch_reuse_info_host}"
+            )
+
+        device = self.qo_indptr.device
+        flat_values: list[int] = []
+        descriptors: list[
+            tuple[
+                FlashMLAPrefixChunkSpec,
+                tuple[int, int],
+                tuple[int, int],
+                tuple[int, int],
+                tuple[int, int],
+            ]
+        ] = []
+
+        def append(values: Sequence[int]) -> tuple[int, int]:
+            offset = len(flat_values)
+            flat_values.extend(int(value) for value in values)
+            return offset, len(values)
+
+        for spec in specs:
+            q_lens = [self.q_lens[index] for index in spec.request_indices]
+            batch_reuse_info: list[int] = []
+            for local_idx, (request_idx, prefix_start, prefix_len) in enumerate(
+                zip(
+                    spec.request_indices,
+                    spec.prefix_starts,
+                    spec.prefix_lens,
+                    strict=True,
+                )
+            ):
+                base_row = self.batch_reuse_info_host[request_idx]
+                batch_reuse_info.extend(
+                    (
+                        local_idx,
+                        prefix_len,
+                        base_row[2] + prefix_start // self.page_size,
+                        (prefix_len + self.page_size - 1) // self.page_size,
+                    )
+                )
+            descriptors.append(
+                (
+                    spec,
+                    append(_indptr(q_lens)),
+                    append(_indptr(spec.prefix_lens)),
+                    append([0] * (len(spec.request_indices) + 1)),
+                    append(batch_reuse_info),
+                )
+            )
+
+        metadata = torch.tensor(flat_values, dtype=torch.int32, device=device)
+        chunks: list[_FlashMLAPrefixChunk] = []
+        for spec, qo_desc, kv_desc, gather_desc, reuse_desc in descriptors:
+
+            def view(desc: tuple[int, int]) -> torch.Tensor:
+                return metadata.narrow(0, desc[0], desc[1])
+
+            chunks.append(
+                _FlashMLAPrefixChunk(
+                    spec=spec,
+                    qo_indptr=view(qo_desc),
+                    kv_indptr=view(kv_desc),
+                    gather_qo_indptr=view(gather_desc),
+                    batch_reuse_info=view(reuse_desc).view(-1, 4),
+                )
+            )
+        metadata.record_stream(torch.cuda.current_stream(device))
+        self._prefix_chunk_metadata = metadata
+        self.prefix_chunks = tuple(chunks)
+
+    def _current_reuse_cache_page_indices(self) -> torch.Tensor:
+        if self.reuse_cache_page_indice is None:
+            raise RuntimeError("FlashMLA cache reuse has no page indices")
+        reuse_cache_page_indice = self.reuse_cache_page_indice
+        if self._direct_attn_inputs is None:
+            return reuse_cache_page_indice
+
+        block_table = getattr(
+            self._direct_attn_inputs,
+            "kv_cache_kernel_block_id_device",
+            None,
+        )
+        if (
+            block_table is None
+            or not block_table.is_cuda
+            or block_table.dtype != torch.int32
+            or block_table.dim() != 2
+            or block_table.shape[0] != self.batch_size
+            or block_table.shape[1] != self._direct_block_table_width
+        ):
+            raise RuntimeError(
+                "FlashMLA current HybridCache group block table no longer "
+                "matches its direct plan"
+            )
+        reuse_cache_page_indice = block_table.contiguous().view(-1)
+        reuse_cache_page_indice.record_stream(
+            torch.cuda.current_stream(block_table.device)
+        )
+        return reuse_cache_page_indice
 
     def _gather_reused_kv(
         self,
@@ -469,75 +735,24 @@ class MlaFlashMLAPrefillOp:
                 f"kv={self.total_kv_lens}, suffix={compressed_kv.shape[0]}"
             )
 
-        reuse_cache_page_indice = self.reuse_cache_page_indice
-        if self._direct_attn_inputs is not None:
-            block_table = getattr(
-                self._direct_attn_inputs,
-                "kv_cache_kernel_block_id_device",
-                None,
-            )
-            if (
-                block_table is None
-                or not block_table.is_cuda
-                or block_table.dtype != torch.int32
-                or block_table.dim() != 2
-                or block_table.shape[0] != self.batch_size
-                or block_table.shape[1] != self._direct_block_table_width
-            ):
-                raise RuntimeError(
-                    "FlashMLA current HybridCache group block table no longer "
-                    "matches its direct plan"
-                )
-            reuse_cache_page_indice = block_table.contiguous().view(-1)
-            reuse_cache_page_indice.record_stream(
-                torch.cuda.current_stream(block_table.device)
-            )
+        reuse_cache_page_indice = self._current_reuse_cache_page_indices()
         return kv_cache.kv_cache_base, reuse_cache_page_indice
-
-    def _create_kv_b_proj(self, layer_id: int) -> Any:
-        return LinearFactory.create_linear_from_weights(
-            self.weights[layer_id],
-            W.mla_kv_b_w,
-            W.mla_kv_b_s,
-            None,
-            self.quant_config,
-        )
-
-    def _can_use_packed_projection(
-        self,
-        compressed_kv: torch.Tensor,
-        kv_b_proj: Any,
-        projection: Any,
-    ) -> bool:
-        head_splits = (
-            self.qk_nope_head_dim,
-            self.qk_rope_head_dim,
-            self.v_head_dim,
-        )
-        return (
-            head_splits == _K3_PACKED_KV_HEAD_SPLITS
-            and callable(projection)
-            and has_bf16_gemm_nt_skip_head_mid()
-            and compressed_kv.is_cuda
-            and compressed_kv.dtype == torch.bfloat16
-            and getattr(kv_b_proj, "bias", None) is None
-            and torch.cuda.get_device_capability(compressed_kv.device)[0] == 10
-        )
 
     def _project_reused_kv_with_gap_fill(
         self,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        kv_b_proj: Any,
+        kv_b_proj: LinearBase,
     ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-        """Gather reused latent KV and fill K_pe before projecting into its gap."""
-        packed_projection_out = getattr(kv_b_proj, "forward_skip_head_mid_out", None)
+        """Use the fused paged KPE gather before the packed KV projection."""
+
         fused_gather = getattr(rtp_llm_ops, "gather_mla_latent_and_fill_k_pe", None)
-        if not self.has_reuse_cache or not callable(fused_gather):
-            return None
-        if not self._can_use_packed_projection(
-            compressed_kv, kv_b_proj, packed_projection_out
+        packed_projection = self._packed_kv_projection(compressed_kv, kv_b_proj)
+        if (
+            not self.has_reuse_cache
+            or not callable(fused_gather)
+            or packed_projection is None
         ):
             return None
 
@@ -574,18 +789,97 @@ class MlaFlashMLAPrefillOp:
             packed_head_dim,
             self.qk_nope_head_dim,
         )
-        packed_projection_out(final_compressed_kv, packed_kv, head_splits)
+        packed_projection.forward_skip_head_mid(
+            final_compressed_kv,
+            head_splits,
+            output=packed_kv,
+        )
         packed_kv = packed_kv.view(self.total_kv_lens, self.num_heads, packed_head_dim)
         k = packed_kv[..., : -self.v_head_dim]
         value_states = packed_kv[..., -self.v_head_dim :]
         return k, value_states
+
+    def _gather_prefix_chunk(
+        self,
+        chunk: _FlashMLAPrefixChunk,
+        compressed_kv: torch.Tensor,
+        flat_k_pe: torch.Tensor,
+        kv_cache: LayerKVCache,
+        reuse_cache_page_indice: torch.Tensor,
+        outputs: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if outputs is None:
+            final_compressed_kv = torch.empty(
+                (chunk.spec.kv_tokens, self.kv_lora_rank),
+                dtype=compressed_kv.dtype,
+                device=compressed_kv.device,
+            )
+            final_k_pe = torch.empty(
+                (chunk.spec.kv_tokens, self.qk_rope_head_dim),
+                dtype=flat_k_pe.dtype,
+                device=flat_k_pe.device,
+            )
+        else:
+            final_compressed_kv, final_k_pe = outputs
+            expected_compressed_shape = (chunk.spec.kv_tokens, self.kv_lora_rank)
+            expected_k_pe_shape = (chunk.spec.kv_tokens, self.qk_rope_head_dim)
+            if (
+                tuple(final_compressed_kv.shape) != expected_compressed_shape
+                or final_compressed_kv.dtype != compressed_kv.dtype
+                or final_compressed_kv.device != compressed_kv.device
+                or not final_compressed_kv.is_contiguous()
+                or tuple(final_k_pe.shape) != expected_k_pe_shape
+                or final_k_pe.dtype != flat_k_pe.dtype
+                or final_k_pe.device != flat_k_pe.device
+                or not final_k_pe.is_contiguous()
+            ):
+                raise RuntimeError(
+                    "FlashMLA prefix gather output buffer mismatch: "
+                    f"compressed(shape={tuple(final_compressed_kv.shape)}, "
+                    f"dtype={final_compressed_kv.dtype}, "
+                    f"device={final_compressed_kv.device}, "
+                    f"contiguous={final_compressed_kv.is_contiguous()}); "
+                    f"k_pe(shape={tuple(final_k_pe.shape)}, "
+                    f"dtype={final_k_pe.dtype}, device={final_k_pe.device}, "
+                    f"contiguous={final_k_pe.is_contiguous()})"
+                )
+        rtp_llm_ops.reuse_kv_cache_indexed_batched(
+            final_compressed_kv,
+            final_k_pe,
+            compressed_kv,
+            flat_k_pe,
+            kv_cache.kv_cache_base,
+            reuse_cache_page_indice,
+            chunk.batch_reuse_info,
+            chunk.gather_qo_indptr,
+            self.page_size,
+        )
+        return final_compressed_kv, final_k_pe
+
+    def _packed_kv_projection(
+        self,
+        compressed_kv: torch.Tensor,
+        kv_b_proj: LinearBase,
+    ) -> Optional[LinearBase]:
+        head_splits = (
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+        if (
+            head_splits == _K3_PACKED_KV_HEAD_SPLITS
+            and kv_b_proj.supports_skip_head_mid(compressed_kv, head_splits)
+        ):
+            return kv_b_proj
+        return None
 
     def _project_kv(
         self,
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
         layer_id: int,
-        kv_b_proj: Optional[Any] = None,
+        kv_b_proj: Optional[LinearBase] = None,
+        packed_output: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if kv_b_proj is None:
             kv_b_proj = self._create_kv_b_proj(layer_id)
@@ -594,12 +888,20 @@ class MlaFlashMLAPrefillOp:
             self.qk_rope_head_dim,
             self.v_head_dim,
         )
-        packed_projection = getattr(kv_b_proj, "forward_skip_head_mid", None)
+        packed_projection = self._packed_kv_projection(compressed_kv, kv_b_proj)
         num_tokens = compressed_kv.shape[0]
-        if self._can_use_packed_projection(compressed_kv, kv_b_proj, packed_projection):
-            packed_kv = packed_projection(compressed_kv, head_splits).view(
-                num_tokens, self.num_heads, sum(head_splits)
-            )
+        if packed_projection is not None:
+            if packed_output is None:
+                projected_kv = packed_projection.forward_skip_head_mid(
+                    compressed_kv, head_splits
+                )
+            else:
+                projected_kv = packed_projection.forward_skip_head_mid(
+                    compressed_kv,
+                    head_splits,
+                    output=packed_output,
+                )
+            packed_kv = projected_kv.view(num_tokens, self.num_heads, sum(head_splits))
             packed_kv[..., self.qk_nope_head_dim : -self.v_head_dim].copy_(
                 k_pe.view(num_tokens, 1, self.qk_rope_head_dim)
             )
@@ -623,6 +925,87 @@ class MlaFlashMLAPrefillOp:
         )
         return k, value_states
 
+    def _create_kv_b_proj(self, layer_id: int) -> LinearBase:
+        return LinearFactory.create_linear_from_weights(
+            self.weights[layer_id],
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
+            None,
+            self.quant_config,
+        )
+
+    def _run_dense_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        value_states: torch.Tensor,
+        *,
+        qo_indptr: torch.Tensor,
+        kv_indptr: torch.Tensor,
+        max_q_len: int,
+        max_kv_len: int,
+        causal: bool,
+        out: Optional[torch.Tensor] = None,
+        lse: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if max_q_len <= 0 or max_kv_len <= 0:
+            raise ValueError(
+                "FlashMLA attention lengths must be positive, got "
+                f"q={max_q_len} kv={max_kv_len}"
+            )
+        if (out is None) != (lse is None):
+            raise ValueError("FlashMLA attention out and LSE must be provided together")
+        if out is None or lse is None:
+            out = torch.empty(
+                q.shape[0],
+                self.num_heads,
+                self.v_head_dim,
+                dtype=q.dtype,
+                device=q.device,
+            )
+            lse = torch.empty(
+                self.num_heads,
+                q.shape[0],
+                dtype=torch.float32,
+                device=q.device,
+            ).transpose(0, 1)
+        else:
+            expected_out_shape = (q.shape[0], self.num_heads, self.v_head_dim)
+            expected_lse_shape = (q.shape[0], self.num_heads)
+            if (
+                tuple(out.shape) != expected_out_shape
+                or out.dtype != q.dtype
+                or out.device != q.device
+                or not out.is_contiguous()
+                or tuple(lse.shape) != expected_lse_shape
+                or lse.dtype != torch.float32
+                or lse.device != q.device
+                or lse.stride() != (1, q.shape[0])
+            ):
+                raise RuntimeError(
+                    "FlashMLA attention output buffer mismatch: "
+                    f"out(shape={tuple(out.shape)}, dtype={out.dtype}, "
+                    f"device={out.device}, contiguous={out.is_contiguous()}); "
+                    f"lse(shape={tuple(lse.shape)}, dtype={lse.dtype}, "
+                    f"device={lse.device}, stride={lse.stride()})"
+                )
+        self.flash_mla_cuda.dense_prefill_fwd(
+            _workspace(q.device),
+            q,
+            k,
+            value_states,
+            qo_indptr,
+            kv_indptr,
+            out,
+            lse,
+            1 if causal else 0,
+            self.scale,
+            max_q_len,
+            max_kv_len,
+            True,
+        )
+        return out, lse
+
     def _dense_attention(
         self,
         q: torch.Tensor,
@@ -631,35 +1014,167 @@ class MlaFlashMLAPrefillOp:
     ) -> torch.Tensor:
         if self.qo_indptr is None or self.kv_indptr is None:
             raise RuntimeError("FlashMLA Prefill must be planned before forward")
-        out = torch.empty(
-            q.shape[0],
-            self.num_heads,
-            self.v_head_dim,
-            dtype=q.dtype,
-            device=q.device,
-        )
-        lse = torch.empty(
-            self.num_heads,
-            q.shape[0],
-            dtype=torch.float32,
-            device=q.device,
-        ).transpose(0, 1)
-        self.flash_mla_cuda.dense_prefill_fwd(
-            _workspace(q.device),
+        out, _ = self._run_dense_attention(
             q,
             k,
             value_states,
-            self.qo_indptr,
-            self.kv_indptr,
-            out,
-            lse,
-            1,
-            self.scale,
-            self.max_q_len,
-            self.max_kv_len,
-            True,
+            qo_indptr=self.qo_indptr,
+            kv_indptr=self.kv_indptr,
+            max_q_len=self.max_q_len,
+            max_kv_len=self.max_kv_len,
+            causal=True,
         )
         return out
+
+    def _forward_chunked_prefix(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.qo_indptr is None:
+            raise RuntimeError("FlashMLA Prefill must be planned before forward")
+        if kv_cache is None:
+            raise RuntimeError("FlashMLA prefix chunks require an MLA KV cache")
+        expected_suffix_tokens = sum(self.q_lens)
+        if compressed_kv.shape[0] != expected_suffix_tokens:
+            raise RuntimeError(
+                "FlashMLA current KV disagrees with packed Q lengths: "
+                f"tensor={compressed_kv.shape[0]} expected={expected_suffix_tokens}"
+            )
+
+        kv_b_proj = self._create_kv_b_proj(layer_id)
+        packed_projection = self._packed_kv_projection(compressed_kv, kv_b_proj)
+        if packed_projection is None:
+            raise RuntimeError(
+                "FlashMLA historical-prefix chunking requires packed "
+                "skip-head-mid projection capability"
+            )
+        suffix_k, suffix_v = self._project_kv(compressed_kv, k_pe, layer_id, kv_b_proj)
+        output, output_lse = self._run_dense_attention(
+            q,
+            suffix_k,
+            suffix_v,
+            qo_indptr=self.qo_indptr,
+            kv_indptr=self.qo_indptr,
+            max_q_len=self.max_q_len,
+            max_kv_len=self.max_q_len,
+            causal=True,
+        )
+        del suffix_k, suffix_v
+        if len(self.prefix_chunks) > 1:
+            # FlashMLA emits BF16 partial states. Keep the recurrence in FP32
+            # and round only once after the last historical-prefix chunk.
+            output = output.float()
+
+        flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim).contiguous()
+        reuse_cache_page_indice = self._current_reuse_cache_page_indices()
+        fused_prefix_gather = getattr(
+            rtp_llm_ops, "gather_mla_latent_and_fill_k_pe", None
+        )
+        use_fused_prefix_gather = callable(fused_prefix_gather)
+        packed_features = self.num_heads * sum(_K3_PACKED_KV_HEAD_SPLITS)
+        chunk_workspace = _FlashMLAPrefixChunkWorkspace.allocate(
+            chunks=self.prefix_chunks,
+            compressed_kv=compressed_kv,
+            k_pe=flat_k_pe,
+            q=q,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            num_heads=self.num_heads,
+            v_head_dim=self.v_head_dim,
+            packed_features=packed_features,
+            allocate_k_pe=not use_fused_prefix_gather,
+        )
+        for chunk in self.prefix_chunks:
+            if use_fused_prefix_gather:
+                assert callable(fused_prefix_gather)
+                chunk_compressed_kv = chunk_workspace.compressed_kv.narrow(
+                    0, 0, chunk.spec.kv_tokens
+                )
+                chunk_packed_kv = chunk_workspace.packed_kv_buffer(chunk.spec.kv_tokens)
+                assert chunk_packed_kv is not None
+                packed_head_dim = sum(_K3_PACKED_KV_HEAD_SPLITS)
+                fused_prefix_gather(
+                    chunk_compressed_kv,
+                    chunk_packed_kv,
+                    compressed_kv,
+                    flat_k_pe,
+                    kv_cache.kv_cache_base,
+                    reuse_cache_page_indice,
+                    chunk.batch_reuse_info,
+                    chunk.gather_qo_indptr,
+                    self.page_size,
+                    packed_head_dim,
+                    self.qk_nope_head_dim,
+                )
+                packed_projection.forward_skip_head_mid(
+                    chunk_compressed_kv,
+                    _K3_PACKED_KV_HEAD_SPLITS,
+                    output=chunk_packed_kv,
+                )
+                packed_kv = chunk_packed_kv.view(
+                    chunk.spec.kv_tokens,
+                    self.num_heads,
+                    packed_head_dim,
+                )
+                chunk_k = packed_kv[..., : -self.v_head_dim]
+                chunk_v = packed_kv[..., -self.v_head_dim :]
+            else:
+                gather_buffers = chunk_workspace.gather_buffers(chunk.spec.kv_tokens)
+                chunk_compressed_kv, chunk_k_pe = self._gather_prefix_chunk(
+                    chunk,
+                    compressed_kv,
+                    flat_k_pe,
+                    kv_cache,
+                    reuse_cache_page_indice,
+                    outputs=gather_buffers,
+                )
+                chunk_k, chunk_v = self._project_kv(
+                    chunk_compressed_kv,
+                    chunk_k_pe,
+                    layer_id,
+                    kv_b_proj,
+                    packed_output=chunk_workspace.packed_kv_buffer(
+                        chunk.spec.kv_tokens
+                    ),
+                )
+            q_chunk = q.narrow(0, chunk.spec.q_start, chunk.spec.q_tokens)
+            attention_buffers = chunk_workspace.attention_buffers(chunk.spec.q_tokens)
+            chunk_output, chunk_lse = self._run_dense_attention(
+                q_chunk,
+                chunk_k,
+                chunk_v,
+                qo_indptr=chunk.qo_indptr,
+                kv_indptr=chunk.kv_indptr,
+                max_q_len=max(
+                    self.q_lens[index] for index in chunk.spec.request_indices
+                ),
+                max_kv_len=max(chunk.spec.prefix_lens),
+                causal=False,
+                out=attention_buffers[0],
+                lse=attention_buffers[1],
+            )
+            output_view = output.narrow(0, chunk.spec.q_start, chunk.spec.q_tokens)
+            lse_view = output_lse.narrow(0, chunk.spec.q_start, chunk.spec.q_tokens)
+            merge_attention_states_in_place(
+                output_view,
+                lse_view,
+                chunk_output,
+                chunk_lse,
+            )
+            del (
+                chunk_compressed_kv,
+                chunk_k,
+                chunk_v,
+                chunk_output,
+                chunk_lse,
+            )
+        if output.dtype != q.dtype:
+            output = output.to(q.dtype)
+        return output, output_lse
 
     def forward(
         self,
@@ -671,25 +1186,35 @@ class MlaFlashMLAPrefillOp:
     ) -> torch.Tensor:
         if self.qo_indptr is None or self.kv_indptr is None:
             raise RuntimeError("FlashMLA Prefill must be planned before forward")
-        kv_b_proj = self._create_kv_b_proj(layer_id)
-        projected_kv = self._project_reused_kv_with_gap_fill(
-            compressed_kv, k_pe, kv_cache, kv_b_proj
-        )
-        if projected_kv is None:
-            compressed_kv, k_pe = self._gather_reused_kv(compressed_kv, k_pe, kv_cache)
-            projected_kv = self._project_kv(compressed_kv, k_pe, layer_id, kv_b_proj)
-        if projected_kv[0].shape[0] != self.total_kv_lens:
-            raise RuntimeError(
-                "FlashMLA gathered KV length disagrees with kv_indptr: "
-                f"tensor={projected_kv[0].shape[0]}, indptr={self.total_kv_lens}"
+        if self.prefix_chunks:
+            out, _ = self._forward_chunked_prefix(
+                q, compressed_kv, k_pe, kv_cache, layer_id
             )
-        k, value_states = projected_kv
-        out = self._dense_attention(q, k, value_states)
+        else:
+            kv_b_proj = self._create_kv_b_proj(layer_id)
+            projected_kv = self._project_reused_kv_with_gap_fill(
+                compressed_kv, k_pe, kv_cache, kv_b_proj
+            )
+            if projected_kv is None:
+                compressed_kv, k_pe = self._gather_reused_kv(
+                    compressed_kv, k_pe, kv_cache
+                )
+                projected_kv = self._project_kv(
+                    compressed_kv, k_pe, layer_id, kv_b_proj
+                )
+            if projected_kv[0].shape[0] != self.total_kv_lens:
+                raise RuntimeError(
+                    "FlashMLA gathered KV length disagrees with kv_indptr: "
+                    f"tensor={projected_kv[0].shape[0]}, "
+                    f"indptr={self.total_kv_lens}"
+                )
+            k, value_states = projected_kv
+            out = self._dense_attention(q, k, value_states)
 
         device_index = q.device.index if q.device.index is not None else 0
         if device_index not in _FLASHMLA_LOGGED_DEVICES:
             logging.info(
-                "Kimi K3 dense Prefill MLA backend: FlashMLA "
+                "dense Prefill MLA backend: FlashMLA "
                 "device=%s heads=%d qk_dim=%d v_dim=%d",
                 q.device,
                 self.num_heads,
@@ -702,15 +1227,19 @@ class MlaFlashMLAPrefillOp:
             self.batch_size,
             tuple(self.q_lens),
             self.has_reuse_cache,
+            self.prefix_chunk_tokens,
         )
         if config not in _FLASHMLA_LOGGED_CONFIGS:
             logging.info(
-                "Kimi K3 FlashMLA Prefill plan: batch=%d q_lens=%s "
-                "kv_lens=%s reuse_cache=%s",
+                "dense FlashMLA Prefill plan: batch=%d q_lens=%s "
+                "kv_lens=%s reuse_cache=%s prefix_chunk_tokens=%d "
+                "prefix_chunks=%d",
                 self.batch_size,
                 self.q_lens,
                 self.kv_lens,
                 self.has_reuse_cache,
+                self.prefix_chunk_tokens,
+                len(self.prefix_chunks),
             )
             _FLASHMLA_LOGGED_CONFIGS.add(config)
         return out

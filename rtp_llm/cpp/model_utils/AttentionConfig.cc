@@ -33,6 +33,7 @@ std::string AttentionConfigs::DebugAttentionConfigStr() const {
     oss << "  nope_head_dim: " << nope_head_dim << std::endl;
     oss << "  rope_head_dim: " << rope_head_dim << std::endl;
     oss << "  v_head_dim: " << v_head_dim << std::endl;
+    oss << "  mla_prefill_kv_chunk_tokens: " << mla_prefill_kv_chunk_tokens << std::endl;
     oss << "  softmax_extra_scale: " << softmax_extra_scale << std::endl;
     oss << "  kv_cache_dtype: " << kvCacheDataTypeToString(kv_cache_dtype) << std::endl;
     oss << "  need_rope_kv_cache: " << need_rope_kv_cache << std::endl;

@@ -4,6 +4,10 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+    flashinfer_mla_wrapper,
+    flashmla_dense_prefill,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
     MlaFlashMLAPrefillImpl,
 )
@@ -11,9 +15,55 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_pr
     MlaFlashMLAPrefillOp,
     build_flashmla_device_params,
 )
+from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 CUDA_AVAILABLE = torch.cuda.is_available()
+
+
+class FlashMlaDensePrefillConfigForwardingTest(TestCase):
+    def test_wrapper_forwards_explicit_prefix_chunk_capacity(self) -> None:
+        configs = AttentionConfigs()
+        configs.head_num = 96
+        configs.kv_lora_rank = 512
+        configs.rope_head_dim = 64
+        configs.nope_head_dim = 128
+        configs.v_head_dim = 128
+        configs.kernel_tokens_per_block = 4096
+        configs.softmax_extra_scale = 1.0
+        configs.use_mla = True
+        configs.mla_prefill_kv_chunk_tokens = 32768
+        captured: dict[str, int] = {}
+
+        def make_op(*args: object, **kwargs: object) -> object:
+            captured["prefix_chunk_tokens"] = int(kwargs["prefix_chunk_tokens"])
+            return object()
+
+        with patch.object(
+            flashmla_dense_prefill,
+            "MlaFlashMLAPrefillOp",
+            side_effect=make_op,
+        ), patch.object(
+            flashinfer_mla_wrapper,
+            "NewMlaRotaryEmbeddingOp",
+            return_value=object(),
+        ), patch.object(
+            flashinfer_mla_wrapper,
+            "MlaKVCacheWriteOp",
+            return_value=object(),
+        ), patch.object(
+            flashinfer_mla_wrapper.MlaFlashInferImplBase,
+            "__init__",
+            return_value=None,
+        ):
+            MlaFlashMLAPrefillImpl(
+                configs,
+                SimpleNamespace(),
+                [],
+                torch.empty(0),
+            )
+
+        self.assertEqual(captured["prefix_chunk_tokens"], 32768)
 
 
 def _indptr(lengths: list[int]) -> torch.Tensor:

@@ -76,6 +76,26 @@ class LinearBase(nn.Module, ABC):
         """
         pass
 
+    def supports_skip_head_mid(
+        self,
+        input: torch.Tensor,
+        head_splits: tuple[int, int, int],
+    ) -> bool:
+        """Whether this linear can write a per-head GEMM with a middle gap."""
+        return False
+
+    def forward_skip_head_mid(
+        self,
+        input: torch.Tensor,
+        head_splits: tuple[int, int, int],
+        *,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run the optional per-head middle-gap projection capability."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support forward_skip_head_mid"
+        )
+
     @abstractmethod
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Forward pass

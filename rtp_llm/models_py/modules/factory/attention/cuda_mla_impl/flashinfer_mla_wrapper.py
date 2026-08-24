@@ -479,7 +479,8 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 attn_configs.use_mla,
                 weights,
                 quant_config,
-                attn_configs.kv_cache_dtype,
+                kv_cache_dtype=attn_configs.kv_cache_dtype,
+                prefix_chunk_tokens=attn_configs.mla_prefill_kv_chunk_tokens,
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,

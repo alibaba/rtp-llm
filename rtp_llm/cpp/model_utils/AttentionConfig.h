@@ -49,6 +49,10 @@ struct AttentionConfigs {
     size_t rope_head_dim;
     size_t v_head_dim;
 
+    // Maximum number of historical-prefix KV tokens expanded by one dense
+    // MLA Prefill chunk.  Zero keeps the original unchunked path.
+    size_t mla_prefill_kv_chunk_tokens = 0;
+
     // softmax config
     float           softmax_extra_scale = 1.0f;
     KvCacheDataType kv_cache_dtype      = KvCacheDataType::BASE;

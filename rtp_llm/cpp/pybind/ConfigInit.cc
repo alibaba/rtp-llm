@@ -1549,6 +1549,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("nope_head_dim", &AttentionConfigs::nope_head_dim)
         .def_readwrite("rope_head_dim", &AttentionConfigs::rope_head_dim)
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
+        .def_readwrite("mla_prefill_kv_chunk_tokens", &AttentionConfigs::mla_prefill_kv_chunk_tokens)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
