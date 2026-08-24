@@ -22,7 +22,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.rocm.f16_linear import (
 )
 from rtp_llm.ops import ActivationType, HWKernelConfig
 from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.swizzle_utils import swizzle_tensor
+from rtp_llm.utils.swizzle_utils import should_swizzle_linear_attn_ba, swizzle_tensor
 
 
 class LinearTorch(nn.Module):
@@ -156,6 +156,19 @@ class LinearTest(TestCase):
         expected = input @ weight
         self.assertTrue(torch.allclose(actual, expected, atol=atol, rtol=rtol))
 
+    def _assert_no_swizzle_linear_matches_reference(
+        self,
+        linear: nn.Module,
+        weight: torch.Tensor,
+        input: torch.Tensor,
+        atol: float = 1e-2,
+        rtol: float = 1e-2,
+    ) -> None:
+        self.assertIsInstance(linear, RocmF16LinearNoSwizzle)
+        actual = linear(input)
+        expected = input @ weight
+        self.assertTrue(torch.allclose(actual, expected, atol=atol, rtol=rtol))
+
     def test_linear(self):
         for params in itertools.product(
             self.NUM_TOKENS,
@@ -174,6 +187,45 @@ class LinearTest(TestCase):
                 has_swizzle=has_swizzle,
             ):
                 self._run_linear_test(num_tokens, k, n, dtype, has_bias, has_swizzle)
+
+    BA_K_N_CASES = [
+        (2048, 32, True),  # Qwen3.6-35B-A3B TP=2
+        (2048, 16, True),  # Qwen3.6-35B-A3B TP=4
+        (5120, 24, False),  # Qwen3.5-27B TP=4
+        (5120, 12, False),  # Qwen3.5-27B TP=8
+    ]
+
+    def test_ba_shape_selects_matching_swizzle_kernel(self):
+        for dtype in self.DTYPES:
+            for k, n, expect_swizzle in self.BA_K_N_CASES:
+                with self.subTest(dtype=dtype, k=k, n=n):
+                    torch.manual_seed(0)
+                    weight = torch.randn(k, n, dtype=dtype)
+                    torch.nn.init.xavier_uniform_(weight)
+                    input = torch.randn(7, k, dtype=dtype)
+                    hw_kernel_config = HWKernelConfig()
+                    hw_kernel_config.use_swizzleA = True
+
+                    should_swizzle = should_swizzle_linear_attn_ba(weight)
+                    self.assertEqual(should_swizzle, expect_swizzle)
+                    kernel_weight = (
+                        self._swizzle_weight(weight) if should_swizzle else weight
+                    )
+                    linear = LinearFactory.create_linear_from_weights(
+                        weights={"weight": kernel_weight},
+                        weight_key="weight",
+                        quant_config=None,
+                        hw_kernel_config=(hw_kernel_config if should_swizzle else None),
+                    )
+                    atol = rtol = 2e-2 if dtype == torch.bfloat16 else 1e-2
+                    if should_swizzle:
+                        self._assert_swizzled_linear_matches_reference(
+                            linear, weight, input, atol, rtol
+                        )
+                    else:
+                        self._assert_no_swizzle_linear_matches_reference(
+                            linear, weight, input, atol, rtol
+                        )
 
     def _run_shared_expert_gate_test(
         self, dtype: _dtype, atol: float, rtol: float

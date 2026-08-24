@@ -1,5 +1,6 @@
 import logging
 import sys
+from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
@@ -63,7 +64,26 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.swizzle_utils import (
+    can_fuse_swizzled_kn,
+    should_swizzle_linear_attn_ba,
+)
 from rtp_llm.utils.util import to_torch_dtype
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _warn_qkvz_ba_swizzle_fallback(
+    qkvz_shape: tuple[int, ...], ba_shape: tuple[int, ...]
+) -> None:
+    logger.warning(
+        "Disabling Qwen3Next qkvz+ba fusion because ROCm swizzle cannot safely "
+        "combine qkvz shape %s with ba shape %s; using separate swizzled qkvz "
+        "and unswizzled ba GEMMs",
+        qkvz_shape,
+        ba_shape,
+    )
 
 
 class Qwen3NextMetadata(object):
@@ -616,15 +636,25 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # Saves a small kernel launch on each forward; on decode (M=1) HBM-access
         # merging shaves a few us per layer (trace measurement: -0.094 ms/step
         # on Qwen3.5-9B TP=2 in the original session).
-        # FP8/quantized: qkvz has scales but ba doesn't, dtypes mismatch -> fall
-        # back to the original 2-GEMM path.
-        self._qkvz_ba_fused = weights.get(W.linear_attn_qkvz_s) is None
+        # Fall back to two GEMMs when qkvz is quantized, or when ROCm swizzle
+        # cannot represent both source weights and their fused output layout.
+        qkvz_w = weights[W.linear_attn_qkvz_w]
+        ba_w = weights[W.linear_attn_ba_w]
+        qkvz_is_bf16 = weights.get(W.linear_attn_qkvz_s) is None
+        _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+        rocm_swizzle_enabled = (
+            _is_rocm and hw_kernel_config is not None and hw_kernel_config.use_swizzleA
+        )
+        rocm_fused_layout_safe = not rocm_swizzle_enabled or can_fuse_swizzled_kn(
+            qkvz_w, ba_w
+        )
+        self._qkvz_ba_fused = qkvz_is_bf16 and rocm_fused_layout_safe
+        if qkvz_is_bf16 and rocm_swizzle_enabled and not rocm_fused_layout_safe:
+            _warn_qkvz_ba_swizzle_fallback(tuple(qkvz_w.shape), tuple(ba_w.shape))
+
         if self._qkvz_ba_fused:
-            qkvz_w = weights[W.linear_attn_qkvz_w]
-            ba_w = weights[W.linear_attn_ba_w]
             self._qkvz_size = qkvz_w.shape[1]
             self._ba_size = ba_w.shape[1]
-            _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
             if _is_rocm:
                 # ROCm: cat in [N, K] space then .t() to preserve column-major
                 # physical layout that hipb_mm / swizzle kernels expect.
@@ -657,13 +687,19 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 quant_config,
                 hw_kernel_config=hw_kernel_config,
             )
+            # BA stays BF16 when qkvz is quantized. Keep runtime dispatch paired
+            # with the loader's shape-based layout decision: aligned TP-local
+            # BA uses WithSwizzle; unaligned BA uses NoSwizzle.
+            ba_hw_kernel_config = hw_kernel_config
+            if rocm_swizzle_enabled and not should_swizzle_linear_attn_ba(ba_w):
+                ba_hw_kernel_config = None
             self.in_proj_ba = LinearFactory.create_linear_from_weights(
                 weights,
                 W.linear_attn_ba_w,
                 None,
                 None,
                 quant_config,
-                hw_kernel_config=hw_kernel_config,
+                hw_kernel_config=ba_hw_kernel_config,
             )
             self.in_proj_fused = None
 
