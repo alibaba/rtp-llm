@@ -70,6 +70,12 @@ PrefillGenerateContext::~PrefillGenerateContext() {
 }
 
 void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
+    if (stream_ && stream_ != stream) {
+        if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
+            stream_->reportError(ErrorCode::CANCELLED, "cancel abandoned retry attempt");
+        }
+        dequeueStreamFromRuntimeMeta();
+    }
     stream_ = stream;
     if (stream) {
         meta->enqueue(task_identity_, stream_);
@@ -77,14 +83,17 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
 }
 
 void PrefillGenerateContext::stopStream() {
+    cancelStreamOnTeardown();
     if (stream_) {
-        if (!stream_->finishOrCancel(prefill_stop_stream_wait_timeout_ms_, "cancel prefill stream")) {
+        // Failed requests may still have an in-flight prefill publishing KV blocks.
+        // Preserve the old bounded wait before closing their cache-store entry;
+        // successful RPC completion remains independent of scheduler completion.
+        if (stream_->hasError() && stream_->getStatus() != StreamState::FINISHED
+            && !stream_->finishOrCancel(prefill_stop_stream_wait_timeout_ms_, "cancel prefill stream")) {
             RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
                                 prefill_stop_stream_wait_timeout_ms_,
                                 stream_->generateInput()->request_id);
         }
-        // Dequeue captures terminal status for runtime scheduling metadata.
-        // Do it after cancellation/finish settlement to preserve its error.
         dequeueStreamFromRuntimeMeta();
         markRequestEnd();
         stream_.reset();
@@ -348,8 +357,7 @@ void PrefillGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request =
-        loading_cache_requests ? static_cast<int64_t>(loading_cache_requests->load()) : 0;
+    collector.loading_cache_request = loading_cache_requests ? static_cast<int64_t>(loading_cache_requests->load()) : 0;
     collector.get_rpc_connection_rt_us              = stat_info.get_rpc_connection_rt_us;
     collector.remote_allocate_resource_rt_us        = stat_info.remote_allocate_resource_rt_us;
     collector.multimodal_process_rt_us              = stat_info.multimodal_process_rt_us;
