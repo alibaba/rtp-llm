@@ -17,6 +17,7 @@
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
+struct PPIntermediateTensors;
 
 struct GptModelDescription {
     rtp_llm::AttentionConfigs attention_conf;
@@ -141,6 +142,11 @@ class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
+    // Keeps the model-defined intermediate-tensor schema outside PPExecutor. The
+    // first stage receives no input tensors, and the last stage produces none.
+    virtual GptModelOutputs forwardPP(const GptModelInputs&        inputs,
+                                      const PPIntermediateTensors* input_tensors,
+                                      PPIntermediateTensors*       output_tensors);
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 

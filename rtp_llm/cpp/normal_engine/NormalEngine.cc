@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -102,9 +103,37 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
-                   params.parallelism_config.dp_rank * params.parallelism_config.tp_size
-                       + params.parallelism_config.tp_rank) {
+                   params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (parallelism_config.pp_size > 1) {
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
+                                "pipeline parallelism does not support speculative decoding");
+        RTP_LLM_CHECK_WITH_INFO(!eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
+        RTP_LLM_CHECK_WITH_INFO(!ffn_disaggregate_config.enable_ffn_disaggregate,
+                                "pipeline parallelism does not support FFN disaggregation");
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1,
+                                "pipeline parallelism does not support data parallelism");
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.ep_size == 1,
+                                "pipeline parallelism does not support expert parallelism");
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.prefill_cp_config.method == CPRotateMethod::DISABLED
+                                    && !parallelism_config.prefill_cp_config.kv_cache_sharded,
+                                "pipeline parallelism does not support context parallelism");
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.enable_sp && parallelism_config.ffn_sp_size == 1,
+                                "pipeline parallelism does not support sequence parallelism");
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.use_ub_comm,
+                                "pipeline parallelism does not support user-buffer communication");
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.world_size
+                                    == parallelism_config.pp_size * parallelism_config.tp_size,
+                                "pipeline parallelism requires world_size == pp_size * tp_size");
+        RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::PDFUSION,
+                                "pipeline parallelism currently requires the PDFUSION role");
+        RTP_LLM_CHECK_WITH_INFO(!runtime_config.use_batch_decode_scheduler,
+                                "pipeline parallelism does not support BatchDecodeScheduler");
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.multi_task_prompt.empty()
+                                    && kv_cache_config.multi_task_prompt_tokens.empty()
+                                    && kv_cache_config.multi_task_prompt_str.empty(),
+                                "pipeline parallelism does not support multi-task system prompts");
+    }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
@@ -147,7 +176,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
+    if (runtime_config.warm_up && parallelism_config.pp_size == 1 && (!model_config_.mm_model_config.is_multimodal)
         && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
@@ -188,6 +217,13 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
     if (propose_params_) {
         executor_.reset(new MtpExecutor(
             params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
+    } else if (parallelism_config.pp_size > 1) {
+        executor_.reset(new PPExecutor(
+            params,
+            resource_context_.cache_manager,
+            mla_ops_type_,
+            [this]() { step_profiler_.startStep(); },
+            [this]() { step_profiler_.finishStep(); }));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -368,8 +404,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    auto cache_config =
+        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
@@ -456,7 +492,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -481,7 +517,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -516,14 +552,21 @@ absl::Status NormalEngine::startLoop() {
         RTP_LLM_LOG_INFO("init system prompt done");
     }
     RTP_LLM_LOG_INFO("start normal engine loop");
-    running_     = true;
-    loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
+    running_ = true;
+    if (parallelism_config.pp_size > 1) {
+        loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::pp_loop, this), "normal_engine_pp_loop");
+    } else {
+        loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
+    }
     return absl::OkStatus();
 }
 
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
+    if (executor_) {
+        executor_->requestStop();
+    }
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     return absl::OkStatus();
@@ -539,6 +582,22 @@ void NormalEngine::loop() {
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
+        }
+    }
+}
+
+void NormalEngine::pp_loop() {
+    RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_LOG_INFO("PP loop begin");
+    c10::InferenceMode inference_guard(true);
+    setCurrentThreadDevice(getDeviceId());
+    while (running_) {
+        auto status = pp_step();
+        if (!status.ok()) {
+            RTP_LLM_LOG_ERROR("PP step running error: %s", status.ToString().c_str());
+            running_ = false;
+            executor_->requestStop();
+            break;
         }
     }
 }
@@ -647,6 +706,83 @@ absl::Status NormalEngine::step() {
     // process() to drive the collective tpSync even with empty streams —
     // without this gate the gauge gets diluted to ~0 by idle iterations.
     if (parallelism_config.tp_rank == 0 && !streams.empty()) {
+        RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
+        auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
+        reportMetrics({step_latency});
+    }
+
+    return status;
+}
+
+absl::Status NormalEngine::pp_step() {
+    RTP_LLM_PROFILE_SCOPE("engine.normal.pp_step_work");
+
+    const int64_t ranks_per_stage          = parallelism_config.dp_size * parallelism_config.tp_size;
+    const int64_t pp_rank                  = parallelism_config.world_rank / ranks_per_stage;
+    const bool    is_first_stage_scheduler = pp_rank == 0 && parallelism_config.tp_rank == 0;
+
+    // Pauses only new pipeline admission so other ranks can continue draining
+    // batches that have already entered the pipeline.
+    if (is_first_stage_scheduler) {
+        while (pause_ && running_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!running_) {
+            return absl::OkStatus();
+        }
+    }
+
+    int64_t                 schedule_time_us = 0;
+    list<GenerateStreamPtr> streams;
+    if (is_first_stage_scheduler) {
+        schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.pp_schedule(reserve_step=%d)", reserve_step_);
+            CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+        }
+
+        if (parallelism_config.dp_size > 1) {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
+            mayAddFakeStream(streams);
+        }
+
+        // Preserves plan arrival as the signal for an executable batch. An idle
+        // DP lane has already been converted to a fake batch above.
+        if (streams.empty()) {
+            return absl::OkStatus();
+        }
+    }
+
+    RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    absl::Status status             = absl::OkStatus();
+
+    // Discovers request-scoped profiling where GenerateStreams are owned. The
+    // PPExecutor callbacks delimit this stage's actual forward work.
+    if (is_first_stage_scheduler && !step_profiler_.enabled()) {
+        for (const auto& stream : streams) {
+            if (stream && stream->genTimeline()) {
+                const auto& cfg = stream->generateConfig();
+                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                break;
+            }
+        }
+    }
+
+    {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.pp_execute(stream_size=%zu)", streams.size());
+        const bool refresh_cache_status_snapshot =
+            is_first_stage_scheduler && resource_context_.cache_manager
+            && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
+        status = executor_->process(streams, schedule_time_us);
+        if (status.ok() && refresh_cache_status_snapshot) {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
+            resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+        }
+    }
+
+    // Reports one scheduling-side engine step for each admitted executable batch.
+    if (is_first_stage_scheduler && !streams.empty()) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});

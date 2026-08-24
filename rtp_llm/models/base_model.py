@@ -171,6 +171,8 @@ class BaseModel(object):
 
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
+        if self.parallelism_config.pp_size > 1 and not self.support_pp():
+            raise Exception("current model can't support pipeline parallelism")
         if (
             self.hw_kernel_config.enable_cuda_graph
             and self.support_cuda_graph() is False
@@ -199,6 +201,9 @@ class BaseModel(object):
 
     def _create_python_model(self):
         pass
+
+    def support_pp(self) -> bool:
+        return False
 
     def support_cuda_graph(self) -> bool:
         return False

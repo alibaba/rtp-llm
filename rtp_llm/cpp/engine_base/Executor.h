@@ -17,6 +17,10 @@ public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
 
+    // Interrupt a blocking process() call. Executors without blocking work do
+    // not need any special handling.
+    virtual void requestStop() {}
+
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    const EPLBConfig&        eplb_config,

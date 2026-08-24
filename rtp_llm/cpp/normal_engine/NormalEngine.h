@@ -35,6 +35,7 @@ public:
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
+    absl::Status pp_step();
     absl::Status startLoop();
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
@@ -54,6 +55,7 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
+    void                            pp_loop();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
