@@ -137,6 +137,7 @@ class LocalStandbyComparisonServiceTest {
         CacheHitComparisonResult result =
                 comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
 
+        assertEquals("10.0.0.1:8080@1", result.worker());
         assertEquals(8192, result.localStandby().hit());
         assertEquals(808, result.localStandby().delta());
     }

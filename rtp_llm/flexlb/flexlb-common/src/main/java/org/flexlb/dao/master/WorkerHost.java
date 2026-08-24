@@ -1,8 +1,7 @@
 package org.flexlb.dao.master;
 
+import lombok.AccessLevel;
 import lombok.Getter;
-
-import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
 
 /**
  * WorkerHost - Worker node host information
@@ -31,7 +30,7 @@ public class WorkerHost {
      */
     private final int httpServerPort;
     /**
-     * gRPC port for GetWorkerStatus.
+     * Per-engine gRPC port for worker control RPCs, including GetWorkerStatus and GetCacheStatus.
      */
     private final int workerStatusPort;
     /**
@@ -42,6 +41,14 @@ public class WorkerHost {
      * Expected number of logical engines for this physical frontend.
      */
     private final int multiEngineNum;
+    /**
+     * Canonical identity for this logical worker. It precomputes the physical frontend
+     * identity ({@code ip:port}), routable/cache identity ({@code ip:port@engineIndex}), and
+     * metrics identity ({@code ip@engineIndex}); callers use the corresponding semantic getters
+     * exposed by {@link WorkerHost}.
+     */
+    @Getter(AccessLevel.NONE)
+    private final WorkerIdentity workerIdentity;
     /**
      * Endpoint configuration address that produced this host.
      */
@@ -103,6 +110,7 @@ public class WorkerHost {
         this.workerStatusPort = workerStatusPort;
         this.engineIndex = engineIndex;
         this.multiEngineNum = multiEngineNum;
+        this.workerIdentity = new WorkerIdentity(ip, httpPort, engineIndex);
         this.endpointAddress = endpointAddress != null ? endpointAddress : "";
         this.site = site != null ? site : "";
         this.group = group != null ? group : "";
@@ -136,12 +144,12 @@ public class WorkerHost {
      * @return physical address in {@code ip:port} format, without an engine index
      */
     public String getIpPort() {
-        return ip + ":" + httpPort;
+        return workerIdentity.getPhysicalIpPort();
     }
 
     /** Returns the physical frontend address in {@code ip:port} format. */
     public String getPhysicalIpPort() {
-        return ip + ":" + httpPort;
+        return workerIdentity.getPhysicalIpPort();
     }
 
     /**
@@ -149,7 +157,12 @@ public class WorkerHost {
      * identifies one independently routable engine behind the physical frontend.
      */
     public String getLogicalIpPort() {
-        return getPhysicalIpPort() + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + engineIndex;
+        return workerIdentity.getLogicalIpPort();
+    }
+
+    /** Returns the port-free metrics identity in {@code ip@engineIndex} format. */
+    public String getIpIndex() {
+        return workerIdentity.getIpIndex();
     }
 
     public String getPhysicalGroupKey() {

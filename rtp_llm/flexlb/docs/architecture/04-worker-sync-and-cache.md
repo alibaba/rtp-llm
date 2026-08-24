@@ -27,6 +27,20 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 `GrpcWorkerStatusRunner` 独立连接 `worker_status_port + i`。N>1 必须显式配置 status base，
 配置加载时同时校验 count、base 和 `base + N - 1 <= 65535`。
 
+worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，调用方不再解析或临时拼接：
+
+| 表示 | 格式 | 用途 |
+|---|---|---|
+| raw IP | `ip` | 网络连接与服务发现 |
+| raw port | `port` | 共享 frontend 端口 |
+| raw engine index | `engineIndex` | 逻辑引擎序号 |
+| physical IP-port | `ip:port` | 共享 frontend 身份、物理健康分组 |
+| logical IP-port | `ip:port@index` | 路由、rollback、KVCM 与 cache key |
+| metrics IP-index | `ip@index` | 所有可归属具体引擎的 `engineIp` 指标标签 |
+
+`WorkerHost` 在服务发现展开时持有该 identity；`WorkerStatus` 更新任一 raw 字段时原子替换
+整份 identity，保证三种派生表示来自同一个快照。N=1 也保留 `@0`。
+
 ### GrpcWorkerStatusRunner
 
 gRPC `getWorkerStatus`（VIT 走 multimodal 变体）携带 `latest_finished_version` 做增量拉取。

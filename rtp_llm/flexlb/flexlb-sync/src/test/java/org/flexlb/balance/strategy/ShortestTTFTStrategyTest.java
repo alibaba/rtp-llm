@@ -188,9 +188,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, cacheLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        cacheLeader.getIpPort(), 17,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        cacheLeader.getLogicalIpPort(), 17,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "cache-lead-two-blocks");
@@ -220,9 +220,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        oneBlockLeader.getIpPort(), 16,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        oneBlockLeader.getLogicalIpPort(), 16,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "cache-lead-one-block");
@@ -240,9 +240,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        oneBlockLeader.getIpPort(), 16,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        oneBlockLeader.getLogicalIpPort(), 16,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "shortest-cache-preference");
@@ -260,9 +260,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, busyCacheLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        busyCacheLeader.getIpPort(), 20,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        busyCacheLeader.getLogicalIpPort(), 20,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "busy-cache-leader");
@@ -280,7 +280,7 @@ class ShortestTTFTStrategyTest {
 
         SelectionResult selection = select(
                 List.of(overThresholdWorker, eligibleWorker),
-                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                Map.of(overThresholdWorker.getLogicalIpPort(), 3, eligibleWorker.getLogicalIpPort(), 0),
                 config,
                 50_000,
                 "outstanding-over-threshold");
@@ -309,7 +309,7 @@ class ShortestTTFTStrategyTest {
 
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, cachePreferredWorker),
-                Map.of(cachePreferredWorker.getIpPort(), 3),
+                Map.of(cachePreferredWorker.getLogicalIpPort(), 3),
                 config,
                 50_000,
                 "all-outstanding-over-threshold");
@@ -392,7 +392,7 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 RoleType.PDFUSION,
                 List.of(overThresholdWorker, eligibleWorker),
-                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                Map.of(overThresholdWorker.getLogicalIpPort(), 3, eligibleWorker.getLogicalIpPort(), 0),
                 config,
                 50_000,
                 "pdfusion-outstanding-over-threshold");
@@ -465,7 +465,7 @@ class ShortestTTFTStrategyTest {
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
         for (WorkerStatus worker : workers) {
             worker.setRole(roleType.getCode());
-            workerStatusMap.put(worker.getIpPort(), worker);
+            workerStatusMap.put(worker.getLogicalIpPort(), worker);
         }
 
         Request request = new Request();

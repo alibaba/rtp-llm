@@ -292,7 +292,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
-        reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
+        reportCacheHitMetrics(
+                roleType, workerStatus.getIpIndex(), selectedWorker.hitCacheTokens(), seqLen);
 
         TaskInfo task = createTaskInfo(
                 requestId,
@@ -306,7 +307,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 seqLen);
         engineHealthReporter.reportKvcmSelectedMatch(
                 roleType,
-                workerStatus.getIp(),
+                workerStatus.getIpIndex(),
                 task.getKvcmLocalMatchTokens(),
                 task.getKvcmP2pFetchTokens(),
                 task.getKvcmP2pTotalMatchTokens(),
@@ -336,13 +337,15 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Report cache hit metrics
      *
      * @param roleType Worker role type
-     * @param ip Worker IP address
+     * @param ipIndex metrics identity in {@code ip@engineIndex} format
      * @param hitCacheTokens Number of cached tokens hit
      * @param seqLen Sequence length
      */
-    private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(
+            RoleType roleType, String ipIndex, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(
+                roleType, ipIndex, hitCacheTokens, hitRate);
     }
 
     /**
@@ -485,8 +488,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 outstandingUncachedTokensThreshold));
     }
 
-    protected void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
-        engineHealthReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
+    protected void reportCacheAffinityDecision(RoleType roleType, String ipIndex, String decision) {
+        engineHealthReporter.reportCacheAffinityDecision(roleType, ipIndex, decision);
     }
 
     private ShortestTtftDecision buildDecisionSnapshot(BalanceContext balanceContext,

@@ -90,14 +90,14 @@ public class ExpirationCleaner {
                 // Check if task is lost
                 if (task.isLost()) {
                     Logger.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
-                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "lost");
+                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIpIndex(), "lost");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
                 // Keep the local prediction until WorkerStatus confirms the task or this window expires.
                 else if (task.getTaskState() == TaskStateEnum.IN_TRANSIT && task.isTimeout(currentTime, taskConfirmTimeoutUs)) {
                     reportTaskConfirmationTimeout(requestId, task, workerStatus, role, currentTime, taskConfirmTimeoutUs);
-                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "timeout");
+                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIpIndex(), "timeout");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
@@ -134,10 +134,10 @@ public class ExpirationCleaner {
         pvLogger.info(eventJson);
     }
 
-    private void reportTaskRemoved(String role, String ip, String type) {
+    private void reportTaskRemoved(String role, String ipIndex, String type) {
         FlexMetricTags tags = FlexMetricTags.of(
             "role", role,
-            "ip", ip,
+            "engineIp", ipIndex,
             "type", type
         );
         monitor.report(TASK_REMOVED, tags, 1);

@@ -103,14 +103,15 @@ class GrpcWorkerStatusCheckRunnerTest {
                 engineGrpcService, 20, cacheAwareService).run();
 
         verify(engineHealthReporter).reportStatusCheckerFail(
-                "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, "127.0.0.1", RoleType.PREFILL);
+                "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT,
+                "127.0.0.1@0", RoleType.PREFILL);
         assertTrue(Mockito.mockingDetails(engineHealthReporter).getInvocations().stream().anyMatch(invocation -> {
             Object[] arguments = invocation.getArguments();
             return invocation.getMethod().getName().equals("reportStatusCheckFailureLatency")
                     && arguments.length == 5
                     && "test-model".equals(arguments[0])
                     && BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT.equals(arguments[1])
-                    && "127.0.0.1".equals(arguments[2])
+                    && "127.0.0.1@0".equals(arguments[2])
                     && RoleType.PREFILL.equals(arguments[3])
                     && (long) arguments[4] >= 0;
         }));
@@ -229,7 +230,9 @@ class GrpcWorkerStatusCheckRunnerTest {
                 "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1", 8080,
                 "running", 200, 64, 100, 120, 20);
         CacheHitComparisonResult unifiedComparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1",
+                "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group",
+                "127.0.0.1:8080@0",
+                "127.0.0.1@0",
                 "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
@@ -347,7 +350,7 @@ class GrpcWorkerStatusCheckRunnerTest {
             return invocation.getMethod().getName().equals("reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency")
                     && arguments.length == 5
                     && "test-model".equals(arguments[0])
-                    && "127.0.0.1".equals(arguments[1])
+                    && "127.0.0.1@0".equals(arguments[1])
                     && RoleType.PREFILL.getCode().equals(arguments[2])
                     && "test-group".equals(arguments[3])
                     && (long) arguments[4] >= 5;
@@ -406,7 +409,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                     return invocation.getMethod().getName().equals("reportFlexlbObservedWaitingToRunningLatency")
                             && arguments.length == 5
                             && "test-model".equals(arguments[0])
-                            && "127.0.0.1".equals(arguments[1])
+                            && "127.0.0.1@0".equals(arguments[1])
                             && RoleType.PREFILL.getCode().equals(arguments[2])
                             && "test-group".equals(arguments[3])
                             && (long) arguments[4] >= 0;
@@ -511,7 +514,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                     return invocation.getMethod().getName().equals("reportEngineObservedWaitingToRunningLatency")
                             && arguments.length == 5
                             && "test-model".equals(arguments[0])
-                            && "127.0.0.1".equals(arguments[1])
+                            && "127.0.0.1@0".equals(arguments[1])
                             && RoleType.PREFILL.getCode().equals(arguments[2])
                             && "test-group".equals(arguments[3])
                             && (long) arguments[4] == 250L;
@@ -558,7 +561,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                     return invocation.getMethod().getName().equals("reportEngineObservedReceivedToWaitingLatency")
                             && arguments.length == 5
                             && "test-model".equals(arguments[0])
-                            && "127.0.0.1".equals(arguments[1])
+                            && "127.0.0.1@0".equals(arguments[1])
                             && RoleType.PREFILL.getCode().equals(arguments[2])
                             && "test-group".equals(arguments[3])
                             && (long) arguments[4] == 80L;

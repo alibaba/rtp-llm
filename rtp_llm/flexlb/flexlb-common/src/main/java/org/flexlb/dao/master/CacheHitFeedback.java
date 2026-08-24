@@ -1,9 +1,9 @@
 package org.flexlb.dao.master;
 
-import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
-
 /**
  * Engine feedback comparing the routing cache-hit prediction with the actual cache hit.
+ * The embedded {@link WorkerIdentity} preserves both the routing identity
+ * ({@code ip:port@engineIndex}) and metrics identity ({@code ip@engineIndex}).
  */
 public record CacheHitFeedback(
         String eventType,
@@ -11,9 +11,7 @@ public record CacheHitFeedback(
         String cacheMatchSource,
         String role,
         String group,
-        String workerIp,
-        int workerPort,
-        int engineIndex,
+        WorkerIdentity workerIdentity,
         String taskState,
         long inputTokens,
         long blockSize,
@@ -24,6 +22,44 @@ public record CacheHitFeedback(
         long kvcmP2pTotalMatchTokens,
         long actualHitTokens,
         long deltaHitTokens) {
+
+    public CacheHitFeedback(
+            String eventType,
+            String requestId,
+            String cacheMatchSource,
+            String role,
+            String group,
+            String workerIp,
+            int workerPort,
+            int engineIndex,
+            String taskState,
+            long inputTokens,
+            long blockSize,
+            long predictedHitTokens,
+            boolean kvcmMatchAvailable,
+            long kvcmLocalMatchTokens,
+            long kvcmP2pFetchTokens,
+            long kvcmP2pTotalMatchTokens,
+            long actualHitTokens,
+            long deltaHitTokens) {
+        this(
+                eventType,
+                requestId,
+                cacheMatchSource,
+                role,
+                group,
+                new WorkerIdentity(workerIp, workerPort, engineIndex),
+                taskState,
+                inputTokens,
+                blockSize,
+                predictedHitTokens,
+                kvcmMatchAvailable,
+                kvcmLocalMatchTokens,
+                kvcmP2pFetchTokens,
+                kvcmP2pTotalMatchTokens,
+                actualHitTokens,
+                deltaHitTokens);
+    }
 
     public CacheHitFeedback(
             String eventType,
@@ -104,6 +140,23 @@ public record CacheHitFeedback(
      * one independently routable engine behind the physical frontend.
      */
     public String logicalWorkerId() {
-        return workerIp + ":" + workerPort + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + engineIndex;
+        return workerIdentity.getLogicalIpPort();
+    }
+
+    /** Returns the metrics identity in {@code ip@engineIndex} format. */
+    public String ipIndex() {
+        return workerIdentity.getIpIndex();
+    }
+
+    public String workerIp() {
+        return workerIdentity.getIp();
+    }
+
+    public int workerPort() {
+        return workerIdentity.getPort();
+    }
+
+    public int engineIndex() {
+        return workerIdentity.getEngineIndex();
     }
 }

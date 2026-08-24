@@ -335,7 +335,7 @@ class DefaultRouterTest {
     }
 
     @Test
-    void should_log_error_when_master_request_is_null() {
+    void should_return_invalid_request_when_master_request_is_null() {
         // Setup
         when(balanceContext.getRequest()).thenReturn(null);
 
@@ -343,7 +343,9 @@ class DefaultRouterTest {
         Response response = defaultRouter.route(balanceContext);
 
         // Verify
-        assertNotNull(response, "Response should not be null");
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorMsg(), response.getErrorMessage());
     }
 
     @Test

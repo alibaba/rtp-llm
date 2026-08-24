@@ -19,8 +19,8 @@ public class Endpoint {
     private String path;
 
     /**
-     * Base TCP port of the engine worker-status gRPC endpoint. Engine with index i exposes
-     * its status endpoint at {@code workerStatusPort + i}. Required when
+     * Base TCP port of the per-engine worker-control gRPC endpoint. Engine with index i exposes
+     * its worker status and cache status RPCs at {@code workerStatusPort + i}. Required when
      * {@code multiEngineNum > 1}; when unset for a single engine, discovery falls back to
      * the engine gRPC port. Validated at config load against the port range.
      */

@@ -5,6 +5,8 @@ import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -63,11 +65,29 @@ class ModelServiceConfigurationTest {
                 });
     }
 
-    @Test
-    void rejectsNonPositiveMultiEngineCount() {
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1})
+    void rejectsNonPositiveMultiEngineCount(int multiEngineNum) {
         assertEndpointRejected(
-                "\"worker_status_port\":18002,\"multi_engine_num\":0,",
+                "\"worker_status_port\":18002,\"multi_engine_num\":" + multiEngineNum + ",",
                 "MODEL_SERVICE_CONFIG endpoint multi_engine_num must be greater than zero: service-a");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 65_536})
+    void rejectsWorkerStatusPortOutsideTcpRange(int workerStatusPort) {
+        assertEndpointRejected(
+                "\"worker_status_port\":" + workerStatusPort + ",",
+                "MODEL_SERVICE_CONFIG endpoint worker_status_port must be between 1 and 65535: service-a");
+    }
+
+    @Test
+    void acceptsMultiEngineWorkerStatusPortRangeEndingAtMaximumTcpPort() {
+        String config = staticModelConfig().replace(
+                "\"worker_status_port\":18002,",
+                "\"worker_status_port\":65534,\"multi_engine_num\":2,");
+
+        withModelConfig(config).run(context -> assertThat(context).hasNotFailed());
     }
 
     @Test
@@ -89,7 +109,7 @@ class ModelServiceConfigurationTest {
     void rejectsMultiEngineWorkerStatusPortOverflow() {
         assertEndpointRejected(
                 "\"worker_status_port\":65535,\"multi_engine_num\":2,",
-                "MODEL_SERVICE_CONFIG endpoint worker status port range exceeds 65535: service-a");
+                "MODEL_SERVICE_CONFIG endpoint worker_status_port range exceeds 65535: service-a");
     }
 
     @Test

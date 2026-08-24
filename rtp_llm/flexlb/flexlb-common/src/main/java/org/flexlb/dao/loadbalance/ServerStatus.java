@@ -6,10 +6,12 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AccessLevel;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.Getter;
 import lombok.Setter;
+import lombok.ToString;
+import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.route.RoleType;
-
-import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -43,6 +45,13 @@ public class ServerStatus {
     @JsonIgnore
     @Setter(AccessLevel.NONE)
     private int routingEngineIndex;
+
+    @JsonIgnore
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
+    @EqualsAndHashCode.Exclude
+    @ToString.Exclude
+    private WorkerIdentity workerIdentity = new WorkerIdentity(null, 0, 0);
 
     @JsonProperty("prefill_time")
     private long prefillTime;
@@ -86,6 +95,7 @@ public class ServerStatus {
         }
         routingEngineIndex = selectedEngineIndex;
         engineIndex = multiEngineNum > 1 ? selectedEngineIndex : null;
+        refreshWorkerIdentity();
     }
 
     /**
@@ -94,7 +104,26 @@ public class ServerStatus {
      */
     @JsonIgnore
     public String getLogicalIpPort() {
-        return serverIp + ":" + httpPort
-                + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + routingEngineIndex;
+        return workerIdentity.getLogicalIpPort();
+    }
+
+    /** Returns the port-free metrics identity in {@code ip@engineIndex} format. */
+    @JsonIgnore
+    public String getIpIndex() {
+        return workerIdentity.getIpIndex();
+    }
+
+    public void setServerIp(String serverIp) {
+        this.serverIp = serverIp;
+        refreshWorkerIdentity();
+    }
+
+    public void setHttpPort(int httpPort) {
+        this.httpPort = httpPort;
+        refreshWorkerIdentity();
+    }
+
+    private void refreshWorkerIdentity() {
+        workerIdentity = new WorkerIdentity(serverIp, httpPort, routingEngineIndex);
     }
 }

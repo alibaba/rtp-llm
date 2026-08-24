@@ -78,7 +78,7 @@ class CacheRoutingStrategyIntegrationTest {
         SelectionResult shortestSelection = select(
                 LoadBalanceStrategyEnum.SHORTEST_TTFT,
                 List.of(shortestWorker, overloadedCacheLeader),
-                Map.of(shortestWorker.getIpPort(), 15, overloadedCacheLeader.getIpPort(), 17),
+                Map.of(shortestWorker.getLogicalIpPort(), 15, overloadedCacheLeader.getLogicalIpPort(), 17),
                 config,
                 "shortest-outstanding-threshold");
 
@@ -89,8 +89,8 @@ class CacheRoutingStrategyIntegrationTest {
                 LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST,
                 List.of(cacheAffinityShortestWorker, cacheAffinityOverloadedLeader),
                 Map.of(
-                        cacheAffinityShortestWorker.getIpPort(), 15,
-                        cacheAffinityOverloadedLeader.getIpPort(), 17),
+                        cacheAffinityShortestWorker.getLogicalIpPort(), 15,
+                        cacheAffinityOverloadedLeader.getLogicalIpPort(), 17),
                 config,
                 "cache-affinity-outstanding-threshold");
 
@@ -132,7 +132,7 @@ class CacheRoutingStrategyIntegrationTest {
                                    String requestId) {
         workers.forEach(worker -> EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
                 .getPrefillStatusMap()
-                .put(worker.getIpPort(), worker));
+                .put(worker.getLogicalIpPort(), worker));
 
         ResourceMeasure resourceMeasure = Mockito.mock(ResourceMeasure.class);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);

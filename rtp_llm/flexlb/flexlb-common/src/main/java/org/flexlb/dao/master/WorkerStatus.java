@@ -1,6 +1,9 @@
 package org.flexlb.dao.master;
 
+import lombok.AccessLevel;
 import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.KvCacheGroupMode;
@@ -18,8 +21,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
-
 @Data
 @Slf4j
 public class WorkerStatus {
@@ -29,9 +30,9 @@ public class WorkerStatus {
     private String group;
     private String deploymentName;
     private String endpointAddress = "";
-    private String ip;
-    private int port;
-    private int engineIndex;
+    @Getter(AccessLevel.NONE)
+    @Setter(AccessLevel.NONE)
+    private volatile WorkerIdentity workerIdentity = new WorkerIdentity(null, 0, 0);
     private int multiEngineNum = 1;
     private String site;
     private Long availableConcurrency;
@@ -69,7 +70,7 @@ public class WorkerStatus {
 
     /** Returns the physical frontend address in {@code ip:port} format. */
     public String getPhysicalIpPort() {
-        return ip == null ? null : ip + ":" + port;
+        return workerIdentity.getPhysicalIpPort();
     }
 
     /**
@@ -77,10 +78,45 @@ public class WorkerStatus {
      * identifies one independently routable engine behind the physical frontend.
      */
     public String getLogicalIpPort() {
-        String physicalIpPort = getPhysicalIpPort();
-        return physicalIpPort == null
-                ? null
-                : physicalIpPort + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + engineIndex;
+        return workerIdentity.getLogicalIpPort();
+    }
+
+    /** Returns the port-free metrics identity in {@code ip@engineIndex} format. */
+    public String getIpIndex() {
+        return workerIdentity.getIpIndex();
+    }
+
+    /** Returns the raw host IP without a port or engine index. */
+    public String getIp() {
+        return workerIdentity.getIp();
+    }
+
+    public void setIp(String ip) {
+        WorkerIdentity current = workerIdentity;
+        workerIdentity = new WorkerIdentity(
+                ip, current.getPort(), current.getEngineIndex());
+    }
+
+    /** Returns the raw shared frontend port. */
+    public int getPort() {
+        return workerIdentity.getPort();
+    }
+
+    public void setPort(int port) {
+        WorkerIdentity current = workerIdentity;
+        workerIdentity = new WorkerIdentity(
+                current.getIp(), port, current.getEngineIndex());
+    }
+
+    /** Returns the raw logical engine index behind the shared frontend. */
+    public int getEngineIndex() {
+        return workerIdentity.getEngineIndex();
+    }
+
+    public void setEngineIndex(int engineIndex) {
+        WorkerIdentity current = workerIdentity;
+        workerIdentity = new WorkerIdentity(
+                current.getIp(), current.getPort(), engineIndex);
     }
 
     public String getPhysicalGroupKey() {
@@ -372,9 +408,7 @@ public class WorkerStatus {
                 localTask.getCacheMatchSource(),
                 role,
                 group,
-                ip,
-                port,
-                engineIndex,
+                workerIdentity,
                 taskState,
                 inputTokens,
                 blockSize,
@@ -549,9 +583,9 @@ public class WorkerStatus {
     }
 
     /**
-     * Returns the logical worker identity used by routing and cache ownership.
+     * Returns the physical frontend address in {@code ip:port} format.
      */
     public String getIpPort() {
-        return getLogicalIpPort();
+        return getPhysicalIpPort();
     }
 }

@@ -30,6 +30,18 @@ class WorkerStatusTest {
         workerStatus.getResourceAvailable().set(true);
     }
 
+    @Test
+    void distinguishesPhysicalAddressFromLogicalWorkerIdentity() {
+        workerStatus.setIp("10.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.setEngineIndex(1);
+
+        assertEquals("10.0.0.1:8080", workerStatus.getIpPort());
+        assertEquals("10.0.0.1:8080", workerStatus.getPhysicalIpPort());
+        assertEquals("10.0.0.1:8080@1", workerStatus.getLogicalIpPort());
+        assertEquals("10.0.0.1@1", workerStatus.getIpIndex());
+    }
+
     @ParameterizedTest
     @CsvSource({
             // currentState, currentMetric, upperThreshold, hysteresisBias, expectedResult
