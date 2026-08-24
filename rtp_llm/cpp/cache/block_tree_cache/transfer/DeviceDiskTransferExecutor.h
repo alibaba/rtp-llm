@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <atomic>
-#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -34,24 +32,19 @@ public:
 
     TransferStatus execute(const TransferDescriptor& descriptor, const GroupSet& group_set);
 
-    void resetBenchmarkTimingStats();
-    std::atomic<int64_t> benchmark_queue_wait_ns_{0};
-    std::atomic<int64_t> benchmark_executor_ns_{0};
-    std::atomic<size_t>  benchmark_executor_count_{0};
-
 private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;
     BlockTreeTaskPool*    taskPool(CacheGroupType group_type) const;
     size_t                batchCapacity(CacheGroupType group_type) const;
 
-    DeviceHostTransferExecutor&        device_host_executor_;
-    HostDiskTransferExecutor&          host_disk_executor_;
+    DeviceHostTransferExecutor&           device_host_executor_;
+    HostDiskTransferExecutor&             host_disk_executor_;
     std::unique_ptr<HostStagingBlockPool> full_staging_pool_;
     std::unique_ptr<HostStagingBlockPool> swa_staging_pool_;
-    std::unique_ptr<BlockTreeTaskPool> full_task_pool_;
-    std::unique_ptr<BlockTreeTaskPool> swa_task_pool_;
-    size_t                            full_batch_capacity_{0};
-    size_t                            swa_batch_capacity_{0};
+    std::unique_ptr<BlockTreeTaskPool>    full_task_pool_;
+    std::unique_ptr<BlockTreeTaskPool>    swa_task_pool_;
+    size_t                                full_batch_capacity_{0};
+    size_t                                swa_batch_capacity_{0};
 };
 
 }  // namespace rtp_llm

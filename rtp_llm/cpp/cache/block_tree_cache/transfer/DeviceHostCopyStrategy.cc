@@ -51,8 +51,7 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
     }
 
     BatchedMemoryCopyParams params;
-    params.device_index    = device_index;
-    params.serialize_calls = options.cuda_batch_serialize;
+    params.device_index = device_index;
     params.tiles.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
