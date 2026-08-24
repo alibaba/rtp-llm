@@ -51,7 +51,7 @@ public class EngineStatusConverter {
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
         response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());
-        // E7 completeness marker: == running detail entry count in this report.
+        // Report completeness marker: == running detail entry count in this report.
         response.setRunningDetailCount(workerStatusPB.getRunningDetailCount());
         response.setStepLatencyMs(workerStatusPB.getStepLatencyMs());
         response.setIterateCount(workerStatusPB.getIterateCount());
@@ -111,7 +111,7 @@ public class EngineStatusConverter {
             taskInfo.setDpRank(taskInfoPB.getDpRank());
             taskInfo.setBatchId(taskInfoPB.getBatchId());
             taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
-            // E1 contract field: 0 means "unknown" (old engine build), not "zero KV".
+            // Engine contract field: 0 means "unknown" (old engine build), not "zero KV".
             taskInfo.setKvTokens(taskInfoPB.getKvTokens());
             taskInfo.setPhase(convertPhase(taskInfoPB.getPhase()));
             if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {

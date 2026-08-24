@@ -7,7 +7,7 @@ import org.flexlb.state.GenerationTriple;
 import org.flexlb.state.InternalApi;
 
 /**
- * 世代追踪器（S8）：端点换代登记与世代屏障校验。
+ * 世代追踪器：端点换代登记与世代屏障校验。
  *
  * <p>换代公式：{@code generation = max(进程 epoch 启动时间戳, 该 endpoint 上一代 + 1)}
  * ——单调递增，且 epoch 兜底防 master 重启归零（重启后 epoch 即当前墙钟，

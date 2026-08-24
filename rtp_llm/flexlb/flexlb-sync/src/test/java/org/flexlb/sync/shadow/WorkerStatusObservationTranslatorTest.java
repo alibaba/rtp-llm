@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * G1 影子翻译器单测：WorkerStatusResponse → EngineObservation 字段映射、
- * E7 完整性标记（runningDetailCount）、P/D 侧过滤与端点世代缓存。
+ * 上报完整性标记（runningDetailCount）、P/D 侧过滤与端点世代缓存。
  */
 class WorkerStatusObservationTranslatorTest {
 
@@ -51,7 +51,7 @@ class WorkerStatusObservationTranslatorTest {
         EngineObservation observation = translator.translate(response, RoleType.DECODE, "10.0.0.1:9000");
 
         assertNotNull(observation);
-        // 报级字段：round=报级 statusVersion（跨报严格单调，S4 版本屏障输入）
+        // 报级字段：round=报级 statusVersion（跨报严格单调，相位裁决矩阵的版本屏障输入）
         assertEquals(42L, observation.round());
         assertEquals(1, observation.detailCount());
         assertTrue(observation.isComplete());
@@ -80,7 +80,7 @@ class WorkerStatusObservationTranslatorTest {
 
     @Test
     void shouldMarkIncomplete_whenOldEngineReportsZeroDetailCountWithRunningTasks() {
-        // 旧引擎未填 runningDetailCount（0）而 running 非空 → E7 不完整
+        // 旧引擎未填 runningDetailCount（0）而 running 非空 → 按上报完整性判不完整
         TaskInfo running = new TaskInfo();
         running.setRequestId(1L);
         running.setPhase(TaskPhase.RECEIVED);
@@ -106,12 +106,12 @@ class WorkerStatusObservationTranslatorTest {
         response.setRole(RoleType.PDFUSION);
 
         assertNull(translator.translate(response, RoleType.PDFUSION, "10.0.0.3:9000"),
-                "PDFUSION/VIT 融合模式 G1 不覆盖，返回 null");
+                "PDFUSION/VIT 融合模式影子挂载（G1）不覆盖，返回 null");
     }
 
     @Test
     void shouldFallbackToPending_whenPhaseIsNull() {
-        // L18：旧引擎未报相位 → 保守 PENDING，不丢弃明细
+        // 相位缺失保守倒推：旧引擎未报相位 → 保守 PENDING，不丢弃明细
         TaskInfo running = new TaskInfo();
         running.setRequestId(2L);
         running.setPhase(null);
@@ -211,7 +211,7 @@ class WorkerStatusObservationTranslatorTest {
         EngineObservation observation = translator.translate(response, RoleType.DECODE, "10.0.0.8:9000");
         ledger.observe(observation);
 
-        // 已开账条目收到 running 观察 → 相位/版本推进（B 道观察账更新）
+        // 已开账条目收到 running 观察 → 相位/版本推进（引擎上报观察账更新）
         assertTrue(ledger.decode().get(9L).isPresent(), "D 侧已开账条目应保留并推进");
         assertSame(StateRole.DECODE, observation.running().get(0).side());
     }

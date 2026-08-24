@@ -23,7 +23,7 @@ class TerminalStateTest {
         assertFalse(TerminalState.PREEMPTED.isAbsorbing(), "PREEMPTED 是回边态（可重试回已决策）");
     }
 
-    /** TerminalOutcome：reason 必填（O2 受控原因，禁止自由文本滥用），detail 可空。 */
+    /** TerminalOutcome：reason 必填（受控原因，禁止自由文本滥用），detail 可空。 */
     @Test
     void outcomeRequiresControlledReason() {
         TerminalOutcome outcome = new TerminalOutcome(

@@ -1,7 +1,8 @@
 package org.flexlb.state;
 
 /**
- * 终态受控原因（O2：取代自由文本 reason 字符串），值域对应设计 F1-F5 终局语义。
+ * 终态受控原因（受控枚举取代自由文本 reason 字符串），值域覆盖五类终局语义
+ * （完成/取消/超时/失败/抢占）。
  */
 public enum TerminalReason {
 

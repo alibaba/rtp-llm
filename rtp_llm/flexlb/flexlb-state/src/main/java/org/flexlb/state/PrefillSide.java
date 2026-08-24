@@ -39,9 +39,9 @@ public interface PrefillSide {
     /** 强制重算并发布快照。 */
     void refreshSnapshot();
 
-    /** 批次影子视图（B6 双视图：maxPhase/minPhase）。 */
+    /** 批次影子双视图（maxPhase 状态判定 / minPhase 等待估算）。 */
     BatchShadowView batchView(long batchId);
 
-    /** 正交取消意图标记（S3：只标记，终局走 settle）。 */
+    /** 正交取消意图标记（只标记，终局走 settle）。 */
     void markPendingCancel(long requestId);
 }

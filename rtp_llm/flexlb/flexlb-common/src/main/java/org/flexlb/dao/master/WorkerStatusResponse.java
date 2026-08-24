@@ -37,7 +37,7 @@ public class WorkerStatusResponse {
     private Map<String, TaskInfo> runningTaskInfo;
 
     /**
-     * E7 completeness marker: how many running detail entries this report
+     * Report completeness marker: how many running detail entries this report
      * actually carries. runningDetailCount == runningTaskInfo.size() means the
      * full running set was reported; a truncated report that omits entries
      * must NOT be treated as evidence that the omitted tasks vanished.

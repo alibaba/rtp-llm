@@ -214,7 +214,7 @@ class StateShadowBridgeTest {
         bridge.close(); // 幂等
     }
 
-    /** 清理层参数从 FlexlbConfig 传播到 LedgerJanitorConfig（R1/R2 同 M3 模式）。 */
+    /** 清理层参数从 FlexlbConfig 传播到 LedgerJanitorConfig（与 M3 影子开关同装配模式）。 */
     @Test
     void janitorConfigWiredFromFlexlbConfig() {
         FlexlbConfig config = new FlexlbConfig();

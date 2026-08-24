@@ -1,7 +1,7 @@
 package org.flexlb.state;
 
 /**
- * 终局判定（settle）受控原因（O2 三类受控枚举之一）：描述一个请求被判定终局所走的证据通道。
+ * 终局判定（settle）受控原因（三类受控枚举之一）：描述一个请求被判定终局所走的证据通道。
  */
 public enum SettleReason {
 

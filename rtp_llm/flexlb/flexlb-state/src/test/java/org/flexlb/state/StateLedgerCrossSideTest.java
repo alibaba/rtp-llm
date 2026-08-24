@@ -10,10 +10,10 @@ import org.junit.jupiter.api.Test;
 /**
  * 跨侧规则（StateLedger.observe 独占实现）核心测试：
  * <ol>
- *   <li>C7/L4：D KV_ALLOCATED 同 tick 收缩 P 条目到 PREFILL_DONE（P 释放点 = D 确认点）。</li>
+ *   <li>跨侧收缩：D KV_ALLOCATED 同 tick 收缩 P 条目到 PREFILL_DONE（P 释放点 = D 确认点）。</li>
  *   <li>F1：D finished(success) 因果闭包收缩 P 条目。</li>
  *   <li>cancel 双清：settle(CANCELLED) 同 tick 清两侧账（各自计数独立减）。</li>
- *   <li>C1 临界点：RECEIVED 期间 D① 预占保持（双记）+ KV_ALLOCATED 后预占撤/引擎值接管。</li>
+ *   <li>计费归属临界点：RECEIVED 期间影子预占保持（双记）+ KV_ALLOCATED 后预占撤/引擎值接管。</li>
  * </ol>
  */
 class StateLedgerCrossSideTest {
@@ -40,7 +40,7 @@ class StateLedgerCrossSideTest {
         return ledger.prefill().get(id).orElseThrow();
     }
 
-    // ---- 规则 1：C7/L4 D 确认点即 P 释放点（同 tick 收缩）----
+    // ---- 规则 1：跨侧收缩 D 确认点即 P 释放点（同 tick 收缩）----
 
     @Test
     void dKvAllocatedShrinksWaitingLoadedPrefillSameTick() {
@@ -71,7 +71,7 @@ class StateLedgerCrossSideTest {
         assertEquals(1L, ledger.prefill().snapshot().phaseCounts().get(9));
         assertEquals(1L, ledger.prefill().snapshot().inflight());
 
-        // D 计数：C1 撤预占 + 引擎接管 + confirmed
+        // D 计数：计费归属撤预占 + 引擎接管 + confirmed
         ledger.decode().refreshSnapshot();
         DecodeCounterSnapshot ds = ledger.decode().snapshot();
         assertEquals(0L, ds.reservedKvTotal());
@@ -103,7 +103,7 @@ class StateLedgerCrossSideTest {
         assertTrue(ledger.auditAndDrift().clean());
     }
 
-    /** P_RUNNING 不收缩（边算边传重叠窗口）——crossSide KV_TRANSFERRING 推导（S9）。 */
+    /** P_RUNNING 不收缩（边算边传重叠窗口）——crossSide KV_TRANSFERRING 推导。 */
     @Test
     void pRunningNotShrunkWhileTransferOverlap() {
         StateLedger ledger = new StateLedger();
@@ -193,7 +193,7 @@ class StateLedgerCrossSideTest {
         assertEquals(8, ledger.prefill().get(id).orElseThrow().phaseOrdinal()); // P 仍在
     }
 
-    // ---- 规则 3：C1 临界点（超卖窗口修正）----
+    // ---- 规则 3：计费归属临界点（超卖窗口修正）----
 
     @Test
     void c1DoubleBookWindowThenKvTakeover() {
@@ -203,7 +203,7 @@ class StateLedgerCrossSideTest {
         GenerationTriple dBinding = new GenerationTriple(2, dGen, -1L);
         long id = 200L;
 
-        // reserve：D① 影子预占入账
+        // reserve：影子预占入账
         ledger.decode().reserve(id, 512L, 4096L, dBinding);
         ledger.decode().refreshSnapshot();
         DecodeCounterSnapshot ds = ledger.decode().snapshot();
@@ -216,7 +216,7 @@ class StateLedgerCrossSideTest {
         ledger.observe(TestEndpoints.runningOnly(dEp, 1L, 1_000L,
                 TestEndpoints.running(id, StateRole.DECODE, EnginePhase.RECEIVED, -1L, 0L, 1L)));
         DecodeRequestStateView dv = ledger.decode().get(id).orElseThrow();
-        assertTrue(dv.engineOwned()); // 引擎已见（B 道事实）
+        assertTrue(dv.engineOwned()); // 引擎已见（引擎上报事实）
         assertEquals(1, dv.phaseOrdinal()); // DISPATCHED 不动
         ledger.decode().refreshSnapshot();
         ds = ledger.decode().snapshot();
@@ -224,7 +224,7 @@ class StateLedgerCrossSideTest {
         assertEquals(4096L, ds.expectedKvTotal());
         assertEquals(1L, ds.activeTotal());
 
-        // KV_ALLOCATED：撤 D① 预占 + D② 引擎事实接管 + confirmed
+        // KV_ALLOCATED：撤影子预占 + 引擎事实接管 + confirmed
         ledger.observe(TestEndpoints.runningOnly(dEp, 2L, 1_010L,
                 TestEndpoints.running(id, StateRole.DECODE, EnginePhase.KV_ALLOCATED, -1L, 4096L, 2L)));
         dv = ledger.decode().get(id).orElseThrow();
@@ -241,7 +241,7 @@ class StateLedgerCrossSideTest {
         assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
     }
 
-    /** E1：kvTokens=0（unknown）不更新引擎事实账。 */
+    /** kvTokens=0（unknown）不更新引擎事实账。 */
     @Test
     void kvTokensZeroMeansUnknownAndKeepsZero() {
         StateLedger ledger = new StateLedger();
@@ -355,7 +355,7 @@ class StateLedgerCrossSideTest {
         assertEquals(0, ledger.decode().get(id).orElseThrow().phaseOrdinal());
     }
 
-    // ---- 批次影子视图（B6）----
+    // ---- 批次影子双视图 ----
 
     @Test
     void batchShadowViewMaxMinPhase() {

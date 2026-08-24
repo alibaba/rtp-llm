@@ -5,7 +5,7 @@ package org.flexlb.state;
  */
 public enum ReserveResult {
 
-    /** 预约成功（D① 影子预占已入账）。 */
+    /** 预约成功（影子预占已入账）。 */
     OK,
 
     /** 拒绝：同 requestId 存活条目仍在（重复预约）。 */

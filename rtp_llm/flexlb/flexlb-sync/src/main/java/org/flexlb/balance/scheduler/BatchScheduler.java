@@ -206,7 +206,7 @@ public class BatchScheduler extends AbstractScheduler {
 
     // ==================== Internal: resource rollback (pre-BatchItem paths) ====================
 
-    /** 影子 D① 预占的 expectedKv 估算（与 CostBasedDecodeStrategy 同公式：seqLen+maxNewTokens，cap totalKv）。 */
+    /** 影子预占的 expectedKv 估算（与 CostBasedDecodeStrategy 同公式：seqLen+maxNewTokens，cap totalKv）。 */
     private long shadowExpectedKv(DecodeEndpoint decodeEp, long seqLen) {
         long expectedKv = seqLen + configService.loadBalanceConfig().getMaxNewTokens();
         long totalKv = decodeEp.decodeKvTotal();

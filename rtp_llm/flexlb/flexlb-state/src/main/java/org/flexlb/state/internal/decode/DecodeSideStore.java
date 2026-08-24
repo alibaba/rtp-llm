@@ -17,15 +17,15 @@ import org.flexlb.state.internal.TombstoneStore;
 /**
  * D 侧条目容器 + 计数挂点。
  *
- * <p>计数纪律（P3）：{@link DecodeCounters} 的 mutator 仅在本类固定位置调用
- * ——advance 的 CAS 胜者分支（含 C1 撤预占）/ reserve / settleRemove /
+ * <p>计数纪律：{@link DecodeCounters} 的 mutator 仅在本类固定位置调用
+ * ——advance 的 CAS 胜者分支（含计费归属移交撤预占）/ reserve / settleRemove /
  * releaseRemove / adoptEngineOwned / noteEngineObserved。</p>
  */
 @InternalApi
 public final class DecodeSideStore {
 
     private final ConcurrentHashMap<Long, DecodeRequestState> entries = new ConcurrentHashMap<>();
-    /** byEndpoint 二级索引（M4 janitor F2/TTL 扫描结构）：endpointId → 名下条目。 */
+    /** byEndpoint 二级索引（M4 janitor 证据通道/TTL 扫描结构）：endpointId → 名下条目。 */
     private final ConcurrentHashMap<Integer, ConcurrentHashMap<Long, DecodeRequestState>> byEndpoint = new ConcurrentHashMap<>();
     private final DecodeCounters counters = new DecodeCounters();
     private final TombstoneStore tombstones;
@@ -42,7 +42,7 @@ public final class DecodeSideStore {
     }
 
     /**
-     * 预约（RESERVED 起步）：登记 D① 影子预占双轨（reservedKv = reservedExpectedKv = expectedKv）
+     * 预约（RESERVED 起步）：登记影子预占双轨（reservedKv = reservedExpectedKv = expectedKv）
      * 并绑定世代三元组。判重——存活条目 → DUPLICATE_ALIVE；墓碑 → DUPLICATE_TOMBSTONE。
      */
     public ReserveResult reserve(long requestId, long seqLen, long expectedKv,
@@ -70,8 +70,8 @@ public final class DecodeSideStore {
 
     /**
      * 相位推进（裁决 ACCEPT 后调用）：CAS 胜者分支内更新计数；
-     * <b>C1 临界点</b>——target ≥ D_LOADING 且 from &lt; D_LOADING 的胜者分支
-     * 撤 D① 影子预占（reservedKvTotal 减、条目清 0、confirmed +1），
+     * <b>计费归属临界点</b>——target ≥ D_LOADING 且 from &lt; D_LOADING 的胜者分支
+     * 撤影子预占（reservedKvTotal 减、条目清 0、confirmed +1），
      * 引擎事实 KV 由随后的 noteEngineObserved 接管。
      *
      * @return 是否本调用为 CAS 胜者
@@ -87,7 +87,7 @@ public final class DecodeSideStore {
             counters.onPhaseTransition(from, target);
             if (target.ordinal() >= DecodePhase.D_LOADING.ordinal()
                     && from.ordinal() < DecodePhase.D_LOADING.ordinal()) {
-                // C1：KV_ALLOCATED（或越级更高）起撤影子预占，引擎事实接管
+                // 计费归属移交：KV_ALLOCATED（或越级更高）起撤影子预占，引擎事实接管
                 counters.onReservationWithdrawn(entry.reservedKv());
                 entry.clearReservation();
                 counters.onConfirmed();
@@ -98,7 +98,7 @@ public final class DecodeSideStore {
     }
 
     /**
-     * B 道观察入账（裁决接受后调用）：引擎首见计数 + D② 引擎事实 KV 增量。
+     * 引擎上报观察入账（裁决接受后调用）：引擎首见计数 + 引擎事实 KV 增量。
      */
     public void noteEngineObserved(DecodeRequestState entry, long round, long kvTokens, long version) {
         synchronized (entry) {
@@ -152,8 +152,8 @@ public final class DecodeSideStore {
     }
 
     /**
-     * rebuild 引擎收养（P2）：不认识 requestId 的 running 条目按 engineOwned=true
-     * 直接入账（P1 重启重建）。收养条目无预占历史（reservedKv=0、expectedKv=0）。
+     * rebuild 引擎收养：不认识 requestId 的 running 条目按 engineOwned=true
+     * 直接入账（重启重建）。收养条目无预占历史（reservedKv=0、expectedKv=0）。
      */
     public DecodeRequestState adoptEngineOwned(long requestId, int endpointId, long generation,
                                                long nowMs, DecodePhase adoptedPhase,

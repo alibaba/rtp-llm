@@ -29,9 +29,9 @@ import org.flexlb.state.spi.StateRole;
  *       COMPLETED / CAUSAL_CLOSURE）——janitor 不做额外事，只透传观测计数
  *       （{@link JanitorStats#causalClosureSettles()}），零常驻成本。</li>
  *   <li><b>F2 证据通道（核心）</b>：连续 N 轮（{@code staleRounds}）完整 tick 缺席推定死亡
- *       → settle(VANISHED / EVIDENCE_CHANNEL)。输入是条目 B 道的 lastSeenRound；
+ *       → settle(VANISHED / EVIDENCE_CHANNEL)。输入是条目引擎上报观察的 lastSeenRound；
  *       缺席追踪由本类维护（见护栏 2），触发即结算，被墓碑吸收迟到事件。</li>
- *   <li><b>F3 时间通道（TTL）</b>：createdAtMs 基准（R5 不可续命——任何 touch/observe
+ *   <li><b>F3 时间通道（TTL）</b>：createdAtMs 基准（创建时刻固定不可续命——任何 touch/observe
  *       不影响基准，createdAt 为 final 已类型级保证）→ 到期
  *       settle(TTL_EXPIRED / TTL_CHANNEL)。低频扫（调度方每 janitorIntervalMs 一 tick），
  *       per-endpoint 轮转分摊 + 单 tick 条目预算（预算内完成）。</li>
@@ -43,18 +43,18 @@ import org.flexlb.state.spi.StateRole;
  * <ul>
  *   <li><b>护栏 1 防抖</b>：缺席跨度超过 N 轮才触发（缺席期间条目重新出现即清零重算，
  *       由 {@link #onRoundEnd} 的缺席追踪保证）。</li>
- *   <li><b>护栏 2 完整性（E7）</b>：仅完整 tick（EngineObservation.isComplete()，
+ *   <li><b>护栏 2 上报完整性</b>：仅完整 tick（EngineObservation.isComplete()，
  *       detailCount == running.size()）才参与缺席判定——不完整 tick 只可能刷新条目
  *       lastSeenRound（截断上报中条目出现仍是活着的证据），<b>绝不推进缺席计数</b>：
  *       onRoundEnd 对不完整 tick 直接丢弃（不产生判定机会），缺席期间的（不完整 tick）
  *       目击同样重置缺席起算。</li>
- *   <li><b>护栏 3 fence 豁免（R4）</b>：缺席判定成立但条目被 fence 冻结（跨侧协调
+ *   <li><b>护栏 3 fence 豁免</b>：缺席判定成立但条目被 fence 冻结（跨侧协调
  *       进行中）→ 跳过并计 fence_hold；settle 前再过 {@link FenceRegistry#canEvict}
  *       断言防线（isFenced 预检与 settle 之间 race 窗口内登记的 fence 兜底拒绝）。</li>
  * </ul>
  *
  * <h2>hard cap vs fence 决策记录</h2>
- * 设计存在张力：F1"createdAt hard cap 不可续命" vs F4"fence 永生（R4 驱逐断言）"。
+ * 设计存在张力：F1"createdAt hard cap 不可续命" vs F4"fence 永生（fence 驱逐断言）"。
  * <b>决策：hard cap 对 fenced 条目也执行</b>（跳过 fence 豁免与 canEvict 断言），
  * reason 标 HARD_CAP 且告警计数翻倍（{@code hardCapSettles} 与
  * {@code hardCapFenceViolations} 双计）——fence 超过硬上限说明 fence 自身泄漏
@@ -110,7 +110,7 @@ public final class LedgerJanitor {
     /**
      * 单条目缺席追踪记录：sinceRound/sinceCount 分别为缺席起始的 round 值与
      * 完整轮序数（entry 用于换代检测）。触发判定用<b>完整轮序数差</b>
-     * （count - sinceCount ≥ staleRounds）——不完整轮穿插不放大跨度（E7）。
+     * （count - sinceCount ≥ staleRounds）——不完整轮穿插不放大跨度（上报完整性护栏）。
      */
     private record Absent(long sinceRound, long sinceCount, Object entry) {
     }
@@ -142,7 +142,7 @@ public final class LedgerJanitor {
     private final ConcurrentHashMap<Long, Absent> pAbsentSince = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Absent> dAbsentSince = new ConcurrentHashMap<>();
 
-    /** per-endpoint 完整轮序数（每次完整 tick +1；缺席跨度按此计数——不完整轮不推进，E7）。 */
+    /** per-endpoint 完整轮序数（每次完整 tick +1；缺席跨度按此计数——不完整轮不推进，上报完整性护栏）。 */
     private final ConcurrentHashMap<Integer, AtomicLong> completeRoundCounters = new ConcurrentHashMap<>();
 
     /** TTL/硬上限轮转游标（trackedEndpoints 快照的下标；单调度线程访问）。 */
@@ -197,7 +197,7 @@ public final class LedgerJanitor {
      * 对该端点名下条目做缺席检测。
      *
      * <p>护栏 2：不完整 tick（截断上报）直接丢弃——缺席判定不发生，
-     * 缺席计数不推进（截断上报中的"缺席"不是死亡证据，E7）。</p>
+     * 缺席计数不推进（截断上报中的"缺席"不是死亡证据）。</p>
      */
     public void onRoundEnd(StateEndpointRef endpointRef, long round, boolean completeTick) {
         try {
@@ -231,13 +231,13 @@ public final class LedgerJanitor {
      * <ul>
      *   <li>本轮出现（lastSeenRound ≥ round，完整 tick 的 noteEngineObserved 已刷新）
      *       → 清零（缺席中断，护栏 1）。</li>
-     *   <li>从未引擎确认（lastSeenRound &lt; 0，B 道非零轮次门槛）→ 不适用缺席判定。</li>
+     *   <li>从未引擎确认（lastSeenRound &lt; 0，引擎上报观察轮次未建立）→ 不适用缺席判定。</li>
      *   <li>缺席期间被（不完整 tick）目击（lastSeenRound ≥ sinceRound）→ 重置起算
      *       ——目击即活着，截断与否不影响这一证据方向。</li>
      *   <li>条目换代（同 requestId 换了实例）→ 重置起算。</li>
      *   <li>完整轮跨度（roundCount − sinceCount）≥ staleRounds → 触发 VANISHED
      *       ——连续完整场景下等价于任务判定式 {@code lastSeenRound < round - N}，
-     *       不完整轮穿插时严格不放大（E7）。</li>
+     *       不完整轮穿插时严格不放大（上报完整性护栏）。</li>
      * </ul>
      */
     private void trackDecodeAbsence(DecodeRequestState entry, long round, long roundCount) {
@@ -248,7 +248,7 @@ public final class LedgerJanitor {
             return;
         }
         if (lastSeen < 0) {
-            return; // 从未引擎确认（B 道字段非零轮次门槛）
+            return; // 从未引擎确认（引擎上报观察轮次未建立）
         }
         Absent absent = dAbsentSince.compute(id, (k, cur) -> {
             if (cur == null || cur.entry() != entry || lastSeen >= cur.sinceRound()) {
@@ -285,7 +285,7 @@ public final class LedgerJanitor {
         }
     }
 
-    /** F2 触发：护栏 3 fence 豁免 + R4 断言防线 + CAS 单出口 settle(VANISHED)。 */
+    /** F2 触发：护栏 3 fence 豁免 + fence 驱逐断言防线 + CAS 单出口 settle(VANISHED)。 */
     private void settleViaEvidence(long requestId, long absentRounds, SettleChannel settle, StateRole side) {
         if (skipForFence(requestId)) {
             return;
@@ -297,7 +297,7 @@ public final class LedgerJanitor {
             vanishedSettles.increment();
             notifySettled(requestId, side);
         } else {
-            lostToFastPath.increment(); // 超车（F3）：快路径已终局——janitor 败者属正常
+            lostToFastPath.increment(); // 超车（TTL 通道）：快路径已终局——janitor 败者属正常
         }
     }
 
@@ -400,7 +400,7 @@ public final class LedgerJanitor {
         }
         if (age >= config.ttlMs()) {
             if (skipForFence(requestId)) {
-                return; // F3 TTL 通道维持 fence 豁免（R4）
+                return; // F3 TTL 通道维持 fence 豁免（fence 驱逐断言）
             }
             boolean won = settle.settle(requestId, new TerminalOutcome(
                     TerminalState.SLO_TIMEOUT, TerminalReason.TTL_EXPIRED,
@@ -414,7 +414,7 @@ public final class LedgerJanitor {
         }
     }
 
-    /** 护栏 3：fence 预检跳过（+计数）与 R4 驱逐断言防线（race 窗口兜底）。 */
+    /** 护栏 3：fence 预检跳过（+计数）与 fence 驱逐断言防线（race 窗口兜底）。 */
     private boolean skipForFence(long requestId) {
         if (fences.isFenced(requestId)) {
             fenceHoldSkips.increment();

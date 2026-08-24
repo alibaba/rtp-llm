@@ -10,7 +10,7 @@ import java.util.Optional;
 public interface DecodeSide {
 
     /**
-     * 预约（RESERVED 起步）：登记 D① 影子预占（reservedKv = expectedKv）并绑定世代三元组。
+     * 预约（RESERVED 起步）：登记影子预占（reservedKv = expectedKv）并绑定世代三元组。
      *
      * @param seqLen     序列长度（M2 记账字段，供上层容量推导）
      * @param expectedKv 期望 KV（预占量）

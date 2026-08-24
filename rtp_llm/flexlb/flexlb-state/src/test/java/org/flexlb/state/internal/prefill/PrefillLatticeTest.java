@@ -11,17 +11,17 @@ import org.flexlb.state.spi.EnginePhase;
 import org.junit.jupiter.api.Test;
 
 /**
- * S4 裁决矩阵（P 分支）机器可枚举性证明（R7）：
+ * 相位裁决矩阵（P 分支）机器可枚举性证明（穷举可枚举性）：
  * current × eventPhase × version 关系(&lt;==&gt;) × isFinish × generationMatch 全组合穷举
  * （10 × 10 × 3 × 2 × 2 = 1200 组合），外加 closureBetween 越级闭包全对枚举与
- * L2 / L9 / L18 教训回归。
+ * 版本屏障 / 乱序裁决 / 保守倒推教训回归。
  */
 class PrefillLatticeTest {
 
     private static final long CURRENT_VERSION = 10L;
 
     /**
-     * S4 裁决矩阵规格直译（测试 oracle）——分支优先级：世代 → 版本 → 相位 → finish。
+     * 相位裁决矩阵规格直译（测试 oracle）——分支优先级：世代 → 版本 → 相位 → finish。
      * 与实现独立维护；代表性组合另有不依赖 oracle 的硬断言点验，防 oracle 与实现同错。
      */
     private static PhaseVerdict oracle(PrefillPhase cur, long cv, PrefillPhase ep, long ev,
@@ -105,7 +105,7 @@ class PrefillLatticeTest {
                 PrefillPhase.P_WAITING_UNLOADED, 5, PrefillPhase.P_RUNNING, 6, true, true));
     }
 
-    /** L9 回归：乱序到达的迟到中间态丢弃——且版本新鲜也照丢（相位证据优先于版本新鲜度）。 */
+    /** 乱序裁决回归：乱序到达的迟到中间态丢弃——且版本新鲜也照丢（相位证据优先于版本新鲜度）。 */
     @Test
     void l9_lateIntermediateEventDropped() {
         assertEquals(PhaseVerdict.DROP_LATE, PrefillLattice.arbitrate(
@@ -116,7 +116,7 @@ class PrefillLatticeTest {
                 PrefillPhase.PREFILL_DONE, 5, PrefillPhase.DISPATCHED, 100, false, true));
     }
 
-    /** L2 回归：version 单调假设破坏（陈旧上报）→ 一律按 DROP_DUP 丢弃，finish 也不例外。 */
+    /** 版本屏障回归：version 单调假设破坏（陈旧上报）→ 一律按 DROP_DUP 丢弃，finish 也不例外。 */
     @Test
     void l2_staleVersionDroppedAsDup() {
         assertEquals(PhaseVerdict.DROP_DUP, PrefillLattice.arbitrate(
@@ -139,7 +139,7 @@ class PrefillLatticeTest {
                 PrefillPhase.P_RUNNING, 5, PrefillPhase.P_RUNNING, 6, false, true));
     }
 
-    // ---- closureBetween（L9 越级闭包补记）----
+    // ---- closureBetween（越级闭包补记）----
 
     @Test
     void closureBetweenSkippedLevels() {
@@ -180,7 +180,7 @@ class PrefillLatticeTest {
                 PrefillPhase.INIT, PrefillPhase.ROUTED));
     }
 
-    // ---- implies（I2 蕴含闭包，P 侧格内前缀关系）----
+    // ---- implies（相位蕴含闭包，P 侧格内前缀关系）----
 
     @Test
     void impliesIsPrefixClosure() {
@@ -194,9 +194,9 @@ class PrefillLatticeTest {
         }
     }
 
-    // ---- L18 回归：fromEnginePhase 映射完备性 ----
+    // ---- 保守倒推回归：fromEnginePhase 映射完备性 ----
 
-    /** L18 回归：引擎无显式中间相位只能倒推——每个 EnginePhase 值必须有保守映射。 */
+    /** 保守倒推回归：引擎无显式中间相位只能倒推——每个 EnginePhase 值必须有保守映射。 */
     @Test
     void l18_everyEnginePhaseHasMapping() {
         for (EnginePhase enginePhase : EnginePhase.values()) {

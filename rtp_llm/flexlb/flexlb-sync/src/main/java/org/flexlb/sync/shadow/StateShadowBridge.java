@@ -40,7 +40,7 @@ import java.util.concurrent.TimeUnit;
  *       + 本地生命周期点（submit/register 终局/cancel/decode reserve）。</li>
  * </ul>
  *
- * <h2>接入点（M3/G1）</h2>
+ * <h2>接入点（影子挂载 G1，M3 里程碑接入）</h2>
  * <ol>
  *   <li>{@code GrpcWorkerStatusRunner.handleStatusResponse} versionAdvanced 分支：
  *       旧 calibrate/handleFinishedTasks 之后、latestFinishedVersion 水位推进之前。</li>
@@ -126,7 +126,7 @@ public final class StateShadowBridge {
 
     /**
      * 装配工厂（生产）：开关关返回 {@link #DISABLED}；开时构建 ledger/translator/diff/
-     * janitor 并注册影子指标、启动 janitor 维护调度、打印启用回显（R2）。
+     * janitor 并注册影子指标、启动 janitor 维护调度、打印启用回显。
      */
     public static StateShadowBridge create(FlexlbConfig config, FlexMonitor monitor) {
         return create(config, monitor, true);
@@ -155,7 +155,7 @@ public final class StateShadowBridge {
         WorkerStatusObservationTranslator translator = new WorkerStatusObservationTranslator(ledger);
 
         // M4：清理层四通道挂载；janitor 胜者结算同步进 diff 对账窗口（listener 在
-        // bridge 实例化后挂——见下方 G3 段，与调度线程启动前完成，无竞态）。
+        // bridge 实例化后挂——见下方结算换权段，与调度线程启动前完成，无竞态）。
         LedgerJanitorConfig janitorConfig = new LedgerJanitorConfig(
                 config.getFlexlbStateV2StaleRounds(),
                 config.getFlexlbStateV2TtlMs(),
@@ -177,7 +177,7 @@ public final class StateShadowBridge {
                     intervalMs, intervalMs, TimeUnit.MILLISECONDS);
         }
 
-        // G3：终态 metric 统一出口 helper（与 BATCH 调度器同 path tag，指标口径连续；
+        // 结算换权（G3）：终态 metric 统一出口 helper（与 BATCH 调度器同 path tag，指标口径连续；
         // monitor null（测试）时 helper 全部 NullSafe no-op）。
         FlexlbMetricHelper terminalMetricHelper = new FlexlbMetricHelper(monitor, MetricConstant.PATH_BATCH);
         terminalMetricHelper.register();
@@ -220,7 +220,7 @@ public final class StateShadowBridge {
 
     /**
      * 引擎状态报文影子消费（versionAdvanced 分支、latestFinishedVersion 水位推进之前
-     * 调用——保证 S4 事件顺序与旧路径同 tick 一致）。
+     * 调用——保证相位事件顺序与旧路径同 tick 一致）。
      */
     public void observeWorkerStatus(WorkerStatusResponse response, RoleType roleType, String ipPort) {
         if (!enabled) {
@@ -229,7 +229,7 @@ public final class StateShadowBridge {
         try {
             EngineObservation observation = translator.translate(response, roleType, ipPort);
             if (observation == null) {
-                return; // 非 P/D 分离角色（PDFUSION/VIT）：影子 G1 不覆盖
+                return; // 非 P/D 分离角色（PDFUSION/VIT）：影子挂载（G1）不覆盖
             }
             ledger.observe(observation);
             diff.onEvent();
@@ -260,7 +260,7 @@ public final class StateShadowBridge {
     }
 
     /**
-     * BatchScheduler.submit 路由成功后：D 侧影子预占（D① 影子双轨的预占侧，
+     * BatchScheduler.submit 路由成功后：D 侧影子预占（影子双轨记账的预占侧，
      * 开账前置——正常 observe 不收养未开条目；binding 由 translator 惰性注册）。
      */
     public void onDecodeReserve(long requestId, long seqLen, long expectedKv,

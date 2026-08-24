@@ -81,7 +81,7 @@ class StateLedgerConcurrencyTest {
         pool.shutdown();
         assertTrue(pool.awaitTermination(10L, TimeUnit.SECONDS));
 
-        // 守恒：全部终态（D finished → F1 因果闭包收缩 P）——两侧活跃归零
+        // 守恒：全部终态（D finished → 因果闭包收缩 P）——两侧活跃归零
         ledger.prefill().refreshSnapshot();
         ledger.decode().refreshSnapshot();
         assertEquals(0L, ledger.prefill().snapshot().inflight(), "P 侧应无泄漏");

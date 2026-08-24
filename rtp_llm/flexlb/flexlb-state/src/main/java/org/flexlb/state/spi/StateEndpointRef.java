@@ -12,6 +12,6 @@ public interface StateEndpointRef {
     /** 端点承担的状态侧角色。 */
     StateRole role();
 
-    /** 端点世代号（S8：世代不匹配的观察整报拒绝）。 */
+    /** 端点世代号（世代屏障：世代不匹配的观察整报拒绝）。 */
     long generation();
 }

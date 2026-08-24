@@ -4,16 +4,16 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 一次引擎观察上报的规范化视图（E7）。
+ * 一次引擎观察上报的规范化视图（含上报完整性标记）。
  *
  * <p>不可变值对象：内部明细列表经 {@link List#copyOf} 防御拷贝，构造后不可变。
  * 完整性判定见 {@link #isComplete()}——截断上报中的"缺席"不可作为死亡证据
  * （对应 {@code org.flexlb.state.CleanupReason#TRUNCATED_REPORT_EXCLUDED}）。</p>
  *
- * @param endpointRef 上报端点身份（含世代，S8 屏障输入）
+ * @param endpointRef 上报端点身份（含世代，世代屏障校验输入）
  * @param round       上报轮次号
  * @param statusMs    上报时间戳（毫秒）
- * @param detailCount 引擎侧声称的明细总数（E7：detailCount == running.size() 时本次上报完整）
+ * @param detailCount 引擎侧声称的明细总数（上报完整性标记：detailCount == running.size() 时本次上报完整）
  * @param running     引擎侧仍在执行的请求明细（不可变，防御拷贝）
  * @param finished    引擎侧已完成的请求明细（不可变，防御拷贝）
  */
@@ -37,7 +37,7 @@ public record EngineObservation(
     }
 
     /**
-     * E7 完整性：本次上报是否未截断——引擎声称的明细总数与实际携带的 running 明细数一致。
+     * 上报完整性：本次上报是否未截断——引擎声称的明细总数与实际携带的 running 明细数一致。
      */
     public boolean isComplete() {
         return detailCount == running.size();
@@ -51,7 +51,7 @@ public record EngineObservation(
      * @param enginePhase 引擎报告的执行相位
      * @param batchId     所属批次 ID
      * @param kvTokens    当前 KV token 数
-     * @param version     引擎上报序号（单调；裁决矩阵的版本屏障输入，S4/L2）
+     * @param version     引擎上报序号（单调；相位裁决矩阵的版本屏障输入）
      */
     public record RunningObservation(
             long requestId,
@@ -69,7 +69,7 @@ public record EngineObservation(
      * @param side       该请求在哪个状态侧被跟踪
      * @param errorCode  完成错误码（0 = 成功）
      * @param endTimeMs  引擎侧结束时间戳（毫秒）
-     * @param version    引擎上报序号（单调；裁决矩阵的版本屏障输入，S4/L2）
+     * @param version    引擎上报序号（单调；相位裁决矩阵的版本屏障输入）
      */
     public record FinishedObservation(
             long requestId,

@@ -15,7 +15,7 @@ public enum EnginePhase {
     /** 引擎已收到请求（尚未分配 KV）。 */
     RECEIVED,
 
-    /** KV 已分配（P 侧 = 已装载等待；D 侧 = LOAD 传输期横跨，见 E10）。 */
+    /** KV 已分配（P 侧 = 已装载等待；D 侧 = LOAD 传输期横跨）。 */
     KV_ALLOCATED,
 
     /** 正在执行（迭代中）。 */
@@ -27,7 +27,7 @@ public enum EnginePhase {
     /**
      * 从既有 {@link TaskPhase}（引擎 status 报文反序列化值域）映射为规范化的 {@link EnginePhase}。
      *
-     * @throws NullPointerException taskPhase 为 null（L18：无显式相位时上游必须先做保守倒推，不允许静默吐掉）
+     * @throws NullPointerException taskPhase 为 null（无显式相位时上游必须先做保守倒推，不允许静默吐掉）
      */
     public static EnginePhase fromTaskPhase(TaskPhase taskPhase) {
         Objects.requireNonNull(taskPhase, "taskPhase");

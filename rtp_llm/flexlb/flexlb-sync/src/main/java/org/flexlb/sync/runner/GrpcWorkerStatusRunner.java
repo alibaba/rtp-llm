@@ -193,7 +193,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 // 3.5 Shadow (G1): flexlb-state v2 ledger consumes the same response —
                 // strictly after legacy calibrate/finished handling (steps 2-3) and
                 // before the latestFinishedVersion watermark advance (step 4), so the
-                // shadow sees the same tick's event order as the legacy path (S4).
+                // shadow sees the same tick's event order as the legacy path
+                // (phase event ordering).
                 // catch-all + enablement short-circuit inside the bridge.
                 shadowBridge.observeWorkerStatus(newWorkerStatus, roleType, ipPort);
 

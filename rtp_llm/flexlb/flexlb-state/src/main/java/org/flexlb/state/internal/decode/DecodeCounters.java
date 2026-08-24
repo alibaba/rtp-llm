@@ -7,7 +7,7 @@ import org.flexlb.state.DecodeCounterSnapshot;
 /**
  * D 侧派生计数器（LongAdder 分带增量账）。
  *
- * <p>P3 单写者强制：mutator 全 package-private，仅 {@link DecodeSideStore} 在
+ * <p>单写者强制：mutator 全 package-private，仅 {@link DecodeSideStore} 在
  * advance 的 CAS 胜者分支 / reserve / settleRemove 等固定位置调用——
  * 类型（package-private）+ 调用位置（Store 独占）双重约束。</p>
  *
@@ -31,7 +31,7 @@ final class DecodeCounters {
         }
     }
 
-    /** 预约入账（RESERVED 人口 +1、D① 影子预占 + 期望 KV 双轨起点）。仅 Store.reserve 调用。 */
+    /** 预约入账（RESERVED 入口 +1、影子预占 + 期望 KV 双轨起点）。仅 Store.reserve 调用。 */
     void onReserved(long expectedKv) {
         phaseCounts[DecodePhase.RESERVED.ordinal()].increment();
         reservedKvTotal.add(expectedKv);
@@ -49,14 +49,14 @@ final class DecodeCounters {
         engineOwned.increment();
     }
 
-    /** C1 撤预占：reservedKvTotal 减去被撤出的量（调用方先读旧值再清零）。仅 Store.advance 调用。 */
+    /** 计费归属移交撤预占：reservedKvTotal 减去被撤出的量（调用方先读旧值再清零）。仅 Store.advance 调用。 */
     void onReservationWithdrawn(long withdrawnKv) {
         if (withdrawnKv != 0) {
             reservedKvTotal.add(-withdrawnKv);
         }
     }
 
-    /** D② 引擎事实 KV 增量（noteEngineObserved 前后差值）。仅 Store.noteEngineObserved 调用。 */
+    /** 引擎事实 KV 增量（noteEngineObserved 前后差值）。仅 Store.noteEngineObserved 调用。 */
     void onKvReportedDelta(long oldKv, long newKv) {
         kvTokensReportedTotal.add(newKv - oldKv);
     }

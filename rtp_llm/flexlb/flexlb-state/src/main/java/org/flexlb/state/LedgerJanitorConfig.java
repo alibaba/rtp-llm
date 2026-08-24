@@ -8,10 +8,10 @@ package org.flexlb.state;
  * env 覆盖 + 启动回显照 M3 模式）；调度周期（janitorIntervalMs）属于调度方
  * 不在本配置内。</p>
  *
- * @param staleRounds        证据通道（F2）缺席阈值：完整 tick 连续缺席跨度
+ * @param staleRounds        证据通道缺席阈值：完整 tick 连续缺席跨度
  *                           超过 N 轮（{@code round - lastSeenRound > N}）才触发
  *                           VANISHED——天然防抖（护栏 1）。默认 3。
- * @param ttlMs              时间通道 TTL：createdAtMs 基准（R5 不可续命——任何
+ * @param ttlMs              时间通道 TTL：createdAtMs 基准（创建时刻固定不可续命——任何
  *                           touch/observe 都不刷新基准）。默认 300s，对齐现状
  *                           InflightStore TTL。
  * @param hardCapMs          强制通道硬上限：createdAtMs + 上限，到期无条件清理

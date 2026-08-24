@@ -8,8 +8,8 @@ import org.flexlb.state.TerminalState;
 import org.flexlb.state.internal.EntryTraceRing;
 
 /**
- * D 侧请求条目：D① 影子预占双轨（reservedKv / reservedExpectedKv）与
- * D② 引擎事实账（kvTokensReported）的单条目载体（C7/C1）。
+ * D 侧请求条目：影子预占双轨（reservedKv / reservedExpectedKv）与
+ * 引擎事实账（kvTokensReported）的单条目载体（计费归属状态驱动）。
  *
  * <p>并发约定：相位推进/终局/绑定均为条目级 synchronized CAS 语义
  * （transitionTo 只进不退；finishTransition AtomicBoolean 一次性守卫）。</p>
@@ -38,12 +38,12 @@ public final class DecodeRequestState {
     // ---- 正交意图 ----
     private volatile boolean pendingCancel;
 
-    // ---- D 账（C7 D①②）----
-    /** D① 影子预占当前占用（KV_ALLOCATED 确认后清 0；归位读数见 reservedKv()）。 */
+    // ---- D 侧 KV 账（双轨：影子预占 + 引擎事实）----
+    /** 影子预占当前占用（KV_ALLOCATED 确认后清 0；归位读数见 reservedKv()）。 */
     private volatile long reservedKv;
     /** 预约时声明的期望 KV（历史记录，确认后保留）。 */
     private final long reservedExpectedKv;
-    /** D② 引擎事实 KV（KV_ALLOCATED 起接管；0 = unknown，E1）。 */
+    /** 引擎事实 KV（KV_ALLOCATED 起接管；0 = unknown，不更新）。 */
     private volatile long kvTokensReported;
     private volatile long lastSeenRound = -1L;
     private volatile boolean engineOwned;
@@ -120,7 +120,7 @@ public final class DecodeRequestState {
         return true;
     }
 
-    /** B 道观察入账：引擎已见 + 上轮次 + KV（E1：kvTokens=0 表示 unknown 不更新）。 */
+    /** 引擎上报观察入账：引擎已见 + 上轮次 + KV（kvTokens=0 表示 unknown，不更新）。 */
     public synchronized void markEngineObserved(long round, long kvTokens, long version) {
         engineOwned = true;
         lastSeenRound = round;
@@ -133,14 +133,14 @@ public final class DecodeRequestState {
     }
 
     /**
-     * C1 撤预占：KV_ALLOCATED 确认后影子预占清 0（调用方先读旧值入计数再清）。
+     * 计费归属移交撤预占：KV_ALLOCATED 确认后影子预占清 0（调用方先读旧值入计数再清）。
      * reservedExpectedKv 保留（历史记录）。
      */
     public synchronized void clearReservation() {
         reservedKv = 0;
     }
 
-    /** S3 正交取消意图标记。 */
+    /** 正交取消意图标记。 */
     public void markPendingCancel() {
         this.pendingCancel = true;
     }

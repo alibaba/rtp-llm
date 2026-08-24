@@ -13,7 +13,7 @@ import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
 
 /**
- * EngineObservation 值对象契约：防御拷贝 / 不可变性 / E7 完整性 / TaskPhase 静态映射。
+ * EngineObservation 值对象契约：防御拷贝 / 不可变性 / 上报完整性 / TaskPhase 静态映射。
  */
 class EngineObservationTest {
 
@@ -76,7 +76,7 @@ class EngineObservationTest {
                 () -> new EngineObservation(ref, 1, 1, -1, List.of(), List.of()));
     }
 
-    /** E7 完整性：detailCount == running.size() 时完整（截断上报不完整）。 */
+    /** 上报完整性：detailCount == running.size() 时完整（截断上报不完整）。 */
     @Test
     void completenessFlag() {
         TestEndpointRef ref = new TestEndpointRef(1, StateRole.PREFILL, 0);
@@ -97,6 +97,6 @@ class EngineObservationTest {
         assertSame(EnginePhase.RUNNING, EnginePhase.fromTaskPhase(TaskPhase.RUNNING));
         assertNull(TaskPhase.fromValue("nonexistent"), "前置确认：未知字符串反序列化为 null");
         assertThrows(NullPointerException.class, () -> EnginePhase.fromTaskPhase(null),
-                "L18：无显式相位不得静默吞掉");
+                "无显式相位不得静默吞掉");
     }
 }

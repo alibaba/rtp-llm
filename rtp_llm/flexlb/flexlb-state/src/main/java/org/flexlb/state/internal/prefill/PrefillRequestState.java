@@ -8,7 +8,7 @@ import org.flexlb.state.TerminalState;
 import org.flexlb.state.internal.EntryTraceRing;
 
 /**
- * P 侧请求条目：A 道（派发流水线）与 B 道（引擎观察账）字段的单条目载体。
+ * P 侧请求条目：派发流水线侧（master 维护，重启即失）与引擎上报观察侧（可从上报重建）字段的单条目载体。
  *
  * <p>并发约定：相位推进/终局/绑定均为条目级 synchronized CAS 语义
  * （transitionTo 只进不退；finishTransition AtomicBoolean 一次性守卫）。</p>
@@ -36,14 +36,14 @@ public final class PrefillRequestState {
     // ---- 世代绑定（发送前可重绑=新记录，发送后不可变）----
     private volatile GenerationTriple binding = UNBOUND;
 
-    // ---- S3 正交意图 ----
+    // ---- 正交取消意图 ----
     private volatile boolean pendingCancel;
 
-    // ---- A 道区段（派发流水线）----
+    // ---- 派发流水线区段（master 维护，进程重启即失）----
     private volatile long batchId;
     private volatile long dispatchedAtMs = -1L;
 
-    // ---- B 道区段（引擎观察账）----
+    // ---- 引擎上报观察账区段（可从上报重建）----
     private volatile long kvTokensReported;
     private volatile long lastSeenRound = -1L;
     private volatile boolean engineOwned;
@@ -61,7 +61,7 @@ public final class PrefillRequestState {
 
     /**
      * 相位 CAS 前进：只进不退（target ≤ 当前相位返回 false——供超车计数）。
-     * 成功时按格闭包补记沿途相位进入历史（L9：越级推进的 enteredAt 用当前时刻近似）。
+     * 成功时按格闭包补记沿途相位进入历史（越级推进的 enteredAt 用当前时刻近似）。
      *
      * @param version 事件版本（本地决策事件传 -1：不更新 lastVersion）
      */
@@ -121,7 +121,7 @@ public final class PrefillRequestState {
         return true;
     }
 
-    /** B 道观察入账：引擎已见 + 上轮次 + KV（E1：kvTokens=0 表示 unknown 不更新）。 */
+    /** 引擎上报观察入账：引擎已见 + 上轮次 + KV（kvTokens=0 表示 unknown，不更新）。 */
     public synchronized void markEngineObserved(long round, long kvTokens, long version) {
         engineOwned = true;
         lastSeenRound = round;
@@ -133,17 +133,17 @@ public final class PrefillRequestState {
         }
     }
 
-    /** S3 正交取消意图标记。 */
+    /** 正交取消意图标记。 */
     public void markPendingCancel() {
         this.pendingCancel = true;
     }
 
-    /** A 道：更新批次外键（B0/B1 可空外键；onDispatching 时随相位一起写）。 */
+    /** 派发流水线：更新批次外键（初始 NO_BATCH(-1) 或实际批次 ID；onDispatching 时随相位一起写）。 */
     public void setBatchId(long batchId) {
         this.batchId = batchId;
     }
 
-    /** A 道：派发时刻。 */
+    /** 派发流水线：派发时刻。 */
     public void noteDispatched(long nowMs) {
         this.dispatchedAtMs = nowMs;
     }

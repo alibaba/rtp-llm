@@ -7,7 +7,7 @@ import org.flexlb.state.InternalApi;
 import org.flexlb.state.PhaseVerdict;
 
 /**
- * Prefill 侧相位格纯函数集（I2 蕴含闭包 / L9 越级闭包补记 / S4 裁决矩阵 P 分支）。
+ * Prefill 侧相位格纯函数集（相位蕴含闭包 / 越级闭包补记 / 相位裁决矩阵 P 分支）。
  *
  * <p>无状态、全静态、纯函数——不持任何可变状态，天然线程安全。</p>
  */
@@ -18,7 +18,7 @@ public final class PrefillLattice {
     }
 
     /**
-     * I2 蕴含闭包（P 侧）：P 侧格为严格单调链，格内蕴含即前缀关系——
+     * 相位蕴含闭包（P 侧）：P 侧格为严格单调链，格内蕴含即前缀关系——
      * 处于相位 p 蕴含"已经过全部更低相位"，即 {@code EnumSet.range(INIT, p)}。
      * （D 侧才需要跨侧蕴含；P 侧无跨侧相位。）
      */
@@ -27,7 +27,7 @@ public final class PrefillLattice {
     }
 
     /**
-     * 越级推进的沿途相位序列（L9）：收到 {@code from → to} 的越级事件时，
+     * 越级推进的沿途相位序列：收到 {@code from → to} 的越级事件时，
      * 返回含两端的完整沿途序列，供上层补记各相位 enteredAt。
      *
      * <p>契约：{@code to > from} 时返回 {@code [from .. to]} 全序列；
@@ -46,17 +46,17 @@ public final class PrefillLattice {
     }
 
     /**
-     * S4 裁决矩阵（P 分支）：对一条相位事件裁决接受/丢弃/拒绝。
+     * 相位裁决矩阵（P 分支）：对一条相位事件裁决接受/丢弃/拒绝。
      *
      * <p>分支优先级（自上而下短路）：</p>
      * <ol>
      *   <li><b>世代屏障</b>：{@code !generationMatch} → {@link PhaseVerdict#REJECT_GENERATION}
-     *       ——世代三元组不匹配整报拒绝（S8），优先级最高。</li>
+     *       ——世代三元组不匹配整报拒绝，优先级最高。</li>
      *   <li><b>版本屏障（陈旧）</b>：{@code eventVersion < currentVersion} →
-     *       {@link PhaseVerdict#DROP_DUP}——版本单调假设被破坏时的丢弃语义（L2），
+     *       {@link PhaseVerdict#DROP_DUP}——版本单调假设被破坏时的丢弃语义，
      *       陈旧上报不论相位如何一律按重复丢弃。</li>
      *   <li><b>迟到中间态</b>：{@code eventPhase < current} → {@link PhaseVerdict#DROP_LATE}
-     *       ——乱序到达的低位中间态丢弃（L9）。</li>
+     *       ——乱序到达的低位中间态丢弃。</li>
      *   <li><b>越级推进</b>：{@code eventPhase > current} →
      *       isFinish ? {@link PhaseVerdict#WARN_FINISH_PRIORITY}（finish 事件携带相位超前于
      *       本地已知相位——优先级倒挂告警，但 finish 是最强证据仍接受推进）

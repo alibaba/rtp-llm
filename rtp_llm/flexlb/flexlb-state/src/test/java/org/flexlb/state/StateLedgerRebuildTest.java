@@ -10,7 +10,7 @@ import org.flexlb.state.spi.StateRole;
 import org.junit.jupiter.api.Test;
 
 /**
- * P1/P2 重启重建：清空两侧账后按序重放全量历史——
+ * 重启重建与引擎收养：清空两侧账后按序重放全量历史——
  * 不认识的 running 条目按引擎收养入账（batchId=-1、engineOwned=true），
  * 历史 finished 收尾对应条目，跨侧规则在重放中同样生效，重建后账面可对账。
  */
@@ -48,10 +48,10 @@ class StateLedgerRebuildTest {
 
         ledger.rebuild(history);
 
-        // P2 收养语义：100 被收养（batchId=-1、engineOwned=true、binding=观察端点世代、kvTokens 入账）
+        // 引擎收养语义：100 被收养（batchId=-1、engineOwned=true、binding=观察端点世代、kvTokens 入账）
         PrefillRequestStateView pv = ledger.prefill().get(100L).orElseThrow();
         assertTrue(pv.engineOwned());
-        assertEquals(-1L, pv.batchId()); // P2：不认识的 running 条目按散请求收养
+        assertEquals(-1L, pv.batchId()); // 引擎收养：不认识的 running 条目按散请求收养
         assertEquals(new GenerationTriple(1, pGen, -1L), pv.binding());
         assertEquals(512L, pv.kvTokensReported());
         // D KV_ALLOCATED 重放触发跨侧收缩：P 100 从 P_WAITING_LOADED(7) → PREFILL_DONE(9)

@@ -9,12 +9,12 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * FenceRegistry 组件级：R4 驱逐断言（fenced 条目 canEvict 抛 IllegalStateException）、
+ * FenceRegistry 组件级：fence 驱逐断言（fenced 条目 canEvict 抛 IllegalStateException）、
  * unfence/TTL 过期防永生、dump 可读视图、重复登记覆盖刷新。
  */
 class FenceRegistryTest {
 
-    /** R4：fenced 条目驱逐断言拒绝；未 fence 条目正常放行。 */
+    /** fenced 条目驱逐断言拒绝；未 fence 条目正常放行。 */
     @Test
     void fencedRequestCannotBeEvicted() {
         FenceRegistry r = new FenceRegistry(60_000L);

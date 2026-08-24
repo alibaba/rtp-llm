@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
  * M4 清理层 LedgerJanitor 组件级测试：四通道（F1-F4）× 三护栏 + 迟到吸收 + 并发守恒。
  *
  * <p>覆盖矩阵：F2 证据通道（护栏 1 防抖/护栏 2 完整性/护栏 3 fence 豁免）、
- * F3 TTL（createdAt 不可续命 R5 + 轮转分摊）、F4 hard cap（fence 不豁免决策 +
+ * F3 TTL（createdAt 不可续命 + 轮转分摊）、F4 hard cap（fence 不豁免决策 +
  * 优先于 TTL）、迟到 finished 墓碑吸收、janitor tick 与快路径 settle 并发
  * （CAS 单出口——无双重结算、终态守恒）。</p>
  */
@@ -50,7 +50,7 @@ class LedgerJanitorTest {
         s.ledger().observe(TestEndpoints.runningOnly(s.dEp(), 1L, 1_000L,
                 TestEndpoints.running(id, StateRole.DECODE, EnginePhase.KV_ALLOCATED, -1L, 100L, 1L)));
         assertEquals(1L, s.ledger().decode().get(id).orElseThrow().lastSeenRound(),
-                "开账后条目须被引擎确认过（B 道非零轮次门槛）");
+                "开账后条目须被引擎确认过（引擎上报观察轮次未建立）");
     }
 
     /** 该端点一轮完整空 tick（running/finished 均空，detailCount=0 完整）。 */
@@ -58,7 +58,7 @@ class LedgerJanitorTest {
         s.ledger().observe(TestEndpoints.observation(s.dEp(), round, 1_000L + round, List.of(), List.of()));
     }
 
-    /** 不完整 tick（detailCount 虚高模拟截断上报，E7）。 */
+    /** 不完整 tick（detailCount 虚高模拟截断上报（上报完整性））。 */
     private static void truncatedRound(DSetup s, long round) {
         s.ledger().observe(new EngineObservation(s.dEp(), round, 1_000L + round, 10, List.of(), List.of()));
     }
@@ -89,7 +89,7 @@ class LedgerJanitorTest {
         assertEquals(0, s.janitor().absentTracked(), "触发后缺席追踪须清理");
     }
 
-    /** 护栏 2（E7）：不完整 tick 绝不推进缺席计数——round 值大跳也不放大跨度。 */
+    /** 护栏 2（上报完整性）：不完整 tick 绝不推进缺席计数——round 值大跳也不放大跨度。 */
     @Test
     void incompleteTicksNeverAdvanceAbsenceCounting() {
         DSetup s = decodeLedger(new LedgerJanitorConfig(3, 300_000L, 900_000L, 4096));
@@ -101,7 +101,7 @@ class LedgerJanitorTest {
         truncatedRound(s, 5L);
         truncatedRound(s, 50L);
         truncatedRound(s, 500L);
-        assertTrue(s.ledger().decode().get(id).isPresent(), "不完整 tick 绝不推进缺席计数（护栏 2/E7）");
+        assertTrue(s.ledger().decode().get(id).isPresent(), "不完整 tick 绝不推进缺席计数（护栏 2 上报完整性）");
         assertEquals(3L, s.janitor().stats().incompleteTicksSkipped());
         assertEquals(1L, s.janitor().stats().roundEndTicks(), "仅开账确认轮计入完整轮");
 
@@ -115,7 +115,7 @@ class LedgerJanitorTest {
         assertEquals(1L, s.janitor().stats().vanishedSettles());
     }
 
-    /** 护栏 3（R4）：fenced 条目缺席触发被跳过并计 fence_hold；解除后从新起点重新累计。 */
+    /** 护栏 3（fence 豁免）：fenced 条目缺席触发被跳过并计 fence_hold；解除后从新起点重新累计。 */
     @Test
     void fencedEntrySkippedByEvidenceChannelWithFenceHoldCount() {
         DSetup s = decodeLedger(new LedgerJanitorConfig(3, 300_000L, 900_000L, 4096));
@@ -126,7 +126,7 @@ class LedgerJanitorTest {
         for (long r = 2; r <= 5; r++) {
             completeRound(s, r);
         }
-        assertTrue(s.ledger().decode().get(id).isPresent(), "fenced 条目必须被豁免（护栏 3/R4）");
+        assertTrue(s.ledger().decode().get(id).isPresent(), "fenced 条目必须被豁免（护栏 3 fence 豁免）");
         assertEquals(1L, s.janitor().stats().fenceHoldSkips(), "fence 豁免须计数");
         assertEquals(0L, s.janitor().stats().vanishedSettles());
 
@@ -170,7 +170,7 @@ class LedgerJanitorTest {
 
     // ---- 2. F3 TTL 通道 ----
 
-    /** R5 专项：TTL 按 createdAt 判定，持续 observe（lastSeenRound 新鲜）不续命。 */
+    /** TTL 不可续命专项：TTL 按 createdAt 判定，持续 observe（lastSeenRound 新鲜）不续命。 */
     @Test
     void ttlExpiresOnCreatedAtNotRenewedByObserve() {
         DSetup s = decodeLedger(new LedgerJanitorConfig(3, 100L, 1_000_000L, 4096)); // ttl=100ms
@@ -187,7 +187,7 @@ class LedgerJanitorTest {
 
         s.janitor().runMaintenanceTick(createdAt + 200L); // age=200 > ttl=100
 
-        assertTrue(s.ledger().decode().get(id).isEmpty(), "TTL 按 createdAt 判定——observe 不续命（R5）");
+        assertTrue(s.ledger().decode().get(id).isEmpty(), "TTL 按 createdAt 判定——observe 不续命（创建时刻固定）");
         TerminalOutcome outcome = s.ledger().terminalOutcomeOf(id, StateRole.DECODE).orElseThrow();
         assertEquals(TerminalState.SLO_TIMEOUT, outcome.state());
         assertEquals(TerminalReason.TTL_EXPIRED, outcome.reason());
@@ -401,7 +401,7 @@ class LedgerJanitorTest {
         assertEquals(0L, st.errors(), "janitor 铁律：并发下绝不外抛");
         long janitorWins = st.ttlSettles() + st.vanishedSettles() + st.hardCapSettles();
         assertTrue(janitorWins <= n, "janitor 通道胜者数守恒（实际 " + janitorWins + "）");
-        // 超车计数（F3）：janitor 败者 = 快路径胜 = 正常；此处只验证不越界
+        // 超车计数（TTL 通道）：janitor 败者 = 快路径胜 = 正常；此处只验证不越界
         assertTrue(st.lostToFastPath() >= 0);
         assertFalse(janitorWins > 0 && st.lostToFastPath() > n);
     }

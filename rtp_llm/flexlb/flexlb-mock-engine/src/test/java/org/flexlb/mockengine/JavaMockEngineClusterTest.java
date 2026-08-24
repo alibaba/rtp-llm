@@ -120,7 +120,8 @@ class JavaMockEngineClusterTest {
 
         enqueue(service, batch(31, slot(0, input(1, 100), input(2, 200))));
 
-        // E1: per-request kv_tokens = inputLen + planned outputLen (max_new_tokens=1).
+        // kv_tokens contract: per-request kv_tokens = inputLen + planned outputLen
+        // (max_new_tokens=1).
         EngineRpcService.WorkerStatusPB running = awaitStatus(service,
                 status -> status.getRunningTaskInfoCount() == 2
                         && status.getRunningDetailCount() == 2
@@ -129,14 +130,14 @@ class JavaMockEngineClusterTest {
                 1_000);
         assertEquals(101, kvTokensOf(running.getRunningTaskInfoList(), 1));
         assertEquals(201, kvTokensOf(running.getRunningTaskInfoList(), 2));
-        // E7: completeness marker equals the reported running entry count.
+        // Report completeness: completeness marker equals the reported running entry count.
         assertEquals(running.getRunningTaskInfoCount(), running.getRunningDetailCount());
 
         EngineRpcService.WorkerStatusPB finished = awaitStatus(service,
                 status -> status.getRunningTaskInfoCount() == 0
                         && status.getFinishedTaskListCount() == 2,
                 2_000);
-        // E1 final value: finished entries keep the same full-sequence KV model.
+        // kv_tokens contract final value: finished entries keep the same full-sequence KV model.
         assertTrue(finished.getFinishedTaskListList().stream()
                 .allMatch(task -> task.getKvTokens() > 0),
                 "finished kv_tokens must be populated, not a dead 0");

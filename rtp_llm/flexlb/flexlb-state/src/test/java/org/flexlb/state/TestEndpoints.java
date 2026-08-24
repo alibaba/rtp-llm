@@ -33,7 +33,7 @@ final class TestEndpoints {
         return new EngineObservation.FinishedObservation(requestId, side, errorCode, endTimeMs, version);
     }
 
-    /** 完整上报（detailCount = running.size()，E7）。 */
+    /** 完整上报（detailCount = running.size()，上报完整性）。 */
     static EngineObservation observation(Endpoint ep, long round, long statusMs,
                                          List<EngineObservation.RunningObservation> running,
                                          List<EngineObservation.FinishedObservation> finished) {

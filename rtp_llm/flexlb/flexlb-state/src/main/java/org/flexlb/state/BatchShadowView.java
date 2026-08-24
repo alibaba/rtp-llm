@@ -3,7 +3,7 @@ package org.flexlb.state;
 import java.util.List;
 
 /**
- * 批次影子视图（B6 双视图）：从 P 侧活跃条目按 batchId 聚类的只读视图。
+ * 批次影子双视图：从 P 侧活跃条目按 batchId 聚类的只读视图。
  *
  * <ul>
  *   <li>{@link #maxPhaseOrdinal()}：任一成员 P_RUNNING（ordinal 8）即视为批次在跑

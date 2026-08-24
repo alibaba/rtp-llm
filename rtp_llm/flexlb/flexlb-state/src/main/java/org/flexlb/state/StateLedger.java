@@ -34,19 +34,19 @@ import org.flexlb.state.spi.StateRole;
  *
  * <h2>跨侧规则（observe 链路独占，本类是唯一实现处）</h2>
  * <ol>
- *   <li><b>C7/L4 P 释放点 = D 确认点</b>：D 侧收到 KV_ALLOCATED（进 D_LOADING）的同 tick，
+ *   <li><b>P 释放点 = D 确认点（跨侧同 tick 收缩规则）</b>：D 侧收到 KV_ALLOCATED（进 D_LOADING）的同 tick，
  *       若 P 侧同请求条目仍处 P_RECEIVED..P_WAITING_LOADED，闭包推进到 PREFILL_DONE
  *       （P 账释放无中间窗口）；P_RUNNING 不收缩（边算边传重叠窗口，见 {@link #crossSide()}）。</li>
- *   <li><b>C1 临界点（超卖窗口修正）</b>：D 侧 DISPATCHED 相位收到 RECEIVED 期间<b>双记</b>
- *       （D① 影子预占保持 + 引擎已见标记）；KV_ALLOCATED 起撤 D① 预占
- *       （reservedKv 出账）、D② 引擎事实 KV 接管。</li>
+ *   <li><b>计费归属临界点（超卖窗口修正）</b>：D 侧 DISPATCHED 相位收到 RECEIVED 期间<b>双记</b>
+ *       （影子预占保持 + 引擎已见标记）；KV_ALLOCATED 起撤影子预占
+ *       （reservedKv 出账）、引擎事实 KV 接管。</li>
  *   <li><b>F1 因果闭包</b>：D 侧 finished(success) ⇒ 整请求完成 ⇒ 同 tick 收缩未终局的
  *       P 侧条目为 COMPLETED（SettleReason.CAUSAL_CLOSURE 通道）。</li>
  *   <li><b>cancel 双清</b>：任一侧 settle(CANCELLED) 成功的同 tick 清对侧同请求条目
  *       （两侧计数独立减，互不依赖）。</li>
  * </ol>
  *
- * <h2>世代屏障（S8）</h2>
+ * <h2>世代屏障</h2>
  * observe 先做整报级世代校验（端点当前登记代 vs 报文代，不匹配整报拒绝），
  * 条目级再按 binding 世代裁决（REJECT_GENERATION）。换代经 {@link #newGeneration}。
  */
@@ -104,7 +104,7 @@ public final class StateLedger {
     }
 
     /**
-     * EP 换代登记（S8）：分配并登记该端点新代际
+     * EP 换代登记：分配并登记该端点新代际
      * （= max(进程 epoch, 上一代 + 1)，单调且防 master 重启归零）。
      */
     public long newGeneration(StateEndpointRef endpoint) {
@@ -113,7 +113,7 @@ public final class StateLedger {
     }
 
     /**
-     * 引擎观察唯一入口：整报世代校验（S8）→ 逐条按 side 分发 → 裁决 →
+     * 引擎观察唯一入口：整报世代校验 → 逐条按 side 分发 → 裁决 →
      * 推进/丢弃/终局 + 跨侧规则（见类 javadoc）。
      */
     public void observe(EngineObservation observation) {
@@ -121,7 +121,7 @@ public final class StateLedger {
     }
 
     /**
-     * 跨侧推导视图（S9：只读推导，不参与裁决）。
+     * 跨侧推导视图（只读推导，不参与裁决）。
      *
      * <p>KV_TRANSFERRING = P 条目 P_RUNNING ∧ D 条目已报（engineOwned）——
      * 边算边传的传输重叠窗口。</p>
@@ -140,9 +140,9 @@ public final class StateLedger {
     }
 
     /**
-     * P1 重启重建：清空两侧账后按序重放全量历史。
+     * 重启重建：清空两侧账后按序重放全量历史。
      *
-     * <p>重放中不认识的 running 条目按引擎收养入账（P2：batchId=-1、engineOwned=true、
+     * <p>重放中不认识的 running 条目按引擎收养入账（batchId=-1、engineOwned=true、
      * binding=观察端点世代）；历史 finished 对未开/已收条目跳过。世代登记经
      * observeGeneration merge max（防重建归零）。</p>
      */
@@ -219,7 +219,7 @@ public final class StateLedger {
     }
 
     /**
-     * 影子对账查询（M3/G1 接口缺口最小补）：按 requestId + 侧查询终局条目的
+     * 影子对账查询（影子挂载 G1 接口缺口最小补）：按 requestId + 侧查询终局条目的
      * 终态记录（墓碑内），条目存活/不存在/墓碑已过期均返回 empty。
      *
      * <p>只读视图，不参与裁决；供 flexlb-sync 影子 diff 对账消费。</p>
@@ -241,7 +241,7 @@ public final class StateLedger {
     }
 
 
-    /** fence 仓库（同包测试/门面协作；R4 断言见 FenceRegistry.canEvict）。 */
+    /** fence 仓库（同包测试/门面协作；fence 驱逐断言见 FenceRegistry.canEvict）。 */
     FenceRegistry fences() {
         return fences;
     }
@@ -254,7 +254,7 @@ public final class StateLedger {
         if (rebuildMode) {
             generations.observeGeneration(ep.endpointId(), ep.generation());
         }
-        // 整报世代屏障（S8）：端点当前登记代 vs 报文代，不匹配整报拒绝
+        // 整报世代屏障：端点当前登记代 vs 报文代，不匹配整报拒绝
         if (!generations.isCurrent(new GenerationTriple((int) ep.endpointId(), ep.generation(), -1L))) {
             generations.recordCrossGenerationReject();
             return;
@@ -266,7 +266,7 @@ public final class StateLedger {
         for (EngineObservation.FinishedObservation f : obs.finished()) {
             dispatchFinished(f, ep, nowMs, rebuildMode);
         }
-        // M4/F2：完整 tick 尾部回调 janitor 缺席扫描（rebuild 重放不触发；
+        // M4 证据通道：完整 tick 尾部回调 janitor 缺席扫描（rebuild 重放不触发；
         // 不完整 tick 由 janitor 护栏 2 自行丢弃——不推进缺席计数）
         if (!rebuildMode) {
             LedgerJanitor j = janitor;
@@ -283,7 +283,7 @@ public final class StateLedger {
             PrefillRequestState e = pStore.get(id);
             if (e == null) {
                 if (rebuildMode) {
-                    // P2 引擎收养：batchId=-1、engineOwned=true
+                    // 引擎收养：batchId=-1、engineOwned=true
                     pStore.adoptEngineOwned(id, (int) ep.endpointId(), ep.generation(), nowMs,
                             PrefillPhase.fromEnginePhase(r.enginePhase()), r.kvTokens(), r.version());
                 } else if (pStore.isTombstoned(id)) {
@@ -301,7 +301,7 @@ public final class StateLedger {
                 generations.recordCrossGenerationReject();
                 return;
             }
-            // 同相位新鲜观察（DROP_DUP/迟到）不推进相位，但版本不落后时仍更新 B 道观察账
+            // 同相位新鲜观察（DROP_DUP/迟到）不推进相位，但版本不落后时仍更新引擎上报观察账
             if (r.version() >= e.lastVersion()) {
                 pStore.noteEngineObserved(e, round, r.kvTokens(), r.version());
             }
@@ -335,13 +335,13 @@ public final class StateLedger {
             generations.recordCrossGenerationReject();
             return;
         }
-        // C1 双记：DISPATCHED 相位收到 RECEIVED——预占保持（不动账）+ 引擎已见（观察账更新）
+        // 计费归属双记：DISPATCHED 相位收到 RECEIVED——预占保持（不动账）+ 引擎已见（观察账更新）
         if (r.version() >= e.lastVersion()) {
             dStore.noteEngineObserved(e, round, r.kvTokens(), r.version());
         }
         if (v == PhaseVerdict.ACCEPT_ADVANCE) {
             boolean winner = dStore.advance(e, eventPhase, r.version(), nowMs);
-            // 跨侧规则 C7/L4：D 确认点即 P 释放点——同 tick 收缩 P 条目（仅 CAS 胜者触发一次）
+            // 跨侧收缩规则：D 确认点即 P 释放点——同 tick 收缩 P 条目（仅 CAS 胜者触发一次）
             if (winner && eventPhase == DecodePhase.D_LOADING) {
                 shrinkPrefillOnDecodeConfirmed(id, nowMs);
             }
@@ -415,7 +415,7 @@ public final class StateLedger {
     }
 
     /**
-     * C7/L4 跨侧收缩：P 条目处 P_RECEIVED..P_WAITING_LOADED 时闭包推进到 PREFILL_DONE
+     * 跨侧收缩：P 条目处 P_RECEIVED..P_WAITING_LOADED 时闭包推进到 PREFILL_DONE
      * （P 账释放点 = D 确认点，无中间窗口）。P_RUNNING 不收缩（传输重叠窗口）；
      * P 侧本地相位（&lt; P_RECEIVED）不收缩（状态滞后由后续观察对齐）。
      */
@@ -626,7 +626,7 @@ public final class StateLedger {
             if (e == null) {
                 return false;
             }
-            // R4：fenced 条目驱逐前断言拒绝（release 属移除路径）
+            // fence 驱逐断言防线：fenced 条目驱逐前断言拒绝（release 属移除路径）
             fences.canEvict(requestId);
             return dStore.releaseRemove(e, System.currentTimeMillis());
         }

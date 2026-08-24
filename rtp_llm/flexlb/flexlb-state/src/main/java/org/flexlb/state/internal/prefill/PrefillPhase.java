@@ -56,7 +56,7 @@ public enum PrefillPhase {
     /**
      * 引擎观察相位 → P 侧格保守映射：
      * RECEIVED→P_RECEIVED、KV_ALLOCATED→P_WAITING_LOADED、RUNNING→P_RUNNING、
-     * PENDING→P_RECEIVED（保守最低观察位，L18：引擎无显式中间相位时只能倒推）。
+     * PENDING→P_RECEIVED（保守最低观察位：引擎无显式中间相位时只能保守倒推）。
      */
     public static PrefillPhase fromEnginePhase(EnginePhase enginePhase) {
         return switch (enginePhase) {

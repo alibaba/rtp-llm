@@ -7,7 +7,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.flexlb.state.InternalApi;
 
 /**
- * fence 登记（R4）：跨侧协调期间冻结相关条目的驱逐（canEvict 断言拒绝），
+ * fence 登记：跨侧协调期间冻结相关条目的驱逐（fence 驱逐断言防线，canEvict 断言拒绝），
  * 带 TTL 防永生。
  *
  * <p>fence 是意图标记不是锁：登记后对应条目在意图完成前不可被驱逐路径移除
@@ -63,7 +63,7 @@ public final class FenceRegistry {
     }
 
     /**
-     * 驱逐前断言（R4）：fenced 条目驱逐拒绝——直接抛 {@link IllegalStateException}
+     * 驱逐前断言（fence 驱逐断言防线）：fenced 条目驱逐拒绝——直接抛 {@link IllegalStateException}
      * （这是编程错误：驱逐路径必须先等 fence 解除）。
      */
     public void canEvict(long requestId) {
@@ -71,7 +71,7 @@ public final class FenceRegistry {
         if (f != null && !expired(f, System.currentTimeMillis())) {
             throw new IllegalStateException(
                     "request " + requestId + " is fenced (" + f.type() + " by " + f.owner()
-                            + " since " + f.createdAtMs() + "), eviction forbidden (R4)");
+                            + " since " + f.createdAtMs() + "), eviction forbidden (fence guard)");
         }
     }
 

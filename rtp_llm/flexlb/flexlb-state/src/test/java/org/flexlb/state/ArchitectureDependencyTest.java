@@ -16,7 +16,7 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
  *       （state 是被 balance/sync 消费的底层组件，反向依赖即成环）。</li>
  *   <li>internal 可见性契约（M2）：org.flexlb.state.internal.. 包内类型要么 package-private，
  *       要么 public 且<b>必须</b>带 {@link InternalApi}（门面 StateLedger 跨包协作骨架）。</li>
- *   <li>P3 单写者强制：派生计数器（*Counters）类型 package-private 且仅同包 *SideStore 可依赖
+ *   <li>单写者强制：派生计数器（*Counters）类型 package-private 且仅同包 *SideStore 可依赖
  *       （类型 + 调用位置双约束的架构层固化）。</li>
  *   <li>SPI 纯净性：org.flexlb.state.spi 契约不得依赖 internal 实现。</li>
  * </ol>
@@ -66,19 +66,19 @@ class ArchitectureDependencyTest {
         rule.check(MAIN_CLASSES);
     }
 
-    /** P3 单写者（类型强制）：派生计数器必须 package-private（@InternalApi 也不允许）。 */
+    /** 单写者（类型强制）：派生计数器必须 package-private（@InternalApi 也不允许）。 */
     @Test
     void derivedCountersMustBePackagePrivate() {
         ArchRule rule = classes()
                 .that().haveSimpleNameEndingWith("Counters")
                 .and().resideInAPackage("org.flexlb.state.internal..")
                 .should().notBePublic()
-                .because("P3 单写者：计数器 mutator 全 package-private——类型不可见即不可调用，"
+                .because("单写者：计数器 mutator 全 package-private——类型不可见即不可调用，"
                         + "条目/门面/其他组件无法绕过 SideStore 直写计数");
         rule.check(MAIN_CLASSES);
     }
 
-    /** P3 单写者（调用位置强制）：计数器仅同包 *SideStore 可依赖。 */
+    /** 单写者（调用位置强制）：计数器仅同包 *SideStore 可依赖。 */
     @Test
     void derivedCountersAreOnlyReachableBySideStores() {
         ArchRule rule = noClasses()
@@ -86,7 +86,7 @@ class ArchitectureDependencyTest {
                 .and().haveSimpleNameNotEndingWith("SideStore")
                 .should().dependOnClassesThat()
                 .haveSimpleNameEndingWith("Counters")
-                .because("P3 单写者：计数器调用点固定在 SideStore 的 CAS 胜者分支/register/"
+                .because("单写者：计数器调用点固定在 SideStore 的 CAS 胜者分支/register/"
                         + "settleRemove 等位置，其他类型（含条目自身）不得依赖计数器");
         rule.check(MAIN_CLASSES);
     }

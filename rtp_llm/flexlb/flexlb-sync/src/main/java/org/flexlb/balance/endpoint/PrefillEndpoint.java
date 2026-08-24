@@ -437,7 +437,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private void failItems(List<BatchItem> items, long batchId, String message) {
         // Use repackBatch (computeIfPresent) instead of releaseBatch (remove)
-        // to avoid the C1 race: releaseBatch's non-atomic remove from both
+        // to avoid the dual-layer accounting race: releaseBatch's non-atomic remove from both
         // layers can race with calibrate's layer-1→layer-2 migration,
         // causing inflightRequestCount to underflow. repackBatch with all
         // request IDs atomically shrinks the entry to zero survivors on

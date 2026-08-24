@@ -627,9 +627,10 @@ public final class JavaMockEngineCluster {
                     .setDpSize(1)
                     .setTpSize(1)
                     .setDpRank(0);
-            // Snapshot the running set once so running_detail_count (E7) is
-            // guaranteed to equal the number of entries actually reported,
-            // even if requests complete concurrently between the two calls.
+            // Snapshot the running set once so running_detail_count
+            // (completeness marker) is guaranteed to equal the number of entries
+            // actually reported, even if requests complete concurrently between
+            // the two calls.
             List<EngineRpcService.TaskInfoPB> runningSnapshot = List.copyOf(runningTasks.values());
             status.addAllRunningTaskInfo(runningSnapshot);
             status.setRunningDetailCount(runningSnapshot.size());
@@ -1251,7 +1252,7 @@ public final class JavaMockEngineCluster {
                     .setBatchId(batchId)
                     .setPhase(phase)
                     .setDpRank(dpRank)
-                    // E1 kv_tokens: per-request KV usage modelled as the full
+                    // kv_tokens contract: per-request KV usage modelled as the full
                     // sequence length (input + planned output), mirroring the
                     // real engine semantics of kv_tokens = allocated blocks *
                     // block size ~= block-aligned sequence length. The separate
@@ -1279,7 +1280,7 @@ public final class JavaMockEngineCluster {
                     .setExecutionTimeMs(executionMs)
                     .setIterateCount(1)
                     .setDpRank(dpRank)
-                    // E1 kv_tokens final value: the finished request's peak KV
+                    // kv_tokens contract final value: the finished request's peak KV
                     // footprint is its full sequence length (input + output),
                     // consistent with the running-entry model in task().
                     .setKvTokens(shape.inputLen() + shape.outputLen())

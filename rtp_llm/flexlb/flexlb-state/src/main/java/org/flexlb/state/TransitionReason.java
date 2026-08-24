@@ -1,7 +1,7 @@
 package org.flexlb.state;
 
 /**
- * 相位转换受控原因（O2 三类受控枚举之一）：描述驱动一次相位格转换的事件来源。
+ * 相位转换受控原因（三类受控枚举之一）：描述驱动一次相位格转换的事件来源。
  */
 public enum TransitionReason {
 

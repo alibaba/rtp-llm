@@ -11,9 +11,9 @@ import java.util.List;
  * @param phaseName          当前相位名（如 "D_LOADING"）
  * @param pendingCancel      正交取消意图标记
  * @param binding            世代绑定
- * @param reservedKv         D① 影子预占当前占用（KV_ALLOCATED 确认后清 0）
+ * @param reservedKv         影子预占当前占用（KV_ALLOCATED 确认后清 0）
  * @param reservedExpectedKv 预约时声明的期望 KV（历史记录，保留）
- * @param kvTokensReported   D② 引擎事实 KV（KV_ALLOCATED 起接管；0 = unknown，E1）
+ * @param kvTokensReported   引擎事实 KV（KV_ALLOCATED 起接管；0 = unknown，不更新）
  * @param lastSeenRound      最近被引擎上报观察到的轮次
  * @param engineOwned        引擎已见
  * @param lastVersion        最近接受的引擎上报序号

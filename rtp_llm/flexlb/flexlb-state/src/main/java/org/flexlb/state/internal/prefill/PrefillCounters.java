@@ -6,7 +6,7 @@ import org.flexlb.state.PrefillCounterSnapshot;
 /**
  * P 侧派生计数器（LongAdder 分带增量账）。
  *
- * <p>P3 单写者强制：mutator 全 package-private，仅 {@link PrefillSideStore} 在
+ * <p>单写者强制：mutator 全 package-private，仅 {@link PrefillSideStore} 在
  * transitionTo CAS 胜者分支 / register / settleRemove 等固定位置调用——
  * 类型（package-private）+ 调用位置（Store 独占）双重约束，条目与其他组件无法绕过。</p>
  */
@@ -34,7 +34,7 @@ final class PrefillCounters {
         phaseCounts[to.ordinal()].increment();
     }
 
-    /** 引擎首见（B 道）：engineOwned +1。仅 Store.noteEngineObserved 调用。 */
+    /** 引擎首见（引擎上报观察）：engineOwned +1。仅 Store.noteEngineObserved 调用。 */
     void onEngineOwned() {
         engineOwned.increment();
     }

@@ -11,16 +11,16 @@ import org.flexlb.state.spi.EnginePhase;
 import org.junit.jupiter.api.Test;
 
 /**
- * S4 裁决矩阵（D 分支）机器可枚举性证明（R7）：
+ * 相位裁决矩阵（D 分支）机器可枚举性证明（穷举可枚举性）：
  * current × eventPhase × version 关系(&lt;==&gt;) × isFinish × generationMatch 全组合穷举
  * （4 × 4 × 3 × 2 × 2 = 192 组合），外加 closureBetween 越级闭包全对枚举与
- * L2 / L9 / L18 教训回归。与 P 侧（PrefillLatticeTest）同构。
+ * 版本屏障 / 乱序裁决 / 保守倒推教训回归。与 P 侧（PrefillLatticeTest）同构。
  */
 class DecodeLatticeTest {
 
     private static final long CURRENT_VERSION = 10L;
 
-    /** S4 裁决矩阵规格直译（测试 oracle）——分支优先级：世代 → 版本 → 相位 → finish。 */
+    /** 相位裁决矩阵规格直译（测试 oracle）——分支优先级：世代 → 版本 → 相位 → finish。 */
     private static PhaseVerdict oracle(DecodePhase cur, long cv, DecodePhase ep, long ev,
                                        boolean fin, boolean gen) {
         if (!gen) {
@@ -81,7 +81,7 @@ class DecodeLatticeTest {
 
     @Test
     void skipLevelAdvanceAccepted() {
-        // E10：RESERVED 直接观察到 KV_ALLOCATED → D_LOADING（横跨 LOAD 传输期）。
+        // 引擎契约：RESERVED 直接观察到 KV_ALLOCATED → D_LOADING（横跨 LOAD 传输期）。
         assertEquals(PhaseVerdict.ACCEPT_ADVANCE, DecodeLattice.arbitrate(
                 DecodePhase.RESERVED, 5, DecodePhase.D_LOADING, 6, false, true));
         assertEquals(PhaseVerdict.ACCEPT_ADVANCE, DecodeLattice.arbitrate(
@@ -102,7 +102,7 @@ class DecodeLatticeTest {
                 DecodePhase.DISPATCHED, 5, DecodePhase.D_LOADING, 6, true, true));
     }
 
-    /** L9 回归：乱序到达的迟到中间态丢弃——且版本新鲜也照丢。 */
+    /** 乱序裁决回归：乱序到达的迟到中间态丢弃——且版本新鲜也照丢。 */
     @Test
     void l9_lateIntermediateEventDropped() {
         assertEquals(PhaseVerdict.DROP_LATE, DecodeLattice.arbitrate(
@@ -111,7 +111,7 @@ class DecodeLatticeTest {
                 DecodePhase.D_LOADING, 50, DecodePhase.RESERVED, 51, false, true));
     }
 
-    /** L2 回归：version 单调假设破坏（陈旧上报）→ 一律按 DROP_DUP 丢弃，finish 也不例外。 */
+    /** 版本屏障回归：version 单调假设破坏（陈旧上报）→ 一律按 DROP_DUP 丢弃，finish 也不例外。 */
     @Test
     void l2_staleVersionDroppedAsDup() {
         assertEquals(PhaseVerdict.DROP_DUP, DecodeLattice.arbitrate(
@@ -134,7 +134,7 @@ class DecodeLatticeTest {
                 DecodePhase.D_RUNNING, 5, DecodePhase.D_RUNNING, 6, false, true));
     }
 
-    // ---- closureBetween（L9 越级闭包补记）----
+    // ---- closureBetween（越级闭包补记）----
 
     @Test
     void closureBetweenSkippedLevels() {
@@ -163,7 +163,7 @@ class DecodeLatticeTest {
         }
     }
 
-    // ---- implies（I2 蕴含闭包，D 侧格内前缀关系）----
+    // ---- implies（相位蕴含闭包，D 侧格内前缀关系）----
 
     @Test
     void impliesIsPrefixClosure() {
@@ -173,9 +173,9 @@ class DecodeLatticeTest {
         assertEquals(EnumSet.allOf(DecodePhase.class), DecodeLattice.implies(DecodePhase.D_RUNNING));
     }
 
-    // ---- L18 回归：fromEnginePhase 映射完备性 ----
+    // ---- 保守倒推回归：fromEnginePhase 映射完备性 ----
 
-    /** L18 回归：引擎无显式中间相位只能倒推——每个 EnginePhase 值必须有保守映射。 */
+    /** 保守倒推回归：引擎无显式中间相位只能倒推——每个 EnginePhase 值必须有保守映射。 */
     @Test
     void l18_everyEnginePhaseHasMapping() {
         for (EnginePhase enginePhase : EnginePhase.values()) {

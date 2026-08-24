@@ -26,7 +26,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * G1 影子挂载点顺序测试：影子消费（StateShadowBridge.observeWorkerStatus）必须
- * 发生在 latestFinishedVersion 水位推进之前（S4 事件顺序一致）。
+ * 发生在 latestFinishedVersion 水位推进之前（相位事件顺序与旧路径一致）。
  *
  * <p>断言手段：水位 AtomicLong 捕获桩——{@code set(newValue)} 被调用的时刻检查
  * 影子账本墓碑是否已可见（影子消费完成的可观察效果）。若挂载顺序错误

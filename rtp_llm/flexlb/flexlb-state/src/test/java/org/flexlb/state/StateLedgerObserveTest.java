@@ -16,7 +16,7 @@ import org.junit.jupiter.api.Test;
 /**
  * StateLedger.observe 主链路：正常全生命周期（P/D 双侧）、乱序注入
  * （迟到中间态 DROP_LATE / 版本回退 DROP_DUP / 跨代 REJECT）、
- * 墓碑判重与迟到吸收、世代 failover 语义、fence→release R4 集成。
+ * 墓碑判重与迟到吸收、世代 failover 语义、fence→release 驱逐断言集成。
  */
 class StateLedgerObserveTest {
 
@@ -75,7 +75,7 @@ class StateLedgerObserveTest {
         assertTrue(v.engineOwned());
         assertEquals(1L, v.lastVersion());
 
-        // KV_ALLOCATED → P_WAITING_LOADED(7)，kvTokens 入 B 道账
+        // KV_ALLOCATED → P_WAITING_LOADED(7)，kvTokens 入引擎上报观察账
         ledger.observe(TestEndpoints.runningOnly(pEp, 2L, t + 10,
                 TestEndpoints.running(id, StateRole.PREFILL, EnginePhase.KV_ALLOCATED, 77L, 128L, 2L)));
         v = ledger.prefill().get(id).orElseThrow();
@@ -105,7 +105,7 @@ class StateLedgerObserveTest {
         assertEquals(0L, ledger.prefill().snapshot().inflight());
         assertEquals(1L, ledger.snapshot().prefillTombstones());
 
-        // D reserve → RESERVED(0)，D① 影子预占双轨入账
+        // D reserve → RESERVED(0)，影子预占双轨入账
         assertEquals(ReserveResult.OK, ledger.decode().reserve(id, 512L, 4096L, dBinding));
         DecodeRequestStateView dv = ledger.decode().get(id).orElseThrow();
         assertEquals(0, dv.phaseOrdinal());
@@ -154,7 +154,7 @@ class StateLedgerObserveTest {
         assertEquals(0L, s.lateEventsAbsorbed());
     }
 
-    /** 正交取消意图标记（S3）：只标记不改相位，终局仍走 settle。 */
+    /** 正交取消意图标记：只标记不改相位，终局仍走 settle。 */
     @Test
     void markPendingCancelIsOrthogonalIntent() {
         StateLedger ledger = new StateLedger();
@@ -346,7 +346,7 @@ class StateLedgerObserveTest {
         assertEquals(0L, ledger.snapshot().prefillTombstones());
     }
 
-    // ---- 6. fence R4（ledger 集成：fenced 条目 release 拒绝）----
+    // ---- 6. fence 驱逐断言（ledger 集成：fenced 条目 release 拒绝）----
 
     @Test
     void fencedDecodeEntryCannotBeReleased() {
@@ -355,7 +355,7 @@ class StateLedgerObserveTest {
         GenerationTriple dBinding = new GenerationTriple(2, dGen, -1L);
         assertEquals(ReserveResult.OK, ledger.decode().reserve(11L, 64L, 256L, dBinding));
 
-        // fence 登记后驱逐断言拒绝（R4）
+        // fence 登记后驱逐断言拒绝（fence 防线）
         ledger.fences().fence("cancel-flow", 11L, FenceRegistry.FenceType.CANCEL);
         IllegalStateException ex = assertThrows(IllegalStateException.class,
                 () -> ledger.decode().release(11L));

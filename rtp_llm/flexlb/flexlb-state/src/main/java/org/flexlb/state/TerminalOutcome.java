@@ -5,7 +5,7 @@ import java.util.Objects;
 /**
  * 终局结果：状态 + 受控原因 + 受控补充信息。
  *
- * <p>reason 为受控枚举（O2 语义），<b>必填</b>——禁止用自由文本 detail 滥用替代原因分类；
+ * <p>reason 为受控枚举，<b>必填</b>——禁止用自由文本 detail 滥用替代原因分类；
  * detail 仅承载受控补充信息（如错误码、触发阈值快照），可为空字符串。</p>
  *
  * @param state  终态（含回边态 PREEMPTED）

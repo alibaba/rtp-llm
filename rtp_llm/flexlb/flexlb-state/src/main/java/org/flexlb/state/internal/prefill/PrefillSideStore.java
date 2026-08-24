@@ -18,7 +18,7 @@ import org.flexlb.state.internal.TombstoneStore;
 /**
  * P 侧条目容器 + 计数挂点。
  *
- * <p>计数纪律（P3）：{@link PrefillCounters} 的 mutator 仅在本类固定位置调用
+ * <p>计数纪律：{@link PrefillCounters} 的 mutator 仅在本类固定位置调用
  * ——advance 的 CAS 胜者分支 / register / settleRemove / adoptEngineOwned /
  * noteEngineObserved。条目与其他组件不可直达计数器。</p>
  */
@@ -26,7 +26,7 @@ import org.flexlb.state.internal.TombstoneStore;
 public final class PrefillSideStore {
 
     private final ConcurrentHashMap<Long, PrefillRequestState> entries = new ConcurrentHashMap<>();
-    /** byEndpoint 二级索引（M4 janitor F2/TTL 扫描结构）：endpointId → 名下条目。 */
+    /** byEndpoint 二级索引（M4 janitor 证据通道/TTL 扫描结构）：endpointId → 名下条目。 */
     private final ConcurrentHashMap<Integer, ConcurrentHashMap<Long, PrefillRequestState>> byEndpoint = new ConcurrentHashMap<>();
     private final PrefillCounters counters = new PrefillCounters();
     private final TombstoneStore tombstones;
@@ -90,7 +90,7 @@ public final class PrefillSideStore {
     }
 
     /**
-     * B 道观察入账（裁决接受后调用）：引擎首见计数。
+     * 引擎上报观察入账（裁决接受后调用）：引擎首见计数。
      */
     public void noteEngineObserved(PrefillRequestState entry, long round, long kvTokens, long version) {
         synchronized (entry) {
@@ -122,8 +122,8 @@ public final class PrefillSideStore {
     }
 
     /**
-     * rebuild 引擎收养（P2）：不认识 requestId 的 running 条目按 batchId=-1、
-     * engineOwned=true 直接入账（P1 重启重建）。
+     * rebuild 引擎收养：不认识 requestId 的 running 条目按 batchId=-1、
+     * engineOwned=true 直接入账（重启重建）。
      */
     public PrefillRequestState adoptEngineOwned(long requestId, int endpointId, long generation,
                                                 long nowMs, PrefillPhase adoptedPhase,

@@ -1,7 +1,7 @@
 package org.flexlb.state;
 
 /**
- * 清理受控原因（O2 三类受控枚举之一）：描述条目从活跃态被移除的通道。
+ * 清理受控原因（三类受控枚举之一）：描述条目从活跃态被移除的通道。
  */
 public enum CleanupReason {
 

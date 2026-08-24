@@ -541,7 +541,7 @@ public class FlexlbConfig {
      *
      * <p>Resolved once at startup (no runtime hot-toggle). Environment
      * variable: FLEXLB_STATE_V2_SHADOW_ENABLED (also echoed in the effective
-     * config dump at startup, R2).
+     * config dump at startup).
      */
     private boolean flexlbStateV2ShadowEnabled = false;
 
@@ -552,7 +552,7 @@ public class FlexlbConfig {
      * presumed dead and settled as VANISHED by the LedgerJanitor. Guard-rail 1
      * (debounce) is satisfied naturally by this threshold.
      *
-     * <p>Only complete ticks ({@code detailCount == running.size()}, E7) count
+     * <p>Only complete ticks ({@code detailCount == running.size()}) count
      * toward absence; truncated reports never advance the absence tracking.
      * Environment variable: FLEXLB_STATE_V2_STALE_ROUNDS. Default: 3.
      */
@@ -561,10 +561,10 @@ public class FlexlbConfig {
     /**
      * FlexLB state v2 time-channel (F3) TTL in milliseconds: ledger entries
      * older than this (measured from createdAtMs, which is final and never
-     * renewed by any touch/observe — R5) are settled as TTL_EXPIRED by the
+     * renewed by any touch/observe) are settled as TTL_EXPIRED by the
      * LedgerJanitor. Default 300s, aligned with the legacy InflightStore TTL.
      *
-     * <p>Fenced entries are exempt (guard-rail 3 / R4) until the fence expires
+     * <p>Fenced entries are exempt (guard-rail 3) until the fence expires
      * or is lifted. Environment variable: FLEXLB_STATE_V2_TTL_MS.
      */
     private long flexlbStateV2TtlMs = 300_000L;
