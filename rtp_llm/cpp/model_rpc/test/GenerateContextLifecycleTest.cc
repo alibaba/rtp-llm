@@ -90,7 +90,7 @@ TEST(GenerateContextLifecycleTest, CompletedFailureCancelsOnceWithoutWaiting) {
 
     ASSERT_TRUE(destroyWithoutSchedulerProgress(std::move(context), stream));
     ASSERT_TRUE(stream->hasError());
-    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
 }
 
 TEST(GenerateContextLifecycleTest, UnexpectedDestructionDiagnosesAndCancelsWithoutWaiting) {

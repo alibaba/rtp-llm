@@ -3,7 +3,7 @@ import json
 import struct
 import sys
 from enum import Enum
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
 # This MUST be at the very top before any other imports, even before unittest
@@ -551,57 +551,6 @@ class ModelRpcClientTest(TestCase):
             input_pb.request_info.request_id, "4bf92f3577b34da6a3ce929d0e0e4736"
         )
 
-    def test_trans_output_reuses_single_all_hidden_states_for_all_outputs(self):
-        input_py = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(return_all_hidden_states=True),
-            request_id=123,
-            mm_inputs=[],
-        )
-        outputs_pb = GenerateOutputsPB()
-        flatten = outputs_pb.flatten_output
-        flatten.finished.extend([True, True])
-        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
-        flatten.all_hidden_states.shape.extend([2, 2])
-        flatten.all_hidden_states.fp32_data = struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0)
-
-        outputs = trans_output(input_py, outputs_pb, StreamState())
-
-        self.assertEqual(len(outputs.generate_outputs), 2)
-        for output in outputs.generate_outputs:
-            self.assertEqual(
-                [[1.0, 2.0], [3.0, 4.0]],
-                output.all_hidden_states.tolist(),
-            )
-
-    def test_trans_output_keeps_legacy_per_output_all_hidden_states(self):
-        input_py = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(return_all_hidden_states=True),
-            request_id=123,
-            mm_inputs=[],
-        )
-        outputs_pb = GenerateOutputsPB()
-        flatten = outputs_pb.flatten_output
-        flatten.finished.extend([True, True])
-        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
-        flatten.all_hidden_states.shape.extend([2, 2, 2])
-        flatten.all_hidden_states.fp32_data = struct.pack(
-            "<ffffffff", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
-        )
-
-        outputs = trans_output(input_py, outputs_pb, StreamState())
-
-        self.assertEqual(len(outputs.generate_outputs), 2)
-        self.assertEqual(
-            [[1.0, 2.0], [3.0, 4.0]],
-            outputs.generate_outputs[0].all_hidden_states.tolist(),
-        )
-        self.assertEqual(
-            [[5.0, 6.0], [7.0, 8.0]],
-            outputs.generate_outputs[1].all_hidden_states.tolist(),
-        )
-
     def test_enqueue_fetches_response_when_master_already_enqueued(self):
         client = ModelRpcClient(
             addresses=["worker:9000"],
@@ -771,6 +720,94 @@ class ModelRpcClientTest(TestCase):
             asyncio.run(run_and_close_after_finished())
 
         self.assertFalse(stub.fetch_iterator.cancelled)
+
+    def test_enqueue_serializes_input_once(self):
+        class EmptyResponseIterator:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            def cancel(self):
+                pass
+
+        client = ModelRpcClient(["127.0.0.1:12345"], {})
+        client._channel_pool.get = AsyncMock(return_value=MagicMock())
+        stub = MagicMock()
+        stub.GenerateStreamCall.return_value = EmptyResponseIterator()
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(max_new_tokens=1),
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        async def drain():
+            async for _ in client.enqueue(input_py):
+                pass
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            wraps=trans_input,
+        ) as convert, patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(drain())
+
+        convert.assert_called_once_with(input_py)
+
+    def test_trans_output_reuses_single_all_hidden_states_for_all_outputs(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_all_hidden_states=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.extend([True, True])
+        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
+        flatten.all_hidden_states.shape.extend([2, 2])
+        flatten.all_hidden_states.fp32_data = struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0)
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 2)
+        for output in outputs.generate_outputs:
+            self.assertEqual(
+                [[1.0, 2.0], [3.0, 4.0]],
+                output.all_hidden_states.tolist(),
+            )
+
+    def test_trans_output_keeps_legacy_per_output_all_hidden_states(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(return_all_hidden_states=True),
+            request_id=123,
+            mm_inputs=[],
+        )
+        outputs_pb = GenerateOutputsPB()
+        flatten = outputs_pb.flatten_output
+        flatten.finished.extend([True, True])
+        flatten.all_hidden_states.data_type = TensorPB.DataType.FP32
+        flatten.all_hidden_states.shape.extend([2, 2, 2])
+        flatten.all_hidden_states.fp32_data = struct.pack(
+            "<ffffffff", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+        )
+
+        outputs = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertEqual(len(outputs.generate_outputs), 2)
+        self.assertEqual(
+            [[1.0, 2.0], [3.0, 4.0]],
+            outputs.generate_outputs[0].all_hidden_states.tolist(),
+        )
+        self.assertEqual(
+            [[5.0, 6.0], [7.0, 8.0]],
+            outputs.generate_outputs[1].all_hidden_states.tolist(),
+        )
 
 
 class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
