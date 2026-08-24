@@ -47,7 +47,6 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     MMUrlType,
-    get_response_logits_with_custom_output_compat,
 )
 from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
 from rtp_llm.utils.util import has_overlap_kmp
@@ -676,11 +675,8 @@ class CustomChatRenderer:
             result().all_hidden_states = output.all_hidden_states.tolist()
         if generate_config.calculate_loss != 0 and output.loss is not None:
             result().loss = output.loss.tolist()
-        response_logits = get_response_logits_with_custom_output_compat(
-            generate_config.return_logits, output.logits, output.custom_output
-        )
-        if response_logits is not None:
-            result().logits = response_logits.tolist()
+        if generate_config.return_logits and output.logits is not None:
+            result().logits = output.logits.tolist()
         if generate_config.return_output_ids and output.output_ids is not None:
             result().output_ids = output.output_ids.tolist()
         if generate_config.return_input_ids and output.input_ids is not None:

@@ -3,16 +3,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-import torch
-
 from rtp_llm.models.downstream_modules.custom_module import (
     CustomHandler,
     Trigger,
 )
 from rtp_llm.models.downstream_modules.utils import create_post_layers_module
-from rtp_llm.utils.base_model_datatypes import (
-    get_response_logits_with_custom_output_compat,
-)
 
 DUMMY_MODULE = """
 SENTINEL = object()
@@ -77,37 +72,6 @@ class TriggerProtocolTest(unittest.TestCase):
         self.assertEqual(Trigger.CONTEXT.value, "context")
         self.assertEqual(Trigger.FINAL_STEP.value, "final_step")
         self.assertEqual(Trigger.EVERY_STEP.value, "every_step")
-
-
-class CustomOutputResponseCompatTest(unittest.TestCase):
-    def test_custom_output_is_returned_as_logits_without_request_flag(self):
-        custom_output = torch.tensor([[1.0, 2.0]])
-
-        result = get_response_logits_with_custom_output_compat(
-            False, None, custom_output
-        )
-
-        self.assertIs(result, custom_output)
-
-    def test_custom_output_takes_priority_over_vocabulary_logits(self):
-        logits = torch.tensor([[3.0, 4.0]])
-        custom_output = torch.tensor([[1.0, 2.0]])
-
-        result = get_response_logits_with_custom_output_compat(
-            True, logits, custom_output
-        )
-
-        self.assertIs(result, custom_output)
-
-    def test_existing_return_logits_behavior_is_unchanged_without_custom_output(self):
-        logits = torch.tensor([[3.0, 4.0]])
-
-        self.assertIs(
-            get_response_logits_with_custom_output_compat(True, logits, None), logits
-        )
-        self.assertIsNone(
-            get_response_logits_with_custom_output_compat(False, logits, None)
-        )
 
 
 class CreatePostLayersModuleTest(unittest.TestCase):
