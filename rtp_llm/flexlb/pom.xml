@@ -47,6 +47,7 @@
         <module>flexlb-sync</module>
         <module>flexlb-common</module>
         <module>flexlb-grpc</module>
+        <module>flexlb-state</module>
         <module>flexlb-cache</module>
         <module>flexlb-mock-engine</module>
     </modules>
