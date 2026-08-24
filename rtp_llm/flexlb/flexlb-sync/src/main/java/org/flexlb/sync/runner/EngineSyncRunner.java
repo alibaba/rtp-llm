@@ -15,6 +15,7 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
@@ -59,6 +60,9 @@ public class EngineSyncRunner implements Runnable {
 
     private final boolean whaleCacheDebugMode;
 
+    /** G1 影子门面：开关关时为 no-op 单例（零行为变化）。 */
+    private final StateShadowBridge shadowBridge;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -73,6 +77,27 @@ public class EngineSyncRunner implements Runnable {
                             InflightStore globalInflightStore,
                             EndpointRegistry endpointRegistry,
                             boolean whaleCacheDebugMode) {
+        this(modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
+                engineHealthReporter, engineGrpcService, roleType, localKvCacheAwareManager,
+                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                globalInflightStore, endpointRegistry, whaleCacheDebugMode, StateShadowBridge.DISABLED);
+    }
+
+    public EngineSyncRunner(String modelName,
+                            Map<String, WorkerStatus> workerStatusMap,
+                            WorkerAddressService workerAddressService,
+                            ExecutorService statusCheckExecutor,
+                            EngineHealthReporter engineHealthReporter,
+                            EngineGrpcService engineGrpcService,
+                            RoleType roleType,
+                            CacheAwareService localKvCacheAwareManager,
+                            long syncRequestTimeoutMs,
+                            LongAdder syncCount,
+                            Long syncEngineStatusInterval,
+                            InflightStore globalInflightStore,
+                            EndpointRegistry endpointRegistry,
+                            boolean whaleCacheDebugMode,
+                            StateShadowBridge shadowBridge) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -88,6 +113,7 @@ public class EngineSyncRunner implements Runnable {
         this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
         this.whaleCacheDebugMode = whaleCacheDebugMode;
+        this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
     }
 
     @Override
@@ -151,7 +177,8 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                                 workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, globalInflightStore, endpointRegistry, statusCheckExecutor);
+                                syncRequestTimeoutMs, globalInflightStore, endpointRegistry, statusCheckExecutor,
+                                shadowBridge);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getStatusCheckInProgress().set(false);

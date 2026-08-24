@@ -31,6 +31,10 @@
             <artifactId>flexlb-grpc</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.flexlb</groupId>
+            <artifactId>flexlb-state</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
         </dependency>

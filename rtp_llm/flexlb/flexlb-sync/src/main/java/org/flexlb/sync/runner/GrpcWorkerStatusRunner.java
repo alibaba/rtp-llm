@@ -14,6 +14,7 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
@@ -48,6 +49,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final EndpointRegistry endpointRegistry;
     private final Executor callbackExecutor;
+    /** G1 影子门面：开关关时为 no-op 单例（零行为变化）。 */
+    private final StateShadowBridge shadowBridge;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
@@ -58,6 +61,21 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   InflightStore globalInflightStore,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
+        this(modelName, ipPort, site, roleType, group, workerStatus, workerStatusMap,
+                engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                globalInflightStore, endpointRegistry, callbackExecutor, StateShadowBridge.DISABLED);
+    }
+
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
+                                  WorkerStatus workerStatus,
+                                  Map<String, WorkerStatus> workerStatusMap,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  InflightStore globalInflightStore,
+                                  EndpointRegistry endpointRegistry,
+                                  Executor callbackExecutor,
+                                  StateShadowBridge shadowBridge) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -74,6 +92,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
         this.callbackExecutor = callbackExecutor;
+        this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
     }
 
     @Override
@@ -170,6 +189,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 if (globalInflightStore != null) {
                     handleFinishedTasks(newWorkerStatus);
                 }
+
+                // 3.5 Shadow (G1): flexlb-state v2 ledger consumes the same response —
+                // strictly after legacy calibrate/finished handling (steps 2-3) and
+                // before the latestFinishedVersion watermark advance (step 4), so the
+                // shadow sees the same tick's event order as the legacy path (S4).
+                // catch-all + enablement short-circuit inside the bridge.
+                shadowBridge.observeWorkerStatus(newWorkerStatus, roleType, ipPort);
 
                 Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
 

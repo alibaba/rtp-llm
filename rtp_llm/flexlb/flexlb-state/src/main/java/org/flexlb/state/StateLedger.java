@@ -199,6 +199,29 @@ public final class StateLedger {
         };
     }
 
+    /**
+     * 影子对账查询（M3/G1 接口缺口最小补）：按 requestId + 侧查询终局条目的
+     * 终态记录（墓碑内），条目存活/不存在/墓碑已过期均返回 empty。
+     *
+     * <p>只读视图，不参与裁决；供 flexlb-sync 影子 diff 对账消费。</p>
+     */
+    public Optional<TerminalOutcome> terminalOutcomeOf(long requestId, StateRole side) {
+        TombstoneStore store = side == StateRole.PREFILL ? pStore.tombstones() : dStore.tombstones();
+        return store.get(requestId)
+                .map(t -> new TerminalOutcome(t.state(),
+                        parseReason(t.reason()),
+                        "shadow-query@" + t.terminalAtMs()));
+    }
+
+    private static TerminalReason parseReason(String name) {
+        try {
+            return TerminalReason.valueOf(name);
+        } catch (IllegalArgumentException e) {
+            return TerminalReason.SUCCEEDED;
+        }
+    }
+
+
     /** fence 仓库（同包测试/门面协作；R4 断言见 FenceRegistry.canEvict）。 */
     FenceRegistry fences() {
         return fences;

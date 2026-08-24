@@ -532,6 +532,20 @@ public class FlexlbConfig {
     // ========== Metrics Reporting Configuration ==========
 
     /**
+     * FlexLB state v2 shadow mode (G1): when enabled, the new flexlb-state
+     * StateLedger consumes the same engine status event stream and local
+     * lifecycle events in parallel with the legacy path, purely for
+     * observation and terminal-state diff accounting. The legacy routing /
+     * dispatch / settlement behavior is unchanged — every shadow call is
+     * wrapped catch-all and can never affect the main path.
+     *
+     * <p>Resolved once at startup (no runtime hot-toggle). Environment
+     * variable: FLEXLB_STATE_V2_SHADOW_ENABLED (also echoed in the effective
+     * config dump at startup, R2).
+     */
+    private boolean flexlbStateV2ShadowEnabled = false;
+
+    /**
      * Metrics report interval in milliseconds.
      * Controls the periodic reporting frequency for scheduler-level and
      * per-endpoint metrics via {@code @Scheduled} throttle.

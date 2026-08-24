@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.sync.shadow.StateShadowBridge;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -28,9 +29,21 @@ public abstract class AbstractScheduler implements DiagnosticsProvider {
     protected final InflightStore globalStore;
     protected final FlexlbMetricHelper metricHelper;
 
+    /**
+     * G1 影子门面（终态 diff 对账）：开关关时为 {@link StateShadowBridge#DISABLED}
+     * no-op 单例，所有调用短路。重载构造器注入，旧构造器保持兼容（默认关）。
+     */
+    protected final StateShadowBridge shadowBridge;
+
     protected AbstractScheduler(InflightStore globalStore, FlexlbMetricHelper metricHelper) {
+        this(globalStore, metricHelper, StateShadowBridge.DISABLED);
+    }
+
+    protected AbstractScheduler(InflightStore globalStore, FlexlbMetricHelper metricHelper,
+                                StateShadowBridge shadowBridge) {
         this.globalStore = globalStore;
         this.metricHelper = metricHelper;
+        this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
     }
 
     /**
@@ -70,6 +83,9 @@ public abstract class AbstractScheduler implements DiagnosticsProvider {
                 } else {
                     item.fail(new IllegalStateException("null routing response"));
                 }
+                // G1 影子：旧路径终态 diff 记录（item.complete 后 state 已终局；
+                // CANCELLED 时影子双清。catch-all 在 bridge 内部，绝不影响主路径）
+                shadowBridge.onOldTerminal(ctx.getRequestId(), item.state().name());
             });
         }
         return existing;

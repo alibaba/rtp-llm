@@ -221,6 +221,26 @@ public class MetricConstant {
      */
     public static final String SCHEDULER_INFLIGHT_SIZE = "app.flexlb.scheduler.inflight.size";
 
+    // ========== FlexLB state v2 shadow metrics (G1) ==========
+
+    /** Shadow event-pump counter: one report per engine observation fed into the shadow StateLedger. */
+    public static final String SHADOW_EVENT = "app.flexlb.shadow.event";
+
+    /** Shadow pipeline error counter (catch-all Throwable inside shadow calls; never affects the main path). */
+    public static final String SHADOW_ERROR = "app.flexlb.shadow.error";
+
+    /** Terminal-state diff: old-path terminal state and shadow-ledger terminal state disagree for the same requestId. */
+    public static final String SHADOW_DIFF_TERMINAL_STATE = "app.flexlb.shadow.diff.terminal.state";
+
+    /** Terminal-reason diff: shadow TerminalReason is outside the equivalent-reason set of the old terminal state. */
+    public static final String SHADOW_DIFF_TERMINAL_REASON = "app.flexlb.shadow.diff.terminal.reason";
+
+    /** Old path reached a terminal state but the shadow ledger never did (within the diff window). */
+    public static final String SHADOW_DIFF_TERMINAL_MISSING_ON_NEW = "app.flexlb.shadow.diff.terminal.missing.on.new";
+
+    /** Shadow ledger reached a terminal state but the old path never did (within the diff window). */
+    public static final String SHADOW_DIFF_TERMINAL_MISSING_ON_OLD = "app.flexlb.shadow.diff.terminal.missing.on.old";
+
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
      * in the per-engine WorkerBatcher queue.

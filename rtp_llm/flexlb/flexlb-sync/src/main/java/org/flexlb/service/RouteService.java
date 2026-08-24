@@ -18,6 +18,8 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.sync.shadow.StateShadowBridge;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -57,6 +59,9 @@ public class RouteService {
      */
     private final List<DiagnosticsProvider> diagnosticsProviders;
 
+    /** G1 影子门面：开关关时为 no-op 单例（零行为变化）。 */
+    private final StateShadowBridge shadowBridge;
+
     public RouteService(ConfigService configService,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
                         InflightStore globalInflightStore,
@@ -65,6 +70,20 @@ public class RouteService {
                         BatchScheduler batchScheduler,
                         QueueScheduler queueScheduler,
                         DirectScheduler directScheduler) {
+        this(configService, recentCacheKeyTraceReporter, globalInflightStore, endpointRegistry,
+                reporter, batchScheduler, queueScheduler, directScheduler, StateShadowBridge.DISABLED);
+    }
+
+    @Autowired
+    public RouteService(ConfigService configService,
+                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
+                        InflightStore globalInflightStore,
+                        EndpointRegistry endpointRegistry,
+                        BatchSchedulerReporter reporter,
+                        BatchScheduler batchScheduler,
+                        QueueScheduler queueScheduler,
+                        DirectScheduler directScheduler,
+                        StateShadowBridge shadowBridge) {
         this.configService = configService;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
         this.globalInflightStore = globalInflightStore;
@@ -73,6 +92,7 @@ public class RouteService {
         this.batchScheduler = batchScheduler;
         this.queueScheduler = queueScheduler;
         this.directScheduler = directScheduler;
+        this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
         this.schedulers = List.of(batchScheduler, queueScheduler, directScheduler);
         this.diagnosticsProviders = List.of(batchScheduler, queueScheduler, directScheduler,
                 globalInflightStore, endpointRegistry);
@@ -147,6 +167,10 @@ public class RouteService {
         if (item == null) {
             return false;
         }
+        // Shadow (G1): mark pending-cancel intent on both sides before the CAS —
+        // intent only, never replaces legacy terminal logic; the shadow terminal
+        // settle happens in AbstractScheduler.register whenComplete (onOldTerminal).
+        shadowBridge.onLocalCancelRequested(shadowRequestId(requestId));
         boolean cancelled = item.complete(
                 Response.error(StrategyErrorType.CANCELLED, "cancelled"),
                 InflightState.CANCELLED);
@@ -154,6 +178,15 @@ public class RouteService {
             item.fireOnCancel();
         }
         return cancelled;
+    }
+
+    /** 影子侧 requestId 解析（防御性）：非数字 ID 返回 -1（账本无对应条目，no-op）。 */
+    private static long shadowRequestId(String requestId) {
+        try {
+            return Long.parseLong(requestId);
+        } catch (NumberFormatException e) {
+            return -1L;
+        }
     }
 
     /**

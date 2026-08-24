@@ -11,6 +11,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.util.Logger;
 
 import java.util.List;
@@ -55,7 +56,19 @@ public class BatchScheduler extends AbstractScheduler {
                           BatchSchedulerReporter reporter,
                           InflightStore globalStore,
                           FlexlbMetricHelper metricHelper) {
-        super(globalStore, metricHelper);
+        this(configService, router, endpointRegistry, reporter, globalStore, metricHelper,
+                StateShadowBridge.DISABLED);
+    }
+
+    /** G1 影子装配入口：shadowBridge 开关关时为 no-op 单例（零行为变化）。 */
+    public BatchScheduler(ConfigService configService,
+                          Router router,
+                          EndpointRegistry endpointRegistry,
+                          BatchSchedulerReporter reporter,
+                          InflightStore globalStore,
+                          FlexlbMetricHelper metricHelper,
+                          StateShadowBridge shadowBridge) {
+        super(globalStore, metricHelper, shadowBridge);
         this.configService = configService;
         this.router = router;
         this.endpointRegistry = endpointRegistry;
@@ -103,6 +116,10 @@ public class BatchScheduler extends AbstractScheduler {
                 return future;
             }
 
+            // G1 影子：P 侧入账（register+onQueued，散请求 batchId=-1）。
+            // 开关关时 bridge 内部短路；catch-all 包裹不外抛（零行为变化）。
+            shadowBridge.onPrefillSubmit(ctx.getRequestId());
+
             RouteResult result = router.route(ctx);
             if (!result.isSuccess()) {
                 future.complete(result.toResponse());
@@ -143,6 +160,16 @@ public class BatchScheduler extends AbstractScheduler {
                 }
             }
 
+            // G1 影子：D 侧预占（与旧路径 DecodeEndpoint.reserve 同语义点；
+            // expectedKv 按旧公式 seqLen+maxNewTokens，cap totalKv）。
+            if (decodeEp != null) {
+                shadowBridge.onDecodeReserve(ctx.getRequestId(),
+                        ctx.getRequest().getSeqLen(),
+                        shadowExpectedKv(decodeEp, ctx.getRequest().getSeqLen()),
+                        RoleType.DECODE,
+                        decodeEp.getIp() + ":" + decodeEp.getHttpPort());
+            }
+
             Response routeResponse = result.toResponse();
             BatchItem item = new BatchItem(ctx, future, routeResponse,
                     BatchItem.copyOf(prefill), BatchItem.copyOf(decode),
@@ -178,6 +205,16 @@ public class BatchScheduler extends AbstractScheduler {
     }
 
     // ==================== Internal: resource rollback (pre-BatchItem paths) ====================
+
+    /** 影子 D① 预占的 expectedKv 估算（与 CostBasedDecodeStrategy 同公式：seqLen+maxNewTokens，cap totalKv）。 */
+    private long shadowExpectedKv(DecodeEndpoint decodeEp, long seqLen) {
+        long expectedKv = seqLen + configService.loadBalanceConfig().getMaxNewTokens();
+        long totalKv = decodeEp.decodeKvTotal();
+        if (totalKv > 0 && expectedKv > totalKv) {
+            expectedKv = totalKv;
+        }
+        return expectedKv;
+    }
 
     /**
      * Release the decode reservation (if any) using the direct endpoint

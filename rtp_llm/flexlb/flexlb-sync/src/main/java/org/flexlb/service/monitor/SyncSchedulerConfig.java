@@ -12,6 +12,7 @@ import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -41,6 +42,18 @@ public class SyncSchedulerConfig {
     // ==================== Scheduler beans ====================
 
     /**
+     * G1 影子门面单例 Bean：开关（flexlbStateV2ShadowEnabled / env
+     * FLEXLB_STATE_V2_SHADOW_ENABLED）启动时定、不热切——关时返回
+     * {@link StateShadowBridge#DISABLED} no-op 单例，注入各挂点的影子调用
+     * 全部字节码级短路（零行为变化）；开时构建 StateLedger/Translator/
+     * DiffCollector 并注册影子指标、打印启用回显。
+     */
+    @Bean
+    public StateShadowBridge stateShadowBridge(ConfigService configService, FlexMonitor flexMonitor) {
+        return StateShadowBridge.create(configService.loadBalanceConfig(), flexMonitor);
+    }
+
+    /**
      * BATCH-mode scheduler bean. Assembled here so that {@code RouteService}
      * can inject it directly instead of constructing it internally with
      * raw dependencies — the QUEUE-specific dependencies
@@ -53,11 +66,12 @@ public class SyncSchedulerConfig {
                                         EndpointRegistry endpointRegistry,
                                         BatchSchedulerReporter reporter,
                                         InflightStore globalInflightStore,
-                                        FlexMonitor flexMonitor) {
+                                        FlexMonitor flexMonitor,
+                                        StateShadowBridge shadowBridge) {
         FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_BATCH);
         batchHelper.register();
         return new BatchScheduler(configService, router, endpointRegistry, reporter,
-                globalInflightStore, batchHelper);
+                globalInflightStore, batchHelper, shadowBridge);
     }
 
     /**

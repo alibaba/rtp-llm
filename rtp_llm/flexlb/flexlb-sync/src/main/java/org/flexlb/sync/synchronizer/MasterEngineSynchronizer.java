@@ -15,6 +15,7 @@ import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.IdUtils;
@@ -44,6 +45,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
     private volatile int completedSyncCount = 0;
+    /** G1 影子门面：开关关时为 no-op 单例（零行为变化）。 */
+    private final StateShadowBridge shadowBridge;
 
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
                                     EngineHealthReporter engineHealthReporter,
@@ -54,7 +57,9 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     @org.springframework.beans.factory.annotation.Autowired(required = false)
                                     InflightStore globalInflightStore,
                                     EndpointRegistry endpointRegistry,
-                                    ConfigService configService) {
+                                    ConfigService configService,
+                                    @org.springframework.beans.factory.annotation.Autowired(required = false)
+                                    StateShadowBridge shadowBridge) {
 
         super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig, configService);
 
@@ -62,6 +67,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         this.localKvCacheAwareManager = localKvCacheAwareManager;
         this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
+        this.shadowBridge = shadowBridge == null ? StateShadowBridge.DISABLED : shadowBridge;
 
         this.syncEngineStatusInterval = configService.loadBalanceConfig().getSyncStatusInterval();
         this.syncRequestTimeoutMs = configService.loadBalanceConfig().getSyncRequestTimeoutMs();
@@ -108,7 +114,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                                 globalInflightStore, endpointRegistry,
-                                flexlbConfig.isWhaleCacheDebugMode()
+                                flexlbConfig.isWhaleCacheDebugMode(),
+                                shadowBridge
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);
