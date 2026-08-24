@@ -199,6 +199,35 @@ class FusedRopeKVCacheDecodeOp:
             return self._dummy_scale
         return None
 
+    @staticmethod
+    def _get_sequence_lengths_device(
+        attn_inputs: PyAttentionInputs, device: torch.device
+    ) -> torch.Tensor:
+        sequence_lengths = attn_inputs.sequence_lengths
+        if sequence_lengths.is_cuda:
+            return sequence_lengths
+
+        # The decode RoPE kernel dereferences this tensor from every head CTA.
+        # Reading the pinned host mirror through UVA turns each access into a
+        # fine-grained PCIe transaction (about 200 us at batch 64 on Pro 5000).
+        # CudaGraphRunner already maintains this device buffer and refreshes it
+        # before every replay, so derive the current lengths from it in-graph.
+        sequence_lengths_plus_1 = attn_inputs.sequence_lengths_plus_1_device
+        if (
+            sequence_lengths_plus_1 is not None
+            and sequence_lengths_plus_1.is_cuda
+        ):
+            return sequence_lengths_plus_1 - 1
+
+        # Keep direct/unit-test callers safe even when they do not construct
+        # the C++-managed device mirror used by the production decode path.
+        assert sequence_lengths.is_pinned(), (
+            "CPU sequence_lengths must be pinned for an asynchronous device copy"
+        )
+        return sequence_lengths.to(
+            device=device, dtype=torch.int32, non_blocking=True
+        )
+
     def forward(
         self,
         qkv: torch.Tensor,
@@ -208,9 +237,7 @@ class FusedRopeKVCacheDecodeOp:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
         assert params.kv_cache_offset is not None
-        assert params.sequence_lengths.is_cuda or params.sequence_lengths.is_pinned(), (
-            "sequence_lengths must be CUDA or pinned host memory"
-        )
+        assert params.sequence_lengths.is_cuda, "sequence_lengths must be on CUDA"
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
@@ -254,6 +281,9 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.kv_cache_kernel_block_id_device
         )
         kv_cache_offset_h = None  # not used
+        sequence_lengths_device = self._get_sequence_lengths_device(
+            attn_inputs, kv_cache_offset.device
+        )
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
@@ -263,7 +293,7 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.cu_kv_seqlens_device,
             attn_inputs.input_lengths,
             attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
+            sequence_lengths_device,
             0,
             0,
             attn_inputs.context_total_kv_length,
