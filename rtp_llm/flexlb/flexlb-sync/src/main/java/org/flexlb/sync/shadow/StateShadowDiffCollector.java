@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.LongAdder;
  * 两侧各持 bounded map（默认上限 {@value #DEFAULT_MAX_ENTRIES} 条），仅 diff 用：
  * 到达即查对侧——命中则比对并双清；未命中入窗等待。窗口过期（默认
  * {@value #DEFAULT_WINDOW_MS} ms）或容量超限时单侧条目淘汰并计 missing
- * （+超限丢弃计数）。淘汰为惰性触发（每次记录时检查），无需后台线程。
+ * （+超限丢弃计数）。淘汰为惰性触发（每秒至多一次过期扫描），无需后台线程。
  *
  * <p>线程安全：两侧 map 独立 ConcurrentHashMap，先到侧入窗、后到侧删除比对
  * （remove 返回值即竞争胜者，天然幂等——并发双到达只有一方能 remove 成功）。
@@ -46,6 +46,11 @@ public final class StateShadowDiffCollector {
     static final long DEFAULT_WINDOW_MS = 10 * 60 * 1000L;
     static final int DEFAULT_MAX_ENTRIES = 65_536;
 
+    /** 惰性过期扫描限频间隔（ms）：高频 put 下每次全表 removeIf 是 O(窗口容量) 热路径开销。 */
+    static final long EVICT_SWEEP_MIN_INTERVAL_MS = 1_000L;
+    /** 溢出 WARN 限频：满载时每条 put 一条 WARN 是日志风暴源。 */
+    static final int OVERFLOW_WARN_EVERY = 10_000;
+
     /** 旧侧终态记录（requestId → 终态快照）。 */
     private final ConcurrentHashMap<Long, TerminalRecord> oldTerminals = new ConcurrentHashMap<>();
     /** 新侧（影子账本）终态记录。 */
@@ -54,6 +59,12 @@ public final class StateShadowDiffCollector {
     private final long windowMs;
     private final int maxEntries;
     private final FlexMonitor monitor;
+
+    /** 惰性过期扫描限频水位（无锁 volatile；并发重复扫描幂等无害）。 */
+    private volatile long lastEvictSweepMs;
+    /** 溢出 WARN 限频计数（漏斗式：多打几条无害，风暴防护目的达成）。 */
+    private final java.util.concurrent.atomic.AtomicLong overflowWarnCounter =
+            new java.util.concurrent.atomic.AtomicLong();
 
     // ---- 计数（LongAdder：日志/诊断/指标双通道）----
 
@@ -191,23 +202,29 @@ public final class StateShadowDiffCollector {
     }
 
     private void putBounded(ConcurrentHashMap<Long, TerminalRecord> side, long requestId, TerminalRecord record) {
-        // 惰性淘汰先行：窗口过期条目此时结算 missing
-        evictExpired(System.currentTimeMillis());
+        // 惰性淘汰限频：过期扫描从每次 put 改为至多每秒一次——漂移只影响
+        // missing 计数的结算时机（窗口 10 分钟≫秒级），不影响配对正确性；
+        // 高频 put 下每次全表 removeIf 是 O(窗口容量) 热路径开销（真机轮
+        // 窗口满载 13 万条时曾拖垮全部终态路径线程）。
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastEvictSweepMs >= EVICT_SWEEP_MIN_INTERVAL_MS) {
+            lastEvictSweepMs = nowMs;
+            evictExpired(nowMs);
+        }
         if (side.size() >= maxEntries) {
             windowOverflowDropped.increment();
-            logger.warn("[state-shadow] diff window overflow ({}), dropping requestId={} on pending side",
-                    maxEntries, requestId);
-            // 容量满：优先淘汰本侧最早条目（扫描近似——diff 窗口为观测辅助，不做精确 LRU）
-            long oldest = -1L;
-            long oldestTime = Long.MAX_VALUE;
-            for (Map.Entry<Long, TerminalRecord> e : side.entrySet()) {
-                if (e.getValue().terminalAtMs() < oldestTime) {
-                    oldestTime = e.getValue().terminalAtMs();
-                    oldest = e.getKey();
-                }
+            if (overflowWarnCounter.incrementAndGet() % OVERFLOW_WARN_EVERY == 1) {
+                logger.warn("[state-shadow] diff window overflow ({}), dropping oldest entries on pending side "
+                        + "(warn throttled every {}, total dropped={})",
+                        maxEntries, OVERFLOW_WARN_EVERY, windowOverflowDropped.sum());
             }
-            if (oldest >= 0) {
-                side.remove(oldest);
+            // 容量满：迭代器取首个淘汰（O(1)）——diff 窗口为观测辅助，近似随机
+            // 淘汰与旧实现的“扫描最老”同可接受（旧实现 O(容量) 扫描在高频 put
+            // 下是热路径瓶颈）。
+            java.util.Iterator<Map.Entry<Long, TerminalRecord>> it = side.entrySet().iterator();
+            if (it.hasNext()) {
+                it.next();
+                it.remove();
                 countMissing(side == oldTerminals);
             }
         }

@@ -610,12 +610,24 @@ public final class StateShadowBridge {
      * 新侧主终态：D 侧墓碑优先（decode 完成即请求完成）、P 侧兜底（prefill 阶段
      * 失败/取消，D 侧无条目时 P 终局即终局）。G3 开启时同步消费挂起 metric
      * （ledger 终局即单点生产出口）。
+     *
+     * <p>P 兜底仅在 D 侧无活跃条目时生效：P 完成 ≠ 请求完成（状态核心跨侧
+     * 语义——D 条目活跃时请求级终态由 D 终局驱动，引擎 finished / janitor
+     * 兜底均可达）。若不加守卫，P 引擎 finished 先终局即记一次新侧终态、
+     * D 终局再记一次——第二次无法与旧侧终态配对而永久滞留 diff 窗口，
+     * 高频终态下窗口满载后 putBounded 的全量淘汰扫描退化为热路径灾难
+     * （真机轮错误率 63% 的根因，配对模型要求每请求恰好一次新侧终态）。
      */
     private void recordNewTerminalIfSettled(long requestId) {
         Optional<TerminalOutcome> decodeOutcome = ledger.terminalOutcomeOf(requestId, StateRole.DECODE);
         if (decodeOutcome.isPresent()) {
             diff.recordNewTerminal(requestId, decodeOutcome.get().state(), decodeOutcome.get().reason());
             consumePendingMetric(requestId);
+            return;
+        }
+        if (ledger.decode().get(requestId).isPresent()) {
+            // D 条目活跃：P 终局只是阶段完成——请求级终态等 D 终局（引擎
+            // finished / janitor 兜底终局时再次进入本方法走 D 墓碑分支）。
             return;
         }
         Optional<TerminalOutcome> prefillOutcome = ledger.terminalOutcomeOf(requestId, StateRole.PREFILL);

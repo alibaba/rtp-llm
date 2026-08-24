@@ -575,6 +575,65 @@ class StateShadowBridgeTest {
                 "派发后条目进入端点索引");
     }
 
+    // ==================== G4 回归：新侧终态恰好一次（P 先终局防双重记录）====================
+
+    /**
+     * 双重终态防重（真机轮根因回归）：P 引擎 finished 先终局时不得记录新侧终态
+     * （P 完成 ≠ 请求完成，D 条目活跃时请求级终态等 D 终局）；D 终局记录恰好一次，
+     * 与旧侧终态配对后窗口清空——否则第二次记录永久滞留窗口，高频终态下窗口
+     * 满载后 diff 淘汰扫描退化为热路径灾难。
+     */
+    @Test
+    void newSideTerminalRecordedExactlyOnceWhenPrefillFinishesBeforeDecode() {
+        StateShadowBridge bridge = authorityBridge();
+        String ipPortP = "10.0.0.31:9000";
+        String ipPortD = "10.0.0.32:9000";
+
+        // 开账：P submit+dispatch 绑定；D reserve（两阶段请求的全生命周期起点）
+        bridge.onPrefillSubmit(60L);
+        bridge.onPrefillDispatched(60L, -1L, ipPortP);
+        bridge.onDecodeReserve(60L, 100L, 200L, RoleType.DECODE, ipPortD);
+
+        // P 引擎 finished 先终局：P 墓碑落地，但 D 条目活跃——不得记录新侧终态
+        bridge.observeWorkerStatus(prefillFinishedResponse(60L, 5L), RoleType.PREFILL, ipPortP);
+        assertTrue(bridge.ledger().terminalOutcomeOf(60L, org.flexlb.state.spi.StateRole.PREFILL).isPresent(),
+                "P 侧 finished 应终局 P 账");
+        assertTrue(bridge.ledger().decode().get(60L).isPresent(), "D 条目仍活跃（decode 未完成）");
+        assertEquals(0, bridge.diffCollector().pendingNew(),
+                "P 先终局不得记录请求级终态（否则 D 终局时双重记录、第二次永久滞留窗口）");
+
+        // D 引擎 finished 后终局：记录恰好一次
+        bridge.observeWorkerStatus(finishedResponse(60L), RoleType.DECODE, ipPortD);
+        assertEquals(1, bridge.diffCollector().pendingNew(), "D 终局记录恰好一次");
+
+        // 旧侧终态到达 → 配对双清，窗口无残留
+        bridge.onOldTerminal(60L, "COMPLETED");
+        assertEquals(1L, bridge.diffCollector().matchedCount());
+        assertEquals(0, bridge.diffCollector().pendingNew(), "配对后窗口清空——零滞留");
+    }
+
+    /**
+     * P 兜底语义保留：D 侧从未开账（纯 P 阶段失败/取消）时，P 终局即请求级终态
+     * ——防重守卫不得误伤此场景（否则该族请求的新侧终态永久缺失）。
+     */
+    @Test
+    void prefillOnlyTerminalRecordedWhenDecodeSideNeverOpened() {
+        StateShadowBridge bridge = enabledBridge();
+        String ipPortP = "10.0.0.33:9000";
+
+        bridge.onPrefillSubmit(61L);
+        bridge.onPrefillDispatched(61L, -1L, ipPortP);
+
+        bridge.observeWorkerStatus(prefillFinishedResponse(61L, 5L), RoleType.PREFILL, ipPortP);
+
+        assertEquals(1, bridge.diffCollector().pendingNew(),
+                "D 侧无条目时 P 终局即请求级终态（P 兜底仍生效）");
+
+        bridge.onOldTerminal(61L, "COMPLETED");
+        assertEquals(1L, bridge.diffCollector().matchedCount(), "P 兜底记录与旧侧终态配对");
+        assertEquals(0, bridge.diffCollector().pendingNew());
+    }
+
     private static StateShadowBridge readAuthorityBridge() {
         FlexlbConfig config = new FlexlbConfig();
         config.setFlexlbStateV2ShadowEnabled(true);
@@ -612,6 +671,21 @@ class StateShadowBridgeTest {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setStatusVersion(3L);
         response.setRole(RoleType.DECODE);
+        response.setRunningDetailCount(0L);
+        response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), finished));
+        return response;
+    }
+
+    /** P 侧 finished(success) 报文（单请求，散请求 batchId=-1）。 */
+    private static WorkerStatusResponse prefillFinishedResponse(long requestId, long statusVersion) {
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(requestId);
+        finished.setErrorCode(0L);
+        finished.setEndTimeMs(1L);
+        finished.setBatchId(-1L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setStatusVersion(statusVersion);
+        response.setRole(RoleType.PREFILL);
         response.setRunningDetailCount(0L);
         response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), finished));
         return response;

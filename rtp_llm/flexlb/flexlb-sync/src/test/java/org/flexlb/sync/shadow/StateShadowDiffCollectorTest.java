@@ -178,6 +178,30 @@ class StateShadowDiffCollectorTest {
                 () -> new StateShadowDiffCollector(null, 1000L, 0));
     }
 
+    // ---- 惰性淘汰限频（热路径防护：高频 put 下过期扫描至多每秒一次） ----
+
+    /**
+     * 限频语义：首次 put 触发过期扫描（水位初始化远早于 now）；限频窗口内的
+     * 后续 put 不再扫描——已过期条目仍在窗，直到下一轮扫描或显式 evictExpired。
+     * （missing 计数的结算时机漂移在秒级，窗口 10 分钟≫限频间隔——正确性不变。）
+     */
+    @Test
+    void evictSweepThrottledWithinInterval() throws InterruptedException {
+        StateShadowDiffCollector collector = new StateShadowDiffCollector(null, 100L, 1024);
+
+        collector.recordOldTerminal(30L, "COMPLETED"); // 首次 put：扫描（无过期）
+        Thread.sleep(150L); // 让 30L 过期（windowMs=100）
+
+        collector.recordOldTerminal(31L, "COMPLETED"); // 限频窗口（1s）内：不扫描
+        assertEquals(2, collector.pendingOld(),
+                "限频窗口内的 put 不触发过期扫描——过期条目仍驻窗（结算时机漂移可接受）");
+        assertEquals(0L, collector.diffMissingOnNew(), "未扫描 → 不结算 missing");
+
+        collector.evictExpired(System.currentTimeMillis()); // 显式驱动：补结算
+        assertEquals(1, collector.pendingOld(), "31L 未过期仍驻窗");
+        assertEquals(1L, collector.diffMissingOnNew(), "显式扫描结算过期条目 30L 的 missing");
+    }
+
     // ---- shutdown summary：全部计数读口的单行聚合（日志即验收证据） ----
 
     @Test
