@@ -1,18 +1,27 @@
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+#include "autil/EnvUtil.h"
+
 namespace rtp_llm {
+
+namespace {
+
+constexpr char kIgnoreRequestCacheSwitchesEnv[] = "RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES";
+
+}  // namespace
 
 void ResourceContext::initCacheConfig(const KVCacheConfig&       kv_cache_config,
                                       const FIFOSchedulerConfig& scheduler_config,
                                       int64_t                    max_seq_len) {
-    reuse_cache                = kv_cache_config.reuse_cache;
-    enable_memory_cache        = kv_cache_config.enable_memory_cache;
-    enable_remote_cache        = kv_cache_config.enable_remote_cache;
-    enable_device_cache        = kv_cache_config.enable_device_cache;
-    write_cache_sync           = kv_cache_config.write_cache_sync;
-    enable_tiered_memory_cache = kv_cache_config.enable_tiered_memory_cache;
-    load_cache_retry_times     = kv_cache_config.load_cache_retry_times;
+    reuse_cache                   = kv_cache_config.reuse_cache;
+    enable_memory_cache           = kv_cache_config.enable_memory_cache;
+    enable_remote_cache           = kv_cache_config.enable_remote_cache;
+    enable_device_cache           = kv_cache_config.enable_device_cache;
+    write_cache_sync              = kv_cache_config.write_cache_sync;
+    enable_tiered_memory_cache    = kv_cache_config.enable_tiered_memory_cache;
+    ignore_request_cache_switches = autil::EnvUtil::getEnv(kIgnoreRequestCacheSwitchesEnv, false);
+    load_cache_retry_times        = kv_cache_config.load_cache_retry_times;
 
     if (kv_cache_config.device_cache_min_free_blocks > 0) {
         device_cache_min_free_blocks = kv_cache_config.device_cache_min_free_blocks;
