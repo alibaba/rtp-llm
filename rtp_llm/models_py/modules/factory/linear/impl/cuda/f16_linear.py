@@ -96,13 +96,46 @@ class CudaF16Linear(LinearBase):
     ) -> torch.Tensor:
         """Run one BF16 GEMM into ``[left | mid gap | right]`` per head."""
         self._validate_skip_head_mid_input(input, head_splits)
-        output_features = self.weight.shape[0]
-        left, mid, right = head_splits
-        logical_head_dim = left + right
-        num_heads = output_features // logical_head_dim
-        physical_features = num_heads * (left + mid + right)
-        output = input.new_empty((input.shape[0], physical_features))
+        output = input.new_empty(self._skip_head_mid_output_shape(input, head_splits))
+        return self._run_skip_head_mid(input, output, head_splits)
 
+    def forward_skip_head_mid_out(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        head_splits: Tuple[int, int, int],
+    ) -> torch.Tensor:
+        """Run skip-head-mid BF16 GEMM into a caller-provided output."""
+        self._validate_skip_head_mid_input(input, head_splits)
+        expected_shape = self._skip_head_mid_output_shape(input, head_splits)
+        if (
+            output.shape != expected_shape
+            or output.dtype != input.dtype
+            or output.device != input.device
+            or not output.is_contiguous()
+        ):
+            raise RuntimeError(
+                "bf16_gemm_nt_skip_head_mid output must be contiguous BF16 "
+                f"{expected_shape} on {input.device}"
+            )
+
+        return self._run_skip_head_mid(input, output, head_splits)
+
+    def _skip_head_mid_output_shape(
+        self,
+        input: torch.Tensor,
+        head_splits: Tuple[int, int, int],
+    ) -> tuple[int, int]:
+        left, mid, right = head_splits
+        num_heads = self.weight.shape[0] // (left + right)
+        return input.shape[0], num_heads * (left + mid + right)
+
+    def _run_skip_head_mid(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        head_splits: Tuple[int, int, int],
+    ) -> torch.Tensor:
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             bf16_gemm_nt_skip_head_mid,
         )

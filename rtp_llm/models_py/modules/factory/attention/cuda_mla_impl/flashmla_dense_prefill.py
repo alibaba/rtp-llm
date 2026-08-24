@@ -423,6 +423,38 @@ class MlaFlashMLAPrefillOp:
         flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
         if not self.has_reuse_cache:
             return compressed_kv, flat_k_pe
+        kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(
+            compressed_kv, kv_cache
+        )
+
+        final_compressed_kv = torch.empty(
+            (self.total_kv_lens, self.kv_lora_rank),
+            dtype=compressed_kv.dtype,
+            device=compressed_kv.device,
+        )
+        final_k_pe = torch.empty(
+            (self.total_kv_lens, self.qk_rope_head_dim),
+            dtype=flat_k_pe.dtype,
+            device=flat_k_pe.device,
+        )
+        rtp_llm_ops.reuse_kv_cache_indexed_batched(
+            final_compressed_kv,
+            final_k_pe,
+            compressed_kv,
+            flat_k_pe.contiguous(),
+            kv_cache_base,
+            reuse_cache_page_indice,
+            self.batch_reuse_info_vec,
+            self.qo_indptr,
+            self.page_size,
+        )
+        return final_compressed_kv, final_k_pe
+
+    def _reuse_cache_inputs(
+        self,
+        compressed_kv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if kv_cache is None:
             raise RuntimeError("FlashMLA cache reuse requires an MLA KV cache")
         if self.reuse_cache_page_indice is None:
@@ -460,43 +492,103 @@ class MlaFlashMLAPrefillOp:
             reuse_cache_page_indice.record_stream(
                 torch.cuda.current_stream(block_table.device)
             )
+        return kv_cache.kv_cache_base, reuse_cache_page_indice
 
-        final_compressed_kv = torch.empty(
-            (self.total_kv_lens, self.kv_lora_rank),
-            dtype=compressed_kv.dtype,
-            device=compressed_kv.device,
-        )
-        final_k_pe = torch.empty(
-            (self.total_kv_lens, self.qk_rope_head_dim),
-            dtype=flat_k_pe.dtype,
-            device=flat_k_pe.device,
-        )
-        rtp_llm_ops.reuse_kv_cache_indexed_batched(
-            final_compressed_kv,
-            final_k_pe,
-            compressed_kv,
-            flat_k_pe.contiguous(),
-            kv_cache.kv_cache_base,
-            reuse_cache_page_indice,
-            self.batch_reuse_info_vec,
-            self.qo_indptr,
-            self.page_size,
-        )
-        return final_compressed_kv, final_k_pe
-
-    def _project_kv(
-        self,
-        compressed_kv: torch.Tensor,
-        k_pe: torch.Tensor,
-        layer_id: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        kv_b_proj = LinearFactory.create_linear_from_weights(
+    def _create_kv_b_proj(self, layer_id: int) -> Any:
+        return LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
             W.mla_kv_b_w,
             W.mla_kv_b_s,
             None,
             self.quant_config,
         )
+
+    def _can_use_packed_projection(
+        self,
+        compressed_kv: torch.Tensor,
+        kv_b_proj: Any,
+        projection: Any,
+    ) -> bool:
+        head_splits = (
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+        return (
+            head_splits == _K3_PACKED_KV_HEAD_SPLITS
+            and callable(projection)
+            and has_bf16_gemm_nt_skip_head_mid()
+            and compressed_kv.is_cuda
+            and compressed_kv.dtype == torch.bfloat16
+            and getattr(kv_b_proj, "bias", None) is None
+            and torch.cuda.get_device_capability(compressed_kv.device)[0] == 10
+        )
+
+    def _project_reused_kv_with_gap_fill(
+        self,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        kv_b_proj: Any,
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """Gather reused latent KV and fill K_pe before projecting into its gap."""
+        packed_projection_out = getattr(kv_b_proj, "forward_skip_head_mid_out", None)
+        fused_gather = getattr(rtp_llm_ops, "gather_mla_latent_and_fill_k_pe", None)
+        if not self.has_reuse_cache or not callable(fused_gather):
+            return None
+        if not self._can_use_packed_projection(
+            compressed_kv, kv_b_proj, packed_projection_out
+        ):
+            return None
+
+        flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
+        kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(
+            compressed_kv, kv_cache
+        )
+        head_splits = (
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+        )
+        packed_head_dim = sum(head_splits)
+        final_compressed_kv = torch.empty(
+            (self.total_kv_lens, self.kv_lora_rank),
+            dtype=compressed_kv.dtype,
+            device=compressed_kv.device,
+        )
+        packed_kv = torch.empty(
+            (self.total_kv_lens, self.num_heads * packed_head_dim),
+            dtype=compressed_kv.dtype,
+            device=compressed_kv.device,
+        )
+        fused_gather(
+            final_compressed_kv,
+            packed_kv,
+            compressed_kv,
+            flat_k_pe,
+            kv_cache_base,
+            reuse_cache_page_indice,
+            self.batch_reuse_info_vec,
+            self.qo_indptr,
+            self.page_size,
+            packed_head_dim,
+            self.qk_nope_head_dim,
+        )
+        packed_projection_out(final_compressed_kv, packed_kv, head_splits)
+        packed_kv = packed_kv.view(self.total_kv_lens, self.num_heads, packed_head_dim)
+        k = packed_kv[..., : -self.v_head_dim]
+        value_states = packed_kv[..., -self.v_head_dim :]
+        return k, value_states
+
+    def _project_kv(
+        self,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        layer_id: int,
+        kv_b_proj: Optional[Any] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if kv_b_proj is None:
+            kv_b_proj = self._create_kv_b_proj(layer_id)
         head_splits = (
             self.qk_nope_head_dim,
             self.qk_rope_head_dim,
@@ -504,15 +596,7 @@ class MlaFlashMLAPrefillOp:
         )
         packed_projection = getattr(kv_b_proj, "forward_skip_head_mid", None)
         num_tokens = compressed_kv.shape[0]
-        if (
-            head_splits == _K3_PACKED_KV_HEAD_SPLITS
-            and callable(packed_projection)
-            and has_bf16_gemm_nt_skip_head_mid()
-            and compressed_kv.is_cuda
-            and compressed_kv.dtype == torch.bfloat16
-            and getattr(kv_b_proj, "bias", None) is None
-            and torch.cuda.get_device_capability(compressed_kv.device)[0] == 10
-        ):
+        if self._can_use_packed_projection(compressed_kv, kv_b_proj, packed_projection):
             packed_kv = packed_projection(compressed_kv, head_splits).view(
                 num_tokens, self.num_heads, sum(head_splits)
             )
@@ -524,9 +608,7 @@ class MlaFlashMLAPrefillOp:
             return k, value_states
 
         expanded_dim = self.qk_nope_head_dim + self.v_head_dim
-        kv = kv_b_proj(compressed_kv).view(
-            num_tokens, self.num_heads, expanded_dim
-        )
+        kv = kv_b_proj(compressed_kv).view(num_tokens, self.num_heads, expanded_dim)
         k_nope = kv[..., : self.qk_nope_head_dim]
         value_states = kv[..., self.qk_nope_head_dim :]
 
@@ -589,13 +671,19 @@ class MlaFlashMLAPrefillOp:
     ) -> torch.Tensor:
         if self.qo_indptr is None or self.kv_indptr is None:
             raise RuntimeError("FlashMLA Prefill must be planned before forward")
-        compressed_kv, k_pe = self._gather_reused_kv(compressed_kv, k_pe, kv_cache)
-        if compressed_kv.shape[0] != self.total_kv_lens:
+        kv_b_proj = self._create_kv_b_proj(layer_id)
+        projected_kv = self._project_reused_kv_with_gap_fill(
+            compressed_kv, k_pe, kv_cache, kv_b_proj
+        )
+        if projected_kv is None:
+            compressed_kv, k_pe = self._gather_reused_kv(compressed_kv, k_pe, kv_cache)
+            projected_kv = self._project_kv(compressed_kv, k_pe, layer_id, kv_b_proj)
+        if projected_kv[0].shape[0] != self.total_kv_lens:
             raise RuntimeError(
                 "FlashMLA gathered KV length disagrees with kv_indptr: "
-                f"tensor={compressed_kv.shape[0]}, indptr={self.total_kv_lens}"
+                f"tensor={projected_kv[0].shape[0]}, indptr={self.total_kv_lens}"
             )
-        k, value_states = self._project_kv(compressed_kv, k_pe, layer_id)
+        k, value_states = projected_kv
         out = self._dense_attention(q, k, value_states)
 
         device_index = q.device.index if q.device.index is not None else 0

@@ -15,4 +15,16 @@ void ReuseKVCacheIndexedBatched(torch::Tensor final_compressed_kv,
                                 torch::Tensor qo_indptr,
                                 int           tokens_per_block);
 
+void GatherMLALatentAndFillKPe(torch::Tensor final_compressed_kv,
+                               torch::Tensor packed_kv,
+                               torch::Tensor compressed_kv,
+                               torch::Tensor k_pe,
+                               torch::Tensor kv_cache_base,
+                               torch::Tensor reuse_cache_page_indice,
+                               torch::Tensor batch_reuse_info_vec,
+                               torch::Tensor qo_indptr,
+                               int           tokens_per_block,
+                               int           packed_head_dim,
+                               int           k_pe_offset);
+
 }  // namespace rtp_llm

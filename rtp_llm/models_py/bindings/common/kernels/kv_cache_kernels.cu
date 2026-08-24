@@ -391,6 +391,152 @@ void invokeReuseKVCacheIndexedBatched(T*             final_compressed_kv,
 #endif
 }
 
+template<typename T>
+__global__ void GatherMLALatentAndFillKPeKernel(T*             final_compressed_kv,
+                                                T*             packed_kv,
+                                                const T*       compressed_kv,
+                                                const T*       k_pe,
+                                                const T*       kv_cache_base,
+                                                const int32_t* reuse_cache_page_indice,
+                                                const int32_t* batch_reuse_info_vec,
+                                                const int32_t* qo_indptr,
+                                                int            num_batches,
+                                                int            total_final_len,
+                                                int            compressed_kv_dim,
+                                                int            k_pe_dim,
+                                                int            num_heads,
+                                                int            packed_head_dim,
+                                                int            k_pe_offset,
+                                                int            tokens_per_block,
+                                                int64_t        final_compressed_kv_stride,
+                                                int64_t        packed_kv_stride,
+                                                int64_t        compressed_kv_stride,
+                                                int64_t        k_pe_stride,
+                                                int64_t        kv_cache_block_stride,
+                                                int64_t        kv_cache_entry_stride) {
+    constexpr int kWarpsPerBlock = 8;
+    const int     lane           = threadIdx.x % warpSize;
+    const int     warp           = threadIdx.x / warpSize;
+    const int     token_idx      = blockIdx.x * kWarpsPerBlock + warp;
+
+    if (token_idx >= total_final_len) {
+        return;
+    }
+
+    int batch_idx    = -1;
+    int final_offset = 0;
+    if (lane == 0) {
+        for (int i = 0; i < num_batches; ++i) {
+            const int reuse_len    = batch_reuse_info_vec[i * 4 + 1];
+            const int query_len    = qo_indptr[i + 1] - qo_indptr[i];
+            const int batch_kv_len = reuse_len + query_len;
+            if (token_idx < final_offset + batch_kv_len) {
+                batch_idx = i;
+                break;
+            }
+            final_offset += batch_kv_len;
+        }
+    }
+    batch_idx    = __shfl_sync(0xffffffff, batch_idx, 0);
+    final_offset = __shfl_sync(0xffffffff, final_offset, 0);
+    if (batch_idx < 0) {
+        return;
+    }
+
+    const int reuse_len       = batch_reuse_info_vec[batch_idx * 4 + 1];
+    const int block_start_idx = batch_reuse_info_vec[batch_idx * 4 + 2];
+    const int local_idx       = token_idx - final_offset;
+
+    const T* src_compressed;
+    const T* src_k_pe;
+    if (local_idx < reuse_len) {
+        const int block_idx       = local_idx / tokens_per_block;
+        const int token_in_block  = local_idx % tokens_per_block;
+        const int cache_block_idx = reuse_cache_page_indice[block_start_idx + block_idx];
+        const T*  cache_token =
+            kv_cache_base + cache_block_idx * kv_cache_block_stride + token_in_block * kv_cache_entry_stride;
+        src_compressed = cache_token;
+        src_k_pe       = cache_token + compressed_kv_dim;
+    } else {
+        const int query_idx = qo_indptr[batch_idx] + local_idx - reuse_len;
+        src_compressed      = compressed_kv + query_idx * compressed_kv_stride;
+        src_k_pe            = k_pe + query_idx * k_pe_stride;
+    }
+
+    T* dst_compressed = final_compressed_kv + token_idx * final_compressed_kv_stride;
+    for (int dim = lane; dim < compressed_kv_dim; dim += warpSize) {
+        dst_compressed[dim] = src_compressed[dim];
+    }
+
+    T* dst_packed = packed_kv + token_idx * packed_kv_stride;
+    for (int dim = lane; dim < k_pe_dim; dim += warpSize) {
+        const T value = src_k_pe[dim];
+        for (int head = 0; head < num_heads; ++head) {
+            dst_packed[head * packed_head_dim + k_pe_offset + dim] = value;
+        }
+    }
+}
+
+template<typename T>
+void invokeGatherMLALatentAndFillKPe(T*             final_compressed_kv,
+                                     T*             packed_kv,
+                                     const T*       compressed_kv,
+                                     const T*       k_pe,
+                                     const T*       kv_cache_base,
+                                     const int32_t* reuse_cache_page_indice,
+                                     const int32_t* batch_reuse_info_vec,
+                                     const int32_t* qo_indptr,
+                                     int            num_batches,
+                                     int            total_final_len,
+                                     int            compressed_kv_dim,
+                                     int            k_pe_dim,
+                                     int            num_heads,
+                                     int            packed_head_dim,
+                                     int            k_pe_offset,
+                                     int            tokens_per_block,
+                                     int64_t        final_compressed_kv_stride,
+                                     int64_t        packed_kv_stride,
+                                     int64_t        compressed_kv_stride,
+                                     int64_t        k_pe_stride,
+                                     int64_t        kv_cache_block_stride,
+                                     int64_t        kv_cache_entry_stride,
+                                     cudaStream_t   stream) {
+    if (total_final_len == 0) {
+        return;
+    }
+
+    constexpr int kWarpsPerBlock = 8;
+    constexpr int kBlockSize     = kWarpsPerBlock * 32;
+    const int     grid_size      = (total_final_len + kWarpsPerBlock - 1) / kWarpsPerBlock;
+    GatherMLALatentAndFillKPeKernel<<<grid_size, kBlockSize, 0, stream>>>(final_compressed_kv,
+                                                                          packed_kv,
+                                                                          compressed_kv,
+                                                                          k_pe,
+                                                                          kv_cache_base,
+                                                                          reuse_cache_page_indice,
+                                                                          batch_reuse_info_vec,
+                                                                          qo_indptr,
+                                                                          num_batches,
+                                                                          total_final_len,
+                                                                          compressed_kv_dim,
+                                                                          k_pe_dim,
+                                                                          num_heads,
+                                                                          packed_head_dim,
+                                                                          k_pe_offset,
+                                                                          tokens_per_block,
+                                                                          final_compressed_kv_stride,
+                                                                          packed_kv_stride,
+                                                                          compressed_kv_stride,
+                                                                          k_pe_stride,
+                                                                          kv_cache_block_stride,
+                                                                          kv_cache_entry_stride);
+
+#if USING_CUDA
+    check_cuda_value(cudaPeekAtLastError());
+    check_cuda_error();
+#endif
+}
+
 // Explicit template instantiation
 #define INSTANTIATE_REUSE_KV_CACHE_INDEXED_BATCHED(T)                                                                  \
     template void invokeReuseKVCacheIndexedBatched<T>(T*,                                                              \
@@ -415,5 +561,36 @@ INSTANTIATE_REUSE_KV_CACHE_INDEXED_BATCHED(__nv_bfloat16)
 #endif
 
 #undef INSTANTIATE_REUSE_KV_CACHE_INDEXED_BATCHED
+
+#define INSTANTIATE_GATHER_MLA_LATENT_AND_FILL_K_PE(T)                                                                 \
+    template void invokeGatherMLALatentAndFillKPe<T>(T*,                                                               \
+                                                     T*,                                                               \
+                                                     const T*,                                                         \
+                                                     const T*,                                                         \
+                                                     const T*,                                                         \
+                                                     const int32_t*,                                                   \
+                                                     const int32_t*,                                                   \
+                                                     const int32_t*,                                                   \
+                                                     int,                                                              \
+                                                     int,                                                              \
+                                                     int,                                                              \
+                                                     int,                                                              \
+                                                     int,                                                              \
+                                                     int,                                                              \
+                                                     int,                                                              \
+                                                     int,                                                              \
+                                                     int64_t,                                                          \
+                                                     int64_t,                                                          \
+                                                     int64_t,                                                          \
+                                                     int64_t,                                                          \
+                                                     int64_t,                                                          \
+                                                     int64_t,                                                          \
+                                                     cudaStream_t);
+
+#if USING_CUDA
+INSTANTIATE_GATHER_MLA_LATENT_AND_FILL_K_PE(__nv_bfloat16)
+#endif
+
+#undef INSTANTIATE_GATHER_MLA_LATENT_AND_FILL_K_PE
 
 }  // namespace rtp_llm

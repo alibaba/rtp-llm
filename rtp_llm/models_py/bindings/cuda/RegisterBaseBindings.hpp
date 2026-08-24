@@ -181,6 +181,21 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("qo_indptr"),
                   py::arg("tokens_per_block"));
 
+    rtp_ops_m.def("gather_mla_latent_and_fill_k_pe",
+                  &rtp_llm::GatherMLALatentAndFillKPe,
+                  "Gather MLA latent cache and fill the packed K_pe gap",
+                  py::arg("final_compressed_kv"),
+                  py::arg("packed_kv"),
+                  py::arg("compressed_kv"),
+                  py::arg("k_pe"),
+                  py::arg("kv_cache_base"),
+                  py::arg("reuse_cache_page_indice"),
+                  py::arg("batch_reuse_info_vec"),
+                  py::arg("qo_indptr"),
+                  py::arg("tokens_per_block"),
+                  py::arg("packed_head_dim"),
+                  py::arg("k_pe_offset"));
+
     rtp_ops_m.def("mla_k_merge",
                   &rtp_llm::MlaKMerge,
                   "Fused kernel to merge k_nope and k_pe efficiently",
