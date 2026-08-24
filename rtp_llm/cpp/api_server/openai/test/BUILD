@@ -57,6 +57,7 @@ cc_library(
     name = "openai_unittest_lib",
     srcs = [
         "APIDataTypeTest.cc",
+        "ChatRenderTest.cc",
         "OpenaiEndpointTest.cc",
         "TestMain.cc",
     ] + [
