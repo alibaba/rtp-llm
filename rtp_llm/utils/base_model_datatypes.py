@@ -159,6 +159,21 @@ class GenerateOutput:
         arbitrary_types_allowed = True
 
 
+def get_response_logits_with_custom_output_compat(
+    return_logits: bool,
+    logits: Optional[torch.Tensor],
+    custom_output: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    # Temporary deployment compatibility hack: the current ingress drops the
+    # custom_output field but already forwards logits. Keep the original
+    # custom_output and also expose it through logits until ingress supports
+    # the dedicated field. A real custom output intentionally takes priority
+    # over vocabulary logits in the serialized response.
+    if custom_output is not None:
+        return custom_output
+    return logits if return_logits else None
+
+
 @dataclass
 class GenerateOutputs:
     generate_outputs: List[GenerateOutput] = field(default_factory=list)

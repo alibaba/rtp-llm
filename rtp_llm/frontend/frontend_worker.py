@@ -27,7 +27,10 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactor
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
-from rtp_llm.utils.base_model_datatypes import GenerateResponse
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateResponse,
+    get_response_logits_with_custom_output_compat,
+)
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -170,6 +173,9 @@ class FrontendWorker:
                 if gc.return_prompt_logits
                 else None
             )
+            response_logits = get_response_logits_with_custom_output_compat(
+                gc.return_logits, out.logits, out.custom_output
+            )
             pipeline_responses.append(
                 PipelineResponse(
                     response=generate_texts[0],
@@ -186,8 +192,8 @@ class FrontendWorker:
                         else None
                     ),
                     logits=(
-                        out.logits.tolist()
-                        if gc.return_logits and out.logits is not None
+                        response_logits.tolist()
+                        if response_logits is not None
                         else None
                     ),
                     prompt_logprobs=prompt_logits_dict,
@@ -287,6 +293,9 @@ class FrontendWorker:
             else None
         )
         custom_output = gen_responses.generate_outputs.generate_outputs[0].custom_output
+        response_logits = get_response_logits_with_custom_output_compat(
+            generate_config.return_logits, logits, custom_output
+        )
 
         response = PipelineResponse(
             response=generate_texts[0],
@@ -303,8 +312,8 @@ class FrontendWorker:
                 else None
             ),
             logits=(
-                logits.tolist()
-                if generate_config.return_logits and logits is not None
+                response_logits.tolist()
+                if response_logits is not None
                 else None
             ),
             output_ids=(
