@@ -97,23 +97,29 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
 
         boolean grpcEndpoint = BackendServiceProtocolEnum.GRPC.getName()
                 .equals(endpoint.getProtocol());
-        List<WorkerHost> normalizedHosts = new ArrayList<>(discoveredHosts.size());
+        int multiEngineNum = endpoint.getMultiEngineNum();
+        List<WorkerHost> normalizedHosts = new ArrayList<>(discoveredHosts.size() * multiEngineNum);
         for (WorkerHost host : discoveredHosts) {
             int discoveredPort = host.getPort();
             int httpPort = grpcEndpoint ? discoveredPort - 1 : discoveredPort;
             int grpcPort = grpcEndpoint ? discoveredPort : discoveredPort + 1;
-            int workerStatusPort = endpoint.getWorkerStatusPort() == null
+            int workerStatusBasePort = endpoint.getWorkerStatusPort() == null
                     ? grpcPort
                     : endpoint.getWorkerStatusPort();
-            normalizedHosts.add(new WorkerHost(
-                    host.getIp(),
-                    httpPort,
-                    grpcPort,
-                    httpPort + 5,
-                    workerStatusPort,
-                    host.getSite(),
-                    endpoint.getGroup(),
-                    host.getDeploymentName()));
+            for (int engineIndex = 0; engineIndex < multiEngineNum; engineIndex++) {
+                normalizedHosts.add(new WorkerHost(
+                        host.getIp(),
+                        httpPort,
+                        grpcPort,
+                        httpPort + 5,
+                        workerStatusBasePort + engineIndex,
+                        host.getSite(),
+                        endpoint.getGroup(),
+                        host.getDeploymentName(),
+                        engineIndex,
+                        multiEngineNum,
+                        endpoint.getAddress()));
+            }
         }
         return normalizedHosts;
     }

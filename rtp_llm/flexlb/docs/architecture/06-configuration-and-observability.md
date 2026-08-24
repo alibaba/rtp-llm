@@ -91,7 +91,9 @@ Nacos 中使用对象字段 `modelServiceConfig`。缺省**启动失败**。配�
 - `service_id`（必填）、`role_endpoints: List<GroupRoleEndPoint>`（必填非空）、`kvcm`。
 - `GroupRoleEndPoint`：`group` + `prefill_endpoint` / `decode_endpoint` / `vit_endpoint` /
   `pd_fusion_endpoint`（各为 `Endpoint{address, protocol, path, worker_status_port,
-  discovery}`）。
+  multi_engine_num=1, discovery}`）。`multi_engine_num < 1` 启动失败；N>1 要求显式
+  `worker_status_port`，并校验完整 `base..base+N-1` 端口段不超过 65535。protocol 只解释
+  frontend discovery port，不参与 worker-status offset。
 - `DiscoveryConfig`：`type`（`vipserver` / `dashscope` / `static-env`）、`base_url`
   （默认 `http://127.0.0.1:8880`）、connect/read timeout 500ms、poll 1000ms、`hosts`。
 - `KvcmConfig`：`enabled`、`address`、`namespace`、`port=6381`、`discovery`、
@@ -171,6 +173,8 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
   - `app.routing.*`：队列长度/入队/超时/拒绝/取消 QPS、排队等待、路由执行耗时、
     单次路由尝试耗时（`app.routing.route.attempt.execution.time.ms`，不含 retry sleep）、
     成功/失败（tag `code`）/每次实际 retry 的重试 QPS（`RoutingQueueReporter`，全 PRECISE）；
+    selected-worker detail 的 `engineIndex` 使用内部 routing index，因此 N=1 schedule 虽省略
+    wire `engine_index`，观测仍记录 index 0；
   - `app.cache.*`：两级索引规模、命中数/率、预测 vs 实际对比（`hit.comparison.*`）、
     Local Standby 默认生效 block size（`app.cache.local.standby.block.size`）、容量/拒绝/映射数、
     `cache.match.active.source`、`standby.fallback.qps`、

@@ -8,7 +8,8 @@ import java.util.Map;
 /**
  * Cache matches and the block size used to produce them.
  *
- * <p>Each worker has one {@link HostCacheMatch} containing the raw local/P2P block counts.
+ * <p>Each map key is a logical worker identity in {@code ip:port@engineIndex} format and has
+ * one {@link HostCacheMatch} containing the raw local/P2P block counts.
  */
 public record CacheMatchResult(
         Map<String, HostCacheMatch> hostMatches,
@@ -32,6 +33,13 @@ public record CacheMatchResult(
         return inputTokens > 0 ? Math.min(inputTokens, matchedTokens) : matchedTokens;
     }
 
+    /**
+     * Returns the match for a logical worker.
+     *
+     * @param workerIpPort logical worker identity in {@code ip:port@engineIndex} format; the
+     *                     index identifies one independently routable engine behind the physical
+     *                     frontend
+     */
     public HostCacheMatch hostMatch(String workerIpPort) {
         return hostMatches.get(workerIpPort);
     }

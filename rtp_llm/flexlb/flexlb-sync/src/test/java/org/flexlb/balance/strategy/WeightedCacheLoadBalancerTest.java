@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
@@ -115,6 +116,10 @@ class WeightedCacheLoadBalancerTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
+        Assertions.assertNull(status.getEngineIndex());
+        Assertions.assertEquals(0, status.getRoutingEngineIndex());
+        Assertions.assertTrue(status.getLogicalIpPort().endsWith("@0"));
+        Assertions.assertFalse(new ObjectMapper().valueToTree(status).has("engine_index"));
         Assertions.assertEquals("LOCAL_SYNC", balanceContext.getCacheMatchSource());
     }
 
@@ -205,7 +210,7 @@ class WeightedCacheLoadBalancerTest {
 
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
                 .thenReturn(new CacheMatchResult(
-                        Map.of("127.0.0.1:8080", HostCacheMatch.local(9)), CacheMatchSource.KVCM, 321, 256));
+                        Map.of("127.0.0.1:8080@0", HostCacheMatch.local(9)), CacheMatchSource.KVCM, 321, 256));
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -239,6 +244,46 @@ class WeightedCacheLoadBalancerTest {
     }
 
     @Test
+    void shouldKeepResourcesIndependentButGateHealthByPhysicalNode() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        WorkerStatus engine0 = createWorkerStatus("127.0.0.1");
+        engine0.setEndpointAddress("service-a");
+        engine0.setMultiEngineNum(2);
+        WorkerStatus engine1 = createWorkerStatus("127.0.0.1");
+        engine1.setEndpointAddress("service-a");
+        engine1.setEngineIndex(1);
+        engine1.setMultiEngineNum(2);
+        Map<String, WorkerStatus> workers =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        workers.put(engine0.getLogicalIpPort(), engine0);
+        workers.put(engine1.getLogicalIpPort(), engine1);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure resourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(engine0)).thenReturn(false);
+        Mockito.when(resourceMeasure.isResourceAvailable(engine1)).thenReturn(true);
+        WeightedCacheLoadBalancer loadBalancer = new WeightedCacheLoadBalancer(
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+        Request request = new Request();
+        request.setRequestId("request-index-1");
+        request.setSeqLen(1000);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus healthy = loadBalancer.select(context, RoleType.DECODE, null);
+
+        Assertions.assertTrue(healthy.isSuccess());
+        Assertions.assertEquals(1, healthy.getEngineIndex());
+        Assertions.assertEquals(
+                1, new ObjectMapper().valueToTree(healthy).get("engine_index").asInt());
+        engine0.setAlive(false);
+
+        Assertions.assertFalse(loadBalancer.select(context, RoleType.DECODE, null).isSuccess());
+    }
+
+    @Test
     void should_use_exponential_decay_for_balanced_weight_distribution_when_cache_usage_differs() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
@@ -251,8 +296,8 @@ class WeightedCacheLoadBalancerTest {
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
         worker2.getUsedKvCacheTokens().set(1500); // Above average 1000, normalizedValue = +500
 
-        decodeMap.put("127.0.0.1:8080", worker1);
-        decodeMap.put("127.0.0.2:8080", worker2);
+        decodeMap.put(worker1.getLogicalIpPort(), worker1);
+        decodeMap.put(worker2.getLogicalIpPort(), worker2);
 
         Request req = new Request();
         req.setSeqLen(1000);
@@ -281,7 +326,7 @@ class WeightedCacheLoadBalancerTest {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
                 // Rollback to reset local tasks and cache usage
-                weightedCacheLoadBalancer.rollBack(selectedIp + ":8080", requestId);
+                weightedCacheLoadBalancer.rollBack(status.getLogicalIpPort(), requestId);
             }
         }
 

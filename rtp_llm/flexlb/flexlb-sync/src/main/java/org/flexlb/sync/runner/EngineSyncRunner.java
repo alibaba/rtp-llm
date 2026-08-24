@@ -25,7 +25,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final String modelName;
 
-    private final Map<String /*ipPort*/, WorkerStatus> workerStatusMap;
+    private final Map<String /*ip:port@engineIndex*/, WorkerStatus> workerStatusMap;
 
     private final WorkerAddressService workerAddressService;
 
@@ -88,7 +88,7 @@ public class EngineSyncRunner implements Runnable {
                         System.nanoTime() / 1000 - startTimeInUs, modelName, roleType);
                 return;
             }
-            Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
+            Map<String/*ip:port@engineIndex*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
             // Log if latest worker count differs from cached worker count
             if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
@@ -97,7 +97,7 @@ public class EngineSyncRunner implements Runnable {
 
             // Remove if not in latest engine list
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
-                    .map(WorkerHost::getIpPort)
+                    .map(WorkerHost::getLogicalIpPort)
                     .collect(Collectors.toSet());
             logger.debug("Current cached worker size: {}, latest worker list size: {}",
                     cachedWorkerStatuses.size(), latestEngineWorkerList.size());
@@ -117,7 +117,7 @@ public class EngineSyncRunner implements Runnable {
             }
             logger.debug("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
-                String workerIpPort = host.getIpPort();
+                String workerIpPort = host.getLogicalIpPort();
                 String site = host.getSite();
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, host);
@@ -189,13 +189,16 @@ public class EngineSyncRunner implements Runnable {
 
     private WorkerStatus getOrCreateWorkerStatus(
             Map<String, WorkerStatus> workerStatuses, WorkerHost host) {
-        String workerIpPort = host.getIpPort();
+        String workerIpPort = host.getLogicalIpPort();
         WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
         if (workerStatus == null) {
             workerStatus = new WorkerStatus();
             workerStatus.setIp(host.getIp());
             workerStatus.setPort(host.getPort());
             workerStatus.setDeploymentName(host.getDeploymentName());
+            workerStatus.setEndpointAddress(host.getEndpointAddress());
+            workerStatus.setEngineIndex(host.getEngineIndex());
+            workerStatus.setMultiEngineNum(host.getMultiEngineNum());
             workerStatuses.put(workerIpPort, workerStatus);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }

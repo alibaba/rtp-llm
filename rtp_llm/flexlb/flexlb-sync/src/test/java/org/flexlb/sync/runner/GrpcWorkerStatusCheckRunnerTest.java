@@ -21,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -113,6 +114,78 @@ class GrpcWorkerStatusCheckRunnerTest {
                     && RoleType.PREFILL.equals(arguments[3])
                     && (long) arguments[4] >= 0;
         }));
+    }
+
+    @Test
+    void shouldKeepAliveUnchangedWhenWorkerStatusIsNotInitialized() {
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18003, "test-site", "test-group", "deployment-a",
+                1, 2);
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setAlive(true);
+        EngineRpcService.WorkerStatusPB uninitialized = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setAlive(true)
+                .setStatusVersion(0)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(uninitialized);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        assertTrue(workerStatus.isAlive());
+        verify(engineGrpcService).getWorkerStatus("127.0.0.1", 18003, -1L, 20L, RoleType.PREFILL);
+    }
+
+    @Test
+    void shouldKeepAliveUnchangedWhenStatusResponseHandlingFails() {
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18003, "test-site", "test-group", "deployment-a",
+                1, 2);
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setAlive(true);
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(1)
+                .setAlive(false)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(response);
+        Mockito.doThrow(new RuntimeException("metrics unavailable"))
+                .when(engineHealthReporter)
+                .reportStatusCheckRemoteInfo(anyString(), anyString(), anyString(), anyLong());
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        assertTrue(workerStatus.isAlive());
+    }
+
+    @Test
+    void shouldUpdateAliveFromExplicitWorkerStatusResponse() {
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18003, "test-site", "test-group", "deployment-a",
+                1, 2);
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setAlive(true);
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(1)
+                .setAlive(false)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(response);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        assertFalse(workerStatus.isAlive());
     }
 
     @Test

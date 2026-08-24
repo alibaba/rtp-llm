@@ -113,7 +113,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Release local cached tasks on the specified worker
      *
-     * @param ipPort Worker IP address
+     * @param ipPort logical worker identity in {@code ip:port@engineIndex} format; the index
+     *               identifies one independently routable engine behind the physical frontend
      * @param requestId Request ID
      */
     @Override
@@ -197,7 +198,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      */
     private List<WorkerStatus> getAvailableWorkers(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
 
-        Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        Map<String, WorkerStatus> workerStatusMap =
+                engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerStatusMap)) {
             return new ArrayList<>();
         }
@@ -229,7 +231,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
-                    HostCacheMatch hostCacheMatch = cacheMatchResult.hostMatch(workerStatus.getIpPort());
+                    HostCacheMatch hostCacheMatch = cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort());
                     long hitCacheTokens = calculatePrefixMatchLength(
                             workerStatus, cacheMatchResult, p2pHitDiscount, seqLen);
                     long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
@@ -300,7 +302,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         recordKvcmMatch(
                 task,
                 cacheMatchResult,
-                cacheMatchResult.hostMatch(workerStatus.getIpPort()),
+                cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort()),
                 seqLen);
         engineHealthReporter.reportKvcmSelectedMatch(
                 roleType,
@@ -541,7 +543,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                      List<ScoredWorker> sortedWorkers,
                                                      CacheAffinityDecision cacheAffinityDecision) {
         LinkedHashMap<String, ScoredWorker> prioritizedWorkers = new LinkedHashMap<>();
-        prioritizedWorkers.put(selectedWorker.worker().getIpPort(), selectedWorker);
+        prioritizedWorkers.put(selectedWorker.worker().getLogicalIpPort(), selectedWorker);
         if (cacheAffinityDecision != null) {
             addSnapshotWorker(
                     prioritizedWorkers,
@@ -552,18 +554,25 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                     sortedWorkers,
                     cacheAffinityDecision.cacheLeaderIpPort());
         }
-        sortedWorkers.forEach(worker -> prioritizedWorkers.putIfAbsent(worker.worker().getIpPort(), worker));
+        sortedWorkers.forEach(worker ->
+                prioritizedWorkers.putIfAbsent(worker.worker().getLogicalIpPort(), worker));
         return prioritizedWorkers.values().stream()
                 .limit(DECISION_SNAPSHOT_WORKER_LIMIT)
                 .sorted(Comparator.comparingInt(sortedWorkers::indexOf))
                 .toList();
     }
 
+    /**
+     * Adds a decision-snapshot worker addressed by logical {@code ip:port@engineIndex}.
+     *
+     * @param ipPort logical worker identity; the index identifies one independently routable
+     *               engine behind the physical frontend
+     */
     private void addSnapshotWorker(Map<String, ScoredWorker> prioritizedWorkers,
                                    List<ScoredWorker> sortedWorkers,
                                    String ipPort) {
         sortedWorkers.stream()
-                .filter(worker -> worker.worker().getIpPort().equals(ipPort))
+                .filter(worker -> worker.worker().getLogicalIpPort().equals(ipPort))
                 .findFirst()
                 .ifPresent(worker -> prioritizedWorkers.putIfAbsent(ipPort, worker));
     }
@@ -640,11 +649,16 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     }
 
     private String sortedWorkerIpPort(List<ScoredWorker> sortedWorkers) {
-        return sortedWorkers.isEmpty() ? null : sortedWorkers.getFirst().worker().getIpPort();
+        return sortedWorkers.isEmpty() ? null : sortedWorkers.getFirst().worker().getLogicalIpPort();
     }
 
+    /**
+     * Checks whether a worker has the supplied logical identity.
+     *
+     * @param ipPort logical worker identity in {@code ip:port@engineIndex} format
+     */
     private boolean isDecisionWorker(WorkerStatus worker, String ipPort) {
-        return ipPort != null && ipPort.equals(worker.getIpPort());
+        return ipPort != null && ipPort.equals(worker.getLogicalIpPort());
     }
 
     private int countTasks(Map<String, TaskInfo> tasks) {
@@ -792,8 +806,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         Logger.debug(
                 "Cache preference - shortest: {}, cacheLeader: {}, cacheLeadTokens: {}, shortestTtft: {}, "
                         + "cacheLeaderTtft: {}",
-                shortestTtftWorker.worker().getIpPort(),
-                cacheLeader.worker().getIpPort(),
+                shortestTtftWorker.worker().getLogicalIpPort(),
+                cacheLeader.worker().getLogicalIpPort(),
                 cacheLeadTokens,
                 shortestTtftWorker.ttft(),
                 cacheLeader.ttft());
@@ -846,6 +860,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             result.setServerIp(workerStatus.getIp());
             result.setHttpPort(workerStatus.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(workerStatus.getPort()));
+            result.setSelectedEngineIndex(
+                    workerStatus.getEngineIndex(), workerStatus.getMultiEngineNum());
         } catch (Exception e) {
             Logger.error("Failed to build server status for requestId: {}", requestId, e);
             result.setCode(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
@@ -867,7 +883,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             CacheMatchResult cacheMatchResult,
             double p2pHitDiscount,
             long inputTokens) {
-        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getIpPort());
+        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort());
         if (match == null) {
             return 0L;
         }

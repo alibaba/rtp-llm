@@ -58,7 +58,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        Map<String/*ip:port@engineIndex*/, WorkerStatus> workerStatusMap =
+                engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerStatusMap)) {
             Logger.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
@@ -118,7 +119,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     /**
      * Release local cached tasks on the specified worker
      *
-     * @param ipPort Worker IP address
+     * @param ipPort logical worker identity in {@code ip:port@engineIndex} format; the index
+     *               identifies one independently routable engine behind the physical frontend
      * @param requestId Request ID
      */
     @Override
@@ -142,7 +144,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         // KVCM returns the host_ip_port reported by Subscriber, while WorkerStatus uses the
         // service-discovery address. No code-level normalization guarantees they are identical;
         // the end-to-end integration must keep both values aligned.
-        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getIpPort());
+        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort());
         if (match == null) {
             return 0L;
         }
@@ -251,6 +253,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             result.setServerIp(optimalWorker.getIp());
             result.setHttpPort(optimalWorker.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(optimalWorker.getPort()));
+            result.setSelectedEngineIndex(
+                    optimalWorker.getEngineIndex(), optimalWorker.getMultiEngineNum());
             result.setGroup(optimalWorker.getGroup());
             result.setRequestId(requestId);
         } catch (Exception e) {

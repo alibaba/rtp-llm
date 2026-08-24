@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -20,6 +21,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -101,6 +103,39 @@ class RandomStrategyTest {
 
         // Then: Should return success status with batchId
         assertTrue(result.isSuccess());
+        assertNull(result.getEngineIndex());
+        assertEquals(0, result.getRoutingEngineIndex());
+        assertEquals("127.0.0.1:8080@0", result.getLogicalIpPort());
+        assertFalse(new ObjectMapper().valueToTree(result).has("engine_index"));
+    }
+
+    @Test
+    void shouldRemoveAllPhysicalSiblingsWhenOneEngineIsDown() {
+        Map<String, WorkerStatus> workers =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        WorkerStatus engine0 = createWorkerStatus("127.0.0.1");
+        engine0.setEndpointAddress("service-a");
+        engine0.setMultiEngineNum(2);
+        WorkerStatus engine1 = createWorkerStatus("127.0.0.1");
+        engine1.setEndpointAddress("service-a");
+        engine1.setEngineIndex(1);
+        engine1.setMultiEngineNum(2);
+        workers.put(engine0.getLogicalIpPort(), engine0);
+        workers.put(engine1.getLogicalIpPort(), engine1);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(new Request());
+
+        ServerStatus healthy = randomStrategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(healthy.isSuccess());
+        assertNotNull(healthy.getEngineIndex());
+        assertEquals(healthy.getEngineIndex(), healthy.getRoutingEngineIndex());
+        assertEquals(
+                healthy.getRoutingEngineIndex(),
+                new ObjectMapper().valueToTree(healthy).get("engine_index").asInt());
+        engine1.setAlive(false);
+
+        assertFalse(randomStrategy.select(context, RoleType.PREFILL, null).isSuccess());
     }
 
     @Test

@@ -52,13 +52,13 @@ class CacheRoutingStrategyIntegrationTest {
         SelectionResult shortestSelection = select(
                 LoadBalanceStrategyEnum.SHORTEST_TTFT,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 2_500)),
-                Map.of("127.0.0.1:8080", 15, "127.0.0.2:8080", 16),
+                Map.of("127.0.0.1:8080@0", 15, "127.0.0.2:8080@0", 16),
                 config,
                 "shortest-ignores-cache-limit");
         SelectionResult cacheAffinitySelection = select(
                 LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 2_500)),
-                Map.of("127.0.0.1:8080", 15, "127.0.0.2:8080", 16),
+                Map.of("127.0.0.1:8080@0", 15, "127.0.0.2:8080@0", 16),
                 config,
                 "cache-affinity-uses-cache-limit");
 
@@ -109,13 +109,13 @@ class CacheRoutingStrategyIntegrationTest {
         SelectionResult shortestSelection = select(
                 LoadBalanceStrategyEnum.SHORTEST_TTFT,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 5_000)),
-                Map.of("127.0.0.2:8080", 1),
+                Map.of("127.0.0.2:8080@0", 1),
                 config,
                 "shortest-low-hit-cache-preference");
         SelectionResult cacheAffinitySelection = select(
                 LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 5_000)),
-                Map.of("127.0.0.2:8080", 1),
+                Map.of("127.0.0.2:8080@0", 1),
                 config,
                 "cache-affinity-low-hit-rejected");
 

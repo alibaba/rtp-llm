@@ -31,6 +31,13 @@ public class RandomStrategy implements LoadBalancer {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, this);
     }
 
+    /**
+     * No-op rollback for the random strategy.
+     *
+     * @param ipPort logical worker identity in {@code ip:port@engineIndex} format; the index
+     *               identifies one independently routable engine behind the physical frontend
+     * @param requestId request whose local accounting would be rolled back
+     */
     @Override
     public void rollBack(String ipPort, String requestId) {
     }
@@ -40,7 +47,8 @@ public class RandomStrategy implements LoadBalancer {
         Request request = balanceContext.getRequest();
         logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
 
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        Map<String/*ip:port@engineIndex*/, WorkerStatus> workerStatusMap =
+                engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
 
         if (MapUtils.isEmpty(workerStatusMap)) {
             logger.warn("No worker status map found");
@@ -79,6 +87,7 @@ public class RandomStrategy implements LoadBalancer {
             result.setServerIp(worker.getIp());
             result.setHttpPort(worker.getPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(worker.getPort()));
+            result.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
             result.setRole(roleType);
             result.setGroup(worker.getGroup());
             result.setRequestId(requestId);

@@ -15,7 +15,7 @@ import java.util.concurrent.ForkJoinTask;
 /**
  * Engine local view (small hash table)
  * Manages local cache state and metadata for each engine
- * Storage structure: EngineIpPort -> HashMap<Long>
+ * Storage structure: logical {@code ip:port@engineIndex} -> cache block IDs.
  *
  * @author FlexLB
  */
@@ -24,7 +24,7 @@ import java.util.concurrent.ForkJoinTask;
 public class EngineLocalView {
 
     /**
-     * Core storage structure: EngineIpPort -> Set<Long>
+     * Core storage structure: logical {@code ip:port@engineIndex} -> block IDs.
      */
     private final ConcurrentHashMap<String, Set<Long>> engineViews = new ConcurrentHashMap<>();
 
@@ -48,7 +48,7 @@ public class EngineLocalView {
     /**
      * Calculate diff result
      *
-     * @param engineIPort       Engine IP
+     * @param engineIPort    logical worker identity in {@code ip:port@engineIndex} format
      * @param newCacheBlocks New cache block set
      * @param role           Engine role
      * @return Diff calculation result
@@ -98,7 +98,7 @@ public class EngineLocalView {
     /**
      * Add or update engine cache block
      *
-     * @param engineIPort     Engine IP
+     * @param engineIPort     logical worker identity in {@code ip:port@engineIndex} format
      * @param blockCacheKey   Cache block hash value
      */
     public void addOrUpdateCacheBlock(String engineIPort, Long blockCacheKey) {
@@ -114,7 +114,7 @@ public class EngineLocalView {
     /**
      * Remove engine cache block
      *
-     * @param engineIPort   Engine IP
+     * @param engineIPort   logical worker identity in {@code ip:port@engineIndex} format
      * @param blockCacheKey Cache block hash value
      */
     public void removeCacheBlock(String engineIPort, Long blockCacheKey) {
@@ -141,7 +141,7 @@ public class EngineLocalView {
     /**
      * Remove all cache blocks of an engine
      *
-     * @param engineIPort Engine IP
+     * @param engineIPort logical worker identity in {@code ip:port@engineIndex} format
      */
     public void removeAllCacheBlockOfEngine(String engineIPort) {
         if (engineIPort == null) {
@@ -158,7 +158,7 @@ public class EngineLocalView {
     /**
      * Get all cache block IDs of an engine
      *
-     * @param engineIPort Engine IP
+     * @param engineIPort logical worker identity in {@code ip:port@engineIndex} format
      * @return Cache block ID set
      */
     public Set<Long> getEngineCacheBlocks(String engineIPort) {
@@ -179,6 +179,11 @@ public class EngineLocalView {
 
     }
 
+    /**
+     * Returns the number of cached blocks owned by one logical worker.
+     *
+     * @param engineIpPort logical worker identity in {@code ip:port@engineIndex} format
+     */
     public int size(String engineIpPort) {
         Set<Long> engineCache = engineViews.get(engineIpPort);
         return engineCache == null ? 0 : engineCache.size();
@@ -194,9 +199,9 @@ public class EngineLocalView {
     }
 
     /**
-     * Get all engine IP:Port set
+     * Get all logical worker identities.
      *
-     * @return All engine IP:Port set
+     * @return identities in {@code ip:port@engineIndex} format
      */
     public Set<String> getAllEngineIpPorts() {
         return engineViews.keySet();

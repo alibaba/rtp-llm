@@ -22,6 +22,11 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
     一个在途状态检查**；
   - **仅当 `!kvcmEnabled`** 时提交 `GrpcCacheStatusCheckRunner`（`cacheCheckInProgress` CAS）。
 
+一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
+统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
+`GrpcWorkerStatusRunner` 独立连接 `worker_status_port + i`。N>1 必须显式配置 status base，
+配置加载时同时校验 count、base 和 `base + N - 1 <= 65535`。
+
 ### GrpcWorkerStatusRunner
 
 gRPC `getWorkerStatus`（VIT 走 multimodal 变体）携带 `latest_finished_version` 做增量拉取。
@@ -34,6 +39,9 @@ dp/tp size、内嵌 `cache_status`、`block_hash_lookahead_tokens`、`cache_matc
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
 对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
 任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
+RPC 失败会立即把该逻辑 worker 标为不健康；空/未初始化 status（`status_version=0`）与响应
+处理异常仅跳过本轮更新、不改 alive。公共 physical AND gate 因而同时摘除其所有 siblings，
+成功状态恢复后整组才重新可路由。
 
 ### WorkerStatus 的本地预测与对账
 
@@ -77,6 +85,9 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
   `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+
+上述 LOCAL_SYNC key、KVCM `host_ip_port`、LOCAL_STANDBY 映射与 cache-hit comparison 均使用
+逻辑 `ip:httpPort@index`；KVCM 返回无法 exact-match 当前候选的 key 时延续既有行为，按零命中忽略。
 
 ### KVCM（外部 KV Cache Manager）
 

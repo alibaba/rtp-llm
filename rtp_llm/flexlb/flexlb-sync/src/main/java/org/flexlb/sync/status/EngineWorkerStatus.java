@@ -8,6 +8,9 @@ import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -23,9 +26,13 @@ public class EngineWorkerStatus {
         this.modelMetaConfig = modelMetaConfig;
     }
 
-    public Map<String/*ipPort*/, WorkerStatus> selectModelWorkerStatus(RoleType roleType, String group) {
+    /**
+     * Returns workers keyed by logical identity in {@code ip:port@engineIndex} format.
+     * The index identifies one independently routable engine behind the physical frontend.
+     */
+    public Map<String, WorkerStatus> selectModelWorkerStatus(RoleType roleType, String group) {
 
-        Map<String/*ip:port*/, WorkerStatus> roleStatusMap = MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
+        Map<String, WorkerStatus> roleStatusMap = MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
 
         if (roleStatusMap == null) {
             return Map.of();
@@ -42,6 +49,58 @@ public class EngineWorkerStatus {
                     return workerStatus != null && workerStatus.getGroup() != null && workerStatus.getGroup().equals(group);
                 })
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
+    /**
+     * Returns logical workers whose complete physical sibling group is healthy.
+     * Resource and cache state are deliberately not aggregated here.
+     * Map keys use {@code ip:port@engineIndex}; the index identifies one independently
+     * routable engine behind the physical frontend.
+     */
+    public Map<String, WorkerStatus> selectRoutableModelWorkerStatus(RoleType roleType, String group) {
+        Map<String, WorkerStatus> candidates = selectModelWorkerStatus(roleType, group);
+        if (candidates.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, Map<String, WorkerStatus>> groups = candidates.values().stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.groupingBy(
+                        WorkerStatus::getPhysicalGroupKey,
+                        Collectors.toMap(WorkerStatus::getLogicalIpPort, Function.identity(), (left, right) -> left)));
+        Set<String> healthyGroups = groups.entrySet().stream()
+                .filter(entry -> isHealthyPhysicalGroup(entry.getValue()))
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
+
+        return candidates.entrySet().stream()
+                .filter(entry -> entry.getValue() != null)
+                .filter(entry -> healthyGroups.contains(entry.getValue().getPhysicalGroupKey()))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
+    private boolean isHealthyPhysicalGroup(Map<String, WorkerStatus> siblings) {
+        if (siblings.isEmpty()) {
+            return false;
+        }
+        WorkerStatus first = siblings.values().iterator().next();
+        int expected = first.getMultiEngineNum();
+        if (expected < 1 || siblings.size() != expected) {
+            return false;
+        }
+        boolean[] indexes = new boolean[expected];
+        for (WorkerStatus sibling : siblings.values()) {
+            int engineIndex = sibling.getEngineIndex();
+            if (sibling.getMultiEngineNum() != expected
+                    || engineIndex < 0
+                    || engineIndex >= expected
+                    || indexes[engineIndex]
+                    || !sibling.isAlive()) {
+                return false;
+            }
+            indexes[engineIndex] = true;
+        }
+        return true;
     }
 
 }
