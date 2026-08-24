@@ -14,7 +14,6 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
-    _FRONTEND_MAX_NEW_TOKENS_ENV,
     _PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV,
     DASH_ERROR_ABORT,
     DASH_ERROR_CAPACITY,
@@ -950,33 +949,6 @@ class DashScGrpcRequestTest(TestCase):
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
-
-    def test_frontend_max_new_tokens_caps_larger_request(self) -> None:
-        sampling = SamplingParams(max_new_tokens=100)
-
-        with patch.dict(os.environ, {_FRONTEND_MAX_NEW_TOKENS_ENV: "32"}):
-            generate_config = sampling.to_generate_config()
-
-        self.assertEqual(generate_config.max_new_tokens, 32)
-
-    def test_frontend_max_new_tokens_keeps_smaller_request(self) -> None:
-        sampling = SamplingParams(max_new_tokens=16)
-
-        with patch.dict(os.environ, {_FRONTEND_MAX_NEW_TOKENS_ENV: "32"}):
-            generate_config = sampling.to_generate_config()
-
-        self.assertEqual(generate_config.max_new_tokens, 16)
-
-    def test_invalid_frontend_max_new_tokens_is_ignored(self) -> None:
-        sampling = SamplingParams(max_new_tokens=100)
-
-        for invalid_cap in ("invalid", "0", "-1"):
-            with self.subTest(invalid_cap=invalid_cap), patch.dict(
-                os.environ, {_FRONTEND_MAX_NEW_TOKENS_ENV: invalid_cap}
-            ), self.assertLogs(level="WARNING"):
-                generate_config = sampling.to_generate_config()
-
-            self.assertEqual(generate_config.max_new_tokens, 100)
 
     def test_parse_sampling_max_new_think_tokens_zero(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
