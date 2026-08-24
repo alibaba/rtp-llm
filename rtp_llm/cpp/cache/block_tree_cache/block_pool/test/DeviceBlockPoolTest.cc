@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 #include <memory>
+#include <optional>
 #include <type_traits>
 #include <vector>
 
@@ -274,6 +275,35 @@ TEST(DeviceBlockPoolTest, OuterAndTreeRefsReleaseIndependently) {
 
     pool.decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(pool.isAllocated(*block));
+}
+
+TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
+    std::shared_ptr<const DeviceBlockPoolConfig> config = makeConfig();
+    DeviceBlockPool                              pool(config);
+    ASSERT_TRUE(pool.init());
+
+    std::optional<BlockIdxType> block = pool.malloc();
+    ASSERT_TRUE(block.has_value());
+    size_t active_blocks = 0;
+
+    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
+    active_blocks = pool.activeBlocksNum();
+    EXPECT_EQ(active_blocks, 0u);
+
+    pool.incRef(*block);
+    pool.incTreeRef(*block, BlockTreeRefType::LOAD);
+    active_blocks = pool.activeBlocksNum();
+    EXPECT_EQ(active_blocks, 1u);
+
+    pool.decRef(*block);
+    active_blocks = pool.activeBlocksNum();
+    EXPECT_EQ(active_blocks, 1u);
+
+    pool.decTreeRef(*block, BlockTreeRefType::LOAD);
+    active_blocks = pool.activeBlocksNum();
+    EXPECT_EQ(active_blocks, 0u);
+
+    pool.decTreeRef(*block, BlockTreeRefType::CACHE);
 }
 
 TEST(DeviceBlockPoolTest, ExplicitReleaseCannotConsumeTreeUmbrella) {
