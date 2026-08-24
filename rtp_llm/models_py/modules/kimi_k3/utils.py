@@ -33,15 +33,16 @@ def collective_gemm_workspace_global_tokens(
     max_context_batch_size: int,
     chunk_tokens: int,
 ) -> int:
-    """Bound collective GEMM workspaces by one model invocation."""
+    """Bound collective GEMM workspaces by one packed model invocation.
+
+    Chunk Prefill shares one global token budget across all sequences in a
+    round, so the context batch size must not multiply the chunk capacity.
+    """
 
     configured_tokens = int(max_seq_len) * int(max_context_batch_size)
     if chunk_tokens <= 0:
         return configured_tokens
-    return min(
-        configured_tokens,
-        int(chunk_tokens) * int(max_context_batch_size),
-    )
+    return min(configured_tokens, int(chunk_tokens))
 
 
 def mask_multimodal_token_ids(

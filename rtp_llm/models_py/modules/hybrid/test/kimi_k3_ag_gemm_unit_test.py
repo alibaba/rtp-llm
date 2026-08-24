@@ -1031,6 +1031,62 @@ class KimiK3CollectiveGemmUnitTest(unittest.TestCase):
         )
         self.assertTrue(model._gemm_reduce_scatter_configured)
 
+    def test_model_initialize_bounds_collective_workspaces_by_chunk(self) -> None:
+        class FakeCudaEmbedding:
+            is_cuda = True
+            dtype = torch.bfloat16
+            device = torch.device("cuda", 0)
+
+        model = KimiK3Model.__new__(KimiK3Model)
+        nn.Module.__init__(model)
+        model.config = SimpleNamespace(max_seq_len=1 << 20, hidden_size=7168)
+        model.parallelism_config = SimpleNamespace(
+            get_attn_tp_size=lambda: 8,
+        )
+        model.embedding_weight = FakeCudaEmbedding()
+        model._all_gather_gemm_configured = False
+        model._gemm_reduce_scatter_configured = False
+        init_resource = SimpleNamespace(
+            kv_cache=None,
+            is_decode_role=False,
+            max_context_batch_size=4,
+        )
+        group = object()
+
+        with (
+            patch.object(kimi_k3, "prefill_chunk_tokens", return_value=1 << 16),
+            patch.object(kimi_k3, "get_process_group", return_value=group),
+            patch.object(
+                kimi_k3,
+                "configure_all_gather_gemm",
+                return_value=True,
+            ) as configure_ag_gemm,
+            patch.object(
+                kimi_k3,
+                "configure_gemm_reduce_scatter",
+                return_value=True,
+            ) as configure_gemm_rs,
+        ):
+            self.assertTrue(model.initialize(init_resource))
+
+        configure_ag_gemm.assert_called_once_with(
+            group,
+            torch.device("cuda", 0),
+            enabled=True,
+            max_m=1 << 16,
+            k=7168,
+            dtype=torch.bfloat16,
+        )
+        configure_gemm_rs.assert_called_once_with(
+            group,
+            torch.device("cuda", 0),
+            enabled=True,
+            max_m=1 << 16,
+            n=7168,
+        )
+        self.assertTrue(model._all_gather_gemm_configured)
+        self.assertTrue(model._gemm_reduce_scatter_configured)
+
     def test_decode_eagle3_uses_fixed_hidden_buffer_across_graph_shapes(self) -> None:
         model = KimiK3Model.__new__(KimiK3Model)
         nn.Module.__init__(model)
