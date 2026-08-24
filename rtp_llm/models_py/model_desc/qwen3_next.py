@@ -1,4 +1,6 @@
+import functools
 import logging
+import os
 import sys
 from typing import Any, Dict, Optional
 
@@ -34,6 +36,11 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
+from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
+    build_aiter_flydsl_gdn_prefill_metadata,
+    chunk_gated_delta_rule_aiter_flydsl_with_intermediate_states,
+    is_aiter_flydsl_gdn_prefill_supported,
+)
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
@@ -76,6 +83,9 @@ class Qwen3NextMetadata(object):
         cp_restore_indices: Optional[torch.Tensor] = None,
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
+        aiter_gdn_prefill_metadata: Optional[
+            dict[int, tuple[torch.Tensor, object]]
+        ] = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
@@ -84,9 +94,16 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
+        self.aiter_gdn_prefill_metadata = aiter_gdn_prefill_metadata or {}
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
+
+    def get_aiter_gdn_prefill_metadata(self, cu_seqlens: torch.Tensor) -> object | None:
+        entry = self.aiter_gdn_prefill_metadata.get(id(cu_seqlens))
+        if entry is None or entry[0] is not cu_seqlens:
+            return None
+        return entry[1]
 
     @property
     def is_cp_linear_attn(self) -> bool:
@@ -113,6 +130,36 @@ def _maybe_write_cp_cache_store(
     if kv_cache is None or not attn_meta.is_cp_linear_attn:
         return
     _write_cp_cache_store(attention_inputs, kv_cache)
+
+
+@functools.cache
+def _is_aiter_flydsl_gdn_prefill_enabled() -> bool:
+    """Keep the optional AITER path ROCm-only and process-static."""
+    return torch.version.hip is not None and os.getenv(
+        "USE_AITER_GDN_PREFILL", "0"
+    ).strip().lower() in {"1", "true", "yes"}
+
+
+def _cpu_sequence_lengths(lengths: torch.Tensor) -> tuple[int, ...] | None:
+    """Reuse host lengths without introducing a device synchronization."""
+    if lengths.device.type != "cpu":
+        return None
+    return tuple(int(length) for length in lengths.tolist())
+
+
+def _should_use_aiter_flydsl_gdn_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    prefill_metadata: object | None,
+) -> bool:
+    return (
+        _is_aiter_flydsl_gdn_prefill_enabled()
+        and prefill_metadata is not None
+        and is_aiter_flydsl_gdn_prefill_supported(q, k, v, g, beta)
+    )
 
 
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
@@ -238,6 +285,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
@@ -294,11 +342,42 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             value = value.view(
                 1, value.shape[0], self.local_num_v_heads, self.head_v_dim
             )
+        prefill_metadata = attn_meta.get_aiter_gdn_prefill_metadata(
+            cu_seqlens_without_padding
+        )
+        use_aiter_flydsl_gdn = _should_use_aiter_flydsl_gdn_prefill(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            prefill_metadata,
+        )
         use_flydsl_chunk_gdn = (
-            is_flydsl_chunk_gdn_enabled()
+            not use_aiter_flydsl_gdn
+            and is_flydsl_chunk_gdn_enabled()
             and is_flydsl_chunk_gdn_shape_supported(query, key, value, beta)
         )
-        if use_flydsl_chunk_gdn:
+        if use_aiter_flydsl_gdn:
+            attn_out, h, final_state = (
+                chunk_gated_delta_rule_aiter_flydsl_with_intermediate_states(
+                    query,
+                    key,
+                    value,
+                    g,
+                    beta,
+                    initial_state=initial_states,
+                    output_final_state=True,
+                    cu_seqlens=cu_seqlens_without_padding,
+                    # Match RTP's original prefill: accumulate and expose
+                    # chunk/final state in FP32, then cast only on cache store.
+                    state_dtype=torch.float32,
+                    snapshot_dtype=torch.float32,
+                    prefill_metadata=prefill_metadata,
+                    use_qk_l2norm_in_kernel=True,
+                )
+            )
+        elif use_flydsl_chunk_gdn:
             # When ssm_states is provided the megakernel writes cache blocks
             # directly, so final_state is not consumed — skip allocation.
             need_final_state = ssm_states is None
@@ -376,7 +455,13 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             metadata=attn_meta.get_prefill_conv1d_meta(),
         )
         attn_out = self._fla(
-            mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
+            mixed_qkv,
+            b,
+            a,
+            kv_cache_tensor,
+            seq_size_per_block,
+            attn_inputs,
+            attn_meta,
         )
         cache_store_inputs = attn_inputs.cache_store_inputs
         cache_store_writer = attn_inputs.cache_store_writer
@@ -1178,6 +1263,7 @@ class Qwen3NextModel(GptModelBase):
         cp_restore_indices = None
         cp_local_extract_indices = None
         cp_local_valid_mask = None
+        aiter_gdn_prefill_metadata: dict[int, tuple[torch.Tensor, object]] = {}
         if attention_inputs.is_prefill and not is_target_verify:
             if is_cp:
                 (
@@ -1196,6 +1282,40 @@ class Qwen3NextModel(GptModelBase):
                     device=hidden_states.device,
                 )
 
+        if (
+            attention_inputs.is_prefill
+            and not is_target_verify
+            and not is_cp
+            and _is_aiter_flydsl_gdn_prefill_enabled()
+        ):
+            for layer_idx, layer in enumerate(self.layers):
+                if layer.layer_type != HybridAttentionType.LINEAR:
+                    continue
+                selected_inputs = select_attention_inputs_for_layer(
+                    inputs, self.kv_cache, layer_idx
+                )
+                input_groups = (
+                    selected_inputs
+                    if isinstance(selected_inputs, list)
+                    else [selected_inputs]
+                )
+                for linear_inputs in input_groups:
+                    cu_seqlens = linear_inputs.cu_seqlens_device
+                    if id(cu_seqlens) in aiter_gdn_prefill_metadata:
+                        continue
+                    sequence_lengths = _cpu_sequence_lengths(
+                        linear_inputs.input_lengths
+                    )
+                    if sequence_lengths is None:
+                        continue
+                    metadata = build_aiter_flydsl_gdn_prefill_metadata(
+                        sequence_lengths, cu_seqlens
+                    )
+                    aiter_gdn_prefill_metadata[id(cu_seqlens)] = (
+                        cu_seqlens,
+                        metadata,
+                    )
+
         attn_meta = Qwen3NextMetadata(
             prefill_conv1d_meta=prefill_conv1d_meta,
             is_target_verify=is_target_verify,
@@ -1204,6 +1324,7 @@ class Qwen3NextModel(GptModelBase):
             cp_restore_indices=cp_restore_indices,
             cp_local_extract_indices=cp_local_extract_indices,
             cp_local_valid_mask=cp_local_valid_mask,
+            aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
         )
 
         if fmha_impl is None:

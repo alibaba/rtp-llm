@@ -10,7 +10,9 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNetDecode,
     Qwen3NextMetadata,
+    _cpu_sequence_lengths,
     _maybe_write_cp_cache_store,
+    _should_use_aiter_flydsl_gdn_prefill,
     _write_cp_cache_store,
 )
 
@@ -37,6 +39,55 @@ class RoutingModel(GptModelBase):
 
 
 class AttentionInputRoutingTest(unittest.TestCase):
+    def test_aiter_prefill_metadata_is_bound_to_exact_cu_seqlens(self):
+        cu_seqlens = torch.tensor([0, 8], dtype=torch.int32)
+        metadata = object()
+        attn_meta = Qwen3NextMetadata(
+            aiter_gdn_prefill_metadata={
+                id(cu_seqlens): (cu_seqlens, metadata),
+            }
+        )
+
+        self.assertIs(attn_meta.get_aiter_gdn_prefill_metadata(cu_seqlens), metadata)
+        self.assertIsNone(attn_meta.get_aiter_gdn_prefill_metadata(cu_seqlens.clone()))
+
+    def test_aiter_prefill_requires_metadata_and_supported_inputs(self):
+        tensors = [Mock() for _ in range(5)]
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next._is_aiter_flydsl_gdn_prefill_enabled",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.is_aiter_flydsl_gdn_prefill_supported",
+            return_value=True,
+        ) as supported:
+            self.assertFalse(
+                _should_use_aiter_flydsl_gdn_prefill(*tensors, prefill_metadata=None)
+            )
+            supported.assert_not_called()
+            self.assertTrue(
+                _should_use_aiter_flydsl_gdn_prefill(
+                    *tensors, prefill_metadata=object()
+                )
+            )
+
+    def test_aiter_prefill_falls_back_for_unsupported_inputs(self):
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next._is_aiter_flydsl_gdn_prefill_enabled",
+            return_value=True,
+        ), patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.is_aiter_flydsl_gdn_prefill_supported",
+            return_value=False,
+        ):
+            self.assertFalse(
+                _should_use_aiter_flydsl_gdn_prefill(
+                    *[Mock() for _ in range(5)], prefill_metadata=object()
+                )
+            )
+
+    def test_aiter_prefill_metadata_uses_only_existing_cpu_lengths(self):
+        lengths = torch.tensor([3, 5], dtype=torch.int32)
+        self.assertEqual(_cpu_sequence_lengths(lengths), (3, 5))
+
     def test_qwen3_next_cuda_graph_uses_narrow_block_map_view(self):
         block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
         attention_inputs = SimpleNamespace(
