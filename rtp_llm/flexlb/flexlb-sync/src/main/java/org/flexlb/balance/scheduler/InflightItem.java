@@ -6,6 +6,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.sync.shadow.StateShadowBridge;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
@@ -330,6 +331,9 @@ public final class InflightItem {
     /**
      * Report the terminal transition via the unified metric helper (if set).
      * Called exactly once, inside the CAS-guarded {@link #terminate} or {@link #complete}.
+     *
+     * <p>G3（终态结算换权）开启时不设 helper（见 AbstractScheduler#register）——
+     * metric 改由 ledger settle 出口经 {@link #terminalMetricContext()} 生产。
      */
     private void reportTerminalMetric(TerminalReason reason) {
         FlexlbMetricHelper helper = this.metricHelper;
@@ -339,6 +343,15 @@ public final class InflightItem {
         String role = resolveRole();
         String engineIp = resolveEngineIp();
         helper.reportTerminal(reason, role, engineIp, null);
+    }
+
+    /**
+     * 终态 metric 上下文（G3 载荷）：旧四值终态原因（监控值域连续）+ 路由解析的
+     * 角色与引擎地址。调用时 item 必已终态（whenComplete 回调在 complete/fail 之后）。
+     */
+    public StateShadowBridge.TerminalMetricContext terminalMetricContext() {
+        return new StateShadowBridge.TerminalMetricContext(
+                toTerminalReason(state.get()), resolveRole(), resolveEngineIp());
     }
 
     /**

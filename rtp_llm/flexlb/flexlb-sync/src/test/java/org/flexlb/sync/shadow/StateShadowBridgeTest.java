@@ -1,9 +1,13 @@
 package org.flexlb.sync.shadow;
 
+import org.flexlb.balance.scheduler.TerminalReason;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.state.LedgerJanitorConfig;
 import org.flexlb.state.TerminalState;
 import org.junit.jupiter.api.Test;
@@ -15,7 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /**
  * G1 影子开关矩阵：关 = 装配返回 DISABLED 单例、所有入口零执行（ledger 不存在）；
@@ -247,6 +256,224 @@ class StateShadowBridgeTest {
         assertEquals(TerminalState.SLO_TIMEOUT,
                 bridge.ledger().terminalOutcomeOf(42L, org.flexlb.state.spi.StateRole.DECODE)
                         .orElseThrow().state());
+    }
+
+    // ==================== G3：结算换权开关矩阵（onOldTerminalAuthority 权威单出口）====================
+
+    /** G3 开 ⇒ shadow 开是硬前置：settle 开而 shadow 关必须拒启（fail-fast）。 */
+    @Test
+    void failFastWhenSettleAuthorityWithoutShadow() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(false);
+        config.setFlexlbStateV2SettleEnabled(true);
+
+        assertThrows(IllegalStateException.class,
+                () -> StateShadowBridge.create(config, null, false),
+                "结算换权依赖影子链路在跑——settle 开而 shadow 关必须 fail-fast 拒启");
+    }
+
+    /** 开关矩阵：settle 开（shadow 开）= 权威；settle 关 / DISABLED = 旧影子语义。 */
+    @Test
+    void settleAuthorityMatrix() {
+        FlexlbConfig settleOff = new FlexlbConfig();
+        settleOff.setFlexlbStateV2ShadowEnabled(true);
+        assertFalse(StateShadowBridge.create(settleOff, null, false).isSettleAuthority(),
+                "settle 关（shadow 开）不得进入权威结算");
+        assertFalse(StateShadowBridge.DISABLED.isSettleAuthority(), "DISABLED 恒非权威");
+        assertTrue(authorityBridge().isSettleAuthority(), "settle 开 + shadow 开 = 权威结算");
+    }
+
+    /** G3 关时权威入口零执行（旧路径 onOldTerminal 语义不变）。 */
+    @Test
+    void authorityEntryPointNoOpWhenSettleDisabled() {
+        StateShadowBridge bridge = enabledBridge(); // shadow 开、settle 关
+        bridge.onPrefillSubmit(31L);
+
+        bridge.onOldTerminalAuthority(31L, "COMPLETED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.COMPLETED, "PREFILL", "10.0.0.1"));
+
+        assertEquals(0, bridge.pendingTerminalMetricCount(), "settle 关时权威入口必须零执行");
+        assertTrue(bridge.ledger().prefill().get(31L).isPresent(), "settle 关时不得提前结算 ledger 条目");
+    }
+
+    /** COMPLETED（ACK）：不提前 settle——两侧条目保留，metric 挂 pending 表等 ledger 终局。 */
+    @Test
+    void completedAckParksMetricWithoutSettlingLedger() {
+        StateShadowBridge bridge = authorityBridge();
+        bridge.onPrefillSubmit(32L);
+        bridge.onDecodeReserve(32L, 100L, 200L, RoleType.DECODE, "10.0.0.6:9000");
+
+        bridge.onOldTerminalAuthority(32L, "COMPLETED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.COMPLETED, "PREFILL", "10.0.0.6"));
+
+        assertEquals(1, bridge.pendingTerminalMetricCount(), "ACK 后 metric 应挂 pending 表");
+        assertTrue(bridge.ledger().prefill().get(32L).isPresent(),
+                "ACK 不得提前结算 P 侧（引擎执行相位保留）");
+        assertTrue(bridge.ledger().decode().get(32L).isPresent(),
+                "ACK 不得提前结算 D 侧（KV 计费移交保留）");
+    }
+
+    /** COMPLETED 挂 pending 后由引擎 D 侧 finished 终局消费（单点生产）。 */
+    @Test
+    void pendingMetricConsumedAtEngineTerminalExit() {
+        StateShadowBridge bridge = authorityBridge();
+        bridge.onPrefillSubmit(33L);
+        bridge.onDecodeReserve(33L, 100L, 200L, RoleType.DECODE, "10.0.0.7:9000");
+        bridge.onOldTerminalAuthority(33L, "COMPLETED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.COMPLETED, "PREFILL", "10.0.0.7"));
+        assertEquals(1, bridge.pendingTerminalMetricCount());
+
+        bridge.observeWorkerStatus(finishedResponse(33L), RoleType.DECODE, "10.0.0.7:9000");
+
+        assertEquals(0, bridge.pendingTerminalMetricCount(), "引擎终局出口应消费挂起 metric");
+        assertTrue(bridge.ledger().terminalOutcomeOf(33L, org.flexlb.state.spi.StateRole.DECODE).isPresent());
+    }
+
+    /** 乱序兜底：引擎 finished 早于 ACK 到达时，挂 pending 后自查立即消费。 */
+    @Test
+    void pendingMetricSelfConsumedWhenEngineTerminalPrecedesAck() {
+        StateShadowBridge bridge = authorityBridge();
+        bridge.onPrefillSubmit(34L);
+        bridge.onDecodeReserve(34L, 100L, 200L, RoleType.DECODE, "10.0.0.8:9000");
+        bridge.observeWorkerStatus(finishedResponse(34L), RoleType.DECODE, "10.0.0.8:9000");
+        assertTrue(bridge.ledger().terminalOutcomeOf(34L, org.flexlb.state.spi.StateRole.DECODE).isPresent(),
+                "前置：引擎终局先到（墓碑已生成）");
+
+        bridge.onOldTerminalAuthority(34L, "COMPLETED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.COMPLETED, "PREFILL", "10.0.0.8"));
+
+        assertEquals(0, bridge.pendingTerminalMetricCount(), "墓碑已在——挂 pending 后自查应立即消费");
+    }
+
+    /** FAILED：master 已判死——双侧主动 settle + metric 即时出口（不挂 pending）。 */
+    @Test
+    void failedSettlesBothSidesImmediately() {
+        StateShadowBridge bridge = authorityBridge();
+        bridge.onPrefillSubmit(35L);
+        bridge.onDecodeReserve(35L, 100L, 200L, RoleType.DECODE, "10.0.0.9:9000");
+
+        bridge.onOldTerminalAuthority(35L, "FAILED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.FAILED, "PREFILL", "10.0.0.9"));
+
+        assertEquals(TerminalState.FAILED,
+                bridge.ledger().terminalOutcomeOf(35L, org.flexlb.state.spi.StateRole.PREFILL)
+                        .orElseThrow().state(), "FAILED 应主动结算 P 侧");
+        assertEquals(TerminalState.FAILED,
+                bridge.ledger().terminalOutcomeOf(35L, org.flexlb.state.spi.StateRole.DECODE)
+                        .orElseThrow().state(), "FAILED 应主动结算 D 侧");
+        assertEquals(0, bridge.pendingTerminalMetricCount(), "FAILED metric 即时出口——不挂 pending");
+    }
+
+    /** CANCELLED：双侧主动 settle 为 CANCELLED（本地取消）。 */
+    @Test
+    void cancelledSettlesBothSidesImmediately() {
+        StateShadowBridge bridge = authorityBridge();
+        bridge.onPrefillSubmit(36L);
+        bridge.onDecodeReserve(36L, 100L, 200L, RoleType.DECODE, "10.0.0.10:9000");
+
+        bridge.onOldTerminalAuthority(36L, "CANCELLED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.CANCELLED, "PREFILL", "10.0.0.10"));
+
+        assertEquals(TerminalState.CANCELLED,
+                bridge.ledger().terminalOutcomeOf(36L, org.flexlb.state.spi.StateRole.PREFILL)
+                        .orElseThrow().state());
+        assertEquals(TerminalState.CANCELLED,
+                bridge.ledger().terminalOutcomeOf(36L, org.flexlb.state.spi.StateRole.DECODE)
+                        .orElseThrow().state());
+    }
+
+    /** TIMED_OUT：双侧主动 settle 为 SLO_TIMEOUT（存活时间上限）。 */
+    @Test
+    void timedOutSettlesBothSidesImmediately() {
+        StateShadowBridge bridge = authorityBridge();
+        bridge.onPrefillSubmit(37L);
+
+        bridge.onOldTerminalAuthority(37L, "TIMED_OUT",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.TIMED_OUT, "PREFILL", "unknown"));
+
+        assertEquals(TerminalState.SLO_TIMEOUT,
+                bridge.ledger().terminalOutcomeOf(37L, org.flexlb.state.spi.StateRole.PREFILL)
+                        .orElseThrow().state());
+    }
+
+    /** 引擎事件丢失场景：COMPLETED 挂 pending 后由 janitor TTL 胜者结算消费。 */
+    @Test
+    void pendingMetricConsumedByJanitorWhenEngineEventsLost() throws Exception {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(true);
+        config.setFlexlbStateV2SettleEnabled(true);
+        config.setFlexlbStateV2TtlMs(50L);
+        StateShadowBridge bridge = StateShadowBridge.create(config, null, false);
+
+        bridge.onPrefillSubmit(38L);
+        bridge.onDecodeReserve(38L, 100L, 200L, RoleType.DECODE, "10.0.0.11:9000");
+        bridge.onOldTerminalAuthority(38L, "COMPLETED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.COMPLETED, "PREFILL", "10.0.0.11"));
+        assertEquals(1, bridge.pendingTerminalMetricCount());
+
+        Thread.sleep(80L); // createdAt + 80 > ttl=50
+        bridge.runJanitorOnce(); // janitor TTL 胜者结算 → listener → pending 消费
+
+        assertTrue(bridge.ledger().decode().get(38L).isEmpty(), "TTL 到期应被 janitor 结算");
+        assertEquals(0, bridge.pendingTerminalMetricCount(),
+                "janitor 胜者结算出口应消费挂起 metric（引擎事件丢失不吞 metric）");
+    }
+
+    /** metric 即时出口（FAILED）：经统一 helper 上报 REQUEST_FAILURE_QPS（与旧出口同口径）。 */
+    @Test
+    void failedMetricReportedThroughUnifiedHelper() {
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(true);
+        config.setFlexlbStateV2SettleEnabled(true);
+        StateShadowBridge bridge = StateShadowBridge.create(config, monitor, false);
+
+        bridge.onOldTerminalAuthority(39L, "FAILED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.FAILED, "DECODE", "10.0.0.12"));
+
+        verify(monitor).report(eq(MetricConstant.REQUEST_FAILURE_QPS), any(FlexMetricTags.class), eq(1.0));
+    }
+
+    /** 权威结算的 metric 上下文消费（COMPLETED）：引擎终局出口上报 REQUEST_SUCCESS_QPS。 */
+    @Test
+    void completedMetricReportedAtEngineTerminalExit() {
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(true);
+        config.setFlexlbStateV2SettleEnabled(true);
+        StateShadowBridge bridge = StateShadowBridge.create(config, monitor, false);
+
+        bridge.onPrefillSubmit(40L);
+        bridge.onDecodeReserve(40L, 100L, 200L, RoleType.DECODE, "10.0.0.13:9000");
+        bridge.onOldTerminalAuthority(40L, "COMPLETED",
+                new StateShadowBridge.TerminalMetricContext(TerminalReason.COMPLETED, "PREFILL", "10.0.0.13"));
+        verify(monitor, org.mockito.Mockito.never()).report(
+                eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
+
+        bridge.observeWorkerStatus(finishedResponse(40L), RoleType.DECODE, "10.0.0.13:9000");
+
+        verify(monitor).report(eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
+    }
+
+    private static StateShadowBridge authorityBridge() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(true);
+        config.setFlexlbStateV2SettleEnabled(true);
+        return StateShadowBridge.create(config, null, false);
+    }
+
+    /** D 侧 finished(success) 报文（单请求）。 */
+    private static WorkerStatusResponse finishedResponse(long requestId) {
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(requestId);
+        finished.setErrorCode(0L);
+        finished.setEndTimeMs(1L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setStatusVersion(3L);
+        response.setRole(RoleType.DECODE);
+        response.setRunningDetailCount(0L);
+        response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), finished));
+        return response;
     }
 
     private static boolean janitorThreadAlive() {

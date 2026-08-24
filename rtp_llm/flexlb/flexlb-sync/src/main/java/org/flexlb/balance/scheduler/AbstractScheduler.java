@@ -72,7 +72,12 @@ public abstract class AbstractScheduler implements DiagnosticsProvider {
      */
     protected InflightItem register(BalanceContext ctx, CompletableFuture<Response> future) {
         InflightItem item = new InflightItem(ctx, future, this);
-        item.setMetricHelper(metricHelper);
+        // G3（终态结算换权）开启时 metric 生产点迁到 ledger settle 出口
+        // （bridge 挂起表消费，每请求恰好一次）——此处不注入 helper 抑制旧出口；
+        // 开关关（含 DIRECT/QUEUE 的 DISABLED 桥）时保持旧行为：ACK 出口上报。
+        if (!shadowBridge.isSettleAuthority()) {
+            item.setMetricHelper(metricHelper);
+        }
         InflightItem existing = globalStore.putIfAbsent(item.requestId(), item);
         if (existing == null) {
             future.whenComplete((response, throwable) -> {
@@ -83,9 +88,17 @@ public abstract class AbstractScheduler implements DiagnosticsProvider {
                 } else {
                     item.fail(new IllegalStateException("null routing response"));
                 }
-                // G1 影子：旧路径终态 diff 记录（item.complete 后 state 已终局；
-                // CANCELLED 时影子双清。catch-all 在 bridge 内部，绝不影响主路径）
-                shadowBridge.onOldTerminal(ctx.getRequestId(), item.state().name());
+                if (shadowBridge.isSettleAuthority()) {
+                    // G3 权威结算：ledger settle 单出口（COMPLETED 挂 pending 等
+                    // 引擎终局；FAILED/TIMED_OUT/CANCELLED 双侧主动 settle）。
+                    // 客户端 future 已由上方旧回调链完成——客户端可见行为不变。
+                    shadowBridge.onOldTerminalAuthority(ctx.getRequestId(),
+                            item.state().name(), item.terminalMetricContext());
+                } else {
+                    // G1 影子：旧路径终态 diff 记录（item.complete 后 state 已终局；
+                    // CANCELLED 时影子双清。catch-all 在 bridge 内部，绝不影响主路径）
+                    shadowBridge.onOldTerminal(ctx.getRequestId(), item.state().name());
+                }
             });
         }
         return existing;

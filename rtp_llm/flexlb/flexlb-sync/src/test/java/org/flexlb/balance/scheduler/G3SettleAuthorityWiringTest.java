@@ -1,0 +1,184 @@
+package org.flexlb.balance.scheduler;
+
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.metric.FlexMetricTags;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.sync.shadow.StateShadowBridge;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
+import java.util.concurrent.CompletableFuture;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * G3（终态结算换权）装配分流验证：AbstractScheduler.register 的 whenComplete
+ * 按 settleAuthority 分流——关 = 旧出口（ACK 时点经 InflightItem helper 上报）；
+ * 开 = 权威单出口（COMPLETED 挂 pending 表由 ledger 终局消费，metric 生产点迁移）。
+ * 客户端 future 语义两侧不变。
+ */
+class G3SettleAuthorityWiringTest {
+
+    /** 最小调度器：直接驱动基类 register 的 whenComplete 分流。 */
+    private static final class WiringScheduler extends AbstractScheduler {
+        WiringScheduler(InflightStore store, FlexlbMetricHelper helper, StateShadowBridge bridge) {
+            super(store, helper, bridge);
+        }
+
+        @Override
+        public CompletableFuture<Response> submit(BalanceContext ctx) {
+            return new CompletableFuture<>();
+        }
+    }
+
+    /** settle 关：旧 metric 出口（ACK 时点经 item helper 上报），pending 表零使用。 */
+    @Test
+    void legacyMetricExitWhenSettleDisabled() {
+        Fixture fx = new Fixture(false);
+
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        fx.scheduler.register(context(60L), future);
+        future.complete(successResponse());
+
+        verify(fx.monitor).report(eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
+        assertEquals(0, fx.bridge.pendingTerminalMetricCount(), "settle 关不得使用 pending 表");
+        fx.tearDown();
+    }
+
+    /** settle 开：ACK 时旧出口静默（helper 未注入 item），metric 挂 pending 由引擎终局消费。 */
+    @Test
+    void metricParkedThenConsumedWhenSettleEnabled() {
+        Fixture fx = new Fixture(true);
+        long requestId = 61L;
+
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        fx.scheduler.register(context(requestId), future);
+        // 开账前置（正常 BATCH 流程由 BatchScheduler.submit 调用：P 开账 + D 预占）
+        fx.bridge.onPrefillSubmit(requestId);
+        fx.bridge.onDecodeReserve(requestId, 128L, 136L, RoleType.DECODE, "10.0.0.61:9000");
+
+        future.complete(successResponse());
+
+        verify(fx.monitor, never()).report(
+                eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
+        assertEquals(1, fx.bridge.pendingTerminalMetricCount(), "ACK 后 metric 应挂 pending 表");
+
+        // 引擎 D 侧 finished 终局 → pending 消费（单点生产出口）
+        fx.bridge.observeWorkerStatus(finishedResponse(requestId), RoleType.DECODE, "10.0.0.61:9000");
+
+        verify(fx.monitor).report(eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
+        assertEquals(0, fx.bridge.pendingTerminalMetricCount());
+        fx.tearDown();
+    }
+
+    /** settle 开但 ledger 未覆盖（开账缺失）：退回旧语义 ACK 即报，不进 pending 生命周期。 */
+    @Test
+    void ackReportedImmediatelyWhenLedgerDoesNotCover() {
+        Fixture fx = new Fixture(true);
+
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        fx.scheduler.register(context(62L), future);
+        // 不调 onPrefillSubmit——ledger 未覆盖（开账异常被吞的罕见场景）
+
+        future.complete(successResponse());
+
+        verify(fx.monitor).report(eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
+        assertEquals(0, fx.bridge.pendingTerminalMetricCount(),
+                "ledger 未覆盖时不得挂 pending（无终局方会消费——泄漏）");
+        fx.tearDown();
+    }
+
+    /** settle 开：FAILED 路由失败——双侧主动 settle，metric 即时出口。 */
+    @Test
+    void failedSettledAndReportedImmediatelyWhenSettleEnabled() {
+        Fixture fx = new Fixture(true);
+        long requestId = 63L;
+
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        fx.scheduler.register(context(requestId), future);
+        fx.bridge.onPrefillSubmit(requestId);
+
+        future.complete(Response.error(
+                org.flexlb.dao.loadbalance.StrategyErrorType.WORKER_EXECUTION_FAILED, "boom"));
+
+        verify(fx.monitor).report(eq(MetricConstant.REQUEST_FAILURE_QPS), any(FlexMetricTags.class), eq(1.0));
+        assertEquals(0, fx.bridge.pendingTerminalMetricCount(), "FAILED 即时出口——不挂 pending");
+        assertEquals(org.flexlb.state.TerminalState.FAILED,
+                fx.bridge.ledger().terminalOutcomeOf(requestId, org.flexlb.state.spi.StateRole.PREFILL)
+                        .orElseThrow().state());
+        fx.tearDown();
+    }
+
+    // ==================== fixture ====================
+
+    private static final class Fixture {
+        final FlexMonitor monitor = mock(FlexMonitor.class);
+        final StateShadowBridge bridge;
+        final InflightStore store;
+        final WiringScheduler scheduler;
+
+        Fixture(boolean settleAuthority) {
+            FlexlbConfig config = new FlexlbConfig();
+            config.setFlexlbStateV2ShadowEnabled(true);
+            config.setFlexlbStateV2SettleEnabled(settleAuthority);
+            ConfigService configService = mock(ConfigService.class);
+            when(configService.loadBalanceConfig()).thenReturn(config);
+            bridge = StateShadowBridge.create(config, monitor, false);
+            store = new InflightStore(mock(BatchSchedulerReporter.class), configService);
+            scheduler = new WiringScheduler(store,
+                    new FlexlbMetricHelper(monitor, MetricConstant.PATH_BATCH), bridge);
+        }
+
+        void tearDown() {
+            store.shutdown();
+        }
+    }
+
+    private static Response successResponse() {
+        Response response = new Response();
+        response.setSuccess(true);
+        return response;
+    }
+
+    /** D 侧 finished(success) 报文（单请求）。 */
+    private static WorkerStatusResponse finishedResponse(long requestId) {
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(requestId);
+        finished.setErrorCode(0L);
+        finished.setEndTimeMs(1L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setStatusVersion(3L);
+        response.setRole(RoleType.DECODE);
+        response.setRunningDetailCount(0L);
+        response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), finished));
+        return response;
+    }
+
+    private static BalanceContext context(long requestId) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(128);
+        request.setMaxNewTokens(8);
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+        ctx.setConfig(new FlexlbConfig());
+        return ctx;
+    }
+}

@@ -591,6 +591,34 @@ public class FlexlbConfig {
     private long flexlbStateV2JanitorIntervalMs = 10_000L;
 
     /**
+     * FlexLB state v2 settlement authority switch (G3 — 终态结算换权): when
+     * enabled, terminal settlement of BATCH-path requests converges on the
+     * StateLedger as the authoritative bookkeeper, while the legacy callback
+     * chain keeps driving the client future unchanged (client-visible behavior
+     * is identical):
+     * <ul>
+     *   <li>Legacy COMPLETED (engine ACK of enqueue) does NOT pre-settle the
+     *       ledger — engine-execution phases and the KV billing handover
+     *       (engine-reported KV takes over the local reservation only after
+     *       the engine confirms allocation) stay intact. The terminal metric
+     *       is parked in a pending table inside the shadow bridge and is
+     *       produced at the ledger's own terminal exit (decode tombstone
+     *       first, prefill tombstone as fallback).</li>
+     *   <li>Legacy FAILED / TIMED_OUT / CANCELLED proactively settle both
+     *       ledger sides — the master has already declared the request dead —
+     *       and the terminal metric is reported immediately at the settle
+     *       exit (single production point per request).</li>
+     * </ul>
+     *
+     * <p>Prerequisite: {@link #flexlbStateV2ShadowEnabled} must be on; startup
+     * fails fast otherwise (settlement authority requires the shadow ledger
+     * to be running). DIRECT / QUEUE routing paths are unaffected (the shadow
+     * ledger only covers the BATCH path). Resolved once at startup (no runtime
+     * hot-toggle). Environment variable: FLEXLB_STATE_V2_SETTLE_ENABLED.
+     */
+    private boolean flexlbStateV2SettleEnabled = false;
+
+    /**
      * Metrics report interval in milliseconds.
      * Controls the periodic reporting frequency for scheduler-level and
      * per-endpoint metrics via {@code @Scheduled} throttle.
