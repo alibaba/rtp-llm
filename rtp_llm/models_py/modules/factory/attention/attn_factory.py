@@ -14,6 +14,7 @@ from rtp_llm.ops import (
     RopeStyle,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.ops.fused_rope_kvcache_op import DecodeRopeContractError
 from rtp_llm.utils.model_weight import W
 
 AttentionImpl = Union[FMHAImplBase, MlaImplBase]
@@ -192,6 +193,11 @@ def get_fmha_impl(
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
+        except DecodeRopeContractError:
+            # Input/state contract violations are not implementation
+            # incompatibilities; silently selecting another backend would hide
+            # the bug as a performance regression.
+            raise
         except Exception as e:
             # ROCm validation predicts the selected cache layout, so falling back
             # after construction could select a reader with a different layout.

@@ -653,6 +653,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             self.assertEqual(plan_mock.call_count, 2)
 
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+
     def test_cuda_core_replay_replans_only_on_page_topology_change(self):
         """CUDA-core replay caches only topology and refreshes graph buffers."""
         config = self._create_config(head_num=32, head_num_kv=32)
