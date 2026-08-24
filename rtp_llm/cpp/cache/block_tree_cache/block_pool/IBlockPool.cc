@@ -85,6 +85,7 @@ void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
         blocks,
         [](BlockIdxType) {},
         [this, ref_type, ref_type_index](BlockIdxType block) {
+            const bool was_active = isActiveNoLock(block);
             if (tree_refcounts_[block] == 0) {
                 onFirstTreeRefNoLock(block);
             }
@@ -98,6 +99,7 @@ void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
             if (ref_type == BlockTreeRefType::CACHE && typed_refcount == 1) {
                 onCacheRefChangedNoLock(block, true);
             }
+            updateActiveBlocksNumNoLock(block, was_active);
         });
 }
 
@@ -117,6 +119,7 @@ void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
                                     ref_type_index);
         },
         [this, ref_type, ref_type_index](BlockIdxType block) {
+            const bool was_active     = isActiveNoLock(block);
             uint32_t& typed_refcount = tree_refcounts_by_type_[ref_type_index][block];
             --typed_refcount;
             if (typed_refcount == 0) {
@@ -132,6 +135,7 @@ void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
             if (tree_refcounts_[block] == 0 && onLastTreeRefNoLock(block)) {
                 freeAllocatedBlockNoLock(block);
             }
+            updateActiveBlocksNumNoLock(block, was_active);
         });
 }
 
@@ -146,6 +150,12 @@ size_t IBlockPool::referencedBlocksNum(BlockTreeRefType ref_type) const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     return tree_referenced_block_counts_[treeRefTypeIndex(ref_type)];
+}
+
+size_t IBlockPool::activeBlocksNum() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    return active_blocks_num_;
 }
 
 bool IBlockPool::validBlock(BlockIdxType block) const {
@@ -254,6 +264,31 @@ uint32_t IBlockPool::treeRefCountNoLock(BlockIdxType block) const {
 
 uint32_t IBlockPool::treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const {
     return tree_refcounts_by_type_[treeRefTypeIndex(ref_type)][block];
+}
+
+bool IBlockPool::isActiveNoLock(BlockIdxType block) const {
+    if (hasExternalRefNoLock(block)) {
+        return true;
+    }
+    for (size_t ref_type_index = treeRefTypeIndex(BlockTreeRefType::LOAD); ref_type_index < kBlockTreeRefTypeCount;
+         ++ref_type_index) {
+        if (tree_refcounts_by_type_[ref_type_index][block] > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void IBlockPool::updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active) {
+    const bool is_active = isActiveNoLock(block);
+    if (was_active != is_active) {
+        if (is_active) {
+            ++active_blocks_num_;
+        } else {
+            assert(active_blocks_num_ > 0);
+            --active_blocks_num_;
+        }
+    }
 }
 
 void IBlockPool::freeAllocatedBlockNoLock(BlockIdxType block) {

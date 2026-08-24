@@ -983,7 +983,7 @@ static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
     EXPECT_EQ(actual.free_blocks, expected.free_blocks) << context;
     EXPECT_EQ(actual.used_blocks, expected.used_blocks) << context;
     EXPECT_EQ(actual.available_blocks, expected.available_blocks) << context;
-    EXPECT_EQ(actual.active_tree_cached_blocks, expected.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.active_blocks, expected.active_blocks) << context;
     EXPECT_EQ(actual.request_ref_blocks, expected.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
@@ -1040,7 +1040,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
         EXPECT_EQ(snapshot->free_blocks, snapshot->total_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->used_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->available_blocks, snapshot->free_blocks) << source.pool_name;
-        EXPECT_EQ(snapshot->active_tree_cached_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->active_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->request_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
@@ -1082,9 +1082,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
         EXPECT_EQ(snapshot->used_blocks, snapshot->total_blocks - snapshot->free_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->used_blocks, expected_request_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->request_ref_blocks, expected_request_blocks) << source.pool_name;
-        // No GroupSet means no candidate-aware override, so available falls back to free.
-        EXPECT_EQ(snapshot->available_blocks, snapshot->free_blocks) << source.pool_name;
-        EXPECT_EQ(snapshot->active_tree_cached_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->available_blocks, snapshot->total_blocks - expected_request_blocks) << source.pool_name;
+        EXPECT_EQ(snapshot->active_blocks, expected_request_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
@@ -1119,7 +1118,7 @@ makeMergeAllocatorInput(const std::string& pool_name, size_t seed, size_t total_
     snapshot.total_blocks              = total_blocks;
     snapshot.free_blocks               = free_blocks;
     snapshot.used_blocks               = total_blocks - free_blocks;
-    snapshot.active_tree_cached_blocks = 7 + seed;
+    snapshot.active_blocks             = 7 + seed;
     snapshot.reserve_blocks            = 5 + seed;
     snapshot.request_ref_blocks        = 11 + seed;
     snapshot.block_cache_ref_blocks    = 13 + seed;
@@ -1144,7 +1143,7 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
     snapshot.free_blocks               = free_blocks;
     snapshot.used_blocks               = total_blocks - free_blocks;
     snapshot.available_blocks          = available_blocks;
-    snapshot.active_tree_cached_blocks = 21 + seed;
+    snapshot.active_blocks             = total_blocks - available_blocks;
     snapshot.request_ref_blocks        = 31 + seed;
     snapshot.block_cache_ref_blocks    = 33 + seed;
     snapshot.load_ref_blocks           = 34 + seed;
@@ -1164,7 +1163,7 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.free_blocks, source.free_blocks) << context;
     EXPECT_EQ(actual.used_blocks, source.used_blocks) << context;
     EXPECT_EQ(actual.reserve_blocks, source.reserve_blocks) << context;
-    EXPECT_EQ(actual.active_tree_cached_blocks, source.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.active_blocks, source.active_blocks) << context;
     EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
@@ -1186,7 +1185,7 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.used_blocks, source.used_blocks) << context;
     // Reserve is an allocator quota, so tree-only pools keep the default.
     EXPECT_EQ(actual.reserve_blocks, 0u) << context;
-    EXPECT_EQ(actual.active_tree_cached_blocks, source.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.active_blocks, source.active_blocks) << context;
     EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
@@ -1213,17 +1212,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeCachePoolMetricsSnapshotsPreservesRe
     };
 
     const std::vector<MergeCase> cases = {
-        {"device_override_then_tree_only_append",
+        {"allocator_then_tree_only_append",
          {makeMergeAllocatorInput("linear", 1, /*total=*/100, /*free=*/40),
           makeMergeAllocatorInput("full", 2, /*total=*/80, /*free=*/80)},
          {makeMergeTreeInput(Tier::DEVICE, "linear", 3, /*total=*/111, /*free=*/44, /*available=*/70),
           makeMergeTreeInput(Tier::DEVICE, "tree_only_device", 4, /*total=*/50, /*free=*/20, /*available=*/35),
           makeMergeTreeInput(Tier::HOST, "host_pool", 5, /*total=*/200, /*free=*/150, /*available=*/180),
           makeMergeTreeInput(Tier::DISK, "disk_pool", 6, /*total=*/300, /*free=*/300, /*available=*/300)},
-         {// Only available_blocks is taken from the same-named tree snapshot.
-          {true, 0, 70},
-          // No tree snapshot for this pool, so available falls back to free.
-          {true, 1, 80},
+         {// Device rows come entirely from allocator snapshots.
+          {true, 0, 92},
+          {true, 1, 71},
           // Tree-only pools follow every allocator pool, in tree input order.
           {false, 1, 35},
           {false, 2, 180},
@@ -1232,12 +1230,12 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeCachePoolMetricsSnapshotsPreservesRe
          {makeMergeAllocatorInput("dup_pool", 1, /*total=*/100, /*free=*/40),
           makeMergeAllocatorInput("dup_pool", 9, /*total=*/500, /*free=*/5)},
          {},
-         {{true, 0, 40}}},
-        {"tree_device_duplicate_overrides_with_first_entry",
+         {{true, 0, 92}}},
+        {"same_named_tree_does_not_override_allocator",
          {makeMergeAllocatorInput("dup_tree_pool", 1, /*total=*/100, /*free=*/40)},
          {makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 3, /*total=*/100, /*free=*/40, /*available=*/70),
           makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 4, /*total=*/100, /*free=*/40, /*available=*/25)},
-         {{true, 0, 70}}},
+         {{true, 0, 92}}},
         // Asymmetry with the allocator loop: tree-only duplicates are all emitted.
         {"tree_only_duplicates_are_not_deduplicated",
          {},
