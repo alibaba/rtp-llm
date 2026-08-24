@@ -156,11 +156,6 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
                                     layer,
                                     spec->tag.c_str());
             const auto policy = SpecBuilder::groupPolicy(desc);
-            // Residency and paged-budget accounting are independent knobs, and
-            // CacheConfig::finalizeBlockNums only looks at charge_to_paged_budget.
-            // A host-resident pool that still charges the budget would silently
-            // shrink the device paged pool by bytes it never occupies.
-            checkGroupResidencyBudget(policy, spec->tag);
             const auto type              = SpecBuilder::groupType(desc);
             const auto local_kv_head_num = localKvHeadNumForDesc(desc, model_config, parallelism_config);
             auto       group_it          = group_by_tag.find(spec->tag);
