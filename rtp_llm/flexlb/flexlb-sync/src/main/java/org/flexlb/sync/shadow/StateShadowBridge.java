@@ -210,6 +210,11 @@ public final class StateShadowBridge {
         if (scheduler != null) {
             scheduler.shutdownNow();
         }
+        // shutdown summary：全量对账统计单行出口（G3/G4 验收 gate 数据源——
+        // 指标通道未部署时（如压测环境无 pushgateway）日志即权威证据）。
+        if (enabled && diff != null) {
+            logger.warn("[state-shadow] shutdown summary: {}", diff.summaryLine());
+        }
     }
 
     public boolean isEnabled() {

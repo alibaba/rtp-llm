@@ -288,6 +288,24 @@ public final class StateShadowDiffCollector {
         return newTerminals.size();
     }
 
+    /**
+     * 全量统计单行摘要（shutdown 诊断日志用：全部计数读口聚合）。
+     * <p>指标通道未部署时（如压测环境无 pushgateway），本行即 G3/G4 验收
+     * （missing/error/diff 归零 gate）的权威日志证据。</p>
+     */
+    public String summaryLine() {
+        return "event=" + eventCount.sum()
+                + " error=" + errorCount.sum()
+                + " matched=" + matchedCount.sum()
+                + " diffTerminalState=" + diffTerminalState.sum()
+                + " diffTerminalReason=" + diffTerminalReason.sum()
+                + " missingOnNew=" + diffMissingOnNew.sum()
+                + " missingOnOld=" + diffMissingOnOld.sum()
+                + " overflowDropped=" + windowOverflowDropped.sum()
+                + " pendingOld=" + oldTerminals.size()
+                + " pendingNew=" + newTerminals.size();
+    }
+
     /** 单条终态快照（state 等价名 + reason 名 + 到达时刻）。 */
     private record TerminalRecord(String stateName, String reasonName, long terminalAtMs) {
     }

@@ -6,9 +6,11 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * G1 影子对账单测：新旧终态一致/不一致/单侧缺失三情形计数 + 滑动窗口淘汰。
+ * G1 影子对账单测：新旧终态一致/不一致/单侧缺失三情形计数 + 滑动窗口淘汰
+ * + shutdown summary 单行聚合。
  */
 class StateShadowDiffCollectorTest {
 
@@ -174,5 +176,30 @@ class StateShadowDiffCollectorTest {
                 () -> new StateShadowDiffCollector(null, 0L, 100));
         assertThrows(IllegalArgumentException.class,
                 () -> new StateShadowDiffCollector(null, 1000L, 0));
+    }
+
+    // ---- shutdown summary：全部计数读口的单行聚合（日志即验收证据） ----
+
+    @Test
+    void shouldRenderSummaryLineWithAllCounters() {
+        StateShadowDiffCollector collector = new StateShadowDiffCollector(null);
+
+        collector.onEvent();
+        collector.recordOldTerminal(20L, "COMPLETED");
+        collector.recordNewTerminal(20L, TerminalState.COMPLETED, TerminalReason.SUCCEEDED);
+        collector.recordOldTerminal(21L, "FAILED"); // 入窗未匹配 → pendingOld=1
+
+        String line = collector.summaryLine();
+
+        assertTrue(line.contains("event=1"), line);
+        assertTrue(line.contains("error=0"), line);
+        assertTrue(line.contains("matched=1"), line);
+        assertTrue(line.contains("diffTerminalState=0"), line);
+        assertTrue(line.contains("diffTerminalReason=0"), line);
+        assertTrue(line.contains("missingOnNew=0"), line);
+        assertTrue(line.contains("missingOnOld=0"), line);
+        assertTrue(line.contains("overflowDropped=0"), line);
+        assertTrue(line.contains("pendingOld=1"), line);
+        assertTrue(line.contains("pendingNew=0"), line);
     }
 }
