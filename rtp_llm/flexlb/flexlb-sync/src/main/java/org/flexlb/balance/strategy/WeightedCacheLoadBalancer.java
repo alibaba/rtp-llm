@@ -141,10 +141,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             CacheMatchResult cacheMatchResult,
             double p2pHitDiscount,
             long inputTokens) {
-        // KVCM returns the host_ip_port reported by Subscriber, while WorkerStatus uses the
-        // service-discovery address. No code-level normalization guarantees they are identical;
-        // the end-to-end integration must keep both values aligned.
-        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort());
+        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus);
         if (match == null) {
             return 0L;
         }

@@ -1,6 +1,7 @@
 package org.flexlb.cache.domain;
 
 import org.flexlb.dao.cache.HostCacheMatch;
+import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Collections;
 import java.util.Map;
@@ -8,8 +9,9 @@ import java.util.Map;
 /**
  * Cache matches and the block size used to produce them.
  *
- * <p>Each map key is a logical worker identity in {@code ip:port@engineIndex} format and has
- * one {@link HostCacheMatch} containing the raw local/P2P block counts.
+ * <p>Each map key normally is a logical worker identity in {@code ip:port@engineIndex} format
+ * and has one {@link HostCacheMatch} containing the raw local/P2P block counts. KVCM responses
+ * from legacy single-engine deployments can use the physical {@code ip:port} identity.
  */
 public record CacheMatchResult(
         Map<String, HostCacheMatch> hostMatches,
@@ -42,6 +44,26 @@ public record CacheMatchResult(
      */
     public HostCacheMatch hostMatch(String workerIpPort) {
         return hostMatches.get(workerIpPort);
+    }
+
+    /**
+     * Returns the match for a worker, preserving legacy KVCM host identities for one engine.
+     *
+     * <p>KVCM formerly returned a physical {@code ip:port} host identity. A single-engine
+     * worker has an unambiguous logical {@code @0} identity, so it can use that legacy entry
+     * when no exact logical match exists. Multi-engine workers require an exact logical match.
+     */
+    public HostCacheMatch hostMatch(WorkerStatus workerStatus) {
+        if (workerStatus == null) {
+            return null;
+        }
+        HostCacheMatch exactMatch = hostMatch(workerStatus.getLogicalIpPort());
+        if (exactMatch != null
+                || source != CacheMatchSource.KVCM
+                || workerStatus.getMultiEngineNum() != 1) {
+            return exactMatch;
+        }
+        return hostMatch(workerStatus.getPhysicalIpPort());
     }
 
 }

@@ -231,7 +231,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
-                    HostCacheMatch hostCacheMatch = cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort());
+                    HostCacheMatch hostCacheMatch = cacheMatchResult.hostMatch(workerStatus);
                     long hitCacheTokens = calculatePrefixMatchLength(
                             workerStatus, cacheMatchResult, p2pHitDiscount, seqLen);
                     long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
@@ -303,7 +303,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         recordKvcmMatch(
                 task,
                 cacheMatchResult,
-                cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort()),
+                cacheMatchResult.hostMatch(workerStatus),
                 seqLen);
         engineHealthReporter.reportKvcmSelectedMatch(
                 roleType,
@@ -886,7 +886,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             CacheMatchResult cacheMatchResult,
             double p2pHitDiscount,
             long inputTokens) {
-        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getLogicalIpPort());
+        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus);
         if (match == null) {
             return 0L;
         }

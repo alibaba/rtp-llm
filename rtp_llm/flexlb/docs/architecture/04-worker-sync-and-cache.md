@@ -101,7 +101,8 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
 
 上述 LOCAL_SYNC key、KVCM `host_ip_port`、LOCAL_STANDBY 映射与 cache-hit comparison 均使用
-逻辑 `ip:httpPort@index`；KVCM 返回无法 exact-match 当前候选的 key 时延续既有行为，按零命中忽略。
+逻辑 `ip:httpPort@index`。KVCM 对 N=1 worker 兼容旧 physical `ip:httpPort` key：logical key
+未命中时才回退查询 physical key；N>1 或非 KVCM source 仍要求 exact match，无法匹配时按零命中忽略。
 
 ### KVCM（外部 KV Cache Manager）
 
