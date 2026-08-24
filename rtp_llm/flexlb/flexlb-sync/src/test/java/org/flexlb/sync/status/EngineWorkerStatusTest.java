@@ -2,7 +2,6 @@ package org.flexlb.sync.status;
 
 import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -37,9 +36,9 @@ class EngineWorkerStatusTest {
         configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 Mockito.mock(BatchSchedulerReporter.class), null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                null); // env=null; shadowBridge=null（退化模式：账本读点全零）
         engineWorkerStatus = new EngineWorkerStatus(registry);
         workerStatus1 = new WorkerStatus();
         workerStatus1.setGroup("group1");

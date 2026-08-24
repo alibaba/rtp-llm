@@ -341,7 +341,7 @@ class StateLedgerObserveTest {
         // retention=0：窗口已过，判重放行
         assertEquals(RegisterResult.OK, ledger.prefill().register(6L, -1L));
 
-        // janitor 维护 tick 清空墓碑库存（M4：占位 Runnable 已被 LedgerJanitor 替换）
+        // janitor 维护 tick 清空墓碑库存
         ledger.createJanitor(LedgerJanitorConfig.defaults()).runMaintenanceTick();
         assertEquals(0L, ledger.snapshot().prefillTombstones());
     }

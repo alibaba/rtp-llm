@@ -94,7 +94,7 @@ class GrpcWorkerStatusRunnerShadowOrderTest {
                 "test-model", "127.0.0.1:8080", "site", RoleType.DECODE, "group",
                 workerStatus, Map.of("127.0.0.1:8080", workerStatus),
                 engineHealthReporter, engineGrpcService, 20L,
-                null, null, Runnable::run, bridge);
+                null, Runnable::run, bridge);
         runner.run();
 
         // 水位推进发生（versionAdvanced: 100 < 200）
@@ -103,7 +103,7 @@ class GrpcWorkerStatusRunnerShadowOrderTest {
         assertTrue(watermarkGetterCalls.get() >= 3, "水位 getter 应被调用 ≥3 次（发请求/比较/set）");
         // 核心顺序断言：水位推进时刻，影子已消费 finished（墓碑可见）
         assertTrue(shadowVisibleAtWatermarkAdvance.get(),
-                "影子消费必须发生在水位推进之前（挂载点 step 3.5 < step 4）");
+                "影子消费必须发生在水位推进之前（挂载点 step 3 < step 4）");
         // 影子链路自身健康：泵入 1 次、零异常
         assertEquals(1L, bridge.diffCollector().eventCount());
         assertEquals(0L, bridge.diffCollector().errorCount());
@@ -142,7 +142,7 @@ class GrpcWorkerStatusRunnerShadowOrderTest {
                 "test-model", "127.0.0.1:8080", "site", RoleType.DECODE, "group",
                 workerStatus, Map.of("127.0.0.1:8080", workerStatus),
                 engineHealthReporter, engineGrpcService, 20L,
-                null, null, Runnable::run, bridge);
+                null, Runnable::run, bridge);
         runner.run();
 
         // versionNotAdvanced 分支不触发影子消费（影子与旧路径同一 versionAdvanced 门）

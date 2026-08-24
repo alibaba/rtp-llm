@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -19,7 +18,9 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -45,6 +46,7 @@ class CostBasedPrefillStrategyTest {
     private ResourceMeasureFactory resourceMeasureFactory;
     private EngineHealthReporter engineHealthReporter;
     private EndpointRegistry endpointRegistry;
+    private StateShadowBridge shadowBridge;
     private CostBasedPrefillStrategy strategy;
 
     @BeforeEach
@@ -57,10 +59,17 @@ class CostBasedPrefillStrategyTest {
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
 
+        // 真账本桥：等待估算读点（estimatedWaitMs）的数据源是账本 per-EP 计数簿，
+        // 退化桥（null/DISABLED）读数恒零——策略测试需要完整的 submit→dispatch
+        // 挂账链（onPrefillSubmit 开账、commitBatch 入账、状态 tick 刷新缓存）。
+        FlexlbConfig bridgeConfig = new FlexlbConfig();
+        bridgeConfig.setFlexlbStateV2ShadowEnabled(true);
+        shadowBridge = StateShadowBridge.create(bridgeConfig, null, false);
+
         endpointRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 Mockito.mock(BatchSchedulerReporter.class), null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                shadowBridge); // env=null（不读 Spring 环境）
         engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
 
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
@@ -71,6 +80,12 @@ class CostBasedPrefillStrategyTest {
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
                 engineHealthReporter);
+    }
+
+    @AfterEach
+    void tearDown() {
+        endpointRegistry.close();
+        shadowBridge.close();
     }
 
     /** Helper: register PrefillEndpoints for all entries in the given worker map. */
@@ -264,7 +279,9 @@ class CostBasedPrefillStrategyTest {
         PrefillEndpoint ep1 = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, "10.0.0.1:8080", w1);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, "10.0.0.2:8080", w2);
+        shadowBridge.onPrefillSubmit(1L);
         ep1.commitBatch(1L, 4000, List.of(batchItem(1L, 1000, 0)));
+        ep1.onWorkerStatusUpdate(w1, null);
 
         ServerStatus result = strategy.select(buildContext(500, 10L), RoleType.PREFILL, null);
 
@@ -342,8 +359,14 @@ class CostBasedPrefillStrategyTest {
         PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
-            ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
-                    List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
+            long requestId = 900000L + ip.hashCode();
+            // 完整挂账链：submit 开账（register + QUEUED）→ commitBatch
+            // （DISPATCHING + 分摊批次预测 + DISPATCHED 绑定端点）→ 状态 tick
+            // 刷新 per-EP 计数缓存，等待估算读点可见。
+            shadowBridge.onPrefillSubmit(requestId);
+            ep.commitBatch(requestId, estimatedWaitMs,
+                    List.of(batchItem(requestId, estimatedWaitMs, 0)));
+            ep.onWorkerStatusUpdate(w, null);
         }
         return w;
     }

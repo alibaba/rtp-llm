@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -58,9 +57,9 @@ class CostBasedDecodeStrategyTest {
     /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
         EndpointRegistry registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 Mockito.mock(BatchSchedulerReporter.class), null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                null); // env=null; shadowBridge=null（退化模式：账本读点全零）
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
             ws.setGrpcPort(9090);
@@ -75,9 +74,9 @@ class CostBasedDecodeStrategyTest {
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 Mockito.mock(BatchSchedulerReporter.class), null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                null); // env=null; shadowBridge=null（退化模式：账本读点全零）
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService, emptyRegistry);

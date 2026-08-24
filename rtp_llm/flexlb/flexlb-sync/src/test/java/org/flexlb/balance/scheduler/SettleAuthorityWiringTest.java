@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
@@ -11,7 +10,6 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.sync.shadow.StateShadowBridge;
 import org.junit.jupiter.api.Test;
@@ -29,17 +27,20 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * G3（终态结算换权）装配分流验证：AbstractScheduler.register 的 whenComplete
- * 按 settleAuthority 分流——关 = 旧出口（ACK 时点经 InflightItem helper 上报）；
- * 开 = 权威单出口（COMPLETED 挂 pending 表由 ledger 终局消费，metric 生产点迁移）。
- * 客户端 future 语义两侧不变。
+ * 终态结算换权（settle authority）装配分流验证：AbstractScheduler.register
+ * 的 whenComplete 按账本启用状态分流——关 = 退化模式（metric 直报，旧四值
+ * 口径连续）；开 = 权威单出口（COMPLETED 挂 pending 表由 ledger 终局消费，
+ * metric 生产点迁移）。客户端 future 语义两侧不变。
+ *
+ * <p>结算/读取开关收束后（旧路径移除），authority 恒等于账本开关——分流
+ * 只剩 enabled / disabled 两态。</p>
  */
-class G3SettleAuthorityWiringTest {
+class SettleAuthorityWiringTest {
 
     /** 最小调度器：直接驱动基类 register 的 whenComplete 分流。 */
     private static final class WiringScheduler extends AbstractScheduler {
-        WiringScheduler(InflightStore store, FlexlbMetricHelper helper, StateShadowBridge bridge) {
-            super(store, helper, bridge);
+        WiringScheduler(FlexlbMetricHelper helper, StateShadowBridge bridge) {
+            super(helper, bridge);
         }
 
         @Override
@@ -48,9 +49,9 @@ class G3SettleAuthorityWiringTest {
         }
     }
 
-    /** settle 关：旧 metric 出口（ACK 时点经 item helper 上报），pending 表零使用。 */
+    /** 账本关（退化模式）：metric 直报（ACK 时点，旧四值口径连续）。 */
     @Test
-    void legacyMetricExitWhenSettleDisabled() {
+    void metricReportedDirectlyWhenLedgerDisabled() {
         Fixture fx = new Fixture(false);
 
         CompletableFuture<Response> future = new CompletableFuture<>();
@@ -58,13 +59,13 @@ class G3SettleAuthorityWiringTest {
         future.complete(successResponse());
 
         verify(fx.monitor).report(eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
-        assertEquals(0, fx.bridge.pendingTerminalMetricCount(), "settle 关不得使用 pending 表");
+        assertEquals(0, fx.bridge.pendingTerminalMetricCount(), "退化模式不得使用 pending 表");
         fx.tearDown();
     }
 
-    /** settle 开：ACK 时旧出口静默（helper 未注入 item），metric 挂 pending 由引擎终局消费。 */
+    /** 账本开：ACK 时直报静默，metric 挂 pending 由引擎终局消费。 */
     @Test
-    void metricParkedThenConsumedWhenSettleEnabled() {
+    void metricParkedThenConsumedWhenLedgerEnabled() {
         Fixture fx = new Fixture(true);
         long requestId = 61L;
 
@@ -88,7 +89,7 @@ class G3SettleAuthorityWiringTest {
         fx.tearDown();
     }
 
-    /** settle 开但 ledger 未覆盖（开账缺失）：退回旧语义 ACK 即报，不进 pending 生命周期。 */
+    /** 账本开但 ledger 未覆盖（开账缺失）：退回旧语义 ACK 即报，不进 pending 生命周期。 */
     @Test
     void ackReportedImmediatelyWhenLedgerDoesNotCover() {
         Fixture fx = new Fixture(true);
@@ -105,9 +106,9 @@ class G3SettleAuthorityWiringTest {
         fx.tearDown();
     }
 
-    /** settle 开：FAILED 路由失败——双侧主动 settle，metric 即时出口。 */
+    /** 账本开：FAILED 路由失败——双侧主动 settle，metric 即时出口。 */
     @Test
-    void failedSettledAndReportedImmediatelyWhenSettleEnabled() {
+    void failedSettledAndReportedImmediatelyWhenLedgerEnabled() {
         Fixture fx = new Fixture(true);
         long requestId = 63L;
 
@@ -131,23 +132,18 @@ class G3SettleAuthorityWiringTest {
     private static final class Fixture {
         final FlexMonitor monitor = mock(FlexMonitor.class);
         final StateShadowBridge bridge;
-        final InflightStore store;
         final WiringScheduler scheduler;
 
-        Fixture(boolean settleAuthority) {
+        Fixture(boolean ledgerEnabled) {
             FlexlbConfig config = new FlexlbConfig();
-            config.setFlexlbStateV2ShadowEnabled(true);
-            config.setFlexlbStateV2SettleEnabled(settleAuthority);
-            ConfigService configService = mock(ConfigService.class);
-            when(configService.loadBalanceConfig()).thenReturn(config);
+            config.setFlexlbStateV2ShadowEnabled(ledgerEnabled);
             bridge = StateShadowBridge.create(config, monitor, false);
-            store = new InflightStore(mock(BatchSchedulerReporter.class), configService);
-            scheduler = new WiringScheduler(store,
+            scheduler = new WiringScheduler(
                     new FlexlbMetricHelper(monitor, MetricConstant.PATH_BATCH), bridge);
         }
 
         void tearDown() {
-            store.shutdown();
+            bridge.close();
         }
     }
 

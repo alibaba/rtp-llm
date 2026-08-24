@@ -20,7 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -28,7 +27,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 /**
- * G1 影子开关矩阵：关 = 装配返回 DISABLED 单例、所有入口零执行（ledger 不存在）；
+ * 影子开关矩阵：关 = 装配返回 DISABLED 单例、所有入口零执行（ledger 不存在）；
  * 开 = 正常泵入（event 计数递增、账本入账）；影子异常绝不外抛（catch-all）。
  */
 class StateShadowBridgeTest {
@@ -72,7 +71,7 @@ class StateShadowBridgeTest {
         assertTrue(bridge.isEnabled());
         assertNotNull(bridge.ledger());
         assertNotNull(bridge.diffCollector());
-        assertNotNull(bridge.janitor(), "M4：shadow 开时 janitor 必须挂载");
+        assertNotNull(bridge.janitor(), "shadow 开时 janitor 必须挂载");
     }
 
     @Test
@@ -162,11 +161,11 @@ class StateShadowBridgeTest {
     private static StateShadowBridge enabledBridge() {
         FlexlbConfig config = new FlexlbConfig();
         config.setFlexlbStateV2ShadowEnabled(true);
-        // M4：autoStartJanitor=false——不创建调度线程（确定性 + 线程卫生）
+        // autoStartJanitor=false——不创建调度线程（确定性 + 线程卫生）
         return StateShadowBridge.create(config, null, false);
     }
 
-    // ==================== M4 清理层装配（janitor 挂载/调度/配置传播）====================
+    // ==================== 清理层装配（janitor 挂载/调度/配置传播）====================
 
     /** 关 = janitor 零挂载零调度（DISABLED 单例不创建任何线程）。 */
     @Test
@@ -215,7 +214,7 @@ class StateShadowBridgeTest {
         bridge.close(); // 幂等
     }
 
-    /** 清理层参数从 FlexlbConfig 传播到 LedgerJanitorConfig（与 M3 影子开关同装配模式）。 */
+    /** 清理层参数从 FlexlbConfig 传播到 LedgerJanitorConfig（与影子开关同装配模式）。 */
     @Test
     void janitorConfigWiredFromFlexlbConfig() {
         FlexlbConfig config = new FlexlbConfig();
@@ -259,42 +258,47 @@ class StateShadowBridgeTest {
                         .orElseThrow().state());
     }
 
-    // ==================== G3：结算换权开关矩阵（onOldTerminalAuthority 权威单出口）====================
+    // ==================== 结算权威单出口（onOldTerminalAuthority 权威入口）====================
 
-    /** G3 开 ⇒ shadow 开是硬前置：settle 开而 shadow 关必须拒启（fail-fast）。 */
+    /** 开关收束：settle 开关退化为 no-op——shadow 关时不再 fail-fast，装配仍返回 DISABLED。 */
     @Test
-    void failFastWhenSettleAuthorityWithoutShadow() {
+    void settleSwitchIsIgnoredWhenShadowOff() {
         FlexlbConfig config = new FlexlbConfig();
         config.setFlexlbStateV2ShadowEnabled(false);
         config.setFlexlbStateV2SettleEnabled(true);
 
-        assertThrows(IllegalStateException.class,
-                () -> StateShadowBridge.create(config, null, false),
-                "结算换权依赖影子链路在跑——settle 开而 shadow 关必须 fail-fast 拒启");
+        StateShadowBridge bridge = StateShadowBridge.create(config, null, false);
+
+        assertSame(StateShadowBridge.DISABLED, bridge,
+                "旧路径移除后 settle 开关不再独立生效——shadow 关即 DISABLED");
+        assertFalse(bridge.isSettleAuthority(), "DISABLED 恒非权威");
     }
 
-    /** 开关矩阵：settle 开（shadow 开）= 权威；settle 关 / DISABLED = 旧影子语义。 */
+    /** 开关收束：结算权威恒等于账本启用位（settle 开关不再独立选路）。 */
     @Test
     void settleAuthorityMatrix() {
         FlexlbConfig settleOff = new FlexlbConfig();
         settleOff.setFlexlbStateV2ShadowEnabled(true);
-        assertFalse(StateShadowBridge.create(settleOff, null, false).isSettleAuthority(),
-                "settle 关（shadow 开）不得进入权威结算");
+        settleOff.setFlexlbStateV2SettleEnabled(false);
+        assertTrue(StateShadowBridge.create(settleOff, null, false).isSettleAuthority(),
+                "settle 开关已收束——shadow 开即权威结算");
         assertFalse(StateShadowBridge.DISABLED.isSettleAuthority(), "DISABLED 恒非权威");
-        assertTrue(authorityBridge().isSettleAuthority(), "settle 开 + shadow 开 = 权威结算");
+        assertTrue(authorityBridge().isSettleAuthority(), "shadow 开 = 权威结算");
     }
 
-    /** G3 关时权威入口零执行（旧路径 onOldTerminal 语义不变）。 */
+    /** 开关收束：settle 开关不再拦截权威入口——COMPLETED 恒挂 pending 表等 ledger 终局。 */
     @Test
-    void authorityEntryPointNoOpWhenSettleDisabled() {
+    void authorityEntryPointRunsRegardlessOfSettleSwitch() {
         StateShadowBridge bridge = enabledBridge(); // shadow 开、settle 关
         bridge.onPrefillSubmit(31L);
 
         bridge.onOldTerminalAuthority(31L, "COMPLETED",
                 new StateShadowBridge.TerminalMetricContext(TerminalReason.COMPLETED, "PREFILL", "10.0.0.1"));
 
-        assertEquals(0, bridge.pendingTerminalMetricCount(), "settle 关时权威入口必须零执行");
-        assertTrue(bridge.ledger().prefill().get(31L).isPresent(), "settle 关时不得提前结算 ledger 条目");
+        assertEquals(1, bridge.pendingTerminalMetricCount(),
+                "权威入口恒执行——settle 开关不再拦截");
+        assertTrue(bridge.ledger().prefill().get(31L).isPresent(),
+                "COMPLETED 不提前结算 ledger 条目（等引擎终局）");
     }
 
     /** COMPLETED（ACK）：不提前 settle——两侧条目保留，metric 挂 pending 表等 ledger 终局。 */
@@ -456,31 +460,33 @@ class StateShadowBridgeTest {
         verify(monitor).report(eq(MetricConstant.REQUEST_SUCCESS_QPS), any(FlexMetricTags.class), eq(1.0));
     }
 
-    // ==================== G4：读取换权开关矩阵（调度读点与 EP 记账切门面）====================
+    // ==================== 调度读点与 EP 记账（账本门面）====================
 
-    /** G4 开 ⇒ settle 开是硬前置：read 开而 settle 关必须拒启（fail-fast）。 */
+    /** 开关收束：read 开关退化为 no-op——不再要求 settle 前置，任意组合不拒启。 */
     @Test
-    void failFastWhenReadAuthorityWithoutSettle() {
+    void readSwitchIsIgnoredWithoutFormerSettlePrerequisite() {
         FlexlbConfig config = new FlexlbConfig();
         config.setFlexlbStateV2ShadowEnabled(true);
         config.setFlexlbStateV2ReadEnabled(true);
+        config.setFlexlbStateV2SettleEnabled(false);
 
-        assertThrows(IllegalStateException.class,
-                () -> StateShadowBridge.create(config, null, false),
-                "读取换权依赖结算单出口——read 开而 settle 关必须 fail-fast 拒启");
+        StateShadowBridge bridge = StateShadowBridge.create(config, null, false);
+
+        assertTrue(bridge.isReadAuthority(),
+                "read 开关已收束——shadow 开即读权威（settle 不再是前置）");
     }
 
-    /** 开关矩阵：read 开（shadow+settle 开）= 读权威；read 关 / settle 关 / DISABLED = 旧读点。 */
+    /** 开关收束：读权威恒等于账本启用位（read/settle 开关不再独立选路）。 */
     @Test
     void readAuthorityMatrix() {
         FlexlbConfig readOff = new FlexlbConfig();
         readOff.setFlexlbStateV2ShadowEnabled(true);
-        readOff.setFlexlbStateV2SettleEnabled(true);
-        assertFalse(StateShadowBridge.create(readOff, null, false).isReadAuthority(),
-                "read 关（settle 开）不得进入读权威");
-        assertFalse(authorityBridge().isReadAuthority(), "settle 权威桥未开 read 时非读权威");
+        readOff.setFlexlbStateV2ReadEnabled(false);
+        assertTrue(StateShadowBridge.create(readOff, null, false).isReadAuthority(),
+                "read 开关已收束——shadow 开即读权威");
+        assertTrue(authorityBridge().isReadAuthority(), "shadow 开即读权威");
         assertFalse(StateShadowBridge.DISABLED.isReadAuthority(), "DISABLED 恒非读权威");
-        assertTrue(readAuthorityBridge().isReadAuthority(), "三开 = 读权威");
+        assertTrue(readAuthorityBridge().isReadAuthority(), "shadow 开即读权威");
     }
 
     /** D 侧权威预占入账 + per-EP 计数读数（读取换权的调度读点数据源）。 */
@@ -517,25 +523,25 @@ class StateShadowBridgeTest {
         bridge.decodeReleaseAuthority(52L); // 幂等：重复释放不抛
     }
 
-    /** read 关时记账/计数权威入口零执行（读点走旧双层 map，返回全零视图）。 */
+    /** 开关收束：read 开关不再拦截记账入口——shadow 开时权威预占/释放照常入账。 */
     @Test
-    void readAuthorityEntryPointsNoOpWhenReadDisabled() {
-        StateShadowBridge bridge = authorityBridge(); // shadow+settle 开、read 关
+    void decodeAuthorityEntryPointsRunRegardlessOfReadSwitch() {
+        StateShadowBridge bridge = authorityBridge(); // shadow 开、read/settle 关
         String ipPort = "10.0.0.23:9000";
 
         bridge.decodeReserveAuthority(53L, 100L, 200L, ipPort);
-        bridge.decodeReleaseAuthority(53L);
+        assertTrue(bridge.ledger().decode().get(53L).isPresent(),
+                "权威预占恒入账——read 开关不再拦截");
 
-        assertTrue(bridge.ledger().decode().get(53L).isEmpty(), "read 关时权威预占零执行");
+        bridge.decodeReleaseAuthority(53L);
+        assertTrue(bridge.ledger().decode().get(53L).isEmpty(), "权威释放照常移除条目");
         assertEquals(0, bridge.decodeEndpointCounters(ipPort.hashCode()).activeTotal(),
-                "read 关时计数恒全零视图");
-        assertEquals(0, bridge.prefillEndpointCounters(ipPort.hashCode()).activeTotal(),
-                "read 关时 P 侧计数恒全零视图");
+                "释放后 per-EP 计数归零");
     }
 
     /**
      * P 条目派发绑定挂点：dispatch 后条目绑定端点世代，引擎事件可推进相位；
-     * 未绑定条目恒被世代屏障拒绝（对照证明挂点补齐了 M3 遗留的绑定缺口）。
+     * 未绑定条目恒被世代屏障拒绝（对照证明 dispatch 挂点补齐了绑定缺口）。
      */
     @Test
     void prefillDispatchBindsEndpointGenerationForEngineEvents() {
@@ -575,7 +581,7 @@ class StateShadowBridgeTest {
                 "派发后条目进入端点索引");
     }
 
-    // ==================== G4 回归：新侧终态恰好一次（P 先终局防双重记录）====================
+    // ==================== 新侧终态恰好一次（P 先终局防双重记录）====================
 
     /**
      * 双重终态防重（真机轮根因回归）：P 引擎 finished 先终局时不得记录新侧终态

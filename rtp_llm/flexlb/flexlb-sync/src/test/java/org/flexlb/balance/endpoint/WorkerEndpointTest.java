@@ -1,10 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.BatchIdGenerator;
-import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -16,7 +13,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -24,6 +20,13 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * {@link WorkerEndpoint} 基类语义与端点状态引用行为测试。
+ *
+ * <p>Prefill 侧的等待估算与条目计数已迁移至状态账本（StateLedger per-EP
+ * 视图）：本类不再覆盖本地 inflight 记账（commit/release/calibrate/repack
+ * 已随旧路径移除），账本语义由 ledger 相关测试覆盖。</p>
+ */
 class WorkerEndpointTest {
 
     private WorkerStatus status;
@@ -46,128 +49,6 @@ class WorkerEndpointTest {
     @AfterEach
     void tearDown() {
         endpoint.close();
-    }
-
-    @Test
-    void commitBatch_incrementsEstimate() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-        assertWaitTimeNear(500);
-
-        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
-        assertWaitTimeNear(800);
-    }
-
-    @Test
-    void releaseBatch_decrementsEstimate() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
-
-        endpoint.releaseBatch(1L);
-        assertWaitTimeNear(300);
-    }
-
-    @Test
-    void releaseBatch_unknownBatchId_noEffect() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-        endpoint.releaseBatch(999L);
-        assertWaitTimeNear(500);
-    }
-
-    @Test
-    void releaseBatch_neverGoesNegative() {
-        endpoint.commitBatch(1L, 100, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-        endpoint.releaseBatch(1L);
-        endpoint.releaseBatch(1L);
-        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
-    }
-
-    private void assertWaitTimeNear(long expectedMs) {
-        long actualMs = endpoint.prefillEstimatedWaitTimeMs();
-        assertTrue(actualMs <= expectedMs && actualMs >= expectedMs - 50,
-                "Expected wait time near " + expectedMs + "ms but got " + actualMs + "ms");
-    }
-
-    private int trackedEntryCount() {
-        return endpoint.prefillInflightCount() + endpoint.prefillEngineWorkCount();
-    }
-
-    @Test
-    void calibrate_noInflight_resetsToZero() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-
-        TaskInfo finished = task(100L, 1000, 0, 1L);
-        finished.setErrorCode(0);
-        calibrate(Map.of("100", finished), null);
-
-        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
-        assertEquals(0, trackedEntryCount());
-    }
-
-    @Test
-    void calibrate_finishedBatch_removedFromInflight() {
-        endpoint.commitBatch(5L, 9999, List.of(
-                new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0), new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0)));
-
-        TaskInfo t1 = task(100L, 1000, 0, 5L);
-        t1.setErrorCode(0);
-        TaskInfo t2 = task(101L, 2000, 0, 5L);
-        t2.setErrorCode(0);
-        calibrate(Map.of("100", t1, "101", t2), null);
-
-        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
-        assertEquals(0, trackedEntryCount());
-    }
-
-    @Test
-    void calibrate_partialBatchFailure_repacks() {
-        endpoint.commitBatch(5L, 9999, List.of(
-                new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0), new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0)));
-
-        TaskInfo failed = task(100L, 1000, 0, 5L);
-        failed.setErrorCode(1);
-        failed.setErrorMessage("timeout");
-        TaskInfo success = task(101L, 2000, 0, 5L);
-        success.setErrorCode(0);
-        calibrate(Map.of("100", failed, "101", success), null);
-
-        assertEquals(0, trackedEntryCount());
-        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
-    }
-
-    @Test
-    void calibrate_inflightUnconfirmedBatchesSurvive() {
-        endpoint.commitBatch(5L, 1000, List.of(new BatchItem(ctx(100L, 500), null, null, null, null, null, null, 0)));
-        endpoint.commitBatch(7L, 2000, List.of(new BatchItem(ctx(200L, 1000), null, null, null, null, null, null, 0)));
-
-        TaskInfo finished = task(100L, 500, 0, 5L);
-        finished.setErrorCode(0);
-        calibrate(Map.of("100", finished), null);
-
-        assertEquals(1, trackedEntryCount());
-        // layer-1 entries count at full predicted value; allow small timing delta
-        assertTrue(Math.abs(endpoint.prefillEstimatedWaitTimeMs() - 2000) < 50,
-                "Expected ~2000ms but got " + endpoint.prefillEstimatedWaitTimeMs());
-    }
-
-    @Test
-    void repackBatch_removesFailedRequests() {
-        endpoint.commitBatch(5L, 9999, List.of(
-                new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0),
-                new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0),
-                new BatchItem(ctx(102L, 3000), null, null, null, null, null, null, 0)));
-        endpoint.repackBatch(5L, java.util.Set.of(101L));
-
-        assertEquals(2, endpoint.prefillPendingRequestCount());
-    }
-
-    @Test
-    void repackBatch_allFailed_removesBatch() {
-        endpoint.commitBatch(5L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-
-        endpoint.repackBatch(5L, java.util.Set.of(100L));
-
-        assertEquals(0, trackedEntryCount());
-        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
     }
 
     @Test
@@ -224,7 +105,7 @@ class WorkerEndpointTest {
         assertEquals(10000L, status.getAvailableKvCacheTokens().get());
         assertEquals(5L, status.getStatusVersion().get());
         // latestFinishedTaskVersion is intentionally NOT set by updateFromResponse();
-        // it is advanced only after calibrate processes finished tasks
+        // it is advanced only after the status-check runner consumed finished tasks
         assertEquals(-1L, status.getLatestFinishedTaskVersion().get());
     }
 
@@ -259,13 +140,19 @@ class WorkerEndpointTest {
     }
 
     @Test
-    void onWorkerStatusUpdate_calibrates_prefill() {
+    void onWorkerStatusUpdate_handles_finished_tasks_gracefully() {
+        // shadowBridge=null（退化模式）：状态 tick 只替换 status 引用并跳过
+        // 账本计数刷新——携带 finishedTaskInfo 的报文不触发任何本地结算。
         WorkerStatusResponse resp = new WorkerStatusResponse();
-        resp.setFinishedTaskInfo(Map.of("100", task(100L, 1000, 0, 1L)));
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(100L);
+        finished.setErrorCode(0L);
+        resp.setFinishedTaskInfo(Map.of("100", finished));
 
-        // PrefillEndpoint calibrates even when runningTaskInfo is null
         endpoint.onWorkerStatusUpdate(status, resp);
-        // No exception = calibrate handled null gracefully
+        // No exception = null bridge handled gracefully
+        assertEquals(0, endpoint.prefillActiveRequestCount(),
+                "退化模式无记账源：读点恒零");
     }
 
     @Test
@@ -283,30 +170,5 @@ class WorkerEndpointTest {
         assertEquals("group-x", endpoint.getStatus().getGroup());
         assertEquals(5L, endpoint.getStatus().getDpRank());
         assertTrue(endpoint.getStatus().isAlive());
-    }
-
-    private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {
-        WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setFinishedTaskInfo(finished);
-        response.setRunningTaskInfo(running);
-        endpoint.onWorkerStatusUpdate(status, response);
-    }
-
-    private BalanceContext ctx(long requestId, long seqLen) {
-        Request req = new Request();
-        req.setRequestId(requestId);
-        req.setSeqLen(seqLen);
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(req);
-        return ctx;
-    }
-
-    private TaskInfo task(long requestId, long inputLength, long prefixLength, long batchId) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
-        task.setInputLength(inputLength);
-        task.setPrefixLength(prefixLength);
-        task.setBatchId(batchId);
-        return task;
     }
 }

@@ -17,7 +17,6 @@ import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.DirectScheduler;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
@@ -217,7 +216,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         batchHelper.register();
         BatchScheduler batchScheduler = new BatchScheduler(
                 configService, (DefaultRouter) router, endpointRegistry,
-                reporter, inflightStore, batchHelper);
+                reporter, batchHelper);
 
         FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(
                 NoOpFlexMonitor.getInstance(), MetricConstant.PATH_QUEUE);
@@ -226,18 +225,17 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 (DefaultRouter) router, configService,
                 mock(RoutingQueueReporter.class, withSettings().stubOnly()),
                 mock(DynamicWorkerManager.class, withSettings().stubOnly()),
-                inflightStore, queueHelper);
+                queueHelper);
 
         FlexlbMetricHelper directHelper = new FlexlbMetricHelper(
                 NoOpFlexMonitor.getInstance(), MetricConstant.PATH_DIRECT);
         directHelper.register();
         DirectScheduler directScheduler = new DirectScheduler(
-                (DefaultRouter) router, inflightStore, directHelper);
+                (DefaultRouter) router, directHelper);
 
         RouteService routeService = new RouteService(
                 configService,
                 mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()),
-                inflightStore,
                 endpointRegistry,
                 reporter,
                 batchScheduler,

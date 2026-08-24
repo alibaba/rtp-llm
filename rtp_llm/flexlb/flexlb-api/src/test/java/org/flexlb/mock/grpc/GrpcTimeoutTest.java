@@ -60,7 +60,6 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(500);  // 500ms deadline — will time out
-        cfg.setFlexlbInflightTtlMs(300_000L);
         return cfg;
     }
 

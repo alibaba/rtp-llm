@@ -119,7 +119,7 @@ class FixedWindowBatcherAlgorithmTest {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchFixedMaxInflightBatches(1);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.prefillInflightCount()).thenReturn(1);
+        when(endpoint.prefillActiveRequestCount()).thenReturn(1);
 
         FixedWindowBatcherAlgorithm algorithm =
                 new FixedWindowBatcherAlgorithm(config, endpoint);

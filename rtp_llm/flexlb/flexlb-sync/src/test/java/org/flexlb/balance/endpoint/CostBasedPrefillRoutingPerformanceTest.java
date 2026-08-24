@@ -3,7 +3,6 @@ package org.flexlb.balance.endpoint;
 import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
@@ -125,9 +124,9 @@ class CostBasedPrefillRoutingPerformanceTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
         BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class, withSettings().stubOnly());
         endpointRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 reporter, null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                null); // env=null; shadowBridge=null（退化模式：账本读点全零）
 
         for (int index = 0; index < ENGINE_COUNT; index++) {
             int port = 61_000 + index;

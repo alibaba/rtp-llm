@@ -65,7 +65,6 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
-        cfg.setFlexlbInflightTtlMs(300_000L);
         return cfg;
     }
 

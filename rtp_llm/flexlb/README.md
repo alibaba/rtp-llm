@@ -19,12 +19,22 @@ FlexLB is a high-performance, intelligent load balancer specifically designed fo
 
 ## Architecture
 
-FlexLB consists of four main modules:
+FlexLB consists of the following modules:
 
 - **flexlb-api**: Web layer providing HTTP endpoints and reactive web services
 - **flexlb-common**: Shared utilities, data models, exception handling, and common configurations
 - **flexlb-grpc**: gRPC client implementation for model service communication
-- **flexlb-sync**: Core load balancing logic, scheduling strategies, and worker status synchronization
+- **flexlb-state**: State ledger — the single accounting source for in-flight requests. Engine-reported
+  status is the single source of truth: entries are opened at scheduler submit/dispatch attach points,
+  advanced by the engine status event pump, and settled through the ledger's single settle exit (the
+  LedgerJanitor provides the stale/TTL safety net). Scheduling read points are served by per-endpoint
+  O(1) counter snapshots refreshed on each engine status tick.
+- **flexlb-sync**: Core load balancing logic, scheduling strategies, and worker status synchronization.
+  The `StateShadowBridge` facade mounts flexlb-state onto the dispatch pipeline (submit/reserve attach
+  points, engine status pump, terminal settlement); when the ledger is disabled all read points
+  degrade to zero without blocking scheduling.
+- **flexlb-cache**: Cache-aware routing (prefix cache index and hit-length estimation)
+- **flexlb-mock-engine**: Mock engine and load client for end-to-end benchmarking
 
 ## Quick Start
 

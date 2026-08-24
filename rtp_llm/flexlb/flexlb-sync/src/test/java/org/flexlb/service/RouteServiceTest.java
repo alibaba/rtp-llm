@@ -5,7 +5,6 @@ import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.DirectScheduler;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.ConfigService;
@@ -73,30 +72,29 @@ class RouteServiceTest {
         flexlbConfig.setScheduleWorkerSize(1);
         flexlbConfig.setQueueingComponentQueueMaxSize(10);
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
-        InflightStore inflightStore = new InflightStore(batchSchedulerReporter, configService);
 
         FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(
                 NoOpFlexMonitor.getInstance(), MetricConstant.PATH_BATCH);
         batchHelper.register();
         BatchScheduler batchScheduler = new BatchScheduler(
                 configService, defaultRouter, endpointRegistry,
-                batchSchedulerReporter, inflightStore, batchHelper);
+                batchSchedulerReporter, batchHelper);
 
         FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(
                 NoOpFlexMonitor.getInstance(), MetricConstant.PATH_QUEUE);
         queueHelper.register();
         QueueScheduler queueScheduler = new QueueScheduler(
                 defaultRouter, configService, routingQueueReporter,
-                dynamicWorkerManager, inflightStore, queueHelper);
+                dynamicWorkerManager, queueHelper);
 
         FlexlbMetricHelper directHelper = new FlexlbMetricHelper(
                 NoOpFlexMonitor.getInstance(), MetricConstant.PATH_DIRECT);
         directHelper.register();
         DirectScheduler directScheduler = new DirectScheduler(
-                defaultRouter, inflightStore, directHelper);
+                defaultRouter, directHelper);
 
         routeService = new RouteService(configService, recentCacheKeyTraceReporter,
-                inflightStore, endpointRegistry, batchSchedulerReporter,
+                endpointRegistry, batchSchedulerReporter,
                 batchScheduler, queueScheduler, directScheduler);
     }
 

@@ -7,14 +7,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Assertion utilities for verifying three-layer inflight resource cleanup.
+ * Assertion utilities for verifying inflight resource cleanup.
  *
- * <p>FlexLB has three layers of inflight tracking:
+ * <p>FlexLB tracks inflight work at two levels:
  * <ol>
  *   <li>scheduler-level batch inflight tracking</li>
- *   <li>{@link PrefillEndpoint#prefillInflightCount()} + {@link PrefillEndpoint#prefillEngineWorkCount()}
- *       — per-worker batch tracking</li>
- *   <li>{@link DecodeEndpoint#decodeInflightCount()} — per-worker decode reservation</li>
+ *   <li>per-worker state ledger entries —
+ *       {@link PrefillEndpoint#prefillActiveRequestCount()} for prefill and
+ *       {@link DecodeEndpoint#decodeInflightCount()} for decode reservations</li>
  * </ol>
  */
 public final class InflightAssertions {
@@ -23,7 +23,7 @@ public final class InflightAssertions {
     }
 
     private static int prefillTrackedCount(PrefillEndpoint prefillEp) {
-        return prefillEp.prefillInflightCount() + prefillEp.prefillEngineWorkCount();
+        return prefillEp.prefillActiveRequestCount();
     }
 
     /**

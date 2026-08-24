@@ -3,7 +3,6 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -38,7 +37,7 @@ import static org.mockito.Mockito.when;
  * <ul>
  *   <li>Proto field {@code is_waiting} replaced by {@code TaskPhase phase}</li>
  *   <li>{@code WorkerStatus.runningTaskList} replaces old {@code waitingTaskList + localTaskMap}</li>
- *   <li>Constructor requires {@code InflightStore + EndpointRegistry} (nullable)</li>
+ *   <li>Constructor requires {@code EndpointRegistry} (nullable)</li>
  *   <li>Task list refresh only occurs when status version advances (not on equal version)</li>
  * </ul>
  */
@@ -77,12 +76,12 @@ class GrpcWorkerStatusCheckRunnerTest {
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
                 org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
-        // Act — pass null for InflightStore and EndpointRegistry (not needed in unit test)
+        // Act — pass null for EndpointRegistry (not needed in unit test)
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
                 group, workerStatus, Map.of(ipPort, workerStatus),
-                engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
+                engineHealthReporter, engineGrpcService, 20L, null, Runnable::run);
         runner.run();
 
         // Assert — gRPC port is derived from HTTP port 8080 → 8081
@@ -125,7 +124,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 modelName, ipPort, site,
                 RoleType.PREFILL,
                 group, workerStatus, Map.of(ipPort, workerStatus),
-                engineHealthReporter, engineGrpcService, 20L, null, null, Runnable::run);
+                engineHealthReporter, engineGrpcService, 20L, null, Runnable::run);
         runner.run();
 
         // Version not advanced → runningTaskList should NOT be populated from response
@@ -155,7 +154,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
                 expired, statuses, engineHealthReporter, engineGrpcService,
-                20L, null, registry, Runnable::run);
+                20L, registry, Runnable::run);
         runner.run();
 
         assertSame(currentEndpoint, registry.get(RoleType.VIT, ipPort));
@@ -178,7 +177,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
                 status, statuses, engineHealthReporter, engineGrpcService,
-                20L, null, registry, Runnable::run);
+                20L, registry, Runnable::run);
 
         runner.run();
         runner.run();
@@ -204,7 +203,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
                 status, statuses, engineHealthReporter, engineGrpcService,
-                20L, null, registry, Runnable::run);
+                20L, registry, Runnable::run);
 
         runner.run();
         runner.run();
@@ -230,9 +229,9 @@ class GrpcWorkerStatusCheckRunnerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         return new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 Mockito.mock(BatchSchedulerReporter.class), null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                null); // env=null; shadowBridge=null（退化模式：账本读点全零）
     }
 
     private static WorkerStatus status(int port) {

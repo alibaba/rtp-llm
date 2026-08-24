@@ -2,7 +2,6 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -89,7 +88,6 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null,
                 false
         );
     }
@@ -119,7 +117,6 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null,
                 false
         );
 
@@ -139,7 +136,7 @@ class EngineSyncRunnerTest {
                 modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, null, false);
+                syncEngineStatusInterval, null, false);
 
         runner.run();
 
@@ -151,9 +148,9 @@ class EngineSyncRunnerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         EndpointRegistry registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 Mockito.mock(BatchSchedulerReporter.class), null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                null); // env=null; shadowBridge=null（退化模式：账本读点全零）
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
         String ipPort = "127.0.0.1:8080";
         WorkerStatus status = new WorkerStatus();
@@ -172,7 +169,7 @@ class EngineSyncRunnerTest {
                 modelName, statuses, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, registry, false);
+                syncEngineStatusInterval, registry, false);
         runner.run();
 
         assertFalse(status.isAlive());
@@ -195,7 +192,6 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
-                null,
                 null,
                 false
         );

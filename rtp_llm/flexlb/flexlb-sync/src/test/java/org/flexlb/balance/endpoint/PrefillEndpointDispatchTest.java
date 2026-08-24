@@ -106,8 +106,9 @@ class PrefillEndpointDispatchTest {
         assertEquals(3, firstResp.getQueueLength());
 
         assertEquals(1, sentBatches.size());
-        // Batch stays inflight until worker-status calibration removes it
-        assertEquals(1, trackedEntryCount());
+        // 条目开账在调度侧 submit 挂点（前置），派发管线本身不建账——
+        // 本 fixture 无 bridge，读点恒零。
+        assertEquals(0, trackedEntryCount());
         // submitBatch assigned the generated batch ID to every item
         assertEquals(first.assignedBatchId(), sentBatches.getFirst().getBatchId());
     }
@@ -226,9 +227,10 @@ class PrefillEndpointDispatchTest {
         Response rejected = second.future().get(2, TimeUnit.SECONDS);
         assertFalse(rejected.isSuccess());
         assertTrue(rejected.getErrorMessage().contains("decode alloc failed"));
-        // Rejected item repacked out of the batch; survivor keeps the entry inflight
-        assertEquals(1, trackedEntryCount());
-        assertEquals(1, endpoint.prefillPendingRequestCount());
+        // 被拒条目单独失败、幸存者成功（future 层断言已覆盖）；
+        // 条目生命周期归调度侧开账，本 fixture 无 bridge——读点恒零。
+        assertEquals(0, trackedEntryCount());
+        assertEquals(0, endpoint.prefillPendingRequestCount());
     }
 
     @Test
@@ -290,7 +292,7 @@ class PrefillEndpointDispatchTest {
     // ==================== helpers ====================
 
     private int trackedEntryCount() {
-        return endpoint.prefillInflightCount() + endpoint.prefillEngineWorkCount();
+        return endpoint.prefillActiveRequestCount();
     }
 
     private static DispatchMeta meta() {

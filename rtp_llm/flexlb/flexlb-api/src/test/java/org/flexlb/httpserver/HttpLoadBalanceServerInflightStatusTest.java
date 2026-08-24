@@ -52,10 +52,11 @@ class HttpLoadBalanceServerInflightStatusTest {
         when(routeService.getDiagnosticsProviders()).thenReturn(List.of(inflightProvider));
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-        when(prefill.prefillInflightCount()).thenReturn(2);
-        when(prefill.prefillEngineWorkCount()).thenReturn(3);
-        when(prefill.prefillEngineWaitingCount()).thenReturn(1);
-        when(prefill.prefillEngineRunningCount()).thenReturn(2);
+        // Ledger per-EP view: activeTotal=5, engineOwned=3 → unconfirmed window = 2
+        when(prefill.prefillActiveRequestCount()).thenReturn(5);
+        when(prefill.prefillEngineOwnedCount()).thenReturn(3);
+        when(prefill.prefillEngineWaitingCount()).thenReturn(1L);
+        when(prefill.prefillEngineRunningCount()).thenReturn(2L);
         ConcurrentHashMap<String, PrefillEndpoint> prefillMap = new ConcurrentHashMap<>();
         prefillMap.put("10.0.0.1:8080", prefill);
         when(endpointRegistry.getPrefillEndpoints()).thenReturn(prefillMap);
@@ -77,7 +78,7 @@ class HttpLoadBalanceServerInflightStatusTest {
                 .expectBody()
                 // Scheduler-level fields (legacy, unchanged)
                 .jsonPath("$.scheduler_inflight").isEqualTo(4)
-                // Prefill: legacy sum + per-layer breakdown
+                // Prefill: active total + unconfirmed/engine-owned breakdown
                 .jsonPath("$.prefill_endpoints[0].ip_port").isEqualTo("10.0.0.1:8080")
                 .jsonPath("$.prefill_endpoints[0].inflight_batches").isEqualTo(5)
                 .jsonPath("$.prefill_endpoints[0].inflight_entries").isEqualTo(2)

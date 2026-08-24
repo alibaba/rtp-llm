@@ -3,7 +3,7 @@ package org.flexlb.balance.resource;
 import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
@@ -11,6 +11,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -35,16 +36,25 @@ class DecodeResourceMeasureTest {
 
     private FlexlbConfig config;
 
+    private StateShadowBridge bridge;
+
     private EndpointRegistry registry;
 
     @BeforeEach
     void setUp() {
         config = new FlexlbConfig();
+        config.setFlexlbStateV2ShadowEnabled(true);
         when(configService.loadBalanceConfig()).thenReturn(config);
+        bridge = StateShadowBridge.create(config, null, false);
         registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
-                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchDispatchExecutor.class),
                 Mockito.mock(BatchSchedulerReporter.class), null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                bridge); // 账本开：reserve 与调度读点走 StateLedger per-EP 视图
+    }
+
+    @AfterEach
+    void tearDown() {
+        bridge.close();
     }
 
     @Test
@@ -65,7 +75,8 @@ class DecodeResourceMeasureTest {
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
         endpoint.reserve(1L, 0, 0);
         endpoint.reserve(2L, 0, 0);
-        // decodeTotalLoad() = engineWork.size(0) + inflightRequests.size(2) = 2, limit = 2, 2 >= 2 → unavailable
+        refreshLedgerCounters(endpoint);
+        // 账本 activeTotal = 2（reserve 起未终局），limit = 2，2 >= 2 → unavailable
         assertFalse(measure.isResourceAvailable(endpoint));
     }
 
@@ -75,7 +86,8 @@ class DecodeResourceMeasureTest {
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService, registry);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
         endpoint.reserve(1L, 0, 0);
-        // decodeTotalLoad() = engineWork.size(0) + inflightRequests.size(1) = 1, limit = 3, 1 < 3 → available
+        refreshLedgerCounters(endpoint);
+        // 账本 activeTotal = 1，limit = 3，1 < 3 → available
         assertTrue(measure.isResourceAvailable(endpoint));
     }
 
@@ -114,8 +126,10 @@ class DecodeResourceMeasureTest {
         double rawLevel = measure.calculateAverageWaterLevel(Map.of("worker", worker));
         assertEquals(0.0, rawLevel);
 
-        // Reserve 60 expected KV tokens → decodeRealKvUsed=60, used%=60 → (60-40)/(80-40)*100 = 50
+        // Reserve 60 expected KV tokens → 账本 unconfirmedExpectedKv=60 → decodeRealKvUsed=60
+        // → (60-40)/(80-40)*100 = 50
         endpoint.reserve(1L, 10, 60);
+        refreshLedgerCounters(endpoint);
         double realLevel = measure.calculateAverageWaterLevel(Map.of("worker", worker));
         assertEquals(50.0, realLevel);
         assertTrue(realLevel > rawLevel, "real view with inflight reserve must be more conservative than raw view");
@@ -130,6 +144,7 @@ class DecodeResourceMeasureTest {
         realWorker.getAvailableKvCacheTokens().set(50);
         DecodeEndpoint endpoint = registerDecodeEndpoint("real", realWorker);
         endpoint.reserve(1L, 10, 20);
+        refreshLedgerCounters(endpoint);
 
         // Unregistered worker with identical raw fields → raw used=50 → (50-40)/40*100=25
         WorkerStatus rawWorker = createAliveWorkerStatus();
@@ -148,14 +163,20 @@ class DecodeResourceMeasureTest {
         endpoint.reserve(1L, 0, 0);
         endpoint.reserve(2L, 0, 0);
         endpoint.reserve(3L, 0, 0);
+        refreshLedgerCounters(endpoint);
 
-        // decodeTotalLoad() = 3, limit = 4 → 75%; runningTaskList is empty, only inflight counts
+        // 账本 activeTotal = 3，limit = 4 → 75%；runningTaskList 为空，仅账本计数生效
         assertEquals(75.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 
     private DecodeEndpoint createAliveDecodeEndpoint() {
         WorkerStatus status = createAliveWorkerStatus();
-        return new DecodeEndpoint(status, new FlexlbConfig(), null);
+        return new DecodeEndpoint(status, config, bridge);
+    }
+
+    /** 刷新 EP 的账本计数缓存（生产链路由引擎状态 tick 驱动；测试显式触发）。 */
+    private void refreshLedgerCounters(DecodeEndpoint endpoint) {
+        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), null);
     }
 
     private DecodeEndpoint registerDecodeEndpoint(String ipPort, WorkerStatus status) {
@@ -165,6 +186,9 @@ class DecodeResourceMeasureTest {
     private WorkerStatus createAliveWorkerStatus() {
         WorkerStatus worker = new WorkerStatus();
         worker.setAlive(true);
+        // ipPort 必须非空：账本预占与 per-EP 计数都以 ipPort 哈希为端点稳定 ID
+        worker.setIp("10.0.0.1");
+        worker.setPort(8080);
         worker.getTotalKvCacheTokens().set(100);
         worker.getAvailableKvCacheTokens().set(100);
         return worker;

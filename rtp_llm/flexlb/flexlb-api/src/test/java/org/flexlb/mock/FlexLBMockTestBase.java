@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchScheduler;
-import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.cache.core.EngineLocalView;
@@ -27,6 +26,7 @@ import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -77,7 +77,6 @@ public abstract class FlexLBMockTestBase {
     protected MockPrefillWorker mockPrefillWorker;
     protected MockDecodeWorker mockDecodeWorker;
     protected BatchScheduler scheduler;
-    protected InflightStore inflightStore;
     protected EndpointRegistry endpointRegistry;
     protected FlexlbConfig config;
     protected ConfigService configService;
@@ -159,10 +158,12 @@ public abstract class FlexLBMockTestBase {
         // 5. Mock reporter (metrics no-op)
         reporter = mock(BatchSchedulerReporter.class);
 
-        // 6. Create real EndpointRegistry (endpoints own dispatch via submitBatch)
-        inflightStore = new InflightStore(reporter, configService);
+        // 6. Create real EndpointRegistry (endpoints own dispatch via submitBatch);
+        //    state ledger stays in degraded mode here — the engine status polling
+        //    pipeline (event pump) is not wired in this fixture, so the ledger's
+        //    single-exit settlement would never see engine facts.
         endpointRegistry = new EndpointRegistry(configService, grpcClient, dispatchExecutor,
-                inflightStore, reporter, null);
+                reporter, null, StateShadowBridge.DISABLED);
 
         // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed view.
         engineWorkerStatus = createEngineWorkerStatus();
@@ -198,7 +199,7 @@ public abstract class FlexLBMockTestBase {
 
         // 11. Create real scheduler
         scheduler = new BatchScheduler(
-                configService, router, endpointRegistry, reporter, inflightStore,
+                configService, router, endpointRegistry, reporter,
                 new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH));
 
         // 12. Register prefill endpoint (dispatch pipeline lives in the endpoint itself)
@@ -227,9 +228,6 @@ public abstract class FlexLBMockTestBase {
         }
         additionalDecodeIpPorts.clear();
 
-        if (inflightStore != null) {
-            inflightStore.shutdown();
-        }
         if (endpointRegistry != null) {
             endpointRegistry.close();
         }
@@ -296,7 +294,6 @@ public abstract class FlexLBMockTestBase {
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
-        cfg.setFlexlbInflightTtlMs(300_000L);
         return cfg;
     }
 
@@ -314,14 +311,6 @@ public abstract class FlexLBMockTestBase {
      */
     protected CompletableFuture<Response> submitRequest(long requestId, long seqLen) {
         return scheduler.submit(createBalanceContext(requestId, seqLen));
-    }
-
-    /**
-     * Trigger inflight TTL cleanup manually (simulates the store's evictor thread in production).
-     */
-    protected void triggerTtlCleanup() {
-        inflightStore.evict();
-        endpointRegistry.scheduledEviction();
     }
 
     // ==================== Helper: endpoint accessors ====================

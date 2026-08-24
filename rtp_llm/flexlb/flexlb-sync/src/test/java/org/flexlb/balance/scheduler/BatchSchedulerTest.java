@@ -18,6 +18,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,7 +52,6 @@ class BatchSchedulerTest {
     private BatchScheduler scheduler;
     private BatchDispatchExecutor dispatchExecutor;
     private EndpointRegistry endpointRegistry;
-    private InflightStore inflightStore;
     private FlexlbConfig config;
     private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
     private final List<String> sentEndpoints = new CopyOnWriteArrayList<>();
@@ -82,12 +82,11 @@ class BatchSchedulerTest {
                     return CompletableFuture.completedFuture(ackFor(request));
                 });
         dispatchExecutor = new BatchDispatchExecutor(configService, null);
-        inflightStore = new InflightStore(reporter, configService);
         endpointRegistry = new EndpointRegistry(configService, grpcClient, dispatchExecutor,
-                inflightStore, reporter, null,
-                null); // env=null; shadowBridge=null（EP 构造退回旧双层 map 行为）
+                reporter, null,
+                null); // env=null; shadowBridge=null（退化模式：账本读点全零）
         scheduler = new BatchScheduler(configService, router,
-                endpointRegistry, reporter, inflightStore,
+                endpointRegistry, reporter,
                 new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH));
 
         // Create endpoint and batcher for the worker that successRoute() returns
@@ -106,7 +105,6 @@ class BatchSchedulerTest {
 
     @AfterEach
     void tearDown() {
-        inflightStore.shutdown();
         endpointRegistry.close();
         dispatchExecutor.shutdown();
     }
@@ -252,24 +250,46 @@ class BatchSchedulerTest {
         config.setFlexlbBatchSizeMax(1);
         config.setFlexlbBatchMaxInflight(1);
 
-        CountDownLatch batchBlocked = new CountDownLatch(1);
-        CountDownLatch releaseBlock = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenAnswer(inv -> {
-                    batchBlocked.countDown();
-                    assertTrue(releaseBlock.await(5, TimeUnit.SECONDS));
-                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
-                    return CompletableFuture.completedFuture(ackFor(request));
-                });
+        // inflight gate 依赖账本 P 侧活跃计数——退化模式（DISABLED）无计数源
+        // 会跳过 gate，本用例用真账本桥独立装配。
+        FlexlbConfig bridgeConfig = new FlexlbConfig();
+        bridgeConfig.setFlexlbStateV2ShadowEnabled(true);
+        StateShadowBridge bridge = StateShadowBridge.create(bridgeConfig, null, false);
+        EndpointRegistry ledgerRegistry = new EndpointRegistry(configService, grpcClient,
+                dispatchExecutor, reporter, null, bridge);
+        BatchScheduler ledgerScheduler = new BatchScheduler(configService, router,
+                ledgerRegistry, reporter,
+                new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH), bridge);
+        try {
+            WorkerStatus ws = new WorkerStatus();
+            ws.setIp("10.0.0.1");
+            ws.setPort(8080);
+            ws.setGrpcPort(8081);
+            ledgerRegistry.ensureEndpoint(RoleType.PREFILL, "10.0.0.1:8080", ws);
 
-        scheduler.submit(context(41));
-        assertTrue(batchBlocked.await(2, TimeUnit.SECONDS));
+            CountDownLatch batchBlocked = new CountDownLatch(1);
+            CountDownLatch releaseBlock = new CountDownLatch(1);
+            when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                    .thenAnswer(inv -> {
+                        batchBlocked.countDown();
+                        assertTrue(releaseBlock.await(5, TimeUnit.SECONDS));
+                        EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                        return CompletableFuture.completedFuture(ackFor(request));
+                    });
 
-        Response rejected = scheduler.submit(context(42)).get(1, TimeUnit.SECONDS);
-        assertFalse(rejected.isSuccess());
-        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+            ledgerScheduler.submit(context(41));
+            assertTrue(batchBlocked.await(2, TimeUnit.SECONDS));
 
-        releaseBlock.countDown();
+            // 首个请求挂账后 P 侧活跃=1 >= maxInflight=1 → 闸门拒绝
+            Response rejected = ledgerScheduler.submit(context(42)).get(1, TimeUnit.SECONDS);
+            assertFalse(rejected.isSuccess());
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+
+            releaseBlock.countDown();
+        } finally {
+            ledgerRegistry.close();
+            bridge.close();
+        }
     }
 
     @Test

@@ -8,7 +8,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -26,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.lenient;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,7 +48,6 @@ class QueueSchedulerTest {
     private RoutingQueueReporter metrics;
 
     private FlexlbConfig config;
-    private InflightStore inflightStore;
     private QueueScheduler scheduler;
 
     @BeforeEach
@@ -60,15 +57,13 @@ class QueueSchedulerTest {
         config.setQueueingComponentQueueMaxSize(10);
         config.setMaxRetryCount(3); // Explicitly set for test, default is 0 (unlimited)
         lenient().when(configService.loadBalanceConfig()).thenReturn(config);
-        inflightStore = new InflightStore(mock(BatchSchedulerReporter.class), configService);
         scheduler = new QueueScheduler(router, configService, metrics, dynamicWorkerManager,
-                inflightStore, new FlexlbMetricHelper(null, MetricConstant.PATH_QUEUE));
+                new FlexlbMetricHelper(null, MetricConstant.PATH_QUEUE));
     }
 
     @AfterEach
     void tearDown() {
         scheduler.shutdown();
-        inflightStore.shutdown();
     }
 
     // ==================== Route completion policy (worker consume path) ====================
@@ -154,7 +149,7 @@ class QueueSchedulerTest {
         config.setQueueingComponentQueueMaxSize(1);
         // Rebuild the scheduler so the bounded deque picks up the new capacity
         scheduler = new QueueScheduler(router, configService, metrics, dynamicWorkerManager,
-                inflightStore, new FlexlbMetricHelper(null, MetricConstant.PATH_QUEUE));
+                new FlexlbMetricHelper(null, MetricConstant.PATH_QUEUE));
 
         // Workers not started — the first request stays queued
         CompletableFuture<Response> first = scheduler.submit(createContext(1L));
@@ -183,7 +178,7 @@ class QueueSchedulerTest {
 
     @Test
     void submit_shouldRejectDuplicateRequestId() throws Exception {
-        // First submit registers the request in InflightStore and enqueues it
+        // First submit registers the request in the pending registry and enqueues it
         CompletableFuture<Response> first = scheduler.submit(createContext(42L));
         assertFalse(first.isDone());
         assertEquals(1, scheduler.queueSize());
@@ -206,31 +201,26 @@ class QueueSchedulerTest {
         CompletableFuture<Response> result = scheduler.submit(createContext(1L));
         assertEquals(1, scheduler.queueSize());
 
-        // Inline the cancel cascade (previously scheduler.cancel("1"),
-        // now owned by RouteService): store.get → item.complete(CANCELLED) → fireOnCancel
-        InflightItem item = inflightStore.get("1");
-        assertTrue(item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
-                InflightState.CANCELLED));
-        item.fireOnCancel();
+        // Cancel cascade (RouteService-owned entry, inlined here):
+        // cancelIfPending → onLocalTerminal → queueing.removeIfQueued
+        // + raw worker future completed with CANCELLED.
+        assertTrue(scheduler.cancelIfPending(1L));
 
         assertEquals(0, scheduler.queueSize()); // slot freed, not dead-occupied
         // Cancel now completes the future with an error Response (not exceptional)
         assertTrue(result.isDone());
         assertFalse(result.join().isSuccess());
-        assertTrue(inflightStore.get("1").isTerminated());
+        assertEquals(0, scheduler.pendingCount());
     }
 
     @Test
     void cancel_onCancelCascadeIsBestEffortIdempotent() {
         scheduler.submit(createContext(1L));
-        InflightItem item = inflightStore.get("1");
 
-        assertTrue(item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
-                InflightState.CANCELLED));
-        item.fireOnCancel(); // queued → removed
+        assertTrue(scheduler.cancelIfPending(1L)); // queued → removed
         assertEquals(0, scheduler.queueSize());
-        // A second cascade against an absent entry must not throw.
-        item.fireOnCancel();
+        // A second cascade against an absent submission must report false, not throw.
+        assertFalse(scheduler.cancelIfPending(1L));
         assertEquals(0, scheduler.queueSize());
     }
 
