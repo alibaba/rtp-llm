@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -31,8 +32,7 @@ class GrpcCacheStatusCheckRunnerTest {
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
         String modelName = "test-model";
-        String ipPort = "127.0.0.1:8080";
-        String site = "test-site";
+        WorkerHost host = WorkerHost.of("127.0.0.1", 8080);
 
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setIp("127.0.0.1");
@@ -48,7 +48,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
-                modelName, ipPort, site, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                modelName, host, RoleType.PREFILL, workerStatus, engineHealthReporter,
                 engineGrpcService, cacheAwareService,
                 20, new LongAdder(), 50L);
         runner.run();
@@ -62,5 +62,32 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Assert
         verify(engineGrpcService).getCacheStatus(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
+    }
+
+    @Test
+    void usesWorkerStatusPortForLogicalEngineCacheStatus() {
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18003,
+                "test-site", "group-a", "deployment-a", 1, 2, "service-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.setEngineIndex(1);
+        when(engineGrpcService.getCacheStatus(
+                anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(EngineRpcService.CacheStatusPB.newBuilder()
+                        .setVersion(1)
+                        .build());
+
+        new GrpcCacheStatusCheckRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, cacheAwareService, 20, new LongAdder(), 50L)
+                .run();
+
+        verify(engineGrpcService).getCacheStatus(
+                eq("127.0.0.1"), eq(18003), any(WorkerStatus.class), eq(-1L), eq(20L),
+                eq(RoleType.PREFILL));
+        verify(engineHealthReporter).reportCacheStatusCheckRemoteInfo(
+                eq("test-model"), eq("127.0.0.1@1"), eq("PREFILL"), anyLong());
     }
 }

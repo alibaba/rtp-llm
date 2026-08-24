@@ -91,7 +91,7 @@ public class ResourceMonitorReporter {
                     continue;
                 }
                 FlexMetricTags workerTags = FlexMetricTags.of(
-                        "engineIp", workerStatus.getIp(),
+                        "engineIp", workerStatus.getIpIndex(),
                         "role", roleType.getCode());
                 monitor.report(WORKER_RESOURCE_WATER_LEVEL,
                         workerTags,

@@ -137,7 +137,7 @@ public class EngineSyncRunner implements Runnable {
                     if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
                         logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                                = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                                = new GrpcCacheStatusCheckRunner(modelName, host, roleType,
                                 workerStatus, engineHealthReporter, engineGrpcService, cacheAwareService,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);

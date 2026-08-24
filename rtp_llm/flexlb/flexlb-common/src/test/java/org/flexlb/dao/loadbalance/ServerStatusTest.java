@@ -29,7 +29,9 @@ class ServerStatusTest {
         assertEquals(1, json.get("engine_index").asInt());
         assertFalse(json.has("routingEngineIndex"));
         assertFalse(json.has("logicalIpPort"));
+        assertFalse(json.has("ipIndex"));
         assertEquals("10.0.0.8:8080@1", status.getLogicalIpPort());
+        assertEquals("10.0.0.8@1", status.getIpIndex());
     }
 
     @Test

@@ -15,7 +15,7 @@ class CacheHitComparisonResultTest {
     void serializesNestedCacheHitComparison() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
-                "127.0.0.1", "running", 200,
+                "127.0.0.1:8080@0", "127.0.0.1@0", "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
                 new CacheHitComparisonResult.HitComparison(70, 50),
@@ -27,7 +27,7 @@ class CacheHitComparisonResultTest {
 
         assertTrue(json.contains("\"event\":\"cache_hit_comparison\""));
         assertTrue(json.contains("\"source\":\"KVCM\""));
-        assertTrue(json.contains("\"worker\":\"127.0.0.1\""));
+        assertTrue(json.contains("\"worker\":\"127.0.0.1:8080@0\""));
         assertTrue(json.contains("\"state\":\"running\""));
         assertTrue(json.contains("\"actual\":{\"hit\":120}"));
         assertTrue(json.contains(
@@ -45,13 +45,14 @@ class CacheHitComparisonResultTest {
         assertTrue(json.indexOf("\"kvcm\"") < json.indexOf("\"localStandby\""));
         assertFalse(json.contains("\"p2pFetch\""));
         assertFalse(json.contains("\"workerPort\""));
+        assertFalse(json.contains("\"ipIndex\""));
     }
 
     @Test
     void omitsUnavailableLocalStandbyPrediction() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
-                "127.0.0.1", "running", 200,
+                "127.0.0.1:8080@0", "127.0.0.1@0", "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
                 null,
@@ -66,7 +67,7 @@ class CacheHitComparisonResultTest {
     void omitsKvcmForNonKvcmSource() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "default",
-                "127.0.0.1", "running", 200,
+                "127.0.0.1:8080@0", "127.0.0.1@0", "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
                 null,

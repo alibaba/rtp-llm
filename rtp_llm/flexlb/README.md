@@ -90,7 +90,9 @@ Each endpoint must contain exactly one `discovery` object. Supported types are:
 - `dashscope`: Uses `address` as the virtual service ID (internal builds). `base_url` defaults to
   `http://127.0.0.1:8880` when omitted.
 
-`worker_status_port` is optional and controls the gRPC port used only for `GetWorkerStatus`.
+`worker_status_port` is optional and controls the per-engine gRPC port used for `GetWorkerStatus`
+and `GetCacheStatus`.
+When configured, it must be in the TCP port range `[1, 65535]`, including single-engine endpoints.
 When omitted, FlexLB uses the endpoint gRPC port (`http` discovery port + 1, or the discovered
 port itself when `protocol` is `grpc`). `multi_engine_num` defaults to `1`. When it is greater
 than `1`, `worker_status_port` is required and logical engine index `i` is polled at

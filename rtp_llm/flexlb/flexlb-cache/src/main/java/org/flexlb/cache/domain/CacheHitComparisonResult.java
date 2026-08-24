@@ -6,6 +6,9 @@ import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 
 /**
  * Cache-hit comparison result and PV log payload.
+ *
+ * @param worker routing/PV identity in {@code ip:port@engineIndex} format
+ * @param ipIndex metrics identity in {@code ip@engineIndex} format; omitted from PV JSON
  */
 @JsonPropertyOrder({
         "event", "requestId", "source", "role", "group", "worker", "state", "inputTokens",
@@ -18,6 +21,7 @@ public record CacheHitComparisonResult(
         String role,
         String group,
         String worker,
+        @JsonIgnore String ipIndex,
         String state,
         long inputTokens,
         Actual actual,

@@ -33,6 +33,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private static final Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
     private final String logicalIpPort;
+    private final String ipIndex;
     private final String modelName;
     private final String site;
     private final RoleType roleType;
@@ -41,6 +42,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final String ip;
+    /** Per-engine control port shared by GetWorkerStatus and GetCacheStatus. */
     private final int workerStatusPort;
     private final int engineIndex;
     private final long createTimeUs = System.nanoTime() / 1000;
@@ -55,6 +57,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   long syncRequestTimeoutMs,
                                   CacheAwareService cacheAwareService) {
         this.logicalIpPort = host.getLogicalIpPort();
+        this.ipIndex = host.getIpIndex();
         this.ip = host.getIp();
         this.workerStatusPort = host.getWorkerStatusPort();
         this.engineIndex = host.getEngineIndex();
@@ -114,7 +117,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
             }
 
             // Only report success worker status check info
-            engineHealthReporter.reportStatusCheckRemoteInfo(modelName, logicalIpPort, newWorkerStatus.getRole(), startTime);
+            engineHealthReporter.reportStatusCheckRemoteInfo(
+                    modelName, ipIndex, newWorkerStatus.getRole(), startTime);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {
@@ -203,7 +207,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
         } catch (Throwable e) {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, ip, roleType);
+            engineHealthReporter.reportStatusCheckerFail(
+                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, ipIndex, roleType);
         }
     }
 
@@ -218,19 +223,19 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private void handleTaskStateUpdateResult(TaskStateUpdateResult updateResult) {
         for (long latencyMs : updateResult.decisionToWaitingObservedLatenciesMs()) {
             engineHealthReporter.reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, ipIndex, roleType.getCode(), group, latencyMs);
         }
         for (long latencyMs : updateResult.waitingToRunningObservedLatenciesMs()) {
             engineHealthReporter.reportFlexlbObservedWaitingToRunningLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, ipIndex, roleType.getCode(), group, latencyMs);
         }
         for (long latencyMs : updateResult.engineWaitingToRunningLatenciesMs()) {
             engineHealthReporter.reportEngineObservedWaitingToRunningLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, ipIndex, roleType.getCode(), group, latencyMs);
         }
         for (long latencyMs : updateResult.engineReceivedToWaitingLatenciesMs()) {
             engineHealthReporter.reportEngineObservedReceivedToWaitingLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, ipIndex, roleType.getCode(), group, latencyMs);
         }
         for (CacheHitFeedback feedback : updateResult.cacheHitFeedbacks()) {
             cacheAwareService.buildCacheHitComparison(feedback)
@@ -261,7 +266,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         }
         for (TaskInfo task : finishedTaskInfo.values()) {
             engineHealthReporter.reportPrefillWorkerStatusTask(
-                    modelName, ip, roleType.getCode(), group, task);
+                    modelName, ipIndex, roleType.getCode(), group, task);
             Map<String, Object> event = new LinkedHashMap<>();
             event.put("event", "prefill_worker_status");
             event.put("requestId", task.getRequestId());
@@ -333,11 +338,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void reportStatusCheckFailure(BalanceStatusEnum errorEnum, long startTime) {
-        engineHealthReporter.reportStatusCheckerFail(modelName, errorEnum, ip, roleType);
+        engineHealthReporter.reportStatusCheckerFail(modelName, errorEnum, ipIndex, roleType);
         engineHealthReporter.reportStatusCheckFailureLatency(
                 modelName,
                 errorEnum,
-                ip,
+                ipIndex,
                 roleType,
                 System.nanoTime() / 1000 - startTime);
     }

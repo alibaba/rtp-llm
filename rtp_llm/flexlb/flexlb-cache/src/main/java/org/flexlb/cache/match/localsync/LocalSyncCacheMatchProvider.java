@@ -48,31 +48,34 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
         long startTime = System.nanoTime() / 1000;
         String logicalIpPort = workerStatus.getLogicalIpPort();
+        String physicalIpPort = workerStatus.getPhysicalIpPort();
+        String ipIndex = workerStatus.getIpIndex();
         String role = workerStatus.getRole();
 
         try {
             CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus == null) {
                 WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, "Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "0");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(ipIndex, role, startTime, "0");
                 return result;
             }
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
             if (cachedKeys == null) {
                 WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, "Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "0");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(ipIndex, role, startTime, "0");
                 return result;
             }
 
-            kvCacheManager.updateEngineCache(logicalIpPort, role, cachedKeys);
+            kvCacheManager.updateEngineCache(
+                    logicalIpPort, physicalIpPort, ipIndex, role, cachedKeys);
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "1");
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(ipIndex, role, startTime, "1");
             return result;
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", logicalIpPort, e);
             WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, e.getMessage());
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "0");
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(ipIndex, role, startTime, "0");
             return result;
         }
     }

@@ -49,11 +49,13 @@ public class EngineLocalView {
      * Calculate diff result
      *
      * @param engineIPort    logical worker identity in {@code ip:port@engineIndex} format
+     * @param ipIndex        metrics identity in {@code ip@engineIndex} format
      * @param newCacheBlocks New cache block set
      * @param role           Engine role
      * @return Diff calculation result
      */
-    public DiffResult calculateDiff(String engineIPort, Set<Long> newCacheBlocks, String role) {
+    public DiffResult calculateDiff(
+            String engineIPort, String ipIndex, Set<Long> newCacheBlocks, String role) {
         if (engineIPort == null || newCacheBlocks == null) {
             return DiffResult.empty(engineIPort);
         }
@@ -80,7 +82,8 @@ public class EngineLocalView {
         addedTask.join();
         removedTask.join();
 
-        cacheMetricsReporter.reportCacheDiffMetrics(engineIPort, role, addedBlocks.size(), removedBlocks.size());
+        cacheMetricsReporter.reportCacheDiffMetrics(
+                ipIndex, role, addedBlocks.size(), removedBlocks.size());
 
         // Update statistics in dynamic sync interval manager
         int diffSize = addedBlocks.size() + removedBlocks.size();
