@@ -164,6 +164,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                     (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
                                                                    cache_manager->cacheConfig()) :
                                                     warmup_sentinel;
+    const auto cache_store_wait_timeout_ms = params.pd_sep_config.load_cache_timeout_ms > 0 ?
+                                                 params.pd_sep_config.load_cache_timeout_ms :
+                                                 PDSepConfig{}.load_cache_timeout_ms;
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -188,7 +191,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          kv_cache_group_num,
          kv_cache_layer_to_group,
          cache_manager,
-         params.model_config_.hc_mult});
+         params.model_config_.hc_mult,
+         cache_store_wait_timeout_ms});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");

@@ -35,6 +35,24 @@ py_library(
 )
 
 py_test(
+    name = "cuda_graph_mode_flag_test",
+    srcs = ["cuda_graph_mode_flag_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "cuda_graph_decode_padding",
     srcs = [
         "cuda_graph_decode_padding.py",

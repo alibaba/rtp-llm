@@ -29,16 +29,6 @@ using namespace std;
 
 namespace rtp_llm {
 
-static int64_t kimiK3WholeChunkPrefillTokens() {
-    const char* value = std::getenv("KIMI_K3_PREFILL_CHUNK_TOKENS");
-    if (value == nullptr) {
-        return 0;
-    }
-    char*      end          = nullptr;
-    const long chunk_tokens = std::strtol(value, &end, 10);
-    return end != value && *end == '\0' && chunk_tokens > 0 ? chunk_tokens : 0;
-}
-
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
         return torch::Tensor();
@@ -174,6 +164,43 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     return result.cast<torch::Tensor>();
 }
 
+void PyWrappedModel::abortPrefillChunkSession() noexcept {
+    try {
+        if (!py_model_) {
+            return;
+        }
+        py::gil_scoped_acquire gil;
+        if (py::hasattr(py_model_, "abort_prefill_chunk_session")) {
+            py_model_.attr("abort_prefill_chunk_session")();
+        }
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("failed to abort Python Prefill chunk session: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("failed to abort Python Prefill chunk session with unknown error");
+    }
+}
+
+size_t PyWrappedModel::queryChunkPrefillTokenBudget() const {
+    if (!py_model_) {
+        return 0;
+    }
+    py::gil_scoped_acquire gil;
+    if (!py::hasattr(py_model_, "chunk_prefill_token_budget")) {
+        return 0;
+    }
+    const auto budget = py_model_.attr("chunk_prefill_token_budget")().cast<int64_t>();
+    RTP_LLM_CHECK_WITH_INFO(budget >= 0, "chunk Prefill token budget must be non-negative, got %ld", budget);
+    return static_cast<size_t>(budget);
+}
+
+size_t PyWrappedModel::chunkPrefillTokenBudget() const {
+    return chunk_prefill_token_budget_;
+}
+
+void PyWrappedModel::setChunkPrefillRoundHook(std::function<void(py::object, bool)> hook) {
+    chunk_prefill_round_hook_fn_ = std::move(hook);
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -269,6 +296,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths_host   = pinned_host_i32(inputs.prefix_lengths_host_for_log);
     py_attn_inputs.sequence_lengths_host = pinned_host_i32(inputs.sequence_lengths_host_for_log);
     py_attn_inputs.input_lengths_host    = pinned_host_i32(inputs.input_lengths_host_for_log);
+    py_attn_inputs.is_prefill_chunk       = inputs.is_prefill_chunk;
 
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.dim() != 3) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_kernel_block_host)");
@@ -311,7 +339,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
-    py_attn_inputs.is_fake_stream   = inputs.is_fake_stream;
+    py_attn_inputs.is_mtp_draft_update = inputs.is_mtp_draft_update;
+    py_attn_inputs.is_fake_stream      = inputs.is_fake_stream;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -341,7 +370,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // TODO(async): context_total_kv_length is still a legacy CPU scalar.
         // The exact value for non-zero prefix lengths is available as
         // cu_kv_seqlens[-1] on device; do not D2H here just to fill this field.
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens;
+        py_attn_inputs.context_total_kv_length =
+            inputs.is_prefill_chunk ? static_cast<int>(inputs.prefill_chunk_kv_length) : py_attn_inputs.total_tokens;
         py_attn_inputs.cu_seqlens              = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens           = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
@@ -554,18 +584,44 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             buffer_holder_.hold_host(host);
             return host;
         };
-        auto input_lengths_host  = inputs.input_lengths_host_for_log.defined() ?
-                                       inputs.input_lengths_host_for_log :
-                                       async_to_pinned_host(inputs.input_lengths);
+        auto input_lengths_host = inputs.input_lengths_host_for_log.defined() ?
+                                      inputs.input_lengths_host_for_log :
+                                      async_to_pinned_host(inputs.input_lengths);
         auto prefix_lengths_host = inputs.prefix_lengths_host_for_log.defined() ?
                                        inputs.prefix_lengths_host_for_log :
                                        async_to_pinned_host(inputs.prefix_lengths);
+        RTP_LLM_CHECK_WITH_INFO(input_lengths_host.numel() == inputs.input_lengths.numel()
+                                    && prefix_lengths_host.numel() == inputs.prefix_lengths.numel(),
+                                "cache-store length size mismatch: input=%ld/%ld prefix=%ld/%ld",
+                                input_lengths_host.numel(),
+                                inputs.input_lengths.numel(),
+                                prefix_lengths_host.numel(),
+                                inputs.prefix_lengths.numel());
+
+        std::optional<torch_ext::PyCacheStorePublishPlan> publish_plan;
+        if (inputs.cache_store_publish_plan.has_value()) {
+            const auto& plan = inputs.cache_store_publish_plan.value();
+            RTP_LLM_CHECK_WITH_INFO(plan.begin_block_host.defined() && plan.end_block_host.defined()
+                                        && plan.terminal_host.defined(),
+                                    "cache-store publish plan tensors must all be defined");
+            RTP_LLM_CHECK_WITH_INFO(plan.begin_block_host.numel() == static_cast<int64_t>(context_batch_size)
+                                        && plan.end_block_host.numel() == static_cast<int64_t>(context_batch_size)
+                                        && plan.terminal_host.numel() == static_cast<int64_t>(context_batch_size),
+                                    "cache-store publish plan size mismatch: begin=%ld end=%ld terminal=%ld batch=%zu",
+                                    plan.begin_block_host.numel(),
+                                    plan.end_block_host.numel(),
+                                    plan.terminal_host.numel(),
+                                    context_batch_size);
+            publish_plan = torch_ext::PyCacheStorePublishPlan{
+                plan.begin_block_host, plan.end_block_host, plan.terminal_host};
+        }
 
         torch::Tensor kv_cache_layer_to_group =
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
         torch::Tensor kv_cache_layer_region_to_group = layerRegionToGroupTensor(kv_cache_layer_layout_);
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
+        RTP_LLM_CHECK_WITH_INFO(inputs.seq_size_per_block > 0, "cache-store seq_size_per_block must be positive");
         PyCacheStoreInputs cache_store_inputs{
             context_batch_size,
             decoder_batch_size,
@@ -589,7 +645,11 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
-            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
+            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0,
+            /*cache_store_full_from_begin=*/!inputs.is_prefill_chunk,
+            /*wait_cache_store_done=*/inputs.is_prefill_chunk,
+            cache_store_wait_timeout_ms_,
+            std::move(publish_plan)};
         params = cache_store_inputs;
     }
     return params;
@@ -878,7 +938,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
-        const auto whole_chunk_tokens   = kimiK3WholeChunkPrefillTokens();
+        const auto whole_chunk_tokens   = chunkPrefillTokenBudget();
         const bool will_run_whole_chunk = whole_chunk_tokens > 0 && inputs.sequence_lengths.size(0) == 0
                                           && inputs.combo_tokens.size(0) > whole_chunk_tokens;
 
@@ -970,7 +1030,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             releaseCompletedAttentionObjects();
             held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto py_model_forward = py_model_.attr("forward");
-            auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
+            auto outputs          = chunk_prefill_round_hook_fn_ ?
+                                        py_model_forward(py_model_inputs,
+                                                         held_attn_pyobj_,
+                                                         py::cpp_function(chunk_prefill_round_hook_fn_)) :
+                                        py_model_forward(py_model_inputs, held_attn_pyobj_);
             if (py::isinstance<py::tuple>(outputs)) {
                 auto tuple = outputs.cast<py::tuple>();
                 RTP_LLM_CHECK_WITH_INFO(tuple.size() == 1, "target-verify hidden tuple must contain one tensor");

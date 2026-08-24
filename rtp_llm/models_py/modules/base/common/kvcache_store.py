@@ -39,6 +39,8 @@ class WriteCacheStoreOp(nn.Module):
         kv_cache_block_id_host: torch.Tensor,
         publish_plan: Optional[PyCacheStorePublishPlan],
     ) -> None:
+        if publish_plan is None:
+            publish_plan = getattr(self.cache_store_inputs, "publish_plan", None)
         compute_ops.write_cache_store(
             self.input_lengths,
             self.prefix_lengths,

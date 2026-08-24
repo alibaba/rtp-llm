@@ -130,7 +130,10 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_kv_cache.region_name,
                                 captured_cache_store.cp_rank,
                                 captured_cache_store.cp_size,
-                                std::move(event)};
+                                std::move(event),
+                                captured_cache_store.cache_store_full_from_begin,
+                                captured_cache_store.wait_cache_store_done,
+                                captured_cache_store.cache_store_wait_timeout_ms};
 
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;

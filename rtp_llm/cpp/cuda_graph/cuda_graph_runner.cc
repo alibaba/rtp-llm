@@ -667,6 +667,9 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
+    if (inputs.attention_inputs.is_mtp_draft_update != is_mtp_draft_update_) {
+        return false;
+    }
     // Check if this is speculative sampling:
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
@@ -676,6 +679,19 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             // Target-verify must also respect captured decode range.
             // Otherwise we may replay an uncaptured graph key.
             if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
+                return false;
+            }
+            // A target-verify graph is captured for one fixed query width
+            // (num_tokens_per_bs_).  The replay planner and the captured
+            // attention tensors both retain that width, so a shorter or wider
+            // speculative proposal must use the eager path instead of replaying
+            // a graph whose metadata shape differs from the live request.
+            if (state.seq_len_sum != state.current_batch_size * num_tokens_per_bs_) {
+                RTP_LLM_LOG_WARNING("target-verify CUDA graph query width differs from capture: "
+                                    "tokens=%d, batch=%d, captured_query_width=%d; fallback to eager execution",
+                                    state.seq_len_sum,
+                                    state.current_batch_size,
+                                    num_tokens_per_bs_);
                 return false;
             }
             // Replay-time attention planning cannot grow the captured context.
@@ -741,6 +757,7 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.total_tokens     = max_bs * num_tokens_per_bs;
 
@@ -934,6 +951,10 @@ void CudaGraphRunner::initCapture() {
         inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
+        // The initial warmup prepares the CUDA-graph attention implementation
+        // before CaptureMemoryHold owns the inputs.  Mark it here so both that
+        // warmup and every copied graph instance take the CUDA-graph path.
+        inputs.attention_inputs.is_cuda_graph = true;
 
         // Setup BertEmbedding inputs using the extracted function
         initCaptureBertEmbeddingInputs(inputs, max_bs_, max_num_token_);
@@ -1090,6 +1111,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
+    inputs.attention_inputs.is_cuda_graph    = true;
     inputs.attention_inputs.total_tokens     = seq_len_or_tokens;
     // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
     // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at

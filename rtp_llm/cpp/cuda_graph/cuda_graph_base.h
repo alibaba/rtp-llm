@@ -22,6 +22,7 @@ struct GraphParams {
     bool                 enable_cuda_graph_debug_mode = false;
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
+    bool                 is_mtp_draft_update          = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured

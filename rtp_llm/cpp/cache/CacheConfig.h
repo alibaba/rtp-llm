@@ -18,6 +18,7 @@ struct CacheConfig {
     // Cache specification and layer mapping
     std::vector<KVCacheSpecPtr>    cache_specs;
     std::vector<std::vector<int>>  global_layer_ids;  // including mtp module layers
+    std::vector<int>               local_to_global_layer_ids;  // MTP sub-config local layer -> global layer
     std::vector<std::vector<int>>  layer_ids;
     std::vector<std::vector<int>>  linear_groups;  // for hybrid attention
     std::vector<std::vector<int>>  full_groups;    // for hybrid attention

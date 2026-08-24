@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <optional>
 #include <vector>
 
 #include <torch/extension.h>
@@ -24,6 +26,23 @@ struct CacheLayerLayout {
     std::vector<torch::Tensor>              layers_to_scale_buffer_ptrs;
     std::vector<std::vector<torch::Tensor>> layers_to_kv_buffer_ptrs_by_attn;
     std::vector<std::vector<torch::Tensor>> layers_to_scale_buffer_ptrs_by_attn;
+
+    std::optional<int> resolvePhysicalGroupId(size_t local_layer_id, KVCacheRegionName region_name) const {
+        if (local_layer_id >= layer_to_groups.size()) {
+            return std::nullopt;
+        }
+        if (region_name == KVCacheRegionName::DEFAULT) {
+            const int group_id = layer_to_groups[local_layer_id];
+            return group_id >= 0 ? std::optional<int>(group_id) : std::nullopt;
+        }
+        const size_t region_id = static_cast<size_t>(region_name);
+        if (local_layer_id >= layer_region_to_group_id.size()
+            || region_id >= layer_region_to_group_id[local_layer_id].size()) {
+            return std::nullopt;
+        }
+        const int group_id = layer_region_to_group_id[local_layer_id][region_id];
+        return group_id >= 0 ? std::optional<int>(group_id) : std::nullopt;
+    }
 };
 
 struct KVCacheBuffer {

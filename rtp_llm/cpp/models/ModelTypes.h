@@ -60,6 +60,9 @@ struct GptModelInitParams {
     // is the contract between target and draft for MTP — see
     // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
     int64_t hc_mult = 1;
+    // Chunk-Prefill must use the same configured cache-operation deadline as
+    // Decode loading, rather than a separate call-site constant.
+    int64_t cache_store_wait_timeout_ms = 0;
 };
 
 enum GptModelInputIndex : size_t {
@@ -149,6 +152,16 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+
+    // Best-effort cleanup for executor-orchestrated Prefill sessions. The
+    // default model is stateless across calls.
+    virtual void abortPrefillChunkSession() noexcept {}
+
+    // Optional model capability used by generic chunk-Prefill executors. A
+    // zero budget keeps the ordinary one-shot Prefill path.
+    virtual size_t chunkPrefillTokenBudget() const {
+        return 0;
+    }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
