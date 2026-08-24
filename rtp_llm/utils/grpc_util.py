@@ -70,10 +70,17 @@ def trans_tensor(t: TensorPB):
     return torch.frombuffer(payload, dtype=dtype).reshape(shape)
 
 
-def trans_from_tensor(t: torch.Tensor):
+def trans_from_tensor(t: torch.Tensor, res: TensorPB | None = None):
+    """Serialize a tensor into ``res`` when supplied, avoiding a message CopyFrom."""
+    if res is None:
+        res = TensorPB()
+    else:
+        res.Clear()
     if t is None:
-        return TensorPB()
-    res = TensorPB()
+        return res
+    # RPC serialization is an inference boundary.  Callers may still hand us
+    # tensors produced by an autograd-enabled module, and NumPy rejects such
+    # tensors even though gradients are never meaningful on the wire.
     with cuda_graph_gate.operation():
         t = t.detach().cpu()
     res.shape.extend(list(t.shape))
