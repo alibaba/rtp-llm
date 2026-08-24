@@ -7,12 +7,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
-from rtp_llm.ops import (
-    AttentionConfigs,
-    FMHAConfig,
-    FMHAType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
@@ -75,9 +70,9 @@ class XQAImpl(FMHAImplBase):
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-        # C++ XQAParams.sequence_lengths shares storage with this tensor.
-        # Keep a reference so prepare_cuda_graph can update it in-place.
-        self._captured_seq_lens = attn_inputs.sequence_lengths
+        # Keep the CUDA-resident storage referenced by the captured RoPE
+        # kernel alive and update it in place during graph preparation.
+        self._captured_seq_lens = self.rope_params.sequence_lengths
 
     @classmethod
     def support(
@@ -147,7 +142,9 @@ class XQAImpl(FMHAImplBase):
 
         # CUDA graph replay keeps the sequence-length pointer captured during
         # initialization, so update that storage rather than replacing it.
-        new_seq_lens = attn_inputs.sequence_lengths
+        new_seq_lens = self.rope_kvcache_impl._get_sequence_lengths_device(
+            attn_inputs, self._captured_seq_lens.device
+        )
         n = min(self._captured_seq_lens.numel(), new_seq_lens.numel())
         self._captured_seq_lens[:n].copy_(new_seq_lens[:n], non_blocking=True)
         self.rope_params.sequence_lengths = self._captured_seq_lens
