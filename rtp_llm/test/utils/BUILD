@@ -12,6 +12,7 @@ py_library(
         "numeric_util.py",
         "cuda_graph_util.py",
         "port_util.py",
+        "semantic_response_validator.py",
         "stream_util.py",
         "diff_util.py",
     ],
@@ -46,4 +47,10 @@ py_test(
     deps = [
         ":test_util",
     ],
+)
+
+py_test(
+    name = "semantic_response_validator_test",
+    srcs = ["semantic_response_validator_test.py"],
+    deps = [":test_util"],
 )
