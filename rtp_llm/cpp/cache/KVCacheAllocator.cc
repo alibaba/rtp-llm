@@ -474,7 +474,7 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
         snapshot.total_blocks              = pool->totalBlocksNum();
         snapshot.free_blocks               = pool->freeBlocksNum();
         snapshot.used_blocks               = snapshot.total_blocks - snapshot.free_blocks;
-        snapshot.active_tree_cached_blocks = pool->activeTreeCachedBlocksNum();
+        snapshot.active_blocks             = pool->activeBlocksNum();
         snapshot.reserve_blocks            = reserveBlocksForPoolMetrics(pool_index);
         snapshot.request_ref_blocks        = pool->referencedBlocksNum();
         snapshot.block_cache_ref_blocks    = pool->referencedBlocksNum(BlockTreeRefType::CACHE);

@@ -52,7 +52,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                             bool                                should_log) {
     if (should_log) {
         RTP_LLM_LOG_INFO("kvc raw pool[%s/%s]: block_size_bytes=%zu total=%zu free=%zu used=%zu available=%zu "
-                         "active_tree_cached=%zu "
+                         "active=%zu "
                          "reserve=%zu request_ref_blocks=%zu block_cache_ref_blocks=%zu "
                          "load_ref_blocks=%zu eviction_ref_blocks=%zu store_ref_blocks=%zu ratio=%.4f%%",
                          pool_snapshot.tier.c_str(),
@@ -62,7 +62,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                          pool_snapshot.free_blocks,
                          pool_snapshot.used_blocks,
                          pool_snapshot.available_blocks,
-                         pool_snapshot.active_tree_cached_blocks,
+                         pool_snapshot.active_blocks,
                          pool_snapshot.reserve_blocks,
                          pool_snapshot.request_ref_blocks,
                          pool_snapshot.block_cache_ref_blocks,
@@ -77,7 +77,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.free_blocks            = static_cast<int64_t>(pool_snapshot.free_blocks);
     pool_collector.used_blocks            = static_cast<int64_t>(pool_snapshot.used_blocks);
     pool_collector.available_blocks       = static_cast<int64_t>(pool_snapshot.available_blocks);
-    pool_collector.active_blocks          = static_cast<int64_t>(pool_snapshot.active_tree_cached_blocks);
+    pool_collector.active_blocks          = static_cast<int64_t>(pool_snapshot.active_blocks);
     pool_collector.total_blocks           = static_cast<int64_t>(pool_snapshot.total_blocks);
     pool_collector.reserve_blocks         = static_cast<int64_t>(pool_snapshot.reserve_blocks);
     pool_collector.request_ref_blocks     = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
