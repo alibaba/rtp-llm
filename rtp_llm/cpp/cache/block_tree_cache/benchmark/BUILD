@@ -150,18 +150,6 @@ cc_test(
 )
 
 cc_test(
-    name = "transfer_benchmark_options_test",
-    srcs = ["TransferBenchmarkOptionsTest.cc"],
-    copts = copts(),
-    tags = ["manual"],
-    deps = [
-        ":benchmark_common",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_test(
     name = "tree_workload_generator_test",
     srcs = ["TreeWorkloadGeneratorTest.cc"],
     copts = copts() + ["-fno-access-control"],
