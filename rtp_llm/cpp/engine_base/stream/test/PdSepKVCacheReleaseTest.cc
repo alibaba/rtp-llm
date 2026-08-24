@@ -5,6 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -26,8 +27,10 @@
 #include <cstring>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -132,7 +135,10 @@ public:
 
 class MinimalEngine: public EngineBase {
 public:
-    MinimalEngine(const EngineInitParams& params, std::shared_ptr<KVCacheManager> cache_manager): EngineBase(params) {
+    MinimalEngine(const EngineInitParams&        params,
+                  std::shared_ptr<KVCacheManager> cache_manager,
+                  bool                            is_mtp_eagle = false):
+        EngineBase(params), is_mtp_eagle_(is_mtp_eagle) {
         resource_context_.cache_manager = std::move(cache_manager);
     }
 
@@ -149,6 +155,12 @@ public:
     KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
         return KVCacheInfo();
     }
+    bool isMTPEagle() override {
+        return is_mtp_eagle_;
+    }
+
+private:
+    bool is_mtp_eagle_;
 };
 
 void fillDsv4RegionBytes(const std::shared_ptr<KVCacheManager>& manager,
@@ -223,6 +235,18 @@ CacheStoreInputs makeSingleBlockWriteInputs(const std::string& cache_key_string,
 
 }  // namespace
 
+TEST(DecodeRpcServerTest, MtpPhysicalGroupUsesGlobalLayerLayout) {
+    CacheLayerLayout layout;
+    layout.layer_to_groups = {2};
+    layout.layer_region_to_group_id = {
+        std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1)};
+    layout.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::SWA_KV)] = 5;
+
+    EXPECT_EQ(layout.resolvePhysicalGroupId(/*local_layer_id=*/0, KVCacheRegionName::DEFAULT), 2);
+    EXPECT_EQ(layout.resolvePhysicalGroupId(/*local_layer_id=*/0, KVCacheRegionName::SWA_KV), 5);
+    EXPECT_FALSE(layout.resolvePhysicalGroupId(/*local_layer_id=*/0, KVCacheRegionName::CSA_KV).has_value());
+}
+
 // =============================================================================
 // Test fixture: PD sep KV cache release correctness
 // Validates that holdKVCacheForPDSep / releaseKVCacheForPDSep / releaseResource
@@ -276,6 +300,62 @@ protected:
         config.block_num                    = block_num;
         config.group_block_nums.assign(config.groupNums(), block_num);
         return config;
+    }
+
+    CacheConfig makeIndependentHybridEagleConfig() {
+        auto make_model_config = [](uint32_t num_layers) {
+            ModelConfig config;
+            config.num_layers                   = static_cast<int64_t>(num_layers);
+            config.max_seq_len                  = 128;
+            config.hidden_size                  = 64;
+            config.vocab_size                   = 1024;
+            config.data_type                    = rtp_llm::DataType::TYPE_FP16;
+            config.attn_config.head_num         = 2;
+            config.attn_config.kv_head_num      = 2;
+            config.attn_config.size_per_head    = 16;
+            config.attn_config.tokens_per_block = 4;
+            config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            return config;
+        };
+
+        auto score_model_config   = make_model_config(/*num_layers=*/4);
+        auto propose_model_config = make_model_config(/*num_layers=*/1);
+        score_model_config.hybrid_attention_config.enable_hybrid_attention           = true;
+        score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+        score_model_config.hybrid_attention_config.hybrid_attention_types            = {
+            HybridAttentionType::NONE,
+            HybridAttentionType::LINEAR,
+            HybridAttentionType::NONE,
+            HybridAttentionType::LINEAR};
+        propose_model_config.hybrid_attention_config.enable_hybrid_attention           = true;
+        propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+        propose_model_config.hybrid_attention_config.hybrid_attention_types            = {
+            HybridAttentionType::SLIDING_WINDOW};
+        propose_model_config.attn_config.sliding_window = 8;
+        score_model_config.linear_attention_config.linear_conv_kernel_dim = 2;
+        score_model_config.linear_attention_config.linear_key_head_dim    = 8;
+        score_model_config.linear_attention_config.linear_value_head_dim  = 8;
+        score_model_config.linear_attention_config.linear_num_key_heads   = 2;
+        score_model_config.linear_attention_config.linear_num_value_heads = 2;
+
+        ParallelismConfig parallelism_config;
+        parallelism_config.tp_size = 1;
+        RuntimeConfig runtime_config;
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.test_block_num = 8;
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type              = SP_TYPE_EAGLE3;
+        sp_config.gen_num_per_cycle = 3;
+
+        return CacheConfigCreator::createSpConfig(score_model_config,
+                                                  propose_model_config,
+                                                  parallelism_config,
+                                                  runtime_config,
+                                                  kv_cache_config,
+                                                  sp_config,
+                                                  /*warm_up_result=*/std::nullopt,
+                                                  /*is_mtp=*/true,
+                                                  /*is_eagle=*/true);
     }
 
     // Build a PREFILL stream with reuse_cache enabled
@@ -739,8 +819,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions =
+                blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
@@ -846,8 +926,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions =
+                blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
@@ -856,6 +936,161 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             }
         }
     }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) {
+    const int64_t request_id    = 9019;
+    const size_t  draft_model_id = 1;
+    const int     block_num      = 4;
+
+    auto config = makeIndependentHybridEagleConfig();
+    ASSERT_TRUE(config.use_independent_block_pools);
+    ASSERT_EQ(config.group_types,
+              std::vector<CacheGroupType>({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}));
+    ASSERT_EQ(config.layer_to_group_id[4], 2);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+
+    auto make_resource = [&config]() {
+        auto resource = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        resource->initGroups(config.groupNums(),
+                             static_cast<int>(config.layer_all_num),
+                             config.layer_to_group_id,
+                             config.kernelBlocksPerKvBlock(),
+                             config.group_types,
+                             config.layer_region_to_group_id);
+        return resource;
+    };
+    const int spb = static_cast<int>(config.seq_size_per_block);
+    auto make_complete_tokens = [spb, block_num]() {
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(block_num * spb, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        auto complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, (block_num + 1) * spb, spb);
+        complete_token_ids->init(input);
+        complete_token_ids->setSeqLength(block_num * spb);
+        return complete_token_ids;
+    };
+
+    auto prefill_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    auto decode_manager  = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    ASSERT_TRUE(prefill_manager->init());
+    ASSERT_TRUE(decode_manager->init());
+
+    auto prefill_resource = make_resource();
+    auto decode_resource  = make_resource();
+    ASSERT_TRUE(prefill_manager
+                    ->malloc({prefill_resource, make_complete_tokens(), request_id, true, false, false})
+                    .success);
+    ASSERT_TRUE(
+        decode_manager->malloc({decode_resource, make_complete_tokens(), request_id, true, false, false}).success);
+
+    const int physical_draft_gid = config.layer_to_group_id[4];
+    ASSERT_EQ(physical_draft_gid, 2);
+    const auto& draft_blocks = prefill_resource->blocks(0, physical_draft_gid);
+    ASSERT_EQ(draft_blocks.size(), static_cast<size_t>(block_num));
+    EXPECT_TRUE(isNullBlockIdx(draft_blocks[0]));
+    EXPECT_TRUE(isNullBlockIdx(draft_blocks[1]));
+    EXPECT_FALSE(isNullBlockIdx(draft_blocks[2]));
+    EXPECT_FALSE(isNullBlockIdx(draft_blocks[3]));
+
+    std::vector<CacheKeyType> cache_keys;
+    std::vector<std::string>  cache_key_strings;
+    for (int i = 0; i < block_num; ++i) {
+        cache_keys.push_back(30000 + i);
+        cache_key_strings.push_back(std::to_string(cache_keys.back()));
+    }
+    std::vector<int32_t> group_types;
+    for (auto group_type : config.group_types) {
+        group_types.push_back(static_cast<int32_t>(group_type));
+    }
+
+    const auto& draft_config = *config.mtp_sub_configs[0];
+    auto draft_layout        = prefill_manager->getMTPModuleCacheLayerLayout(0);
+    ASSERT_EQ(draft_layout.layer_to_groups, std::vector<int>({physical_draft_gid}));
+    ASSERT_EQ(draft_layout.layers_to_kv_buffer_ptrs.size(), 1u);
+    draft_layout.layers_to_kv_buffer_ptrs[0].fill_(42);
+
+    CacheStoreInputs inputs;
+    inputs.input_lengths_host           = torch::tensor({block_num * spb}, torch::kInt32);
+    inputs.prefix_lengths_host          = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset         = blockIdsTensor(prefill_resource, physical_draft_gid);
+    inputs.kv_cache_layer_to_group_host = torch::tensor({physical_draft_gid}, torch::kInt32);
+    inputs.kv_cache_group_types_host =
+        torch::from_blob(group_types.data(), {(int64_t)group_types.size()}, torch::kInt32).clone();
+    inputs.context_batch_size          = 1;
+    inputs.decoder_batch_size          = 0;
+    inputs.request_id                  = torch::tensor({request_id}, torch::kInt64);
+    inputs.request_pd_separation       = torch::tensor({true}, torch::kBool);
+    inputs.cache_keys                  = cache_key_strings;
+    inputs.tokens_per_block            = spb;
+    inputs.kv_block_stride_bytes       = draft_config.group_kv_block_stride_bytes[0];
+    inputs.kv_scale_stride_bytes       = draft_config.group_kv_scale_stride_bytes[0];
+    inputs.pd_separation               = true;
+    inputs.model_id                    = draft_model_id;
+    inputs.decode_entrance             = false;
+    inputs.warmup                      = false;
+    inputs.use_opaque_kv_cache_store   = draft_config.use_opaque_kv_cache_store;
+    inputs.layer_id                    = 0;
+    inputs.region_name                 = KVCacheRegionName::DEFAULT;
+
+    KvCacheInfo kv_cache_info;
+    kv_cache_info.kv_cache_buffer = draft_layout.layers_to_kv_buffer_ptrs[0];
+    auto cache_store              = std::make_shared<MemoryBackedCacheStore>();
+    runtimeWriteCacheStore(inputs, kv_cache_info, /*mla_kvcache=*/false, cache_store);
+    ASSERT_EQ(cache_store->store_request_keys_.size(), 1u);
+    ASSERT_EQ(cache_store->stored_blocks_.size(), 4u);
+
+    EngineInitParams params;
+    params.model_id                 = 0;
+    params.model_config_.num_layers = 0;
+    params.parallelism_config       = ParallelismConfig();
+    auto mtp_model_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    auto mtp_params        = std::make_unique<EngineInitParams>();
+    mtp_params->model_id                 = draft_model_id;
+    mtp_params->model_config_.num_layers = 1;
+    mtp_model_params->push_back(std::move(mtp_params));
+
+    DecodeRpcServer server;
+    server.engine_ = std::make_shared<MinimalEngine>(params, decode_manager, /*is_mtp_eagle=*/true);
+    server.maga_init_params_ = params;
+    auto propose_params = std::make_unique<ProposeModelEngineInitParams>(
+        SP_TYPE_EAGLE3, /*gen_num_per_circle=*/3, std::move(mtp_model_params));
+    server.propose_maga_init_params_ = propose_params.get();
+    server.resource_.cache_store     = cache_store;
+
+    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
+    grpc::ServerContext                 server_context;
+    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
+                                                     "eagle-independent-draft-pd",
+                                                     peer_addrs,
+                                                     cache_keys,
+                                                     decode_resource->groupBlocks(),
+                                                     /*reuse_block_size=*/0,
+                                                     /*timeout_ms=*/5000,
+                                                     /*partition_count=*/1,
+                                                     /*partition_id=*/0,
+                                                     &server_context);
+    auto status = server.loadCache(load_context);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    ASSERT_EQ(cache_store->load_buffer_requests_.size(), 1u);
+    EXPECT_EQ(cache_store->load_buffer_requests_[0]->getBlocks().size(), 4u);
+    EXPECT_EQ(cache_store->load_request_keys_.size(), 1u);
+
+    std::unordered_set<void*> expected_destination_addrs;
+    const auto&               decode_draft_blocks = decode_resource->blocks(0, physical_draft_gid);
+    for (size_t block_pos : {size_t{2}, size_t{3}}) {
+        auto parts = decode_manager->convertIndexToBuffer(
+            decode_draft_blocks[block_pos], /*global_layer_id=*/4, /*partition_count=*/1, /*partition_id=*/0);
+        ASSERT_EQ(parts.size(), 2u);
+        expected_destination_addrs.insert(parts[0].addr);
+        expected_destination_addrs.insert(parts[1].addr);
+    }
+    std::unordered_set<void*> actual_destination_addrs;
+    for (const auto& [key, block] : cache_store->load_buffer_requests_[0]->getBlocks()) {
+        actual_destination_addrs.insert(block->addr.get());
+    }
+    EXPECT_EQ(actual_destination_addrs, expected_destination_addrs);
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBlocks) {
@@ -912,8 +1147,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions =
+                blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
@@ -1029,8 +1264,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, /*reuse_block_size=*/0, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions =
+                blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));
@@ -1095,8 +1330,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, reuse_num, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions =
+                blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
@@ -1202,8 +1437,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
-            auto positions   = blockPositionsForCacheTransfer(
-                block_num, reuse_num, true, config.group_types[gid], /*hybrid_full_from_begin=*/true);
+            auto positions =
+                blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
                 ASSERT_FALSE(isNullBlockIdx(decode_block_id));

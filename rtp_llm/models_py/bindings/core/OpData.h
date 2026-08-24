@@ -27,6 +27,50 @@ enum class ParallelMode {
     EPLB      = 5,
 };
 
+// One request's token span inside a model-planned Prefill round. The executor
+// consumes this model-neutral carrier after adapting the Python planner object.
+struct PrefillChunkSlice {
+    int  original_batch_idx = 0;
+    int  source_start       = 0;  // packed token offset in the full batch
+    int  source_end         = 0;  // packed token offset after this slice
+    int  new_length         = 0;
+    int  absolute_start     = 0;  // KV position where this slice begins
+    int  absolute_end       = 0;  // KV position after this slice
+    bool terminal           = false;
+};
+
+// One Python-planned Prefill round. Non-terminal slices end at MLA page
+// boundaries. Requests may become terminal in different rounds.
+struct PrefillChunkRound {
+    std::vector<PrefillChunkSlice> slices;
+
+    int64_t token_count() const {
+        int64_t count = 0;
+        for (const auto& slice : slices) {
+            count += slice.new_length;
+        }
+        return count;
+    }
+
+    int64_t kv_length() const {
+        int64_t length = 0;
+        for (const auto& slice : slices) {
+            length += slice.absolute_end;
+        }
+        return length;
+    }
+};
+
+// One explicit CacheStore publication frontier for a context batch. FULL
+// groups publish [begin_block, end_block); LINEAR groups publish only
+// terminal rows. Keeping this on GptModelInputs lets executor-driven model
+// passes use the same lower-level publication contract as Python planners.
+struct CacheStorePublishPlan {
+    torch::Tensor begin_block_host;
+    torch::Tensor end_block_host;
+    torch::Tensor terminal_host;
+};
+
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
@@ -45,6 +89,9 @@ struct GptModelInputs {
     torch::Tensor         input_lengths_host_for_log;
     torch::Tensor         sequence_lengths_host_for_log;
     torch::Tensor         prefix_lengths_host_for_log;
+    // Optional explicit publication plan. Attention keeps its real token
+    // lengths while CacheStore independently publishes a block-aligned range.
+    std::optional<CacheStorePublishPlan> cache_store_publish_plan;
     // Pinned host mirrors retained at gather time. Performance-sensitive
     // Python attention paths consume these instead of synchronously copying
     // CUDA cache metadata back to the host during model forward.
@@ -89,6 +136,11 @@ struct GptModelInputs {
     bool          pd_separation             = false;
     bool          decode_entrance           = false;
     bool          use_opaque_kv_cache_store = false;
+    // Executor-driven whole-model Prefill chunk metadata.
+    bool   is_prefill_chunk       = false;
+    // Sum of the round's per-request KV end positions; supplies the legacy
+    // CPU context_total_kv_length for chunked Prefill rounds.
+    size_t prefill_chunk_kv_length = 0;
 
     bool need_all_logits = false;
     // Set when any stream requests return_all_hidden_states. Gates whether the
@@ -100,14 +152,19 @@ struct GptModelInputs {
     bool skip_run               = false;
     // Request-level switch for target-only decoding. This is synchronized
     // through tpSyncModelInputs so every TP rank selects the same path.
-    bool force_disable_sp_run   = false;
-    bool is_fake_stream         = false;
+    bool force_disable_sp_run = false;
+    bool is_fake_stream       = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+
+    // MTP updates the draft cache through a Prefill-shaped forward after target
+    // verification.  Keep this phase explicit so generic MLA implementation
+    // selection does not infer it from request lengths.
+    bool is_mtp_draft_update = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -194,12 +251,6 @@ struct KvCacheInfo {
     std::vector<size_t> linear_cache_segment_sizes;
 };
 
-struct CacheStorePublishPlan {
-    torch::Tensor begin_block_host;
-    torch::Tensor end_block_host;
-    torch::Tensor terminal_host;
-};
-
 struct CacheStoreInputs {
     torch::Tensor input_lengths_host;
     torch::Tensor prefix_lengths_host;
@@ -243,6 +294,10 @@ struct CacheStoreInputs {
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
     std::shared_ptr<torch::Event> pre_created_event = nullptr;
+
+    // Incremental chunked-Prefill publication starts after the already
+    // published prefix. Legacy/non-chunked hybrid FULL groups start at zero.
+    bool cache_store_full_from_begin = true;
 };
 
 struct AttentionCommonInputs {

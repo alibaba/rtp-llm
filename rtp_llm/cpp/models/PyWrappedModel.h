@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <optional>
 #include <string>
 #include <atomic>
@@ -65,9 +66,16 @@ public:
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
+    void            abortPrefillChunkSession() noexcept override;
+    size_t          chunkPrefillTokenBudget() const override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+
+    // Model-neutral chunk Prefill hook: invoked by a supporting Python model
+    // after each planned target round with (round_plan, is_last_round). Kimi K3
+    // is the only caller today; the bridge itself does not encode that model.
+    void setChunkPrefillRoundHook(std::function<void(py::object, bool)> hook);
 
 private:
     // A Python attention implementation can own pinned planner workspaces used by
@@ -167,6 +175,7 @@ private:
     void retireHeldAttentionObject();
     void releaseCompletedAttentionObjects();
     void recordHeldAttentionObjectCompletion();
+    size_t queryChunkPrefillTokenBudget() const;
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
@@ -187,6 +196,9 @@ private:
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
     py::object held_attn_pyobj_;
+    // Queried once after Python model initialization; forward/executor hot
+    // paths read this immutable model capability without acquiring the GIL.
+    size_t     chunk_prefill_token_budget_{0};
 #if USING_CUDA || USING_ROCM
     std::shared_ptr<torch::Event>             held_attn_completion_event_;
     AttnPyObjectRetirementQueue<torch::Event> retired_attn_pyobjs_;
@@ -211,6 +223,8 @@ private:
     std::atomic<bool>            prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs attention_inputs_;
     CudaGraphState               graph_state_;
+
+    std::function<void(py::object, bool)> chunk_prefill_round_hook_fn_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -321,6 +335,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+    if (enable_cuda_graph_ && !params.hw_kernel_config.decode_capture_batch_sizes.empty()) {
+        init_resources.max_decode_graph_batch_size =
+            *std::max_element(params.hw_kernel_config.decode_capture_batch_sizes.begin(),
+                              params.hw_kernel_config.decode_capture_batch_sizes.end());
+    }
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
@@ -367,11 +386,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
-        if (!graph_params.decode_capture_batch_sizes.empty()) {
-            init_resources.max_decode_graph_batch_size =
-                *std::max_element(graph_params.decode_capture_batch_sizes.begin(),
-                                  graph_params.decode_capture_batch_sizes.end());
-        }
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
@@ -423,6 +437,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                              && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
+        graph_params.is_mtp_draft_update =
+            params.sp_config.type != SP_TYPE_NONE && params.model_id != 0 && is_prefill_cuda_graph_mode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
@@ -461,6 +477,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
+    chunk_prefill_token_budget_ = queryChunkPrefillTokenBudget();
 
     cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 

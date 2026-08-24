@@ -610,6 +610,30 @@ class FlashInferDecodeParamsTest(TestCase):
         impl.fmha_params.fill_decode_cuda_graph_params.assert_not_called()
         impl.fmha_impl.plan.assert_not_called()
 
+    def test_mla_mtp_draft_update_replay_keeps_generic_planner(self) -> None:
+        impl = object.__new__(MlaFlashInferDecodeImpl)
+        impl.fmha_params = mock.Mock()
+        impl.fmha_impl = mock.Mock()
+        impl.seq_size_per_block = 64
+        impl.prepare = mock.Mock()
+        inputs = SimpleNamespace(
+            is_target_verify=False,
+            is_mtp_draft_update=True,
+            sequence_lengths_plus_1_d=torch.ones(
+                1, dtype=torch.int32, device="cuda"
+            ),
+            sequence_lengths_host=torch.zeros(1, dtype=torch.int32),
+            kv_cache_kernel_block_id_device=torch.zeros(
+                (1, 4), dtype=torch.int32, device="cuda"
+            ),
+        )
+
+        impl.prepare_cuda_graph(inputs)
+
+        impl.prepare.assert_called_once_with(inputs, forbid_realloc=True)
+        impl.fmha_params.fill_decode_cuda_graph_params.assert_not_called()
+        impl.fmha_impl.plan.assert_not_called()
+
     def test_mla_q1_cuda_graph_attention_matches_eager_across_live_metadata(
         self,
     ) -> None:

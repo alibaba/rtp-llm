@@ -270,6 +270,16 @@ struct PyModelInitResources {
     int64_t                max_decode_graph_batch_size = 1;
 };
 
+// Optional per-forward incremental publication plan. The tensors are CPU
+// mirrors indexed by the context-batch row. FULL cache groups publish the
+// half-open logical-block range [begin, end); LINEAR groups publish only
+// rows whose terminal flag is true.
+struct PyCacheStorePublishPlan {
+    torch::Tensor begin_block_host;
+    torch::Tensor end_block_host;
+    torch::Tensor terminal_host;
+};
+
 struct PyCacheStoreInputs {
     size_t                   context_batch_size = 0;
     size_t                   decoder_batch_size = 0;
@@ -300,16 +310,15 @@ struct PyCacheStoreInputs {
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
     int cp_size = 1;
     int cp_rank = 0;
-};
 
-// Optional per-forward incremental publication plan.  The tensors are CPU
-// mirrors indexed by the original context-batch row.  FULL cache groups
-// publish the half-open logical-block range [begin, end); LINEAR groups only
-// publish their final state for rows whose terminal flag is true.
-struct PyCacheStorePublishPlan {
-    torch::Tensor begin_block_host;
-    torch::Tensor end_block_host;
-    torch::Tensor terminal_host;
+    // Chunked Prefill publishes only the blocks introduced by the current
+    // chunk. Non-chunked hybrid FULL groups preserve the legacy behavior of
+    // publishing from block zero.
+    bool cache_store_full_from_begin = true;
+
+    // Default plan for model-internal CacheStore call sites. An explicit plan
+    // passed by a Python publisher takes precedence.
+    std::optional<PyCacheStorePublishPlan> publish_plan;
 };
 
 struct PyPrefillCudaGaphCopyParams {
@@ -335,6 +344,8 @@ struct PyAttentionInputs {
     // Model-scoped fixed-address backing storage used while constructing
     // TokenSpeed MLA implementations for CUDA graph capture/replay.
     torch::Tensor cuda_graph_fmha_workspace;
+    bool is_mtp_draft_update{false};
+    bool is_prefill_chunk{false};
     // True for the synthetic stream used to keep DP/EP collectives aligned.
     // Python models must not read or write request KV state for this stream.
     bool          is_fake_stream{false};

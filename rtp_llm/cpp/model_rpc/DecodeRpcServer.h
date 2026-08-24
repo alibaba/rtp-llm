@@ -8,6 +8,8 @@
 
 namespace rtp_llm {
 
+struct CacheLayerLayout;
+
 class DecodeRpcServer: public RemoteRpcServer {
 public:
     DecodeRpcServer() {}

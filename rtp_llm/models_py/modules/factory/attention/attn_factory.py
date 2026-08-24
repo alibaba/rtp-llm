@@ -34,14 +34,24 @@ def get_mla_impl(
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
 ) -> MlaImplBase:
+    # Keep the runtime metadata in sync with the implementation mode.  CUDA
+    # graph construction performs ordinary-stream warmup forwards before the
+    # actual capture; model code must still recognize those forwards as graph
+    # mode so it reserves fixed-address metadata at full graph capacity.
+    # ``get_fmha_impl`` already provides this contract for MHA.
+    attn_inputs.is_cuda_graph = is_cuda_graph
 
     is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
-    # Target verify is represented as a multi-token prefill-shaped batch, but
-    # it reads and updates the paged decode cache.  Select a decode MLA
-    # implementation, matching the model's forward_decode dispatch.
+    is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
+    # Target verify and the post-rejection MTP draft KV update are multi-token
+    # prefill-shaped batches that read and update the paged decode cache.
+    # Select a decode MLA implementation for both, matching the model's
+    # forward_decode dispatch.  Routing the draft update through dense
+    # FlashMLA prefill would gather and expand the whole reused prefix KV,
+    # OOMing on long contexts.
     mla_impls = (
         PREFILL_MLA_IMPS
-        if attn_inputs.is_prefill and not is_target_verify
+        if attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
         else DECODE_MLA_IMPS
     )
     for impl in mla_impls:
