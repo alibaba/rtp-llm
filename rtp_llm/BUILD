@@ -593,6 +593,19 @@ py_library(
     ]
 )
 
+# Hermetic development entry point. Running the source file directly leaks the
+# caller's user-site packages into sys.path; this target executes with Bazel's
+# declared runfiles instead.
+py_binary(
+    name = "start_server_bin",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    deps = [
+        ":rtp_llm_package_libs",
+        "@rtp_deps//:extension_lib",
+    ],
+)
+
 py_package(
     name = "rtp_llm_frontend_package",
     deps = [
