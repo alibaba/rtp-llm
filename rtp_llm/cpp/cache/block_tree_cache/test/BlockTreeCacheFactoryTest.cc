@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -1552,8 +1553,8 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
-    const auto config    = makeHybridConfig(/*independent_pools=*/false);
-    auto       allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
+    const auto    config    = makeHybridConfig(/*independent_pools=*/false);
+    auto          allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_disk_cache  = true;
     kv_cache_config.disk_cache_size_mb = 1;
@@ -1563,10 +1564,10 @@ TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheForReusableLinearGroupSet) {
 }
 
 TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsDisabledLinearReuse) {
-    const auto config = makeHybridConfig(/*independent_pools=*/false, /*disable_linear_reuse=*/true);
-    auto allocator    = initAllocator<HybridTypeKVCacheAllocator>(config);
+    const auto config    = makeHybridConfig(/*independent_pools=*/false, /*disable_linear_reuse=*/true);
+    auto       allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_disabled_linear_l3");
-    KVCacheConfig kv_cache_config;
+    KVCacheConfig                            kv_cache_config;
     kv_cache_config.enable_disk_cache      = true;
     kv_cache_config.disk_cache_size_mb     = 1;
     kv_cache_config.disk_cache_paths       = disk_dir.path;
@@ -1646,15 +1647,53 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
     }
+
+    KVCacheConfig scan_enabled;
+    scan_enabled.block_tree_full_prefix_scan_interval_ms = 5000;
+
+    // Cache owner: tp_rank 0 of a non-FFN service, on a non-zero world/dp rank so the gate
+    // cannot be mistaken for world_rank == 0.
     {
-        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
-        KVCacheConfig kv_cache_config;
-        kv_cache_config.block_tree_full_prefix_scan_interval_ms = 5000;
-        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+        ParallelismConfig owner;
+        owner.tp_size    = 2;
+        owner.dp_size    = 2;
+        owner.world_size = 4;
+        owner.world_rank = 2;
+        owner.dp_rank    = 1;
+        owner.tp_rank    = 0;
+
+        auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto cache     = createBlockTreeCache(config, scan_enabled, allocator, owner);
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 5000);
     }
-    for (const int64_t invalid_interval : {int64_t{-1}, int64_t{999}}) {
+    // TP follower: the tree is a replica, so the scanner stays off.
+    {
+        ParallelismConfig follower;
+        follower.tp_size    = 2;
+        follower.world_size = 2;
+        follower.world_rank = 1;
+        follower.tp_rank    = 1;
+
+        auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto cache     = createBlockTreeCache(config, scan_enabled, allocator, follower);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
+    }
+    // FFN service: it does not schedule normal requests, so it owns no mutable tree.
+    {
+        ParallelismConfig ffn;
+        ffn.tp_rank                                         = 0;
+        ffn.ffn_disaggregate_config.enable_ffn_disaggregate = true;
+        ffn.ffn_disaggregate_config.is_ffn_rank             = true;
+
+        auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto cache     = createBlockTreeCache(config, scan_enabled, allocator, ffn);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
+    }
+
+    for (const int64_t invalid_interval : {int64_t{-1}, int64_t{999}, std::numeric_limits<int64_t>::max()}) {
         auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
         kv_cache_config.block_tree_full_prefix_scan_interval_ms = invalid_interval;

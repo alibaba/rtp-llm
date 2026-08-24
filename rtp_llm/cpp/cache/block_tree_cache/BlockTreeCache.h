@@ -8,7 +8,6 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
@@ -20,6 +19,7 @@ namespace rtp_llm {
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
+class FullPrefixInvariantScanner;
 struct CacheStats {
     size_t tree_node_count{0};
     size_t device_heap_total_size{0};
@@ -63,10 +63,8 @@ struct BlockTreeCacheConfig {
     size_t max_descriptors_per_transfer_batch{64};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
-    // Batch size and detail cap are scanner-internal constants; see FullPrefixInvariantScanner.h.
+    // The factory zeroes this on ranks that do not own a mutable BlockTree.
     int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
-    int     world_rank{0};
-    int     local_rank{0};
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {

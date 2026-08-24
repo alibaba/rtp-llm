@@ -3,8 +3,6 @@ load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 cc_test = cc_test_wrapper
 
-# No -fno-access-control: this test asserts only the public detector, stats and
-# lifecycle contract.
 test_copts = copts()
 
 cc_import(
@@ -21,6 +19,7 @@ cuda13_torch_link_deps = select({
 
 test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache",
+    "//rtp_llm/cpp/testing:test_log_capture",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
