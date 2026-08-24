@@ -7,7 +7,6 @@
 #include <limits>
 #include <optional>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -218,46 +217,60 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
     return pool->init() ? pool : nullptr;
 }
 
-struct AggregationPlan {
-    std::vector<std::vector<int>> members;
-};
-
-bool aggregationCompatible(const CacheConfig& cache_config, int lhs_group_id, int rhs_group_id) {
-    const auto& lhs = cache_config.topology().groupById(static_cast<size_t>(lhs_group_id));
-    const auto& rhs = cache_config.topology().groupById(static_cast<size_t>(rhs_group_id));
-    if (!CacheConfig::samePolicy(lhs.policy, rhs.policy) || lhs.block_num != rhs.block_num
-        || lhs.local_kv_head_num != rhs.local_kv_head_num || lhs.seq_size_per_block != rhs.seq_size_per_block
-        || lhs.kernel_seq_size_per_block != rhs.kernel_seq_size_per_block
-        || lhs.kv_block_stride_bytes != rhs.kv_block_stride_bytes
-        || lhs.kv_scale_stride_bytes != rhs.kv_scale_stride_bytes || (lhs.spec == nullptr) != (rhs.spec == nullptr)
-        || (lhs.spec != nullptr && lhs.spec->type != rhs.spec->type)) {
+bool groupSetSemanticsCompatible(const CacheConfig& cache_config, int lhs_group_id, int rhs_group_id) {
+    const GroupBase& lhs = cache_config.topology().groupById(static_cast<size_t>(lhs_group_id));
+    const GroupBase& rhs = cache_config.topology().groupById(static_cast<size_t>(rhs_group_id));
+    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seq_size_per_block != rhs.seq_size_per_block
+        || lhs.policy.cp_mapping != rhs.policy.cp_mapping) {
         return false;
     }
     if (lhs.policy.group_type == CacheGroupType::SWA) {
-        return slidingWindowSize(lhs, static_cast<size_t>(lhs_group_id))
-               == slidingWindowSize(rhs, static_cast<size_t>(rhs_group_id));
+        if (slidingWindowSize(lhs, static_cast<size_t>(lhs_group_id))
+            != slidingWindowSize(rhs, static_cast<size_t>(rhs_group_id))) {
+            return false;
+        }
+    }
+    if (lhs.policy.group_type == CacheGroupType::SWA || lhs.policy.group_type == CacheGroupType::LINEAR) {
+        if (lhs.policy.active_tail_blocks != rhs.policy.active_tail_blocks) {
+            return false;
+        }
     }
     return true;
 }
 
-AggregationPlan buildAggregationPlan(const CacheConfig& cache_config) {
-    AggregationPlan plan;
+bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<int>>& group_members) {
+    group_members.clear();
     for (int group_id = 0; group_id < cache_config.groupNums(); ++group_id) {
-        const auto& group = cache_config.topology().groupById(static_cast<size_t>(group_id));
+        const GroupBase& group = cache_config.topology().groupById(static_cast<size_t>(group_id));
         if (!group.policy.enable_prefix_reuse) {
             continue;
         }
-        auto it = std::find_if(plan.members.begin(), plan.members.end(), [&](const std::vector<int>& members) {
-            return aggregationCompatible(cache_config, members.front(), group_id);
+
+        const CacheGroupType group_type = group.policy.group_type;
+        if (group_type != CacheGroupType::FULL && group_type != CacheGroupType::SWA
+            && group_type != CacheGroupType::LINEAR) {
+            RTP_LLM_LOG_ERROR("unsupported reusable cache group type for group_id=%d", group_id);
+            return false;
+        }
+
+        auto it = std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<int>& members) {
+            const GroupBase& first = cache_config.topology().groupById(static_cast<size_t>(members.front()));
+            return first.policy.group_type == group.policy.group_type;
         });
-        if (it == plan.members.end()) {
-            plan.members.push_back({group_id});
+        if (it == group_members.end()) {
+            group_members.push_back({group_id});
         } else {
+            if (!groupSetSemanticsCompatible(cache_config, it->front(), group_id)) {
+                RTP_LLM_LOG_ERROR(
+                    "incompatible BlockTree reuse coordinates for group_id=%d and group_id=%d", it->front(), group_id);
+                return false;
+            }
             it->push_back(group_id);
         }
     }
-    return plan;
+    return true;
 }
+
 size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::vector<int>& members) {
     size_t payload_bytes = 0;
     for (int group_id : members) {
@@ -378,27 +391,15 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         return nullptr;
     }
 
-    std::vector<GroupSetPtr>   group_sets;
-    const auto                 plan = buildAggregationPlan(cache_config);
-    std::unordered_set<size_t> planned_group_ids;
-    for (const auto& members : plan.members) {
-        for (int group_id : members) {
-            RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && planned_group_ids.emplace(static_cast<size_t>(group_id)).second,
-                                    "BlockTreeCache aggregation plan contains invalid or duplicate group_id=%d",
-                                    group_id);
-        }
-    }
-    for (size_t group_id = 0; group_id < cache_config.topology().groups().size(); ++group_id) {
-        const bool reusable = cache_config.topology().groupById(group_id).policy.enable_prefix_reuse;
-        RTP_LLM_CHECK_WITH_INFO(reusable == (planned_group_ids.find(group_id) != planned_group_ids.end()),
-                                "BlockTreeCache aggregation plan coverage mismatch for group_id=%zu reusable=%d",
-                                group_id,
-                                static_cast<int>(reusable));
+    std::vector<GroupSetPtr>      group_sets;
+    std::vector<std::vector<int>> group_members;
+    if (!buildGroupMembers(cache_config, group_members)) {
+        return nullptr;
     }
     if (disk_enabled) {
-        for (const auto& members : plan.members) {
+        for (const std::vector<int>& members : group_members) {
             RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
-            const auto group_id = static_cast<size_t>(members.front());
+            const size_t group_id = static_cast<size_t>(members.front());
             if (cache_config.topology().groupById(group_id).policy.group_type == CacheGroupType::LINEAR) {
                 RTP_LLM_LOG_ERROR(
                     "disk cache does not support reusable LINEAR group sets, group_id=%zu", group_id);
@@ -408,9 +409,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
 
     std::vector<size_t> group_set_payload_bytes;
-    group_set_payload_bytes.reserve(plan.members.size());
+    group_set_payload_bytes.reserve(group_members.size());
     size_t combined_stride = 0;
-    for (const auto& members : plan.members) {
+    for (const std::vector<int>& members : group_members) {
         const size_t payload_bytes = computeGroupSetPayloadBytes(cache_config, members);
         group_set_payload_bytes.push_back(payload_bytes);
         const size_t stride = alignUp(payload_bytes, kPoolAlignment);
@@ -419,27 +420,29 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         combined_stride += stride;
     }
 
-    std::vector<std::shared_ptr<HostBlockPool>> host_pools(plan.members.size());
-    if (host_enabled && !plan.members.empty()) {
+    std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());
+    if (host_enabled && !group_members.empty()) {
         const size_t bytes  = static_cast<size_t>(kv_cache_config.host_cache_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
             RTP_LLM_LOG_ERROR("host budget is too small for one complete tree coordinate");
             return nullptr;
         }
-        for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
-            host_pools[group_set_id] = createHostPool("block_tree_host_g" + std::to_string(group_set_id),
-                                                      group_set_payload_bytes[group_set_id],
-                                                      usable,
-                                                      kv_cache_config.enable_host_cache_pinned);
+        for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
+            const std::vector<int>& members = group_members[group_set_id];
+            const GroupBase&        first   = cache_config.topology().groupById(static_cast<size_t>(members.front()));
+            const std::string       pool_name =
+                "block_tree_host_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
+            host_pools[group_set_id] = createHostPool(
+                pool_name, group_set_payload_bytes[group_set_id], usable, kv_cache_config.enable_host_cache_pinned);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }
         }
     }
 
-    std::vector<BlockTreeDiskBlockPoolPtr> disk_pools(plan.members.size());
-    if (disk_enabled && !plan.members.empty()) {
+    std::vector<BlockTreeDiskBlockPoolPtr> disk_pools(group_members.size());
+    if (disk_enabled && !group_members.empty()) {
         const size_t bytes  = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
@@ -451,10 +454,14 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         if (!guard) {
             return nullptr;
         }
-        for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
+        for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
+            const std::vector<int>& members = group_members[group_set_id];
+            const GroupBase&        first   = cache_config.topology().groupById(static_cast<size_t>(members.front()));
+            const std::string       pool_name =
+                "block_tree_disk_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
             disk_pools[group_set_id] = createDiskPool(kv_cache_config,
                                                       guard,
-                                                      "block_tree_disk_g" + std::to_string(group_set_id),
+                                                      pool_name,
                                                       group_set_payload_bytes[group_set_id],
                                                       usable,
                                                       parallelism_config.world_rank,
@@ -465,9 +472,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         }
     }
 
-    group_sets.reserve(plan.members.size());
-    for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
-        const auto&                     members = plan.members[group_set_id];
+    group_sets.reserve(group_members.size());
+    for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
+        const std::vector<int>&         members = group_members[group_set_id];
         std::vector<DeviceBlockPoolPtr> device_pools;
         std::vector<size_t>             group_ids;
         device_pools.reserve(members.size());
@@ -563,8 +570,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                    std::move(transfer_dispatcher),
                                                    std::move(task_pool));
     if (result->isRemoteCacheEnabled()) {
-        const auto storage_topology = cache_config.topologyPtr();
-        const auto resolver_pools   = group_pools;
+        const std::shared_ptr<const CacheTopology> storage_topology = cache_config.topologyPtr();
+        const std::vector<DeviceBlockPoolPtr>      resolver_pools   = group_pools;
         RTP_LLM_CHECK_WITH_INFO(result->storageBackend()->init(
                                     storage_topology,
                                     group_pools,

@@ -617,6 +617,7 @@ protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
         host_pool_ = makeHostPool(240, 4, true);
+        disk_pool_ = makeDiskPool(240, 4, temp_dir_.path);
         pools_     = {
             makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_multi_member_0"),
             makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_multi_member_1"),
@@ -627,45 +628,60 @@ protected:
             ASSERT_NE(blocks_.back(), NULL_BLOCK_IDX);
         }
 
-        auto group =
+        GroupSetPtr group =
             makeDeviceHostGroup(0,
                                 pools_,
                                 host_pool_,
-                                {makeGroupBase({0}, 64, 16), makeGroupBase({0}, 64, 16), makeGroupBase({0}, 64, 16)});
+                                {makeGroupBase({0}, 64, 16), makeGroupBase({0}, 64, 16), makeGroupBase({0}, 64, 16)},
+                                disk_pool_);
         engine_     = makeEngine({group});
         host_block_ = poolMalloc(*host_pool_);
+        disk_block_ = poolMalloc(*disk_pool_);
         ASSERT_NE(host_block_, NULL_BLOCK_IDX);
+        ASSERT_NE(disk_block_, NULL_BLOCK_IDX);
     }
 
+    TempDirGuard                                temp_dir_{"per_rank_transfer_engine_multi_member"};
     std::shared_ptr<HostBlockPool>              host_pool_;
+    BlockTreeDiskBlockPoolPtr                   disk_pool_;
     std::vector<DeviceBlockPoolPtr>             pools_;
     std::vector<BlockIdxType>                   blocks_;
     std::shared_ptr<PerRankBlockTransferEngine> engine_;
     BlockIdxType                                host_block_{NULL_BLOCK_IDX};
+    BlockIdxType                                disk_block_{NULL_BLOCK_IDX};
 };
 
-TEST_F(PerRankBlockTransferEngineMultiMemberTest, CompleteMultiMemberRoundTripPreservesOffsets) {
+TEST_F(PerRankBlockTransferEngineMultiMemberTest, CompleteMultiMemberThreeTierRoundTripPreservesOffsets) {
     fillDeviceLayer(pools_[0], 0, blocks_[0], {0xA1, 0xA2});
     fillDeviceLayer(pools_[1], 0, blocks_[1], {0xB1, 0xB2});
     fillDeviceLayer(pools_[2], 0, blocks_[2], {0xC1, 0xC2});
     auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_).addr);
     std::memset(host_data, 0xFF, 240);
 
+    const auto expect_host_payload = [host_data]() {
+        for (size_t i = 0; i < 64; ++i)
+            EXPECT_EQ(host_data[i], 0xA1);
+        for (size_t i = 64; i < 80; ++i)
+            EXPECT_EQ(host_data[i], 0xA2);
+        for (size_t i = 80; i < 144; ++i)
+            EXPECT_EQ(host_data[i], 0xB1);
+        for (size_t i = 144; i < 160; ++i)
+            EXPECT_EQ(host_data[i], 0xB2);
+        for (size_t i = 160; i < 224; ++i)
+            EXPECT_EQ(host_data[i], 0xC1);
+        for (size_t i = 224; i < 240; ++i)
+            EXPECT_EQ(host_data[i], 0xC2);
+    };
+
     expectStatus(engine_,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, {blocks_[0], blocks_[1], blocks_[2]}, host_block_),
                  TransferStatus::OK);
-    for (size_t i = 0; i < 64; ++i)
-        EXPECT_EQ(host_data[i], 0xA1);
-    for (size_t i = 64; i < 80; ++i)
-        EXPECT_EQ(host_data[i], 0xA2);
-    for (size_t i = 80; i < 144; ++i)
-        EXPECT_EQ(host_data[i], 0xB1);
-    for (size_t i = 144; i < 160; ++i)
-        EXPECT_EQ(host_data[i], 0xB2);
-    for (size_t i = 160; i < 224; ++i)
-        EXPECT_EQ(host_data[i], 0xC1);
-    for (size_t i = 224; i < 240; ++i)
-        EXPECT_EQ(host_data[i], 0xC2);
+    expect_host_payload();
+
+    expectStatus(engine_, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block_, disk_block_), TransferStatus::OK);
+    std::memset(host_data, 0, 240);
+    expectStatus(engine_, makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block_, disk_block_), TransferStatus::OK);
+    expect_host_payload();
 
     fillDeviceLayer(pools_[0], 0, blocks_[0], {0x00, 0x00});
     fillDeviceLayer(pools_[1], 0, blocks_[1], {0x00, 0x00});

@@ -99,6 +99,7 @@ public:
     void reportEvictionFinished(const EvictionTask&             task,
                                 const EvictionTaskResult&       task_result,
                                 const std::vector<GroupSetPtr>& group_sets) const;
+    void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
     void    reportTransferFinished(CacheTransferOperation                  operation,
@@ -121,6 +122,10 @@ private:
                                       const std::vector<GroupSetPtr>& group_sets,
                                       int64_t                         finish_time_us,
                                       bool                            report_candidate_times) const;
+    void       reportEvictionTrigger(Tier           source_tier,
+                                     CacheGroupType group_type,
+                                     const char*    trigger_type,
+                                     int64_t        count) const;
     void       reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
     void       accumulateTransferBytes(const TransferDescriptor& desc,
                                        const GroupSetPtr&        group_set,

@@ -157,6 +157,7 @@ std::vector<BlockTreeEvictableMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
                                                                 const BlockTreeEvictor&         evictor) const {
     std::array<std::array<size_t, kMetricGroupTypes.size()>, kMetricTiers.size()> candidate_counts{};
+    std::array<bool, kMetricGroupTypes.size()>                                    group_type_present{};
     for (const GroupSetPtr& group_set : group_sets) {
         if (group_set == nullptr) {
             continue;
@@ -165,6 +166,7 @@ BlockTreeCacheMetricsReporter::collectEvictableMetricsSnapshots(const std::vecto
         if (group_type_index < 0) {
             continue;
         }
+        group_type_present[static_cast<size_t>(group_type_index)] = true;
         for (size_t tier_index = 0; tier_index < kMetricTiers.size(); ++tier_index) {
             candidate_counts[tier_index][static_cast<size_t>(group_type_index)] +=
                 evictor.candidateCount(group_set->groupSetId(), kMetricTiers[tier_index]);
@@ -175,9 +177,12 @@ BlockTreeCacheMetricsReporter::collectEvictableMetricsSnapshots(const std::vecto
     snapshots.reserve(kMetricTiers.size() * kMetricGroupTypes.size());
     for (size_t tier_index = 0; tier_index < kMetricTiers.size(); ++tier_index) {
         for (size_t group_type_index = 0; group_type_index < kMetricGroupTypes.size(); ++group_type_index) {
+            if (!group_type_present[group_type_index]) {
+                continue;
+            }
             BlockTreeEvictableMetricsSnapshot snapshot;
-            snapshot.tier             = kMetricTiers[tier_index];
-            snapshot.group_type       = kMetricGroupTypes[group_type_index];
+            snapshot.tier                      = kMetricTiers[tier_index];
+            snapshot.group_type                = kMetricGroupTypes[group_type_index];
             snapshot.evictable_candidate_count = candidate_counts[tier_index][group_type_index];
             snapshots.push_back(snapshot);
         }
@@ -192,12 +197,36 @@ void BlockTreeCacheMetricsReporter::reportEvictableCandidateCount(
     }
     for (const BlockTreeEvictableMetricsSnapshot& snapshot : snapshots) {
         RtpLLMCacheEvictionMetricsCollector collector;
-        collector.source_tier           = tierName(snapshot.tier);
-        collector.group_type            = metricCacheGroupTypeName(snapshot.group_type);
+        collector.source_tier               = tierName(snapshot.tier);
+        collector.group_type                = metricCacheGroupTypeName(snapshot.group_type);
         collector.evictable_candidate_count = static_cast<int64_t>(snapshot.evictable_candidate_count);
-        collector.report_evictable      = true;
+        collector.report_evictable          = true;
         metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
+        reportEvictionTrigger(snapshot.tier, snapshot.group_type, "watermark", 0);
+        reportEvictionTrigger(snapshot.tier, snapshot.group_type, "force_drop", 0);
     }
+}
+
+void BlockTreeCacheMetricsReporter::reportEvictionTriggered(Tier           source_tier,
+                                                            CacheGroupType group_type,
+                                                            bool           force_drop) const {
+    reportEvictionTrigger(source_tier, group_type, force_drop ? "force_drop" : "watermark", 1);
+}
+
+void BlockTreeCacheMetricsReporter::reportEvictionTrigger(Tier           source_tier,
+                                                          CacheGroupType group_type,
+                                                          const char*    trigger_type,
+                                                          int64_t        count) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheEvictionMetricsCollector collector;
+    collector.source_tier             = tierName(source_tier);
+    collector.group_type              = metricCacheGroupTypeName(group_type);
+    collector.trigger_type            = trigger_type;
+    collector.eviction_trigger_count  = count;
+    collector.report_eviction_trigger = true;
+    metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
 
 std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeCacheMetricsReporter::collectCacheReuseTimeMetrics(

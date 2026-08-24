@@ -110,12 +110,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
         EXPECT_EQ(descriptor.source_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);
-        const auto& group_set = cache->groupSets()[descriptor.group_set_id];
-        ASSERT_EQ(group_set->groupIds().size(), 1u);
-        const size_t group_id = group_set->groupIds().front();
-        const auto   position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, static_cast<int>(group_id), 0);
-        ASSERT_TRUE(position.has_value());
-        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), (BlockIndicesType{seed.blocks_by_group[group_id][*position]}));
+        const GroupSetPtr& group_set = cache->groupSets()[descriptor.group_set_id];
+        BlockIndicesType   expected_blocks;
+        for (const size_t group_id : group_set->groupIds()) {
+            const std::optional<size_t> position =
+                cpCanonicalBlockPosition(*cp_mapper, cache_config_, static_cast<int>(group_id), 0);
+            ASSERT_TRUE(position.has_value());
+            expected_blocks.push_back(seed.blocks_by_group[group_id][*position]);
+        }
+        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), expected_blocks);
         EXPECT_EQ(descriptor.singleBlockAt(Tier::HOST), host_sources[descriptor.group_set_id]);
         ++device_to_host[descriptor.group_set_id];
     }
@@ -194,7 +197,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
 
     auto maybe_loading = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_loading.has_value());
-    std::vector<BlockIdxType> load_targets(cache->groupSets().size(), NULL_BLOCK_IDX);
+    std::vector<BlockIndicesType> load_targets(cache->groupSets().size());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto& group_set = cache->groupSets()[group_set_id];
         const auto& resource  = (*maybe_loading)[0][group_set_id];
@@ -203,17 +206,19 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         EXPECT_EQ(resource.disk_slot, disk_sources[group_set_id]);
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 2u);
-        ASSERT_EQ(group_set->groupIds().size(), 1u);
-        const int  group_id = static_cast<int>(group_set->groupIds().front());
-        const auto position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, group_id, 0);
-        ASSERT_TRUE(position.has_value());
-        const auto& blocks = load_resource->blocks(0, group_id);
-        ASSERT_LT(*position, blocks.size());
-        ASSERT_FALSE(isNullBlockIdx(blocks[*position]));
-        load_targets[group_set_id] = blocks[*position];
-        EXPECT_EQ(group_set->devicePools().front()->refCount(blocks[*position]), 2u);
-        ASSERT_TRUE(fillGroupBlockPayload(
-            manager_, cache_config_, group_id, blocks[*position], /*path_index=*/0, /*poison=*/true));
+        ASSERT_EQ(group_set->groupIds().size(), group_set->devicePools().size());
+        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
+            const int                   group_id = static_cast<int>(group_set->groupIds()[member_index]);
+            const std::optional<size_t> position = cpCanonicalBlockPosition(*cp_mapper, cache_config_, group_id, 0);
+            ASSERT_TRUE(position.has_value());
+            const BlockIndicesType& blocks = load_resource->blocks(0, group_id);
+            ASSERT_LT(*position, blocks.size());
+            ASSERT_FALSE(isNullBlockIdx(blocks[*position]));
+            load_targets[group_set_id].push_back(blocks[*position]);
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(blocks[*position]), 2u);
+            ASSERT_TRUE(fillGroupBlockPayload(
+                manager_, cache_config_, group_id, blocks[*position], /*path_index=*/0, /*poison=*/true));
+        }
     }
 
     pausable_engine->release();
@@ -232,7 +237,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(descriptor.source_tier, Tier::DISK);
         EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.singleBlockAt(Tier::DISK), disk_sources[descriptor.group_set_id]);
-        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), (BlockIndicesType{load_targets[descriptor.group_set_id]}));
+        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), load_targets[descriptor.group_set_id]);
         ++disk_to_device[descriptor.group_set_id];
     }
     for (size_t group_set_id = 0; group_set_id < disk_to_device.size(); ++group_set_id) {
@@ -247,9 +252,12 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
-        EXPECT_EQ(resource.device_blocks, (BlockIndicesType{load_targets[group_set_id]}));
+        EXPECT_EQ(resource.device_blocks, load_targets[group_set_id]);
         EXPECT_FALSE(group_set->diskPool()->isAllocated(disk_sources[group_set_id]));
-        EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 2u);
+        ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(load_targets[group_set_id][member_index]), 2u);
+        }
     }
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(requestReusesExpectedCpCanonicalPath(
@@ -528,11 +536,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         const auto& group_set   = cache->groupSets()[group_set_id];
         const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
         const size_t reuse_begin = 3 - reuse_count;
-        const int    group_id    = static_cast<int>(group_set->groupIds().front());
-        const auto&  blocks      = prefill_stream->streamCacheResource().kvCache().blocks(0, group_id);
-        for (size_t path = reuse_begin; path < 3; ++path) {
-            ASSERT_LT(path, blocks.size());
-            EXPECT_FALSE(isNullBlockIdx(blocks[path]));
+        for (const size_t raw_group_id : group_set->groupIds()) {
+            const BlockIndicesType& blocks =
+                prefill_stream->streamCacheResource().kvCache().blocks(0, static_cast<int>(raw_group_id));
+            for (size_t path = reuse_begin; path < 3; ++path) {
+                ASSERT_LT(path, blocks.size());
+                EXPECT_FALSE(isNullBlockIdx(blocks[path]));
+            }
         }
     }
 
@@ -589,9 +599,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         const size_t reuse_begin          = 3 - reuse_count;
         expected_host_loads[group_set_id] = reuse_begin <= 1 ? 1u : 0u;
         expected_load_descriptors += expected_host_loads[group_set_id] + expected_disk_loads[group_set_id];
-        const int   group_id = static_cast<int>(group_set->groupIds().front());
-        const auto& blocks   = load_resource->blocks(0, group_id);
-        ASSERT_GE(blocks.size(), 3u);
         for (size_t path = 1; path < 3; ++path) {
             const bool  reused = path >= reuse_begin;
             const auto& state  = (*loading)[path][group_set_id];
@@ -602,8 +609,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 1u);
                 continue;
             }
-            ASSERT_FALSE(isNullBlockIdx(blocks[path]));
-            ASSERT_TRUE(fillGroupBlockPayload(manager_, cache_config_, group_id, blocks[path], path, /*poison=*/true));
+            for (const size_t raw_group_id : group_set->groupIds()) {
+                const int               group_id = static_cast<int>(raw_group_id);
+                const BlockIndicesType& blocks   = load_resource->blocks(0, group_id);
+                ASSERT_GE(blocks.size(), 3u);
+                ASSERT_FALSE(isNullBlockIdx(blocks[path]));
+                ASSERT_TRUE(
+                    fillGroupBlockPayload(manager_, cache_config_, group_id, blocks[path], path, /*poison=*/true));
+            }
         }
     }
 
@@ -640,16 +653,18 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         const size_t reuse_begin = 3 - reuse_count;
         EXPECT_EQ(host_loads[group_set_id], expected_host_loads[group_set_id]);
         EXPECT_EQ(disk_loads[group_set_id], expected_disk_loads[group_set_id]);
-        const int group_id = static_cast<int>(group_set->groupIds().front());
         for (size_t path = 0; path < 3; ++path) {
             const auto& state = (*loaded)[path][group_set_id];
             EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
             const Tier expected = path >= reuse_begin || path == 0 ? Tier::DEVICE : Tier::HOST;
             EXPECT_EQ(state.getTopTier(), expected) << "path=" << path << " group_set=" << group_set_id;
             if (expected == Tier::DEVICE) {
-                ASSERT_EQ(state.device_blocks.size(), 1u);
-                EXPECT_TRUE(
-                    groupBlockPayloadMatches(manager_, cache_config_, group_id, state.device_blocks.front(), path));
+                ASSERT_EQ(state.device_blocks.size(), group_set->groupIds().size());
+                for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
+                    const int group_id = static_cast<int>(group_set->groupIds()[member_index]);
+                    EXPECT_TRUE(groupBlockPayloadMatches(
+                        manager_, cache_config_, group_id, state.device_blocks[member_index], path));
+                }
             }
         }
     }
@@ -685,9 +700,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
 
     std::vector<std::shared_ptr<IBlockPool>> device_pools;
     std::vector<std::shared_ptr<IBlockPool>> host_pools;
-    for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->devicePools().size(), 1u);
-        device_pools.push_back(group_set->devicePools().front());
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        appendDevicePools(group_set, device_pools);
         host_pools.push_back(group_set->hostPool());
     }
     const auto device_ratio = zeroTargetWatermarkRatio(device_pools);
@@ -792,13 +806,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         ASSERT_LE(reuse_count, static_cast<size_t>(logical_blocks));
         expected_load_descriptors += reuse_count;
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;
-        const int    group_id    = static_cast<int>(group_set->groupIds().front());
-        const auto&  blocks      = resource->blocks(0, group_id);
-        ASSERT_EQ(blocks.size(), static_cast<size_t>(logical_blocks + 1));
-        for (size_t path_index = reuse_begin; path_index < static_cast<size_t>(logical_blocks); ++path_index) {
-            ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));
-            ASSERT_TRUE(fillGroupBlockPayload(
-                manager_, cache_config_, group_id, blocks[path_index], path_index, /*poison=*/true));
+        for (const size_t raw_group_id : group_set->groupIds()) {
+            const int               group_id = static_cast<int>(raw_group_id);
+            const BlockIndicesType& blocks   = resource->blocks(0, group_id);
+            ASSERT_EQ(blocks.size(), static_cast<size_t>(logical_blocks + 1));
+            for (size_t path_index = reuse_begin; path_index < static_cast<size_t>(logical_blocks); ++path_index) {
+                ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));
+                ASSERT_TRUE(fillGroupBlockPayload(
+                    manager_, cache_config_, group_id, blocks[path_index], path_index, /*poison=*/true));
+            }
         }
     }
     EXPECT_GT(expected_load_descriptors, staging_block_count);
