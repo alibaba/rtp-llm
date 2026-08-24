@@ -1,7 +1,9 @@
 package org.flexlb.state.internal.decode;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
@@ -23,6 +25,8 @@ import org.flexlb.state.internal.TombstoneStore;
 public final class DecodeSideStore {
 
     private final ConcurrentHashMap<Long, DecodeRequestState> entries = new ConcurrentHashMap<>();
+    /** byEndpoint 二级索引（M4 janitor F2/TTL 扫描结构）：endpointId → 名下条目。 */
+    private final ConcurrentHashMap<Integer, ConcurrentHashMap<Long, DecodeRequestState>> byEndpoint = new ConcurrentHashMap<>();
     private final DecodeCounters counters = new DecodeCounters();
     private final TombstoneStore tombstones;
     private final int snapshotInterval;
@@ -54,6 +58,7 @@ public final class DecodeSideStore {
         if (entries.putIfAbsent(requestId, fresh) != null) {
             return ReserveResult.DUPLICATE_ALIVE;
         }
+        indexEndpoint(fresh); // reserve 即绑定——入 byEndpoint 索引
         counters.onReserved(expectedKv);
         return ReserveResult.OK;
     }
@@ -120,6 +125,7 @@ public final class DecodeSideStore {
             return false;
         }
         entries.remove(entry.requestId(), entry);
+        unindexEndpoint(entry);
         synchronized (entry) {
             counters.onRemoved(entry);
         }
@@ -138,6 +144,7 @@ public final class DecodeSideStore {
                 return false;
             }
             entries.remove(entry.requestId(), entry);
+            unindexEndpoint(entry);
             counters.onRemoved(entry);
         }
         tickPublish();
@@ -160,6 +167,7 @@ public final class DecodeSideStore {
         if (prev != null) {
             return prev;
         }
+        indexEndpoint(adopted); // 收养即绑定观察端点——入 byEndpoint 索引
         // 单次记账：收养相位人口 + 引擎事实 KV + engineOwned（+ confirmed 若 ≥ D_LOADING）。
         counters.onAdopted(adoptedPhase, adopted.kvTokensReported(), true);
         tickPublish();
@@ -184,6 +192,74 @@ public final class DecodeSideStore {
     /** 活跃条目快照视图（遍历用）。 */
     public List<DecodeRequestState> entriesSnapshot() {
         return List.copyOf(entries.values());
+    }
+
+    // ---- byEndpoint 二级索引（M4 janitor 扫描结构）----
+
+    /**
+     * 端点索引登记（幂等 put；重绑后旧桶残留由 {@link #entriesByEndpoint} 自愈清除）。
+     * 调用点：reserve / adoptEngineOwned（store 内部）与 onDispatched 重绑后（StateLedger 门面）。
+     * 判据是 {@code isBound()}（UNBOUND 三元组哨兵）——endpointId 本身可为负
+     * （如 flexlb-sync 影子桥的 ipPort 哈希），不得用符号判定。
+     */
+    public void indexEndpoint(DecodeRequestState entry) {
+        if (!entry.isBound()) {
+            return;
+        }
+        GenerationTriple binding = entry.binding();
+        byEndpoint.computeIfAbsent(binding.endpointId(), k -> new ConcurrentHashMap<>())
+                .put(entry.requestId(), entry);
+    }
+
+    /** 端点索引移除（终局/释放时；UNBOUND 条目 no-op）。 */
+    public void unindexEndpoint(DecodeRequestState entry) {
+        if (!entry.isBound()) {
+            return;
+        }
+        GenerationTriple binding = entry.binding();
+        ConcurrentHashMap<Long, DecodeRequestState> bucket = byEndpoint.get(binding.endpointId());
+        if (bucket != null) {
+            bucket.remove(entry.requestId(), entry);
+            if (bucket.isEmpty()) {
+                byEndpoint.remove(binding.endpointId(), bucket);
+            }
+        }
+    }
+
+    /**
+     * 该端点名下活跃条目视图（量级 = 每 endpoint 活跃条目数，非全账本扫描）。
+     * 自愈：DISPATCHED 前重绑的旧桶残留顺手清除。
+     */
+    public List<DecodeRequestState> entriesByEndpoint(int endpointId) {
+        ConcurrentHashMap<Long, DecodeRequestState> bucket = byEndpoint.get(endpointId);
+        if (bucket == null) {
+            return List.of();
+        }
+        List<DecodeRequestState> out = new ArrayList<>(bucket.size());
+        for (DecodeRequestState e : bucket.values()) {
+            if (e.isBound() && e.binding().endpointId() == endpointId) {
+                out.add(e);
+            } else {
+                bucket.remove(e.requestId(), e); // 重绑后旧桶残留自愈
+            }
+        }
+        return out;
+    }
+
+    /** 未绑定条目视图（D 侧 reserve/adopt 均即绑定——恒空，对称提供）。 */
+    public List<DecodeRequestState> unboundEntries() {
+        List<DecodeRequestState> out = new ArrayList<>();
+        for (DecodeRequestState e : entries.values()) {
+            if (!e.isBound()) {
+                out.add(e);
+            }
+        }
+        return out;
+    }
+
+    /** 已登记端点集合快照（janitor 轮转游标用）。 */
+    public Set<Integer> trackedEndpointIds() {
+        return Set.copyOf(byEndpoint.keySet());
     }
 
     public long size() {
@@ -217,6 +293,7 @@ public final class DecodeSideStore {
     /** reset（rebuild 用；单线程调用）。 */
     public void reset() {
         entries.clear();
+        byEndpoint.clear();
         counters.reset();
         transitionTick.set(0);
         overtakenEvents.reset();

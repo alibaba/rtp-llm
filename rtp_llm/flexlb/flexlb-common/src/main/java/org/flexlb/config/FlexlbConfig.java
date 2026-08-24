@@ -546,6 +546,51 @@ public class FlexlbConfig {
     private boolean flexlbStateV2ShadowEnabled = false;
 
     /**
+     * FlexLB state v2 evidence-channel (F2) absence threshold: a ledger entry
+     * that was engine-confirmed at least once (non-negative lastSeenRound) and
+     * has been absent for more than this many complete observation rounds is
+     * presumed dead and settled as VANISHED by the LedgerJanitor. Guard-rail 1
+     * (debounce) is satisfied naturally by this threshold.
+     *
+     * <p>Only complete ticks ({@code detailCount == running.size()}, E7) count
+     * toward absence; truncated reports never advance the absence tracking.
+     * Environment variable: FLEXLB_STATE_V2_STALE_ROUNDS. Default: 3.
+     */
+    private int flexlbStateV2StaleRounds = 3;
+
+    /**
+     * FlexLB state v2 time-channel (F3) TTL in milliseconds: ledger entries
+     * older than this (measured from createdAtMs, which is final and never
+     * renewed by any touch/observe — R5) are settled as TTL_EXPIRED by the
+     * LedgerJanitor. Default 300s, aligned with the legacy InflightStore TTL.
+     *
+     * <p>Fenced entries are exempt (guard-rail 3 / R4) until the fence expires
+     * or is lifted. Environment variable: FLEXLB_STATE_V2_TTL_MS.
+     */
+    private long flexlbStateV2TtlMs = 300_000L;
+
+    /**
+     * FlexLB state v2 force-channel (F4) hard cap in milliseconds: entries
+     * older than createdAtMs + this cap are settled unconditionally as
+     * HARD_CAP — <b>fences do not exempt</b> (a fence that outlives the hard
+     * cap is itself a leak; prefer clearing over keeping, with doubled alarm
+     * accounting). Must be strictly greater than flexlbStateV2TtlMs.
+     * Default 900s. Environment variable: FLEXLB_STATE_V2_HARD_CAP_MS.
+     */
+    private long flexlbStateV2HardCapMs = 900_000L;
+
+    /**
+     * FlexLB state v2 LedgerJanitor maintenance tick interval in milliseconds:
+     * the low-frequency scheduled scan (TTL + hard cap rotation, absence-orphan
+     * cleanup, tombstone/fence expiry) driven by the shadow bridge when
+     * flexlbStateV2ShadowEnabled is on. Not started when shadow mode is off
+     * (the legacy path keeps its own InflightEvictor).
+     *
+     * <p>Environment variable: FLEXLB_STATE_V2_JANITOR_INTERVAL_MS. Default 10s.
+     */
+    private long flexlbStateV2JanitorIntervalMs = 10_000L;
+
+    /**
      * Metrics report interval in milliseconds.
      * Controls the periodic reporting frequency for scheduler-level and
      * per-endpoint metrics via {@code @Scheduled} throttle.

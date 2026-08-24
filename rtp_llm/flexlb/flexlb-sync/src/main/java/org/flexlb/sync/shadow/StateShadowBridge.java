@@ -5,12 +5,14 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.state.GenerationTriple;
+import org.flexlb.state.LedgerJanitorConfig;
 import org.flexlb.state.RegisterResult;
 import org.flexlb.state.SettleReason;
 import org.flexlb.state.StateLedger;
 import org.flexlb.state.TerminalOutcome;
 import org.flexlb.state.TerminalReason;
 import org.flexlb.state.TerminalState;
+import org.flexlb.state.internal.LedgerJanitor;
 import org.flexlb.state.spi.EngineObservation;
 import org.flexlb.state.spi.StateRole;
 import org.slf4j.Logger;
@@ -18,6 +20,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * G1 影子门面：flexlb-state v2 账本以<b>影子模式</b>接入 flexlb-sync 的唯一桥。
@@ -60,6 +65,10 @@ public final class StateShadowBridge {
     private final StateLedger ledger;
     private final WorkerStatusObservationTranslator translator;
     private final StateShadowDiffCollector diff;
+    /** M4 清理层（影子开时挂载；关态 null）。 */
+    private final LedgerJanitor janitor;
+    /** janitor 维护 tick 调度（autoStart=false 时 null；close 时停）。 */
+    private final ScheduledExecutorService janitorScheduler;
 
     /** DISABLED 构造。 */
     private StateShadowBridge() {
@@ -67,22 +76,36 @@ public final class StateShadowBridge {
         this.ledger = null;
         this.translator = null;
         this.diff = null;
+        this.janitor = null;
+        this.janitorScheduler = null;
     }
 
     private StateShadowBridge(StateLedger ledger,
                               WorkerStatusObservationTranslator translator,
-                              StateShadowDiffCollector diff) {
+                              StateShadowDiffCollector diff,
+                              LedgerJanitor janitor,
+                              ScheduledExecutorService janitorScheduler) {
         this.enabled = true;
         this.ledger = Objects.requireNonNull(ledger);
         this.translator = Objects.requireNonNull(translator);
         this.diff = Objects.requireNonNull(diff);
+        this.janitor = janitor;
+        this.janitorScheduler = janitorScheduler;
     }
 
     /**
-     * 装配工厂：开关关返回 {@link #DISABLED}；开时构建 ledger/translator/diff
-     * 并注册影子指标、打印启用回显（R2 补充：ConfigService dump 之外的显式标记）。
+     * 装配工厂（生产）：开关关返回 {@link #DISABLED}；开时构建 ledger/translator/diff/
+     * janitor 并注册影子指标、启动 janitor 维护调度、打印启用回显（R2）。
      */
     public static StateShadowBridge create(FlexlbConfig config, FlexMonitor monitor) {
+        return create(config, monitor, true);
+    }
+
+    /**
+     * 装配工厂（测试钩子）：{@code autoStartJanitor=false} 时不创建调度线程
+     * （janitor 仍挂载，由 {@link #runJanitorOnce()} 手动驱动——确定性测试）。
+     */
+    public static StateShadowBridge create(FlexlbConfig config, FlexMonitor monitor, boolean autoStartJanitor) {
         Objects.requireNonNull(config, "config");
         if (!config.isFlexlbStateV2ShadowEnabled()) {
             logger.info("[state-shadow] flexlb-state v2 shadow mode disabled (flexlbStateV2ShadowEnabled=false)");
@@ -92,10 +115,50 @@ public final class StateShadowBridge {
         StateShadowDiffCollector diff = new StateShadowDiffCollector(monitor);
         diff.registerMetrics();
         WorkerStatusObservationTranslator translator = new WorkerStatusObservationTranslator(ledger);
+
+        // M4：清理层四通道（F1-F4 + 三护栏）挂载；janitor 胜者结算同步进 diff 对账窗口
+        LedgerJanitorConfig janitorConfig = new LedgerJanitorConfig(
+                config.getFlexlbStateV2StaleRounds(),
+                config.getFlexlbStateV2TtlMs(),
+                config.getFlexlbStateV2HardCapMs(),
+                LedgerJanitorConfig.DEFAULT_SCAN_BUDGET_PER_TICK);
+        LedgerJanitor janitor = ledger.createJanitor(janitorConfig);
+        janitor.setSettleListener((requestId, side) -> recordNewTerminalForJanitor(ledger, diff, requestId));
+
+        ScheduledExecutorService scheduler = null;
+        if (autoStartJanitor) {
+            scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "flexlb-state-janitor");
+                t.setDaemon(true);
+                t.setUncaughtExceptionHandler((thread, e) ->
+                        logger.warn("[state-shadow] janitor scheduler thread died: {}", e.getMessage(), e));
+                return t;
+            });
+            long intervalMs = config.getFlexlbStateV2JanitorIntervalMs();
+            scheduler.scheduleAtFixedRate(janitor::runMaintenanceTick,
+                    intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+        }
+
         logger.warn("[state-shadow] flexlb-state v2 shadow mode ENABLED "
                 + "(env FLEXLB_STATE_V2_SHADOW_ENABLED / flexlbStateV2ShadowEnabled=true): "
-                + "StateLedger now consuming the same event stream in shadow; legacy path unchanged");
-        return new StateShadowBridge(ledger, translator, diff);
+                + "StateLedger now consuming the same event stream in shadow; legacy path unchanged; "
+                + "LedgerJanitor " + (autoStartJanitor ? "scheduled" : "mounted (manual tick)")
+                + " interval=" + config.getFlexlbStateV2JanitorIntervalMs() + "ms"
+                + " staleRounds=" + config.getFlexlbStateV2StaleRounds()
+                + " ttlMs=" + config.getFlexlbStateV2TtlMs()
+                + " hardCapMs=" + config.getFlexlbStateV2HardCapMs());
+        return new StateShadowBridge(ledger, translator, diff, janitor, scheduler);
+    }
+
+    /**
+     * 生命周期收尾（Spring @Bean destroyMethod 自动推断）：停 janitor 维护调度。
+     * 幂等；仅影子链路资源——旧路径不受影响。
+     */
+    public void close() {
+        ScheduledExecutorService scheduler = janitorScheduler;
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+        }
     }
 
     public boolean isEnabled() {
@@ -227,5 +290,33 @@ public final class StateShadowBridge {
 
     public StateLedger ledger() {
         return ledger;
+    }
+
+    /** M4 清理层（关态 null；观察/装配测试用）。 */
+    public LedgerJanitor janitor() {
+        return janitor;
+    }
+
+    /** 手动驱动一 janitor 维护 tick（测试钩子；生产走 flexlb-state-janitor 调度线程）。 */
+    public void runJanitorOnce() {
+        LedgerJanitor j = janitor;
+        if (j != null) {
+            j.runMaintenanceTick();
+        }
+    }
+
+    /**
+     * janitor 胜者结算的新侧终态进 diff 对账（静态：create 时的 settleListener 引用，
+     * 与 recordNewTerminalIfSettled 同语义——D 侧墓碑优先、P 侧兑底）。
+     */
+    private static void recordNewTerminalForJanitor(StateLedger ledger, StateShadowDiffCollector diff,
+                                                    long requestId) {
+        Optional<TerminalOutcome> decodeOutcome = ledger.terminalOutcomeOf(requestId, StateRole.DECODE);
+        if (decodeOutcome.isPresent()) {
+            diff.recordNewTerminal(requestId, decodeOutcome.get().state(), decodeOutcome.get().reason());
+            return;
+        }
+        Optional<TerminalOutcome> prefillOutcome = ledger.terminalOutcomeOf(requestId, StateRole.PREFILL);
+        prefillOutcome.ifPresent(o -> diff.recordNewTerminal(requestId, o.state(), o.reason()));
     }
 }

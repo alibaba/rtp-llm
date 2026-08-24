@@ -153,6 +153,6 @@ class GrpcWorkerStatusRunnerShadowOrderTest {
     private static StateShadowBridge enabledBridge() {
         FlexlbConfig config = new FlexlbConfig();
         config.setFlexlbStateV2ShadowEnabled(true);
-        return StateShadowBridge.create(config, null);
+        return StateShadowBridge.create(config, null, false);
     }
 }

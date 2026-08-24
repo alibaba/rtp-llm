@@ -9,6 +9,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.LongAdder;
 import org.flexlb.state.internal.FenceRegistry;
 import org.flexlb.state.internal.GenerationTracker;
+import org.flexlb.state.internal.LedgerJanitor;
 import org.flexlb.state.internal.TombstoneStore;
 import org.flexlb.state.internal.decode.DecodeLattice;
 import org.flexlb.state.internal.decode.DecodePhase;
@@ -62,6 +63,11 @@ public final class StateLedger {
     private final EnumMap<PhaseVerdict, LongAdder> verdictCounts = new EnumMap<>(PhaseVerdict.class);
     private final LongAdder unknownRunningEvents = new LongAdder();
     private final LongAdder unknownFinishedEvents = new LongAdder();
+    /** F1 因果闭包触发计数（janitor 透传观测，M4）。 */
+    private final LongAdder causalClosureSettles = new LongAdder();
+
+    /** M4 清理层实例（createJanitor 挂载；未创建时 observe 尾部零开销）。 */
+    private volatile LedgerJanitor janitor;
 
     public StateLedger() {
         this(StateLedgerConfig.defaults());
@@ -186,17 +192,30 @@ public final class StateLedger {
         return new CounterDriftReport(drift);
     }
 
+    //（M2 占位 ledgerJanitor() 已被 M4 的 createJanitor/LedgerJanitor 替换：
+    // 墓碑/fence TTL 过期清理并入 runMaintenanceTick，缺席判死/硬上限新增）
+
     /**
-     * janitor 驱动入口（M4 前占位）：当前仅做过期清理的安全子集
-     * （墓碑/fence TTL）；TTL 收尾、缺席判死、fence 驱逐路径 M4 接入。
+     * M4 清理层工厂：创建并挂载 {@link LedgerJanitor}（四通道 F1-F4 + 三护栏）。
+     *
+     * <p>janitor 的 settle 与外部 settle 走同一 CAS 单出口（本类 settlePrefill/
+     * settleDecode 的单侧委托回调）；observe 尾部（完整 tick）回调其缺席扫描。
+     * 单例约定：一账本一 janitor，重复调用替换旧实例（旧实例的调度由持有方负责停止）。
+     * 调度（TTL/硬上限定时 tick）由上层驱动（flexlb-sync 影子装配处，M4）。</p>
      */
-    public Runnable ledgerJanitor() {
-        return () -> {
-            long now = System.currentTimeMillis();
-            pStore.tombstones().evictExpired(now);
-            dStore.tombstones().evictExpired(now);
-            fences.evictExpired(now);
-        };
+    public LedgerJanitor createJanitor(LedgerJanitorConfig janitorConfig) {
+        Objects.requireNonNull(janitorConfig, "janitorConfig");
+        LedgerJanitor created = new LedgerJanitor(janitorConfig, pStore, dStore, fences,
+                causalClosureSettles::sum,
+                (requestId, outcome) -> settlePrefill(requestId, outcome, false),
+                (requestId, outcome) -> settleDecode(requestId, outcome, false));
+        this.janitor = created;
+        return created;
+    }
+
+    /** 挂载中的 janitor（未创建返回 null；测试/诊断）。 */
+    public LedgerJanitor janitor() {
+        return janitor;
     }
 
     /**
@@ -246,6 +265,14 @@ public final class StateLedger {
         }
         for (EngineObservation.FinishedObservation f : obs.finished()) {
             dispatchFinished(f, ep, nowMs, rebuildMode);
+        }
+        // M4/F2：完整 tick 尾部回调 janitor 缺席扫描（rebuild 重放不触发；
+        // 不完整 tick 由 janitor 护栏 2 自行丢弃——不推进缺席计数）
+        if (!rebuildMode) {
+            LedgerJanitor j = janitor;
+            if (j != null) {
+                j.onRoundEnd(ep, obs.round(), obs.isComplete());
+            }
         }
     }
 
@@ -381,6 +408,7 @@ public final class StateLedger {
                             new TerminalOutcome(TerminalState.COMPLETED, TerminalReason.SUCCEEDED,
                                     "causal-closure:decode-finished"),
                             nowMs);
+                    causalClosureSettles.increment(); // F1 通道触发计数（janitor 透传）
                 }
             }
         }
@@ -543,6 +571,7 @@ public final class StateLedger {
                 return false;
             }
             e.setBindingOnce(binding); // DISPATCHED 前可重绑；不可变后返回 false 保留原绑定
+            pStore.indexEndpoint(e); // M4：byEndpoint 索引（重绑旧桶残留由视图自愈）
             return pStore.advance(e, PrefillPhase.DISPATCHED, -1L, System.currentTimeMillis());
         }
 
@@ -609,6 +638,7 @@ public final class StateLedger {
                 return false;
             }
             e.setBindingOnce(binding);
+            dStore.indexEndpoint(e); // M4：byEndpoint 索引（重绑旧桶残留由视图自愈）
             return dStore.advance(e, DecodePhase.DISPATCHED, -1L, System.currentTimeMillis());
         }
 
