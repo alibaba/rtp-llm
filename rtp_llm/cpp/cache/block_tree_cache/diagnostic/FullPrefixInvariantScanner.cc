@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <exception>
+#include <limits>
 #include <sstream>
-#include <utility>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -12,6 +12,11 @@
 
 namespace rtp_llm {
 namespace {
+
+// Bounds on cache mutex hold time and log volume, not user-facing knobs.
+constexpr size_t  kNodesPerBatch      = 1024;
+constexpr size_t  kMaxDetailsPerCycle = 10;
+constexpr int64_t kMaxIntervalMs      = std::numeric_limits<int64_t>::max() / 1000;
 
 const char* transferStateName(GroupSetTransferState state) {
     switch (state) {
@@ -171,7 +176,7 @@ void detectNodeViolations(const BlockTree& tree, const TreeNode& node, std::vect
     }
 }
 
-std::string formatViolationDetail(const FullViolationDetail& detail, int world_rank, int local_rank) {
+std::string formatViolationDetail(const FullViolationDetail& detail) {
     std::ostringstream oss;
     if (detail.type == FullViolationType::INVALID_RESOURCE) {
         oss << "event=block_tree_resource_violation"
@@ -186,29 +191,28 @@ std::string formatViolationDetail(const FullViolationDetail& detail, int world_r
             << " status=" << (detail.stable ? "stable" : "transient") << " edge=[" << formatNodeBrief(detail.parent)
             << " -> " << formatNodeBrief(detail.current) << "]";
     }
-    oss << " world_rank=" << world_rank << " local_rank=" << local_rank;
     return oss.str();
 }
 
-FullPrefixInvariantScanner::FullPrefixInvariantScanner(const BlockTree&      tree,
-                                                       std::mutex&           cache_mutex,
-                                                       FullPrefixScanOptions options):
-    tree_(tree), cache_mutex_(cache_mutex), options_([](FullPrefixScanOptions o) {
-        o.nodes_per_round       = std::clamp(o.nodes_per_round, size_t{1}, kFullPrefixScanNodesPerRoundLimit);
-        o.max_details_per_cycle = std::min(o.max_details_per_cycle, kFullPrefixScanMaxDetailsPerCycle);
-        return o;
-    }(std::move(options))) {}
+FullPrefixInvariantScanner::FullPrefixInvariantScanner(const BlockTree& tree,
+                                                       std::mutex&      cache_mutex,
+                                                       int64_t          interval_ms):
+    tree_(tree), cache_mutex_(cache_mutex), interval_ms_(interval_ms) {}
 
 FullPrefixInvariantScanner::~FullPrefixInvariantScanner() {
     stop();
 }
 
 bool FullPrefixInvariantScanner::start() {
-    if (options_.interval_ms <= 0) {
+    if (interval_ms_ <= 0) {
+        return false;
+    }
+    if (interval_ms_ > kMaxIntervalMs) {
+        RTP_LLM_LOG_ERROR("FULL prefix invariant scan interval_ms=%ld overflows the loop period", interval_ms_);
         return false;
     }
     loop_thread_ = autil::LoopThread::createLoopThread(
-        [this] { runBatchGuarded(); }, options_.interval_ms * 1000, "BlockTreeScan", /*strictMode=*/true);
+        [this] { runBatchGuarded(); }, interval_ms_ * 1000, "BlockTreeScan", /*strictMode=*/true);
     if (!loop_thread_) {
         RTP_LLM_LOG_ERROR("failed to create FULL prefix invariant scanner loop thread");
         return false;
@@ -224,25 +228,15 @@ void FullPrefixInvariantScanner::stop() {
     }
 }
 
-FullPrefixScanStats FullPrefixInvariantScanner::stats() const {
-    std::lock_guard<std::mutex> lock(stats_mutex_);
-    return stats_;
-}
-
 void FullPrefixInvariantScanner::runBatchGuarded() {
     try {
-        runOneBatch();
+        runBatch();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("FULL prefix invariant scan round failed, dropping details: %s", e.what());
     }
 }
 
-void FullPrefixInvariantScanner::runOneBatch() {
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        ++stats_.batches_started;
-    }
-
+void FullPrefixInvariantScanner::runBatch() {
     std::vector<FullViolationDetail> details;
     size_t                           nodes_scanned  = 0;
     size_t                           tree_size      = 0;
@@ -259,7 +253,7 @@ void FullPrefixInvariantScanner::runOneBatch() {
             cycle_end_index_ = tree_.size();
         }
         const BlockTreeNodeRangeResult range =
-            tree_.visitNodeRangeLocked(cursor_, cycle_end_index_, options_.nodes_per_round, [&](const TreeNode& node) {
+            tree_.visitNodeRangeLocked(cursor_, cycle_end_index_, kNodesPerBatch, [&](const TreeNode& node) {
                 detectNodeViolations(tree_, node, details);
             });
         cursor_        = range.next_cursor;
@@ -287,12 +281,12 @@ void FullPrefixInvariantScanner::publishBatch(const std::vector<FullViolationDet
         // Past the cap the violation is dropped rather than remembered, which is what keeps
         // scanner state constant when a large part of the tree is anomalous. The summary
         // still reports the full count.
-        if (cycle_details_logged_ >= options_.max_details_per_cycle) {
+        if (cycle_details_logged_ >= kMaxDetailsPerCycle) {
             ++cycle_details_suppressed_;
             continue;
         }
         ++cycle_details_logged_;
-        const std::string line = formatViolationDetail(detail, options_.world_rank, options_.local_rank);
+        const std::string line = formatViolationDetail(detail);
         if (detail.stable) {
             RTP_LLM_LOG_WARNING("%s", line.c_str());
         } else {
@@ -300,36 +294,27 @@ void FullPrefixInvariantScanner::publishBatch(const std::vector<FullViolationDet
         }
     }
 
-    uint64_t cycle_index = 0;
-    {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.cycle_active         = cycle_active_ && !cycle_complete;
-        stats_.nodes_scanned        = cycle_complete ? 0 : cycle_nodes_scanned_;
-        stats_.stable_violations    = cycle_complete ? 0 : cycle_stable_;
-        stats_.transient_violations = cycle_complete ? 0 : cycle_transient_;
-        stats_.details_logged       = cycle_complete ? 0 : cycle_details_logged_;
-        stats_.details_suppressed   = cycle_complete ? 0 : cycle_details_suppressed_;
-        if (cycle_complete) {
-            cycle_index = stats_.cycles_completed++;
-        }
-    }
     if (!cycle_complete) {
         return;
     }
 
-    const std::string summary =
-        "event=block_tree_full_scan cycle=" + std::to_string(cycle_index)
-        + " nodes_scanned=" + std::to_string(cycle_nodes_scanned_) + " tree_nodes=" + std::to_string(cycle_tree_size_)
-        + " violations=" + std::to_string(cycle_stable_ + cycle_transient_) + " stable=" + std::to_string(cycle_stable_)
-        + " transient=" + std::to_string(cycle_transient_) + " details_logged=" + std::to_string(cycle_details_logged_)
-        + " details_suppressed=" + std::to_string(cycle_details_suppressed_)
-        + " world_rank=" + std::to_string(options_.world_rank) + " local_rank=" + std::to_string(options_.local_rank);
-    if (cycle_stable_ > 0) {
-        RTP_LLM_LOG_WARNING("%s", summary.c_str());
-    } else {
-        RTP_LLM_LOG_INFO("%s", summary.c_str());
+    // A healthy tree stays silent: the enabled log already proves the scanner runs.
+    if (cycle_stable_ + cycle_transient_ > 0) {
+        const std::string summary = "event=block_tree_full_scan cycle=" + std::to_string(cycles_completed_)
+                                    + " nodes_scanned=" + std::to_string(cycle_nodes_scanned_)
+                                    + " tree_nodes=" + std::to_string(cycle_tree_size_)
+                                    + " violations=" + std::to_string(cycle_stable_ + cycle_transient_) + " stable="
+                                    + std::to_string(cycle_stable_) + " transient=" + std::to_string(cycle_transient_)
+                                    + " details_logged=" + std::to_string(cycle_details_logged_)
+                                    + " details_suppressed=" + std::to_string(cycle_details_suppressed_);
+        if (cycle_stable_ > 0) {
+            RTP_LLM_LOG_WARNING("%s", summary.c_str());
+        } else {
+            RTP_LLM_LOG_INFO("%s", summary.c_str());
+        }
     }
 
+    ++cycles_completed_;
     cycle_active_             = false;
     cursor_                   = 0;
     cycle_end_index_          = 0;
