@@ -44,10 +44,32 @@ def _pack_eos_for_empty_generated_ids() -> bool:
 
 
 def _cap_frontend_max_new_tokens(max_new_tokens: int) -> int:
-    """Backward-compatible wrapper for the shared frontend cap."""
-    from rtp_llm.config.generate_config import cap_frontend_max_new_tokens
+    """Apply the optional DashSC frontend output-length cap.
 
-    return cap_frontend_max_new_tokens(max_new_tokens)
+    Read the environment for each request so test/performance runners can set
+    it before serving without changing the normal request defaults. Invalid or
+    non-positive values leave the request unchanged.
+    """
+    raw_cap = os.environ.get(_FRONTEND_MAX_NEW_TOKENS_ENV)
+    if raw_cap is None:
+        return max_new_tokens
+    try:
+        cap = int(raw_cap)
+    except ValueError:
+        logging.warning(
+            "ignore invalid %s=%r: expected a positive integer",
+            _FRONTEND_MAX_NEW_TOKENS_ENV,
+            raw_cap,
+        )
+        return max_new_tokens
+    if cap <= 0:
+        logging.warning(
+            "ignore invalid %s=%r: expected a positive integer",
+            _FRONTEND_MAX_NEW_TOKENS_ENV,
+            raw_cap,
+        )
+        return max_new_tokens
+    return min(max_new_tokens, cap)
 
 
 class LLMFinishReason(IntEnum):

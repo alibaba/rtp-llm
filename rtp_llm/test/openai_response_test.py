@@ -6,7 +6,6 @@ import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, main
-from unittest.mock import MagicMock, patch
 
 import torch
 from typing_extensions import override
@@ -713,24 +712,6 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         self.assertTrue(generate_config.frontend_metric_streaming)
         self.assertNotIn("frontend_metric_streaming", generate_config.model_dump())
-
-    def test_openai_generation_config_respects_frontend_max_new_tokens(self):
-        endpoint = OpenaiEndpoint.__new__(OpenaiEndpoint)
-        endpoint.stop_words_str_list = []
-        endpoint.stop_words_id_list = []
-        endpoint.chat_renderer = MagicMock()
-        endpoint.chat_renderer.tokenize_words.return_value = []
-        endpoint.tokenizer = MagicMock()
-        endpoint.tokenizer.__len__.return_value = 100
-        endpoint.generate_env_config = GenerateEnvConfig()
-        request = ChatCompletionRequest(messages=[], max_tokens=100)
-
-        with patch.object(GenerateConfig, "add_thinking_params"), patch.dict(
-            os.environ, {"FRONTEND_MAX_NEW_TOKENS": "32"}
-        ):
-            config = endpoint._extract_generation_config(request)
-
-        self.assertEqual(config.max_new_tokens, 32)
 
     async def test_frontend_metric_backend_copy_forces_aux_without_mutating_request(
         self,
