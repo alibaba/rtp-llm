@@ -9,6 +9,8 @@ import lombok.Data;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
 
+import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
+
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
@@ -92,6 +94,7 @@ public class ServerStatus {
      */
     @JsonIgnore
     public String getLogicalIpPort() {
-        return serverIp + ":" + httpPort + "@" + routingEngineIndex;
+        return serverIp + ":" + httpPort
+                + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + routingEngineIndex;
     }
 }

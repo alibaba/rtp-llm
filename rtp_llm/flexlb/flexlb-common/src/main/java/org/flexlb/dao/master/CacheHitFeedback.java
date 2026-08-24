@@ -1,5 +1,7 @@
 package org.flexlb.dao.master;
 
+import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
+
 /**
  * Engine feedback comparing the routing cache-hit prediction with the actual cache hit.
  */
@@ -102,6 +104,6 @@ public record CacheHitFeedback(
      * one independently routable engine behind the physical frontend.
      */
     public String logicalWorkerId() {
-        return workerIp + ":" + workerPort + "@" + engineIndex;
+        return workerIp + ":" + workerPort + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + engineIndex;
     }
 }
