@@ -493,9 +493,7 @@ void RtpLLMCacheOperationMetrics::report(const kmonitor::MetricsTags*          t
                                          RtpLLMCacheOperationMetricsCollector* collector) {
     if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::MALLOC) {
         malloc_qps_metric->Report(tags, 1);
-        if (!collector->success) {
-            malloc_failed_qps_metric->Report(tags, 1);
-        }
+        malloc_failed_qps_metric->Report(tags, collector->success ? 0 : 1);
         REPORT_MUTABLE_METRIC(malloc_latency_us_metric, collector->latency_us);
     } else if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::INSERT) {
         insert_qps_metric->Report(tags, 1);
@@ -556,9 +554,7 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
     transfer_tags.AddTag("target_tier", collector->target_tier);
     if (collector->transfer_completed) {
         transfer_qps_metric->Report(&transfer_tags, 1);
-        if (!collector->success) {
-            transfer_failed_qps_metric->Report(&transfer_tags, 1);
-        }
+        transfer_failed_qps_metric->Report(&transfer_tags, collector->success ? 0 : 1);
         transfer_block_count_metric->Report(&transfer_tags, collector->block_count);
         transfer_latency_us_metric->Report(&transfer_tags, collector->latency_us);
         for (const RtpLLMCacheTransferMetricsCollector::TransferBytesEntry& entry : collector->transfer_bytes) {
@@ -575,6 +571,7 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
 
 bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(evictable_candidate_count_metric, "rtp_llm_kv_cache_evictable_candidate_count");
+    REGISTER_QPS_MUTABLE_METRIC(eviction_trigger_qps_metric, "rtp_llm_kv_cache_eviction_trigger_qps");
     REGISTER_QPS_MUTABLE_METRIC(eviction_qps_metric, "rtp_llm_kv_cache_eviction_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_tier_residence_time_ms_metric,
                                   "rtp_llm_kv_cache_evicted_block_tier_residence_time_ms");
@@ -590,6 +587,12 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         kmonitor::MetricsTags evictable_tags("tier", collector->source_tier);
         evictable_tags.AddTag("group_type", collector->group_type);
         evictable_candidate_count_metric->Report(&evictable_tags, collector->evictable_candidate_count);
+    }
+    if (collector->report_eviction_trigger) {
+        kmonitor::MetricsTags trigger_tags("trigger_type", collector->trigger_type);
+        trigger_tags.AddTag("source_tier", collector->source_tier);
+        trigger_tags.AddTag("group_type", collector->group_type);
+        eviction_trigger_qps_metric->Report(&trigger_tags, collector->eviction_trigger_count);
     }
     if (collector->report_eviction) {
         kmonitor::MetricsTags eviction_tags("source_tier", collector->source_tier);
@@ -708,7 +711,7 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(hit_entry_age_avg_ms_metric, "rtp_llm_kv_cache_hit_entry_age_avg_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(hit_entry_age_max_ms_metric, "rtp_llm_kv_cache_hit_entry_age_max_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(match_latency_us_metric, "rtp_llm_kv_cache_match_latency_us");
-    REGISTER_QPS_MUTABLE_METRIC(load_success_qps_metric, "rtp_llm_kv_cache_load_success_qps");
+    REGISTER_QPS_MUTABLE_METRIC(load_qps_metric, "rtp_llm_kv_cache_load_qps");
     REGISTER_QPS_MUTABLE_METRIC(load_fail_qps_metric, "rtp_llm_kv_cache_load_fail_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(load_prepare_latency_us_metric, "rtp_llm_kv_cache_load_prepare_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_wait_latency_us_metric, "rtp_llm_kv_cache_load_wait_latency_us");
@@ -739,11 +742,8 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
         REPORT_MUTABLE_METRIC(hit_entry_age_max_ms_metric, collector->hit_entry_age_max_ms);
     }
     if (collector->report_load_metrics) {
-        if (collector->load_success) {
-            load_success_qps_metric->Report(tags, 1);
-        } else {
-            load_fail_qps_metric->Report(tags, 1);
-        }
+        load_qps_metric->Report(tags, 1);
+        load_fail_qps_metric->Report(tags, collector->load_success ? 0 : 1);
         REPORT_MUTABLE_METRIC(load_prepare_latency_us_metric, collector->load_prepare_latency_us);
         if (collector->report_load_wait_latency) {
             REPORT_MUTABLE_METRIC(load_wait_latency_us_metric, collector->load_wait_latency_us);

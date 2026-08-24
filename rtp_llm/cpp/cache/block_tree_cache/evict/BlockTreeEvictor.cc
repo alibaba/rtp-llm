@@ -230,24 +230,26 @@ std::vector<TreeNode*> BlockTreeEvictor::candidateNodes(size_t group_set_id, Tie
 
 // ---- Eviction selection ----
 bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool force_drop) {
-    auto eviction_desc = chooseVictim(group_set_id, source_tier, force_drop);
+    std::optional<TransferDescriptor> eviction_desc = chooseVictim(group_set_id, source_tier, force_drop);
     if (!eviction_desc.has_value()) {
         return false;
     }
 
-    auto task = prepareEvictionLocked(*eviction_desc);
-    if (!task.has_value() || !task->needsCopy()) {
-        return task.has_value();
-    }
-
-    auto task_ptr = std::make_shared<EvictionTask>(std::move(*task));
-    updatePendingReleases(*task_ptr, true);
-    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(*task_ptr); });
-    if (!submitted) {
-        updatePendingReleases(*task_ptr, false);
-        abortEvictionLocked(*task_ptr);
+    std::optional<EvictionTask> task = prepareEvictionLocked(*eviction_desc);
+    if (!task.has_value()) {
         return false;
     }
+    if (task->needsCopy()) {
+        std::shared_ptr<EvictionTask> task_ptr = std::make_shared<EvictionTask>(std::move(*task));
+        updatePendingReleases(*task_ptr, true);
+        const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(*task_ptr); });
+        if (!submitted) {
+            updatePendingReleases(*task_ptr, false);
+            abortEvictionLocked(*task_ptr);
+            return false;
+        }
+    }
+    metrics_reporter_->reportEvictionTriggered(source_tier, tree_->groupSets()[group_set_id]->groupType(), force_drop);
     return true;
 }
 

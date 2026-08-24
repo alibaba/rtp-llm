@@ -85,15 +85,14 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     ASSERT_TRUE(maybe_demoting.has_value());
     for (size_t path_index = 0; path_index < maybe_demoting->size(); ++path_index) {
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-            const auto& resource = (*maybe_demoting)[path_index][group_set_id];
+            const GroupSetPtr&      group_set = cache->groupSets()[group_set_id];
+            const GroupSetResource& resource  = (*maybe_demoting)[path_index][group_set_id];
             EXPECT_EQ(resource.transfer_state,
                       path_index == 2 ? GroupSetTransferState::DEMOTING : GroupSetTransferState::IDLE)
                 << "path=" << path_index << " group_set=" << group_set_id;
             ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
             EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
-            const size_t group_id = cache->groupSets()[group_set_id]->groupIds().front();
-            ASSERT_EQ(resource.device_blocks.size(), 1u);
-            EXPECT_EQ(resource.device_blocks.front(), seed.blocks_by_group[group_id][path_index]);
+            EXPECT_EQ(resource.device_blocks, groupSetSeedBlocksAt(group_set, seed, path_index));
         }
     }
     for (const auto& group_set : cache->groupSets()) {
@@ -123,13 +122,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
                 EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
                 EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-                const size_t group_id = group_set->groupIds().front();
-                EXPECT_FALSE(group_set->devicePools().front()->isAllocated(seed.blocks_by_group[group_id][path_index]));
+                const BlockIndicesType source_blocks = groupSetSeedBlocksAt(group_set, seed, path_index);
+                ASSERT_EQ(group_set->devicePools().size(), source_blocks.size());
+                for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+                    EXPECT_FALSE(group_set->devicePools()[member_index]->isAllocated(source_blocks[member_index]));
+                }
             } else {
                 ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
                 EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
-                const size_t group_id = group_set->groupIds().front();
-                EXPECT_EQ(resource.device_blocks.front(), seed.blocks_by_group[group_id][path_index]);
+                EXPECT_EQ(resource.device_blocks, groupSetSeedBlocksAt(group_set, seed, path_index));
             }
         }
     }
@@ -142,8 +143,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         EXPECT_EQ(descriptor.source_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);
         EXPECT_FALSE(isNullBlockIdx(descriptor.singleBlockAt(Tier::HOST)));
-        const size_t group_id = cache->groupSets()[descriptor.group_set_id]->groupIds().front();
-        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), (BlockIndicesType{seed.blocks_by_group[group_id][2]}));
+        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE),
+                  groupSetSeedBlocksAt(cache->groupSets()[descriptor.group_set_id], seed, /*path_index=*/2));
         ++demotions_by_group_set[descriptor.group_set_id];
     }
     for (size_t group_set_id = 0; group_set_id < demotions_by_group_set.size(); ++group_set_id) {
@@ -180,7 +181,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
 
     auto maybe_loading = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_loading.has_value());
-    std::vector<BlockIdxType> load_targets(cache->groupSets().size(), NULL_BLOCK_IDX);
+    std::vector<BlockIndicesType> load_targets(cache->groupSets().size());
     for (size_t path_index = 0; path_index < maybe_loading->size(); ++path_index) {
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
             const auto& group_set = cache->groupSets()[group_set_id];
@@ -190,23 +191,20 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 ASSERT_TRUE(resource.hasTier(Tier::HOST));
                 EXPECT_EQ(resource.host_block, host_sources[group_set_id]);
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
-                const size_t group_id = group_set->groupIds().front();
-                const auto&  blocks   = load_resource->blocks(0, static_cast<int>(group_id));
-                ASSERT_GT(blocks.size(), path_index);
-                ASSERT_FALSE(isNullBlockIdx(blocks[path_index]));
-                load_targets[group_set_id] = blocks[path_index];
-                EXPECT_EQ(group_set->devicePools().front()->refCount(blocks[path_index]), 2u);
-                ASSERT_TRUE(fillGroupBlockPayload(manager_,
-                                                  cache_config_,
-                                                  static_cast<int>(group_id),
-                                                  blocks[path_index],
-                                                  path_index,
-                                                  /*poison=*/true));
+                load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, path_index);
+                ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
+                for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
+                    const int          group_id = static_cast<int>(group_set->groupIds()[member_index]);
+                    const BlockIdxType block    = load_targets[group_set_id][member_index];
+                    ASSERT_FALSE(isNullBlockIdx(block));
+                    EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);
+                    ASSERT_TRUE(
+                        fillGroupBlockPayload(manager_, cache_config_, group_id, block, path_index, /*poison=*/true));
+                }
             } else {
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
                 ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
-                const size_t group_id = group_set->groupIds().front();
-                EXPECT_EQ(resource.device_blocks.front(), seed.blocks_by_group[group_id][path_index]);
+                EXPECT_EQ(resource.device_blocks, groupSetSeedBlocksAt(group_set, seed, path_index));
             }
         }
     }
@@ -227,7 +225,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         EXPECT_EQ(descriptor.source_tier, Tier::HOST);
         EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.singleBlockAt(Tier::HOST), host_sources[descriptor.group_set_id]);
-        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), (BlockIndicesType{load_targets[descriptor.group_set_id]}));
+        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), load_targets[descriptor.group_set_id]);
         ++loads_by_group_set[descriptor.group_set_id];
     }
     for (size_t group_set_id = 0; group_set_id < loads_by_group_set.size(); ++group_set_id) {
@@ -243,9 +241,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
             ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
             EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
-            const size_t group_id = group_set->groupIds().front();
-            EXPECT_EQ(resource.device_blocks.front(),
-                      path_index == 2 ? load_targets[group_set_id] : seed.blocks_by_group[group_id][path_index]);
+            const BlockIndicesType expected_blocks =
+                path_index == 2 ? load_targets[group_set_id] : groupSetSeedBlocksAt(group_set, seed, path_index);
+            EXPECT_EQ(resource.device_blocks, expected_blocks);
         }
     }
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -301,9 +299,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
 
     std::vector<std::shared_ptr<IBlockPool>> device_pools;
-    for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->devicePools().size(), 1u);
-        device_pools.push_back(group_set->devicePools().front());
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        appendDevicePools(group_set, device_pools);
     }
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
@@ -330,8 +327,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
-        const size_t group_id = group_set->groupIds().front();
-        EXPECT_EQ(resource.device_blocks, (BlockIndicesType{seed.blocks_by_group[group_id][0]}));
+        EXPECT_EQ(resource.device_blocks, groupSetSeedBlocksAt(group_set, seed, /*path_index=*/0));
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
     }
@@ -353,8 +349,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-        const size_t group_id = group_set->groupIds().front();
-        EXPECT_FALSE(group_set->devicePools().front()->isAllocated(seed.blocks_by_group[group_id][0]));
+        const BlockIndicesType source_blocks = groupSetSeedBlocksAt(group_set, seed, /*path_index=*/0);
+        ASSERT_EQ(group_set->devicePools().size(), source_blocks.size());
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_FALSE(group_set->devicePools()[member_index]->isAllocated(source_blocks[member_index]));
+        }
     }
 
     auto descriptors = pausable_engine->descriptors();
@@ -364,8 +363,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
         EXPECT_EQ(descriptor.source_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);
-        const size_t group_id = cache->groupSets()[descriptor.group_set_id]->groupIds().front();
-        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), (BlockIndicesType{seed.blocks_by_group[group_id][0]}));
+        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE),
+                  groupSetSeedBlocksAt(cache->groupSets()[descriptor.group_set_id], seed, /*path_index=*/0));
         EXPECT_EQ(descriptor.singleBlockAt(Tier::HOST), host_sources[descriptor.group_set_id]);
         ++device_to_host_by_group_set[descriptor.group_set_id];
     }
@@ -469,7 +468,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
 
     auto maybe_loading = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_loading.has_value());
-    std::vector<BlockIdxType> load_targets(cache->groupSets().size(), NULL_BLOCK_IDX);
+    std::vector<BlockIndicesType> load_targets(cache->groupSets().size());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto& group_set = cache->groupSets()[group_set_id];
         const auto& resource  = (*maybe_loading)[0][group_set_id];
@@ -478,18 +477,16 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
         EXPECT_EQ(resource.disk_slot, disk_sources[group_set_id]);
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 2u);
-        const size_t group_id = group_set->groupIds().front();
-        const auto&  blocks   = load_resource->blocks(0, static_cast<int>(group_id));
-        ASSERT_FALSE(blocks.empty());
-        ASSERT_FALSE(isNullBlockIdx(blocks.front()));
-        load_targets[group_set_id] = blocks.front();
-        EXPECT_EQ(group_set->devicePools().front()->refCount(blocks.front()), 2u);
-        ASSERT_TRUE(fillGroupBlockPayload(manager_,
-                                          cache_config_,
-                                          static_cast<int>(group_id),
-                                          blocks.front(),
-                                          /*path_index=*/0,
-                                          /*poison=*/true));
+        load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, /*path_index=*/0);
+        ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
+        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
+            const int          group_id = static_cast<int>(group_set->groupIds()[member_index]);
+            const BlockIdxType block    = load_targets[group_set_id][member_index];
+            ASSERT_FALSE(isNullBlockIdx(block));
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);
+            ASSERT_TRUE(
+                fillGroupBlockPayload(manager_, cache_config_, group_id, block, /*path_index=*/0, /*poison=*/true));
+        }
     }
 
     pausable_engine->release();
@@ -508,7 +505,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(descriptor.source_tier, Tier::DISK);
         EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.singleBlockAt(Tier::DISK), disk_sources[descriptor.group_set_id]);
-        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), (BlockIndicesType{load_targets[descriptor.group_set_id]}));
+        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), load_targets[descriptor.group_set_id]);
         ++disk_to_device_by_group_set[descriptor.group_set_id];
     }
     for (size_t group_set_id = 0; group_set_id < disk_to_device_by_group_set.size(); ++group_set_id) {
@@ -523,9 +520,12 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
-        EXPECT_EQ(resource.device_blocks, (BlockIndicesType{load_targets[group_set_id]}));
+        EXPECT_EQ(resource.device_blocks, load_targets[group_set_id]);
         EXPECT_FALSE(group_set->diskPool()->isAllocated(disk_sources[group_set_id]));
-        EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 2u);
+        ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(load_targets[group_set_id][member_index]), 2u);
+        }
     }
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(
@@ -606,10 +606,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_FALSE(resource.hasTier(Tier::HOST));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
-        ASSERT_EQ(resource.device_blocks.size(), 1u);
-        const size_t group_id = group_set->groupIds().front();
-        EXPECT_EQ(resource.device_blocks.front(), seed.blocks_by_group[group_id][0]);
-        EXPECT_EQ(group_set->devicePools().front()->refCount(resource.device_blocks.front()), 1u);
+        EXPECT_EQ(resource.device_blocks, groupSetSeedBlocksAt(group_set, seed, /*path_index=*/0));
+        ASSERT_EQ(group_set->devicePools().size(), resource.device_blocks.size());
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(resource.device_blocks[member_index]), 1u);
+        }
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
         EXPECT_EQ(group_set->hostPool()->usedBlocksNum(), 0u);
         ASSERT_NE(group_set->diskPool(), nullptr);
@@ -852,8 +853,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     auto seed = std::move(*seed_opt);
     ASSERT_TRUE(fillSeedPayload(manager_, cache_config_, seed));
     std::vector<std::shared_ptr<IBlockPool>> pools;
-    for (const auto& gs : cache->groupSets()) {
-        pools.push_back(gs->devicePools().front());
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        appendDevicePools(group_set, pools);
     }
     auto ratio = oneUsedBlockWatermarkRatio(pools);
     ASSERT_TRUE(ratio.has_value());
@@ -878,9 +879,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         ASSERT_TRUE(state.hasTier(Tier::DEVICE));
         EXPECT_FALSE(state.hasTier(Tier::HOST))
             << "the demotion target is held by the eviction ticket until settlement";
-        const size_t group_id = group_set->groupIds().front();
-        EXPECT_EQ(state.device_blocks, (BlockIndicesType{seed.blocks_by_group[group_id][0]}));
-        EXPECT_EQ(group_set->devicePools().front()->refCount(state.device_blocks.front()), 1u);
+        EXPECT_EQ(state.device_blocks, groupSetSeedBlocksAt(group_set, seed, /*path_index=*/0));
+        ASSERT_EQ(group_set->devicePools().size(), state.device_blocks.size());
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(state.device_blocks[member_index]), 1u);
+        }
         EXPECT_EQ(group_set->hostPool()->usedBlocksNum(), 1u);
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
     }
@@ -907,8 +910,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         const auto& group_set = cache->groupSets()[group_set_id];
         const auto& state     = (*still_demoting)[0][group_set_id];
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::DEMOTING);
-        EXPECT_EQ(group_set->devicePools().front()->refCount(state.device_blocks.front()), 1u)
-            << "the miss request must not reference the DEMOTING source";
+        ASSERT_EQ(group_set->devicePools().size(), state.device_blocks.size());
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(state.device_blocks[member_index]), 1u)
+                << "the miss request must not reference the DEMOTING source";
+        }
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 1u);
     }
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);

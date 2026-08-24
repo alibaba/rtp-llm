@@ -296,11 +296,16 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
         EXPECT_EQ(descriptor.source_tier, Tier::HOST);
         EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
-        EXPECT_TRUE(pathSnapshotContainsBlock(
-            *maybe_host, descriptor.group_set_id, Tier::HOST, descriptor.singleBlockAt(Tier::HOST)));
-        const int   group_id = static_cast<int>(cache->groupSets()[descriptor.group_set_id]->groupIds().front());
-        const auto& blocks   = first_resource->blocks(0, group_id);
-        EXPECT_NE(std::find(blocks.begin(), blocks.end(), descriptor.singleBlockAt(Tier::DEVICE)), blocks.end());
+        EXPECT_TRUE(pathSnapshotContainsBlocks(
+            *maybe_host, descriptor.group_set_id, Tier::HOST, descriptor.blocksAt(Tier::HOST)));
+        const GroupSetPtr& group_set = cache->groupSets()[descriptor.group_set_id];
+        ASSERT_EQ(group_set->groupIds().size(), descriptor.blocksAt(Tier::DEVICE).size());
+        for (size_t member_group_id = 0; member_group_id < group_set->groupIds().size(); ++member_group_id) {
+            const int               group_id = static_cast<int>(group_set->groupIds()[member_group_id]);
+            const BlockIndicesType& blocks   = first_resource->blocks(0, group_id);
+            EXPECT_NE(std::find(blocks.begin(), blocks.end(), descriptor.blocksAt(Tier::DEVICE)[member_group_id]),
+                      blocks.end());
+        }
     }
 
     ASSERT_NO_FATAL_FAILURE(expectHostLoadSettledAtDevice(cache, seed, *maybe_host, first_resource));
@@ -461,9 +466,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     ASSERT_TRUE(fillSeedPayload(manager_, cache_config_, seed));
 
     std::vector<std::shared_ptr<IBlockPool>> device_pools;
-    for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->devicePools().size(), 1u);
-        device_pools.push_back(group_set->devicePools().front());
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        appendDevicePools(group_set, device_pools);
     }
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
@@ -523,21 +527,23 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(group_set->hostPool()->treeRefCount(state.host_block), 2u);
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 1u);
 
-        ASSERT_EQ(group_set->groupIds().size(), 1u);
-        const int   group_id = static_cast<int>(group_set->groupIds().front());
-        const auto& batch0   = resource->blocks(0, group_id);
-        const auto& batch1   = resource->blocks(1, group_id);
-        ASSERT_EQ(batch0.size(), 2u);
-        ASSERT_EQ(batch1.size(), 2u);
-        ASSERT_FALSE(isNullBlockIdx(batch0[0]));
-        ASSERT_FALSE(isNullBlockIdx(batch0[1]));
-        ASSERT_FALSE(isNullBlockIdx(batch1[1]));
-        EXPECT_EQ(batch0[0], batch1[0]);
-        EXPECT_NE(batch0[1], batch1[1]);
-        EXPECT_EQ(group_set->devicePools().front()->refCount(batch0[0]), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 3u);
-        ASSERT_TRUE(
-            fillGroupBlockPayload(manager_, cache_config_, group_id, batch0[0], /*path_index=*/0, /*poison=*/true));
+        ASSERT_EQ(group_set->groupIds().size(), group_set->devicePools().size());
+        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
+            const int               group_id = static_cast<int>(group_set->groupIds()[member_index]);
+            const BlockIndicesType& batch0   = resource->blocks(0, group_id);
+            const BlockIndicesType& batch1   = resource->blocks(1, group_id);
+            ASSERT_EQ(batch0.size(), 2u);
+            ASSERT_EQ(batch1.size(), 2u);
+            ASSERT_FALSE(isNullBlockIdx(batch0[0]));
+            ASSERT_FALSE(isNullBlockIdx(batch0[1]));
+            ASSERT_FALSE(isNullBlockIdx(batch1[1]));
+            EXPECT_EQ(batch0[0], batch1[0]);
+            EXPECT_NE(batch0[1], batch1[1]);
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(batch0[0]), 3u);
+            EXPECT_EQ(group_set->devicePools()[member_index]->referencedBlocksNum(), 3u);
+            ASSERT_TRUE(
+                fillGroupBlockPayload(manager_, cache_config_, group_id, batch0[0], /*path_index=*/0, /*poison=*/true));
+        }
     }
 
     // The non-reusable typed region is not part of a transfer GroupSet, but
@@ -579,18 +585,20 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     const auto found = cache->tree()->findNode(seed.cache_keys);
     ASSERT_EQ(found.size(), 1u);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        const auto& group_set = cache->groupSets()[group_set_id];
-        const int   group_id  = static_cast<int>(group_set->groupIds().front());
-        const auto& tree      = found[0]->group_set_resources[group_set_id];
-        const auto& batch0    = resource->blocks(0, group_id);
-        const auto& batch1    = resource->blocks(1, group_id);
-        ASSERT_EQ(tree.device_blocks.size(), 1u);
-        EXPECT_EQ(batch0[0], tree.device_blocks[0]);
-        EXPECT_EQ(batch1[0], tree.device_blocks[0]);
-        EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, group_id, batch1[0], /*path_index=*/0));
-        EXPECT_EQ(group_set->devicePools().front()->refCount(tree.device_blocks[0]), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+        const GroupSetPtr&      group_set = cache->groupSets()[group_set_id];
+        const GroupSetResource& tree      = found[0]->group_set_resources[group_set_id];
+        ASSERT_EQ(tree.device_blocks.size(), group_set->groupIds().size());
+        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
+            const int               group_id = static_cast<int>(group_set->groupIds()[member_index]);
+            const BlockIndicesType& batch0   = resource->blocks(0, group_id);
+            const BlockIndicesType& batch1   = resource->blocks(1, group_id);
+            EXPECT_EQ(batch0[0], tree.device_blocks[member_index]);
+            EXPECT_EQ(batch1[0], tree.device_blocks[member_index]);
+            EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, group_id, batch1[0], /*path_index=*/0));
+            EXPECT_EQ(group_set->devicePools()[member_index]->refCount(tree.device_blocks[member_index]), 3u);
+            EXPECT_EQ(group_set->devicePools()[member_index]->referencedBlocksNum(), 3u);
+            EXPECT_EQ(group_set->devicePools()[member_index]->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
+        }
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
     }
 
