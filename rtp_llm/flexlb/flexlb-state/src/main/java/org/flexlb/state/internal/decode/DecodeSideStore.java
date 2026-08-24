@@ -144,6 +144,11 @@ public final class DecodeSideStore {
         if (!entry.finishTransition(outcome.state(), nowMs)) {
             return false;
         }
+        // 墓碑先落、条目后移：若先移除条目再吸收墓碑，两者之间存在观察窗口——
+        // 并发的迟到 finished/settle 读到“条目不在且墓碑未落”会误记 unknown。
+        // 先吸收墓碑可闭合该窗口（absorb 幂等，CAS 守卫保证唯一胜者）：
+        // 条目仍在时 CAS 守卫拦截双重结算，条目移除后迟到事件被墓碑吸收。
+        tombstones.absorb(entry.requestId(), outcome, nowMs);
         entries.remove(entry.requestId(), entry);
         unindexEndpoint(entry);
         synchronized (entry) {
@@ -153,7 +158,6 @@ public final class DecodeSideStore {
                 epCounters.onRemoved(epId, entry);
             }
         }
-        tombstones.absorb(entry.requestId(), outcome, nowMs);
         tickPublish();
         return true;
     }
@@ -223,7 +227,7 @@ public final class DecodeSideStore {
         return List.copyOf(entries.values());
     }
 
-    // ---- byEndpoint 二级索引（M4 janitor 扫描结构）----
+    // ---- byEndpoint 二级索引（janitor 扫描结构）----
 
     /**
      * 端点索引登记（幂等 put；重绑后旧桶残留由 {@link #entriesByEndpoint} 自愈清除）。
