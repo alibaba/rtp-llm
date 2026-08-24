@@ -71,8 +71,9 @@ import java.util.concurrent.TimeUnit;
  *   <li>DecodeEndpoint 的 reserve/release 真实记账切到 {@link #decodeReserveAuthority}
  *       / {@link #decodeReleaseAuthority}（ledger.decode() 单入账；旧 layer-1 map 停写）；</li>
  *   <li>调度读点（总负载 / 真实 KV 用量与可用量 / 容量 gate / reporter）切
- *       {@link #decodeEndpointCounters} / {@link #prefillEndpointCounters}（per-EP
- *       按需聚合，调用方在引擎状态 tick 时缓存刷新）；</li>
+ *       {@link #decodeEndpointCounters} / {@link #prefillEndpointCounters}（端点级
+ *       增量计数簿的无锁 O(1) 快照——读侧零条目遍历，调用方在引擎状态 tick
+ *       时缓存刷新）；</li>
  *   <li>P 侧条目在派发提交时经 {@link #onPrefillDispatched} 绑定端点世代——
  *       补齐 M3 遗留的绑定缺口（原 P 条目恒 UNBOUND，引擎事件全被世代屏障拒绝），
  *       该挂点对影子/结算模式同样生效。</li>

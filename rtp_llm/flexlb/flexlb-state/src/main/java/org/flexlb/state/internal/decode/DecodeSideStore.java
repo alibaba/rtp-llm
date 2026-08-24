@@ -18,17 +18,21 @@ import org.flexlb.state.internal.TombstoneStore;
 /**
  * D 侧条目容器 + 计数挂点。
  *
- * <p>计数纪律：{@link DecodeCounters} 的 mutator 仅在本类固定位置调用
- * ——advance 的 CAS 胜者分支（含计费归属移交撤预占）/ reserve / settleRemove /
- * releaseRemove / adoptEngineOwned / noteEngineObserved。</p>
+ * <p>计数纪律：{@link DecodeCounters} 与端点级 {@link DecodeEndpointCountersBook}
+ * 的 mutator 仅在本类固定位置调用——advance 的 CAS 胜者分支（含计费
+ * 归属移交撤预占）/ reserve / settleRemove / releaseRemove /
+ * adoptEngineOwned / noteEngineObserved；全局账与端点账在同一临界区内
+ * 同步更新（单一写者纪律，两套账天然一致）。</p>
  */
 @InternalApi
 public final class DecodeSideStore {
 
     private final ConcurrentHashMap<Long, DecodeRequestState> entries = new ConcurrentHashMap<>();
-    /** byEndpoint 二级索引（M4 janitor 证据通道/TTL 扫描结构）：endpointId → 名下条目。 */
+    /** byEndpoint 二级索引（清理层证据通道/TTL 扫描结构）：endpointId → 名下条目。 */
     private final ConcurrentHashMap<Integer, ConcurrentHashMap<Long, DecodeRequestState>> byEndpoint = new ConcurrentHashMap<>();
     private final DecodeCounters counters = new DecodeCounters();
+    /** 端点级增量计数簿（调度读数 O(1) 数据源；与全局账同一写者位置同步更新）。 */
+    private final DecodeEndpointCountersBook epCounters = new DecodeEndpointCountersBook();
     private final TombstoneStore tombstones;
     private final int snapshotInterval;
 
@@ -61,6 +65,7 @@ public final class DecodeSideStore {
         }
         indexEndpoint(fresh); // reserve 即绑定——入 byEndpoint 索引
         counters.onReserved(expectedKv);
+        epCounters.onReserved(binding.endpointId(), seqLen, expectedKv);
         return ReserveResult.OK;
     }
 
@@ -85,11 +90,18 @@ public final class DecodeSideStore {
                 overtakenEvents.increment();
                 return false;
             }
+            Integer epId = boundEndpointId(entry);
+            if (epId != null) {
+                epCounters.onPhaseTransition(epId, from, target);
+            }
             counters.onPhaseTransition(from, target);
             if (target.ordinal() >= DecodePhase.D_LOADING.ordinal()
                     && from.ordinal() < DecodePhase.D_LOADING.ordinal()) {
-                // 计费归属移交：KV_ALLOCATED（或越级更高）起撤影子预占，引擎事实接管
+                // 计费归属移交：引擎加载临界相位起撤影子预占，引擎事实接管
                 counters.onReservationWithdrawn(entry.reservedKv());
+                if (epId != null) {
+                    epCounters.onReservationConfirmed(epId, entry.reservedKv(), entry.seqLen());
+                }
                 entry.clearReservation();
                 counters.onConfirmed();
             }
@@ -106,12 +118,19 @@ public final class DecodeSideStore {
             boolean first = !entry.engineOwned();
             long oldKv = entry.kvTokensReported();
             entry.markEngineObserved(round, kvTokens, version);
+            Integer epId = boundEndpointId(entry);
             if (first) {
                 counters.onEngineOwned();
+                if (epId != null) {
+                    epCounters.onEngineOwned(epId);
+                }
             }
             long newKv = entry.kvTokensReported();
             if (newKv != oldKv) {
                 counters.onKvReportedDelta(oldKv, newKv);
+                if (epId != null) {
+                    epCounters.onKvReportedDelta(epId, newKv - oldKv);
+                }
             }
         }
     }
@@ -129,6 +148,10 @@ public final class DecodeSideStore {
         unindexEndpoint(entry);
         synchronized (entry) {
             counters.onRemoved(entry);
+            Integer epId = boundEndpointId(entry);
+            if (epId != null) {
+                epCounters.onRemoved(epId, entry);
+            }
         }
         tombstones.absorb(entry.requestId(), outcome, nowMs);
         tickPublish();
@@ -147,6 +170,10 @@ public final class DecodeSideStore {
             entries.remove(entry.requestId(), entry);
             unindexEndpoint(entry);
             counters.onRemoved(entry);
+            Integer epId = boundEndpointId(entry);
+            if (epId != null) {
+                epCounters.onRemoved(epId, entry);
+            }
         }
         tickPublish();
         return true;
@@ -169,8 +196,9 @@ public final class DecodeSideStore {
             return prev;
         }
         indexEndpoint(adopted); // 收养即绑定观察端点——入 byEndpoint 索引
-        // 单次记账：收养相位人口 + 引擎事实 KV + engineOwned（+ confirmed 若 ≥ D_LOADING）。
+        // 单次记账：收养相位人口 + 引擎事实 KV + engineOwned（+ confirmed 若 ≥ 引擎加载临界相位）。
         counters.onAdopted(adoptedPhase, adopted.kvTokensReported(), true);
+        epCounters.onAdopted(endpointId, adoptedPhase, adopted.kvTokensReported(), true);
         tickPublish();
         return adopted;
     }
@@ -264,42 +292,61 @@ public final class DecodeSideStore {
     }
 
     /**
-     * 端点级派生计数（读取换权阶段 G4 调度读数数据源）：按需对单端点名下
-     * 活跃条目聚合（量级 = 每端点活跃条目数；索引自愈语义同
-     * {@link #entriesByEndpoint(int)}）。未确认口径（phase &lt; D_LOADING）
-     * 对应旧双层账本 layer-1 预占的期望 KV / prompt KV 双轨计数。
+     * 绑定/重绑（dispatch 挂点）：首次绑定入桶（现态全账）；派发前重绑
+     * 做桶间全账迁移（同一临界区内完成——旧桶减/新桶加原子）；
+     * 引擎加载临界相位后不可变（拒绝重绑，保留原绑定）。索引随绑定同步维护。
+     *
+     * @return 绑定是否生效（false = 已不可变，保留原绑定）
+     */
+    public boolean bindEndpoint(DecodeRequestState entry, GenerationTriple binding) {
+        Integer fromEndpointId;
+        synchronized (entry) {
+            GenerationTriple old = entry.binding();
+            boolean wasBound = entry.isBound();
+            if (!entry.setBindingOnce(binding)) {
+                return false; // 已不可变（保留原绑定）：账不动
+            }
+            fromEndpointId = wasBound ? old.endpointId() : null;
+            if (fromEndpointId != null && fromEndpointId != binding.endpointId()) {
+                // 派发前重绑：全账迁移（本临界区内）
+                epCounters.transferEntry(fromEndpointId, binding.endpointId(), entry);
+            } else if (fromEndpointId == null) {
+                // 首次绑定：现态入桶
+                epCounters.onEntryAdded(binding.endpointId(), entry);
+            }
+        }
+        if (fromEndpointId != null && fromEndpointId != binding.endpointId()) {
+            unindexFromEndpoint(entry, fromEndpointId); // 旧桶索引清除（防残留）
+        }
+        indexEndpoint(entry);
+        return true;
+    }
+
+    /** 旧桶索引清除（重绑专用：按指定旧端点移除，当前 binding 已指向新端点）。 */
+    private void unindexFromEndpoint(DecodeRequestState entry, int oldEndpointId) {
+        ConcurrentHashMap<Long, DecodeRequestState> bucket = byEndpoint.get(oldEndpointId);
+        if (bucket != null) {
+            bucket.remove(entry.requestId(), entry);
+            if (bucket.isEmpty()) {
+                byEndpoint.remove(oldEndpointId, bucket);
+            }
+        }
+    }
+
+    /** 已绑定条目的端点 id（未绑定返回 null——不入端点计数桶）。 */
+    private static Integer boundEndpointId(DecodeRequestState entry) {
+        return entry.isBound() ? entry.binding().endpointId() : null;
+    }
+
+    /**
+     * 端点级派生计数（读取换权阶段调度读数数据源）：端点级增量计数簿的
+     * O(1) 无锁快照（写路径与全局账同一临界区增量维护；不再按需遍历
+     * 聚合——把 O(端点活跃条目) 扫描从调度热路径上拿掉）。未确认口径
+     * （phase &lt; 引擎加载临界相位）对应旧双层账本预占层的期望 KV /
+     * prompt KV 双轨计数。
      */
     public DecodeEndpointCounters endpointCounters(int endpointId) {
-        List<DecodeRequestState> entries = entriesByEndpoint(endpointId);
-        if (entries.isEmpty()) {
-            return DecodeEndpointCounters.empty();
-        }
-        long[] phases = new long[DecodePhase.values().length];
-        int unconfirmedCount = 0;
-        long unconfirmedExpectedKv = 0L;
-        long unconfirmedSeqKv = 0L;
-        int engineOwnedCount = 0;
-        long kvReportedTotal = 0L;
-        int unconfirmedOrdinal = DecodePhase.D_LOADING.ordinal();
-        for (DecodeRequestState e : entries) {
-            phases[e.phase().ordinal()]++;
-            if (e.phase().ordinal() < unconfirmedOrdinal) {
-                unconfirmedCount++;
-                unconfirmedExpectedKv += e.reservedKv();
-                unconfirmedSeqKv += e.seqLen();
-            }
-            if (e.engineOwned()) {
-                engineOwnedCount++;
-            }
-            kvReportedTotal += e.kvTokensReported();
-        }
-        List<Long> phaseCounts = new ArrayList<>(phases.length);
-        for (long v : phases) {
-            phaseCounts.add(v);
-        }
-        return new DecodeEndpointCounters(entries.size(), unconfirmedCount,
-                unconfirmedExpectedKv, unconfirmedSeqKv, engineOwnedCount,
-                kvReportedTotal, phaseCounts);
+        return epCounters.countersOf(endpointId);
     }
 
     public long size() {
@@ -327,7 +374,20 @@ public final class DecodeSideStore {
 
     /** 对账：计数器增量账 vs 全量重算（不静默修正）。 */
     public List<String> auditDrift() {
-        return counters.driftAgainst(entriesSnapshot());
+        List<String> drift = new ArrayList<>(counters.driftAgainst(entriesSnapshot()));
+        drift.addAll(auditDriftPerEndpoint());
+        return drift;
+    }
+
+    /** 对账（端点级）：桶增量账 vs 按已绑定活跃条目全量重算（不静默修正）。 */
+    public List<String> auditDriftPerEndpoint() {
+        Map<Integer, List<DecodeRequestState>> bound = new java.util.HashMap<>();
+        for (DecodeRequestState e : entries.values()) {
+            if (e.isBound()) {
+                bound.computeIfAbsent(e.binding().endpointId(), k -> new ArrayList<>()).add(e);
+            }
+        }
+        return epCounters.driftAgainst(bound);
     }
 
     /** reset（rebuild 用；单线程调用）。 */
@@ -335,6 +395,7 @@ public final class DecodeSideStore {
         entries.clear();
         byEndpoint.clear();
         counters.reset();
+        epCounters.reset();
         transitionTick.set(0);
         overtakenEvents.reset();
         publishedSnapshot = counters.recompute(0);

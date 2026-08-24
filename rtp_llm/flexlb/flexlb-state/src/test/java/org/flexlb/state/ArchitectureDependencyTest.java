@@ -6,6 +6,8 @@ import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.lang.ArchRule;
 import org.junit.jupiter.api.Test;
 
+import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAPackage;
+import static com.tngtech.archunit.core.domain.properties.HasName.Predicates.nameMatching;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.classes;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 
@@ -66,28 +68,39 @@ class ArchitectureDependencyTest {
         rule.check(MAIN_CLASSES);
     }
 
-    /** 单写者（类型强制）：派生计数器必须 package-private（@InternalApi 也不允许）。 */
+    /**
+     * 单写者（类型强制）：派生计数器（全局 *Counters 与端点级 *CountersBook）
+     * 必须 package-private（@InternalApi 也不允许）。
+     */
     @Test
     void derivedCountersMustBePackagePrivate() {
         ArchRule rule = classes()
-                .that().haveSimpleNameEndingWith("Counters")
-                .and().resideInAPackage("org.flexlb.state.internal..")
+                .that(resideInAPackage("org.flexlb.state.internal..")
+                        .and(nameMatching(".*Counters(Book)?$")))
                 .should().notBePublic()
                 .because("单写者：计数器 mutator 全 package-private——类型不可见即不可调用，"
-                        + "条目/门面/其他组件无法绕过 SideStore 直写计数");
+                        + "条目/门面/其他组件无法绕过 SideStore 直写计数"
+                        + "（全局派生计数器与端点级计数簿同一纪律）");
         rule.check(MAIN_CLASSES);
     }
 
-    /** 单写者（调用位置强制）：计数器仅同包 *SideStore 可依赖。 */
+    /**
+     * 单写者（调用位置强制）：计数器（internal 包内的增量账实现——全局
+     * *Counters 与端点级 *CountersBook）仅同包 *SideStore 可依赖。
+     * 对外只读 record（org.flexlb.state 包的 *EndpointCounters 快照）不在
+     * 限制范围——它们是读侧返回值而非可写账。
+     */
     @Test
     void derivedCountersAreOnlyReachableBySideStores() {
         ArchRule rule = noClasses()
                 .that().resideInAPackage("org.flexlb.state.internal..")
                 .and().haveSimpleNameNotEndingWith("SideStore")
-                .should().dependOnClassesThat()
-                .haveSimpleNameEndingWith("Counters")
+                .should().dependOnClassesThat(
+                        resideInAPackage("org.flexlb.state.internal..")
+                                .and(nameMatching(".*Counters(Book)?$")))
                 .because("单写者：计数器调用点固定在 SideStore 的 CAS 胜者分支/register/"
-                        + "settleRemove 等位置，其他类型（含条目自身）不得依赖计数器");
+                        + "settleRemove 等位置，其他类型（含条目自身、端点级计数簿的调用方）"
+                        + "不得依赖计数器；对外只读快照 record 不受限");
         rule.check(MAIN_CLASSES);
     }
 

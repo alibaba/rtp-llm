@@ -570,8 +570,8 @@ public final class StateLedger {
             if (e == null) {
                 return false;
             }
-            e.setBindingOnce(binding); // DISPATCHED 前可重绑；不可变后返回 false 保留原绑定
-            pStore.indexEndpoint(e); // M4：byEndpoint 索引（重绑旧桶残留由视图自愈）
+            // 绑定 + 端点计数簿迁移（首绑入桶/派发前重绑桶间迁移）+ 索引维护（同一临界区）
+            pStore.bindEndpoint(e, binding);
             return pStore.advance(e, PrefillPhase.DISPATCHED, -1L, System.currentTimeMillis());
         }
 
@@ -642,8 +642,8 @@ public final class StateLedger {
             if (e == null) {
                 return false;
             }
-            e.setBindingOnce(binding);
-            dStore.indexEndpoint(e); // M4：byEndpoint 索引（重绑旧桶残留由视图自愈）
+            // 绑定 + 端点计数簿迁移（首绑入桶/派发前重绑桶间迁移）+ 索引维护（同一临界区）
+            dStore.bindEndpoint(e, binding);
             return dStore.advance(e, DecodePhase.DISPATCHED, -1L, System.currentTimeMillis());
         }
 

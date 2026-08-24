@@ -19,17 +19,20 @@ import org.flexlb.state.internal.TombstoneStore;
 /**
  * P 侧条目容器 + 计数挂点。
  *
- * <p>计数纪律：{@link PrefillCounters} 的 mutator 仅在本类固定位置调用
- * ——advance 的 CAS 胜者分支 / register / settleRemove / adoptEngineOwned /
- * noteEngineObserved。条目与其他组件不可直达计数器。</p>
+ * <p>计数纪律：{@link PrefillCounters} 与端点级 {@link PrefillEndpointCountersBook}
+ * 的 mutator 仅在本类固定位置调用——advance 的 CAS 胜者分支 / register /
+ * settleRemove / adoptEngineOwned / noteEngineObserved；全局账与端点账
+ * 在同一临界区内同步更新（单一写者纪律）。条目与其他组件不可直达计数器。</p>
  */
 @InternalApi
 public final class PrefillSideStore {
 
     private final ConcurrentHashMap<Long, PrefillRequestState> entries = new ConcurrentHashMap<>();
-    /** byEndpoint 二级索引（M4 janitor 证据通道/TTL 扫描结构）：endpointId → 名下条目。 */
+    /** byEndpoint 二级索引（清理层证据通道/TTL 扫描结构）：endpointId → 名下条目。 */
     private final ConcurrentHashMap<Integer, ConcurrentHashMap<Long, PrefillRequestState>> byEndpoint = new ConcurrentHashMap<>();
     private final PrefillCounters counters = new PrefillCounters();
+    /** 端点级增量计数簿（调度读数 O(1) 数据源；与全局账同一写者位置同步更新）。 */
+    private final PrefillEndpointCountersBook epCounters = new PrefillEndpointCountersBook();
     private final TombstoneStore tombstones;
     private final int snapshotInterval;
 
@@ -82,6 +85,10 @@ public final class PrefillSideStore {
                 return false;
             }
             counters.onPhaseTransition(from, target);
+            Integer epId = boundEndpointId(entry);
+            if (epId != null) {
+                epCounters.onPhaseTransition(epId, from, target);
+            }
             if (target == PrefillPhase.DISPATCHED) {
                 entry.noteDispatched(nowMs);
             }
@@ -99,6 +106,10 @@ public final class PrefillSideStore {
             entry.markEngineObserved(round, kvTokens, version);
             if (first) {
                 counters.onEngineOwned();
+                Integer epId = boundEndpointId(entry);
+                if (epId != null) {
+                    epCounters.onEngineOwned(epId);
+                }
             }
         }
     }
@@ -116,6 +127,10 @@ public final class PrefillSideStore {
         unindexEndpoint(entry);
         synchronized (entry) {
             counters.onRemoved(entry);
+            Integer epId = boundEndpointId(entry);
+            if (epId != null) {
+                epCounters.onRemoved(epId, entry);
+            }
         }
         tombstones.absorb(entry.requestId(), outcome, nowMs);
         tickPublish();
@@ -141,6 +156,7 @@ public final class PrefillSideStore {
         indexEndpoint(adopted); // 收养即绑定观察端点——入 byEndpoint 索引
         // 单次记账：收养相位人口 +1、engineOwned +1（构造时未走 register，无 INIT 账可减）。
         counters.onAdopted(adoptedPhase, true);
+        epCounters.onEntryAdded(endpointId, adopted);
         tickPublish();
         return adopted;
     }
@@ -234,28 +250,61 @@ public final class PrefillSideStore {
     }
 
     /**
-     * 端点级派生计数（读取换权阶段 G4 调度读数数据源）：按需对单端点名下
-     * 活跃条目聚合。条目在 onDispatched 绑定后进端点索引——排队/攒批窗口
-     * 由派发编排侧（batcher 队列深度）单独覆盖，此处不含。
+     * 绑定/重绑（dispatch 挂点）：首次绑定入桶（现态全账）；派发前重绑
+     * 做桶间全账迁移（同一临界区内完成——旧桶减/新桶加原子）；
+     * DISPATCHED 后不可变（拒绝重绑，保留原绑定）。索引随绑定同步维护。
+     *
+     * @return 绑定是否生效（false = 已不可变，保留原绑定）
      */
-    public PrefillEndpointCounters endpointCounters(int endpointId) {
-        List<PrefillRequestState> entries = entriesByEndpoint(endpointId);
-        if (entries.isEmpty()) {
-            return PrefillEndpointCounters.empty();
-        }
-        long[] phases = new long[PrefillPhase.values().length];
-        int engineOwnedCount = 0;
-        for (PrefillRequestState e : entries) {
-            phases[e.phase().ordinal()]++;
-            if (e.engineOwned()) {
-                engineOwnedCount++;
+    public boolean bindEndpoint(PrefillRequestState entry, GenerationTriple binding) {
+        Integer fromEndpointId;
+        synchronized (entry) {
+            GenerationTriple old = entry.binding();
+            boolean wasBound = entry.isBound();
+            if (!entry.setBindingOnce(binding)) {
+                return false; // 已不可变（保留原绑定）：账不动
+            }
+            fromEndpointId = wasBound ? old.endpointId() : null;
+            if (fromEndpointId != null && fromEndpointId != binding.endpointId()) {
+                // 派发前重绑：全账迁移（本临界区内）
+                epCounters.transferEntry(fromEndpointId, binding.endpointId(), entry);
+            } else if (fromEndpointId == null) {
+                // 首次绑定：现态入桶
+                epCounters.onEntryAdded(binding.endpointId(), entry);
             }
         }
-        List<Long> phaseCounts = new ArrayList<>(phases.length);
-        for (long v : phases) {
-            phaseCounts.add(v);
+        if (fromEndpointId != null && fromEndpointId != binding.endpointId()) {
+            unindexFromEndpoint(entry, fromEndpointId); // 旧桶索引清除（防残留）
         }
-        return new PrefillEndpointCounters(entries.size(), engineOwnedCount, phaseCounts);
+        indexEndpoint(entry);
+        return true;
+    }
+
+    /** 旧桶索引清除（重绑专用：按指定旧端点移除，当前 binding 已指向新端点）。 */
+    private void unindexFromEndpoint(PrefillRequestState entry, int oldEndpointId) {
+        ConcurrentHashMap<Long, PrefillRequestState> bucket = byEndpoint.get(oldEndpointId);
+        if (bucket != null) {
+            bucket.remove(entry.requestId(), entry);
+            if (bucket.isEmpty()) {
+                byEndpoint.remove(oldEndpointId, bucket);
+            }
+        }
+    }
+
+    /** 已绑定条目的端点 id（未绑定返回 null——排队/攒批窗口不入端点计数桶）。 */
+    private static Integer boundEndpointId(PrefillRequestState entry) {
+        return entry.isBound() ? entry.binding().endpointId() : null;
+    }
+
+    /**
+     * 端点级派生计数（读取换权阶段调度读数数据源）：端点级增量计数簿的
+     * O(1) 无锁快照（写路径与全局账同一临界区增量维护；不再按需遍历
+     * 聚合——把 O(端点活跃条目) 扫描从调度热路径上拿掉）。条目在
+     * dispatch 绑定后进端点计数桶——排队/攒批窗口由派发编排侧
+     * （batcher 队列深度）单独覆盖，此处不含。
+     */
+    public PrefillEndpointCounters endpointCounters(int endpointId) {
+        return epCounters.countersOf(endpointId);
     }
 
     /** 按批次聚类（BatchShadowView 数据源）。 */
@@ -294,7 +343,20 @@ public final class PrefillSideStore {
 
     /** 对账：计数器增量账 vs 全量重算（不静默修正）。 */
     public List<String> auditDrift() {
-        return counters.driftAgainst(entriesSnapshot());
+        List<String> drift = new ArrayList<>(counters.driftAgainst(entriesSnapshot()));
+        drift.addAll(auditDriftPerEndpoint());
+        return drift;
+    }
+
+    /** 对账（端点级）：桶增量账 vs 按已绑定活跃条目全量重算（不静默修正）。 */
+    public List<String> auditDriftPerEndpoint() {
+        Map<Integer, List<PrefillRequestState>> bound = new java.util.HashMap<>();
+        for (PrefillRequestState e : entries.values()) {
+            if (e.isBound()) {
+                bound.computeIfAbsent(e.binding().endpointId(), k -> new ArrayList<>()).add(e);
+            }
+        }
+        return epCounters.driftAgainst(bound);
     }
 
     /** reset（rebuild 用；单线程调用）。 */
@@ -302,6 +364,7 @@ public final class PrefillSideStore {
         entries.clear();
         byEndpoint.clear();
         counters.reset();
+        epCounters.reset();
         transitionTick.set(0);
         overtakenEvents.reset();
         publishedSnapshot = counters.recompute(0);
