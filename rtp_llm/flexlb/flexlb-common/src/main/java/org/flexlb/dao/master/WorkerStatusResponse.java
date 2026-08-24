@@ -36,6 +36,15 @@ public class WorkerStatusResponse {
     @JsonProperty("running_task_info")
     private Map<String, TaskInfo> runningTaskInfo;
 
+    /**
+     * E7 completeness marker: how many running detail entries this report
+     * actually carries. runningDetailCount == runningTaskInfo.size() means the
+     * full running set was reported; a truncated report that omits entries
+     * must NOT be treated as evidence that the omitted tasks vanished.
+     */
+    @JsonProperty("running_detail_count")
+    private long runningDetailCount;
+
     @JsonProperty("finished_task_info")
     private Map<String, TaskInfo> finishedTaskInfo;
 

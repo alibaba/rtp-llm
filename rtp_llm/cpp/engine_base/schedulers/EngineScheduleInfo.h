@@ -25,6 +25,10 @@ struct EngineScheduleInfo {
         std::string error_message;
         int64_t     batch_id          = -1;
         int64_t     execution_time_ms = -1;
+        // Current actual KV usage (unit: tokens) = allocated blocks * block size.
+        // Filled per snapshot for running entries; carries the final value for
+        // finished entries. 0 = unknown (old engine / blocks already released).
+        int64_t kv_tokens = 0;
     };
     std::vector<TaskInfo> running_task_info_list;
     std::vector<TaskInfo> finished_task_info_list;

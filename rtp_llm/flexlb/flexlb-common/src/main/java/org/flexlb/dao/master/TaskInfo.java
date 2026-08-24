@@ -36,4 +36,12 @@ public class TaskInfo {
     @JsonProperty("execution_time_ms")
     private long executionTimeMs = -1;
 
+    /**
+     * Current actual KV usage of this request (unit: tokens), reported by the
+     * engine as allocated blocks * block size. E1 contract field: 0 means
+     * "unknown" (old engine build), not "zero KV".
+     */
+    @JsonProperty("kv_tokens")
+    private long kvTokens;
+
 }

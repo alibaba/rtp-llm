@@ -442,6 +442,12 @@ message TaskInfoPB {
     int64 batch_id = 11;
     TaskPhase phase = 12;
     int64 execution_time_ms = 13;
+    // Current actual KV usage of this request (unit: tokens), reported by the
+    // engine as allocated blocks * block size. E1 contract field: engines on
+    // old builds do not populate it and the wire default 0 means "unknown",
+    // not "zero KV". Field number 16 is fixed: 14/15 are taken by the
+    // feat/auto_tpm_v3 branch to stay conflict-free at merge time.
+    int64 kv_tokens = 16;
 }
 
 message UpdateWeightsRequestPB {
@@ -480,6 +486,11 @@ message WorkerStatusPB {
     int64 max_seq_len = 21;
     // Maximum total tokens allowed in one batch (unit: tokens).
     int64 max_batch_tokens_size = 22;
+    // E7 completeness marker: how many running detail entries this report
+    // actually carries. running_detail_count == running_task_info.size()
+    // means the full running set was reported; a truncated report that omits
+    // entries must NOT be treated as evidence that the omitted tasks vanished.
+    int32 running_detail_count = 23;
 }
 
 message EmbeddingInputPB {

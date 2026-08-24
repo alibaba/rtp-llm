@@ -248,6 +248,15 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_role(roleTypeToString(status_info.role));
     response->set_role_type(static_cast<RoleTypePB>(status_info.role));
 
+    // E2: activate the previously dead waiting/running query lengths. The
+    // phase of each running entry is already derived per snapshot via
+    // RpcServerRuntimeMeta::derivePhase, so count in the same loop that
+    // assembles running_task_info (no extra traversal):
+    //   waiting_query_len = entries not yet RUNNING,
+    //   running_query_len = entries in RUNNING phase.
+    int32_t waiting_query_len    = 0;
+    int32_t running_query_len    = 0;
+    int32_t running_detail_count = 0;
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();
         task_info->set_request_id(task.request_id);
@@ -260,11 +269,23 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_phase(static_cast<::TaskPhase>(task.phase));
         task_info->set_batch_id(task.batch_id);
         task_info->set_execution_time_ms(task.execution_time_ms);
+        task_info->set_kv_tokens(task.kv_tokens);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);
         }
+        if (task.phase == TaskPhase::RUNNING) {
+            running_query_len++;
+        } else {
+            waiting_query_len++;
+        }
+        running_detail_count++;
     }
+    response->set_waiting_query_len(waiting_query_len);
+    response->set_running_query_len(running_query_len);
+    // E7 completeness marker: how many running detail entries this report
+    // actually carries (== running_task_info.size() of this response).
+    response->set_running_detail_count(running_detail_count);
 
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
         TaskInfoPB* task_info = response->add_finished_task_list();
@@ -278,6 +299,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_phase(static_cast<::TaskPhase>(task.phase));
         task_info->set_batch_id(task.batch_id);
         task_info->set_execution_time_ms(task.execution_time_ms);
+        task_info->set_kv_tokens(task.kv_tokens);
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);

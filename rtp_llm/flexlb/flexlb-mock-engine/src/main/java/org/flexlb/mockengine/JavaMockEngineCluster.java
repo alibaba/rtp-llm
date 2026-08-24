@@ -627,7 +627,12 @@ public final class JavaMockEngineCluster {
                     .setDpSize(1)
                     .setTpSize(1)
                     .setDpRank(0);
-            status.addAllRunningTaskInfo(runningTasks.values());
+            // Snapshot the running set once so running_detail_count (E7) is
+            // guaranteed to equal the number of entries actually reported,
+            // even if requests complete concurrently between the two calls.
+            List<EngineRpcService.TaskInfoPB> runningSnapshot = List.copyOf(runningTasks.values());
+            status.addAllRunningTaskInfo(runningSnapshot);
+            status.setRunningDetailCount(runningSnapshot.size());
             for (VersionedTask completion : completions) {
                 if (completion.version > requestedVersion && completion.version <= latestVersion) {
                     status.addFinishedTaskList(completion.task);
@@ -1246,6 +1251,15 @@ public final class JavaMockEngineCluster {
                     .setBatchId(batchId)
                     .setPhase(phase)
                     .setDpRank(dpRank)
+                    // E1 kv_tokens: per-request KV usage modelled as the full
+                    // sequence length (input + planned output), mirroring the
+                    // real engine semantics of kv_tokens = allocated blocks *
+                    // block size ~= block-aligned sequence length. The separate
+                    // activeKvTokens watermark (inputLen-only) models
+                    // available_kv_cache pressure and is intentionally not
+                    // reused here: it is a capacity watermark, not a
+                    // per-request usage value.
+                    .setKvTokens(shape.inputLen() + shape.outputLen())
                     .build();
         }
 
@@ -1265,6 +1279,10 @@ public final class JavaMockEngineCluster {
                     .setExecutionTimeMs(executionMs)
                     .setIterateCount(1)
                     .setDpRank(dpRank)
+                    // E1 kv_tokens final value: the finished request's peak KV
+                    // footprint is its full sequence length (input + output),
+                    // consistent with the running-entry model in task().
+                    .setKvTokens(shape.inputLen() + shape.outputLen())
                     .build();
             completions.add(new VersionedTask(version, task));
         }

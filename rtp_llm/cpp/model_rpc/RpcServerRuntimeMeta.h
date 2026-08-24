@@ -32,12 +32,50 @@ public:
         return TaskPhase::RECEIVED;
     }
 
+    // Current KV usage in tokens = allocated blocks * block size. Block size
+    // comes from stream->seqSizePerBlock(), i.e. the KVCacheManager config the
+    // stream was created with (production streams always carry a cache_manager;
+    // unit-test streams built with an empty ResourceContext do not, so guard
+    // and report 0 instead of dereferencing a null cache_manager).
+    static int64_t deriveKvTokens(const GenerateStreamPtr& stream) {
+        if (!stream || !stream->resourceContext().cache_manager) {
+            return 0;
+        }
+        return static_cast<int64_t>(stream->curBlocksNum()) * stream->seqSizePerBlock();
+    }
+
+    // Final KV usage in tokens for a finished stream. By the time dequeue runs,
+    // GenerateStateMachine has already released the KV blocks (clearBlocks),
+    // so curBlocksNum() would read 0. Derive the peak block-aligned footprint
+    // from the final sequence length instead: ceil(seq_len / block_size)
+    // blocks, each holding block_size tokens (the last partially-filled block
+    // still occupies a full block), matching the running-entry semantics of
+    // blocks * block size.
+    static int64_t deriveFinalKvTokens(const GenerateStreamPtr& stream) {
+        if (!stream || !stream->resourceContext().cache_manager) {
+            return 0;
+        }
+        const int64_t block_size = stream->seqSizePerBlock();
+        if (block_size <= 0) {
+            return 0;
+        }
+        const int64_t seq_len = stream->seqLength();
+        return ((seq_len + block_size - 1) / block_size) * block_size;
+    }
+
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
         std::shared_lock<std::shared_mutex> lock(read_write_lock_);
         EngineScheduleInfo                  info;
-        for (auto& [id, entry] : running_streams_) {
-            entry.task_info.phase = derivePhase(entry.stream);
-            info.running_task_info_list.push_back(entry.task_info);
+        // Value copy (not `auto&`): the snapshot must not write the derived
+        // phase / kv_tokens back into running_streams_. This keeps the protocol
+        // invariant that a finished entry keeps phase == PENDING (the value it
+        // was enqueued with) instead of leaking the last snapshot's derived
+        // phase into finished reports.
+        for (const auto& [id, entry] : running_streams_) {
+            auto task_info      = entry.task_info;
+            task_info.phase     = derivePhase(entry.stream);
+            task_info.kv_tokens = deriveKvTokens(entry.stream);
+            info.running_task_info_list.push_back(std::move(task_info));
         }
         int64_t version = latest_finished_version;
         for (auto& iter : finished_streams_) {
@@ -77,6 +115,7 @@ public:
         task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
         task_info.iterate_count     = stream->iterCount();
         task_info.execution_time_ms = computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
+        task_info.kv_tokens         = deriveFinalKvTokens(stream);
         if (stream->hasError()) {
             task_info.error_code    = static_cast<int64_t>(stream->statusInfo().code());
             task_info.error_message = stream->statusInfo().ToString();
