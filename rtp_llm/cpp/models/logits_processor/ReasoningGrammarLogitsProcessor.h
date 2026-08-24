@@ -46,6 +46,7 @@ public:
 private:
     bool applyReasoningOrGrammarMaskLocked(const SamplerInputs& inputs, size_t batch_idx);
     bool applyGrammarMaskLocked(const torch::Tensor& logits);
+    void maskGrammarThinkBeginToken(const torch::Tensor& logits);
     bool forceThinkEndTokenLocked(const torch::Tensor& logits);
     void acceptCommittedGrammarTokenLocked(int32_t token_id);
     void reportErrorOnce(ErrorCode error_code, const std::string& error_msg, bool stream_lock_held);
