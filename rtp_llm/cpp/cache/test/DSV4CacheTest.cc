@@ -2799,16 +2799,16 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     const auto    seeded      = seedCompleteBlockTreePath(allocator, cached_keys);
     ASSERT_TRUE(seeded.success);
 
-    size_t evicted_tail_blocks = 0;
     for (const auto& group_set : allocator->blockTreeCacheOwner()->groupSets()) {
         if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
         ASSERT_FALSE(group_set->groupIds().empty());
-        evicted_tail_blocks += static_cast<size_t>(
-            allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), cached_keys.size()));
+        for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 1), 0)
+                << "path_index=" << path_index;
+        }
     }
-    ASSERT_GT(evicted_tail_blocks, 0u);
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
     batch_res->resetBatchSize(1);
@@ -2888,7 +2888,10 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
             continue;
         }
         ASSERT_FALSE(group_set->groupIds().empty());
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 2), 2);
+        for (size_t path_index = 1; path_index < cached_keys.size(); ++path_index) {
+            ASSERT_GT(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 1), 0)
+                << "path_index=" << path_index;
+        }
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();
