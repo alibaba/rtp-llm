@@ -10,6 +10,7 @@
 #include <thread>
 
 #include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
@@ -19,10 +20,39 @@
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
+
+double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags) {
+    if (metric == nullptr) {
+        ADD_FAILURE() << "metric is null";
+        return -1;
+    }
+    kmonitor::Metric* qps_metric = metric->DeclareMetric(&tags);
+    if (qps_metric == nullptr) {
+        ADD_FAILURE() << "metric series is missing for tags=" << tags.ToString();
+        return -1;
+    }
+    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+    qps_metric->Snapshot(&record, 1000);
+    EXPECT_TRUE(metric->UndeclareMetric(qps_metric));
+    if (record.Values().size() != 1) {
+        ADD_FAILURE() << "unexpected metric value count=" << record.Values().size();
+        return -1;
+    }
+    return std::stod(record.Values().front()->Value());
+}
+
+size_t metricSeriesCount(kmonitor::MutableMetric* metric) {
+    if (metric == nullptr) {
+        ADD_FAILURE() << "metric is null";
+        return 0;
+    }
+    return static_cast<size_t>(metric->metric_data_->Size());
+}
 
 std::shared_ptr<LoadAsyncContext> getLoadContext(const BlockTreeMatchResult& result) {
     return std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
@@ -276,6 +306,103 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
     const size_t direction_index =
         static_cast<size_t>(BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier::DEVICE, Tier::HOST));
     EXPECT_EQ(reporter.transfer_in_flight_[operation_index][direction_index].load(), 0);
+}
+
+TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperations) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+
+    RtpLLMCacheOperationMetricsCollector malloc_collector;
+    malloc_collector.operation_type = RtpLLMCacheOperationMetricsCollector::OpType::MALLOC;
+    malloc_collector.success        = true;
+    ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(
+        nullptr, &malloc_collector)));
+    RtpLLMCacheOperationMetrics* operation_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheOperationMetrics>();
+    ASSERT_NE(operation_metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(operation_metrics->malloc_failed_qps_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_failed_qps_metric, tags), 0);
+    malloc_collector.success = false;
+    ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheOperationMetrics, RtpLLMCacheOperationMetricsCollector>(
+        nullptr, &malloc_collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_failed_qps_metric, tags), 1);
+
+    RtpLLMCacheTransferMetricsCollector transfer_collector;
+    transfer_collector.operation   = "load";
+    transfer_collector.source_tier = "host";
+    transfer_collector.target_tier = "device";
+    transfer_collector.success     = true;
+    ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
+        nullptr, &transfer_collector)));
+    RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(transfer_metrics, nullptr);
+    kmonitor::MetricsTags transfer_tags("operation", "load");
+    transfer_tags.AddTag("source_tier", "host");
+    transfer_tags.AddTag("target_tier", "device");
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_failed_qps_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_failed_qps_metric, transfer_tags), 0);
+    transfer_collector.success = false;
+    ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
+        nullptr, &transfer_collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_failed_qps_metric, transfer_tags), 1);
+
+    RtpLLMCacheReuseMetricsCollector no_load_collector;
+    ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
+        nullptr, &no_load_collector)));
+    RtpLLMCacheReuseMetrics* reuse_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
+    ASSERT_NE(reuse_metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(reuse_metrics->load_qps_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(reuse_metrics->load_fail_qps_metric), 0u);
+
+    RtpLLMCacheReuseMetricsCollector load_collector;
+    load_collector.report_load_metrics = true;
+    load_collector.load_success        = true;
+    ASSERT_TRUE((
+        metrics_reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &load_collector)));
+    EXPECT_EQ(metricSeriesCount(reuse_metrics->load_qps_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(reuse_metrics->load_fail_qps_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_qps_metric, tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_fail_qps_metric, tags), 0);
+    load_collector.load_success = false;
+    ASSERT_TRUE((
+        metrics_reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &load_collector)));
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_qps_metric, tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_fail_qps_metric, tags), 1);
+}
+
+TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    const std::vector<BlockTreeEvictableMetricsSnapshot> snapshots =
+        reporter.collectEvictableMetricsSnapshots(cache_->groupSets(), cache_->evictor_);
+    ASSERT_EQ(snapshots.size(), 3u);
+    for (const BlockTreeEvictableMetricsSnapshot& snapshot : snapshots) {
+        EXPECT_EQ(snapshot.group_type, CacheGroupType::FULL);
+    }
+    reporter.reportEvictableCandidateCount(snapshots);
+    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->evictable_candidate_count_metric), 3u);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->eviction_trigger_qps_metric), 6u);
+
+    kmonitor::MetricsTags watermark_tags("trigger_type", "watermark");
+    watermark_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 0);
+
+    kmonitor::MetricsTags force_drop_tags("trigger_type", "force_drop");
+    force_drop_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    force_drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 0);
+
+    reporter.reportEvictionTriggered(Tier::DEVICE, CacheGroupType::FULL, false);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 1);
+    reporter.reportEvictionTriggered(Tier::DEVICE, CacheGroupType::FULL, true);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
 }
 
 TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndLimit) {

@@ -15,9 +15,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
 
     std::vector<std::shared_ptr<IBlockPool>> device_pools;
     std::vector<std::shared_ptr<IBlockPool>> host_pools;
-    for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->devicePools().size(), 1u);
-        device_pools.push_back(group_set->devicePools().front());
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        appendDevicePools(group_set, device_pools);
         host_pools.push_back(group_set->hostPool());
     }
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
@@ -47,9 +46,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_host);
     ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
-    for (const auto& group_set : cache->groupSets()) {
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+        for (const DeviceBlockPoolPtr& pool : group_set->devicePools()) {
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+        }
     }
 
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -146,9 +147,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
 
     std::vector<std::shared_ptr<IBlockPool>> device_pools;
     std::vector<std::shared_ptr<IBlockPool>> host_pools;
-    for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->devicePools().size(), 1u);
-        device_pools.push_back(group_set->devicePools().front());
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        appendDevicePools(group_set, device_pools);
         host_pools.push_back(group_set->hostPool());
     }
     const size_t host_capacity = host_pools.front()->totalBlocksNum();
@@ -194,14 +194,18 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     auto retry_device = snapshotPathResources(*cache, retry_seed.cache_keys);
     ASSERT_TRUE(retry_device.has_value());
     ASSERT_EQ(retry_device->size(), 1u);
-    std::vector<BlockIdxType> retry_device_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
+    std::vector<BlockIndicesType> retry_device_sources(cache->groupSets().size());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        const auto& resource = (*retry_device)[0][group_set_id];
+        const GroupSetPtr&      group_set = cache->groupSets()[group_set_id];
+        const GroupSetResource& resource  = (*retry_device)[0][group_set_id];
         ASSERT_EQ(resource.getTopTier(), Tier::DEVICE);
-        ASSERT_EQ(resource.device_blocks.size(), 1u);
-        retry_device_sources[group_set_id] = resource.device_blocks.front();
-        EXPECT_EQ(cache->groupSets()[group_set_id]->devicePools().front()->refCount(retry_device_sources[group_set_id]),
-                  1u);
+        retry_device_sources[group_set_id] = groupSetSeedBlocksAt(group_set, retry_seed, /*path_index=*/0);
+        ASSERT_EQ(resource.device_blocks, retry_device_sources[group_set_id]);
+        ASSERT_EQ(group_set->devicePools().size(), retry_device_sources[group_set_id].size());
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_EQ(
+                group_set->devicePools()[member_index]->refCount(retry_device_sources[group_set_id][member_index]), 1u);
+        }
     }
 
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
@@ -218,14 +222,16 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     auto retained_device = snapshotPathResources(*cache, retry_seed.cache_keys);
     ASSERT_TRUE(retained_device.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        const auto& resource = (*retained_device)[0][group_set_id];
+        const GroupSetPtr&      group_set = cache->groupSets()[group_set_id];
+        const GroupSetResource& resource  = (*retained_device)[0][group_set_id];
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
         ASSERT_EQ(resource.getTopTier(), Tier::DEVICE);
-        ASSERT_EQ(resource.device_blocks.size(), 1u);
-        EXPECT_EQ(resource.device_blocks.front(), retry_device_sources[group_set_id]);
-        EXPECT_EQ(cache->groupSets()[group_set_id]->devicePools().front()->refCount(retry_device_sources[group_set_id]),
-                  1u);
-        EXPECT_EQ(device_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+        EXPECT_EQ(resource.device_blocks, retry_device_sources[group_set_id]);
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_EQ(
+                group_set->devicePools()[member_index]->refCount(retry_device_sources[group_set_id][member_index]), 1u);
+            EXPECT_EQ(group_set->devicePools()[member_index]->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+        }
         EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
     }
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, retry_seed.cache_keys));
@@ -278,7 +284,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
         EXPECT_EQ(descriptor.source_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);
-        EXPECT_EQ(descriptor.singleBlockAt(Tier::DEVICE), retry_device_sources[descriptor.group_set_id]);
+        EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE), retry_device_sources[descriptor.group_set_id]);
     }
     auto retry_host = snapshotPathResources(*cache, retry_seed.cache_keys);
     ASSERT_TRUE(retry_host.has_value());
@@ -287,7 +293,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         EXPECT_EQ(host_pools[group_set_id]->treeRefCount(resource.host_block), 1u);
-        EXPECT_FALSE(device_pools[group_set_id]->isAllocated(retry_device_sources[group_set_id]));
+        const GroupSetPtr& group_set = cache->groupSets()[group_set_id];
+        for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
+            EXPECT_FALSE(
+                group_set->devicePools()[member_index]->isAllocated(retry_device_sources[group_set_id][member_index]));
+        }
         EXPECT_EQ(host_pools[group_set_id]->freeBlocksNum(), freed_host_blocks[group_set_id] - 1);
         EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE),
                   host_capacity - freed_host_blocks[group_set_id] + 1);
@@ -309,9 +319,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     std::vector<std::shared_ptr<IBlockPool>> device_pools;
     std::vector<std::shared_ptr<IBlockPool>> host_pools;
     std::vector<std::shared_ptr<IBlockPool>> disk_pools;
-    for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->devicePools().size(), 1u);
-        device_pools.push_back(group_set->devicePools().front());
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        appendDevicePools(group_set, device_pools);
         host_pools.push_back(group_set->hostPool());
         disk_pools.push_back(group_set->diskPool());
     }
