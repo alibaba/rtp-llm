@@ -951,14 +951,14 @@ public:
         int64_t     transfer_bytes = 0;
     };
 
-    std::string source_tier;
-    std::string target_tier;
+    std::string                     source_tier;
+    std::string                     target_tier;
     std::vector<TransferBytesEntry> transfer_bytes;
-    int64_t     block_count        = 0;
-    int64_t     latency_us         = 0;
-    int64_t     in_flight          = 0;
-    bool        success            = true;
-    bool        transfer_completed = true;
+    int64_t                         descriptor_count   = 0;
+    int64_t                         latency_us         = 0;
+    int64_t                         in_flight          = 0;
+    bool                            success            = true;
+    bool                            transfer_completed = true;
 };
 
 class RtpLLMCacheTransferMetrics: public kmonitor::MetricsGroup {
@@ -967,12 +967,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* transfer_qps_metric         = nullptr;
-    kmonitor::MutableMetric* transfer_failed_qps_metric  = nullptr;
-    kmonitor::MutableMetric* transfer_block_count_metric = nullptr;
-    kmonitor::MutableMetric* transfer_latency_us_metric  = nullptr;
-    kmonitor::MutableMetric* transfer_in_flight_metric   = nullptr;
-    kmonitor::MutableMetric* transfer_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric              = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric       = nullptr;
+    kmonitor::MutableMetric* transfer_descriptor_count_metric = nullptr;
+    kmonitor::MutableMetric* transfer_latency_us_metric       = nullptr;
+    kmonitor::MutableMetric* transfer_in_flight_metric        = nullptr;
+    kmonitor::MutableMetric* transfer_bytes_metric            = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1051,10 +1051,11 @@ public:
     int64_t hit_entry_age_avg_ms  = 0;
     int64_t hit_entry_age_max_ms  = 0;
 
-    int64_t match_latency_us          = 0;
-    int64_t load_prepare_latency_us   = 0;
-    int64_t load_wait_latency_us      = 0;
-    int64_t match_to_ready_latency_us = 0;
+    int64_t match_latency_us              = 0;
+    int64_t load_prepare_latency_us       = 0;
+    int64_t load_wait_latency_us          = 0;
+    int64_t match_to_ready_latency_us     = 0;
+    bool    load_attempted                = false;
     bool    load_success                  = false;
     bool    report_reuse_metrics          = false;
     bool    report_reuse_time_metrics     = false;

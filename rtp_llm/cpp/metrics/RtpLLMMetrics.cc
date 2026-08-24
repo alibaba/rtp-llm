@@ -540,7 +540,7 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
 bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(transfer_qps_metric, "rtp_llm_kv_cache_transfer_qps");
     REGISTER_QPS_MUTABLE_METRIC(transfer_failed_qps_metric, "rtp_llm_kv_cache_transfer_failed_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(transfer_block_count_metric, "rtp_llm_kv_cache_transfer_block_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(transfer_descriptor_count_metric, "rtp_llm_kv_cache_transfer_descriptor_count");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_latency_us_metric, "rtp_llm_kv_cache_transfer_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
     REGISTER_QPS_MUTABLE_METRIC(transfer_bytes_metric, "rtp_llm_kv_cache_transfer_bytes");
@@ -555,7 +555,7 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
     if (collector->transfer_completed) {
         transfer_qps_metric->Report(&transfer_tags, 1);
         transfer_failed_qps_metric->Report(&transfer_tags, collector->success ? 0 : 1);
-        transfer_block_count_metric->Report(&transfer_tags, collector->block_count);
+        transfer_descriptor_count_metric->Report(&transfer_tags, collector->descriptor_count);
         transfer_latency_us_metric->Report(&transfer_tags, collector->latency_us);
         for (const RtpLLMCacheTransferMetricsCollector::TransferBytesEntry& entry : collector->transfer_bytes) {
             kmonitor::MetricsTags bytes_tags("operation", collector->operation);
@@ -750,7 +750,9 @@ void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCa
         }
     }
     if (collector->report_match_to_ready_latency) {
-        REPORT_MUTABLE_METRIC(match_to_ready_latency_us_metric, collector->match_to_ready_latency_us);
+        kmonitor::MetricsTags match_to_ready_tags = tags ? kmonitor::MetricsTags(*tags) : kmonitor::MetricsTags();
+        match_to_ready_tags.AddTag("load_attempted", collector->load_attempted ? "true" : "false");
+        match_to_ready_latency_us_metric->Report(&match_to_ready_tags, collector->match_to_ready_latency_us);
     }
 }
 

@@ -80,6 +80,7 @@ protected:
     void onFirstTreeRefNoLock(BlockIdxType block) override;
     bool onLastTreeRefNoLock(BlockIdxType block) override;
     void onCacheRefChangedNoLock(BlockIdxType block, bool cached) override;
+    bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
     bool                         hasRequestRefNoLock(BlockIdxType block) const;
