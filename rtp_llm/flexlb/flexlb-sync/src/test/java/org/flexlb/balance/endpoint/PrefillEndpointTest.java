@@ -271,11 +271,16 @@ class PrefillEndpointTest {
         BatchItem item = createBatchItem(1L, 500, 200);
         endpoint.getBatcher().offer(item);
 
-        long deadlineMs = System.currentTimeMillis() + 100;
-        while (endpoint.prefillPendingRequestCount() == 0 && System.currentTimeMillis() < deadlineMs) {
+        // 队列信号快照随引擎状态 tick 刷新（读点无锁化）——消费线程与
+        // 刷新竞争时小窗口重试，任一时刻读数>0 即证明队列深度已并入。
+        long deadlineMs = System.currentTimeMillis() + 200;
+        long pending = endpoint.prefillPendingRequestCount();
+        while (pending == 0 && System.currentTimeMillis() < deadlineMs) {
+            pumpEngineReport(null, null);
             Thread.sleep(1);
+            pending = endpoint.prefillPendingRequestCount();
         }
-        assertTrue(endpoint.prefillPendingRequestCount() > 0, "Pending count should include batcher queue");
+        assertTrue(pending > 0, "Pending count should include batcher queue");
     }
 
     // ---- WorkerEndpoint inherited behavior ----

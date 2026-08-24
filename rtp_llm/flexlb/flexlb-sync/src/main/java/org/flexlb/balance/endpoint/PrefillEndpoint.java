@@ -102,6 +102,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return c != null ? c : PrefillEndpointCounters.empty();
     }
 
+    /**
+     * Batcher 队列信号快照（深度 + 队头剩余攒批等待），引擎状态 tick 刷新。
+     *
+     * <p>选路读点每请求对全部候选端点调用——直接 peek/size 会与 batcher
+     * 生产/消费线程争抢队列内部锁，端点规模大时锁竞争拖垮调度延迟（高频
+     * 无效唤醒）。快照化后读点无锁，陈旧度以状态同步间隔为上界（与账本
+     * 计数缓存同 tick 采样，信号时点一致）。</p>
+     */
+    private volatile int batcherQueueDepth = 0;
+    private volatile long batcherQueueWaitMs = 0L;
+
     public WorkerBatcher getBatcher() {
         return batcher;
     }
@@ -116,7 +127,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public long batcherWaitMs() {
-        return batcher.queueWaitMs();
+        return batcherQueueWaitMs;
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
@@ -470,6 +481,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (shadowBridge != null) {
             this.ledgerCounters = shadowBridge.prefillEndpointCounters(endpointId);
         }
+        // batcher 队列信号同 tick 快照（无账本依赖；见字段注释——高频读点
+        // 无锁化，陈旧度以状态同步间隔为上界）。
+        this.batcherQueueDepth = batcher.queueSize();
+        this.batcherQueueWaitMs = batcher.queueWaitMs();
     }
 
     // ==================== 调度读点（账本 per-EP 视图） ====================
@@ -507,9 +522,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return ledgerCountersOrZero().estimatedWaitMs();
     }
 
-    /** Batcher pending-dispatch queue depth (unified naming for the existing view). */
+    /** Batcher pending-dispatch queue depth（引擎状态 tick 刷新的快照，见字段注释）。 */
     public int prefillBatcherQueueSize() {
-        return batcher.queueSize();
+        return batcherQueueDepth;
     }
 
     /**
@@ -518,7 +533,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * 深度（排队/攒批窗口）。退化模式只剩 batcher 队列深度。
      */
     public long prefillPendingRequestCount() {
-        return ledgerCountersOrZero().activeTotal() + batcher.queueSize();
+        return ledgerCountersOrZero().activeTotal() + batcherQueueDepth;
     }
 
     public PrefillTimePredictor getPredictor() {
