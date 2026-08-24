@@ -142,6 +142,34 @@ TEST(IBlockPoolTest, TreeRefMetricsCountDistinctBlocks) {
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 }
 
+TEST(IBlockPoolTest, ActiveBlocksDeduplicateReferenceTypes) {
+    std::shared_ptr<TestPool>   pool  = makeInitializedPool(/*physical_block_count=*/4);
+    std::optional<BlockIdxType> block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+
+    size_t active_blocks = 0;
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    active_blocks = pool->activeBlocksNum();
+    EXPECT_EQ(active_blocks, 0u);
+
+    pool->incTreeRef(*block, BlockTreeRefType::LOAD);
+    pool->incTreeRef(*block, BlockTreeRefType::STORE);
+    active_blocks = pool->activeBlocksNum();
+    EXPECT_EQ(active_blocks, 1u);
+
+    pool->decTreeRef(*block, BlockTreeRefType::LOAD);
+    active_blocks = pool->activeBlocksNum();
+    EXPECT_EQ(active_blocks, 1u);
+
+    pool->decTreeRef(*block, BlockTreeRefType::STORE);
+    active_blocks = pool->activeBlocksNum();
+    EXPECT_EQ(active_blocks, 0u);
+
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    active_blocks = pool->activeBlocksNum();
+    EXPECT_EQ(active_blocks, 0u);
+}
+
 TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
     auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 6));
     ASSERT_TRUE(pool.init());

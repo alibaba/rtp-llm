@@ -50,6 +50,7 @@ void DeviceBlockPool::incRef(const BlockIdList& blocks) {
         blocks,
         [](BlockIdxType) {},
         [this](BlockIdxType block) {
+            const bool was_active     = isActiveNoLock(block);
             const bool was_referenced = hasRequestRefNoLock(block);
             ++refcounts_[block];
             if (!was_referenced) {
@@ -58,6 +59,7 @@ void DeviceBlockPool::incRef(const BlockIdList& blocks) {
                     ++active_tree_cached_blocks_num_;
                 }
             }
+            updateActiveBlocksNumNoLock(block, was_active);
         });
 }
 
@@ -75,6 +77,7 @@ void DeviceBlockPool::decRef(const BlockIdList& blocks) {
                                     poolName().c_str());
         },
         [this](BlockIdxType block) {
+            const bool was_active = isActiveNoLock(block);
             --refcounts_[block];
             if (!hasRequestRefNoLock(block)) {
                 --request_referenced_blocks_num_;
@@ -86,6 +89,7 @@ void DeviceBlockPool::decRef(const BlockIdList& blocks) {
             if (refcounts_[block] == 0) {
                 freeAllocatedBlockNoLock(block);
             }
+            updateActiveBlocksNumNoLock(block, was_active);
         });
 }
 
@@ -132,6 +136,10 @@ void DeviceBlockPool::onCacheRefChangedNoLock(BlockIdxType block, bool cached) {
 
 bool DeviceBlockPool::hasRequestRefNoLock(BlockIdxType block) const {
     return refcounts_[block] > static_cast<uint32_t>(treeRefCountNoLock(block) > 0);
+}
+
+bool DeviceBlockPool::hasExternalRefNoLock(BlockIdxType block) const {
+    return hasRequestRefNoLock(block);
 }
 
 DeviceBlockPool::~DeviceBlockPool() {
