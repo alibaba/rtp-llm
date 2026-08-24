@@ -983,12 +983,15 @@ public:
     std::string source_tier;
     std::string target_tier;
     std::string group_type;
-    int64_t     evictable_candidate_count      = 0;
-    int64_t     tier_residence_time_ms           = 0;
-    int64_t     candidate_idle_time_ms           = 0;
-    int64_t     candidate_age_ms                 = 0;
-    bool        report_evictable                 = false;
-    bool        report_eviction                  = false;
+    std::string trigger_type;
+    int64_t     evictable_candidate_count  = 0;
+    int64_t     eviction_trigger_count     = 0;
+    int64_t     tier_residence_time_ms     = 0;
+    int64_t     candidate_idle_time_ms     = 0;
+    int64_t     candidate_age_ms           = 0;
+    bool        report_evictable           = false;
+    bool        report_eviction_trigger    = false;
+    bool        report_eviction            = false;
     bool        report_tier_residence_time = false;
     bool        report_candidate_idle_time = false;
     bool        report_candidate_age       = false;
@@ -1001,6 +1004,7 @@ public:
 
 public:
     kmonitor::MutableMetric* evictable_candidate_count_metric            = nullptr;
+    kmonitor::MutableMetric* eviction_trigger_qps_metric                 = nullptr;
     kmonitor::MutableMetric* eviction_qps_metric                         = nullptr;
     kmonitor::MutableMetric* evicted_block_tier_residence_time_ms_metric = nullptr;
     kmonitor::MutableMetric* evicted_candidate_idle_time_ms_metric       = nullptr;
@@ -1179,7 +1183,7 @@ public:
     kmonitor::MutableMetric* hit_entry_age_avg_ms_metric       = nullptr;
     kmonitor::MutableMetric* hit_entry_age_max_ms_metric       = nullptr;
     kmonitor::MutableMetric* match_latency_us_metric           = nullptr;
-    kmonitor::MutableMetric* load_success_qps_metric           = nullptr;
+    kmonitor::MutableMetric* load_qps_metric                   = nullptr;
     kmonitor::MutableMetric* load_fail_qps_metric              = nullptr;
     kmonitor::MutableMetric* load_prepare_latency_us_metric    = nullptr;
     kmonitor::MutableMetric* load_wait_latency_us_metric       = nullptr;
