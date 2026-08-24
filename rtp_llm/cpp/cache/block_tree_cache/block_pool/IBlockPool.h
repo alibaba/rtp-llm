@@ -68,6 +68,7 @@ public:
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
     size_t usedBlocksNum() const;
+    size_t activeBlocksNum() const;
 
 protected:
     explicit IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config);
@@ -80,6 +81,9 @@ protected:
         return true;
     }
     virtual void onCacheRefChangedNoLock(BlockIdxType, bool) {}
+    virtual bool hasExternalRefNoLock(BlockIdxType) const {
+        return false;
+    }
 
     template<typename Validator, typename Mutator>
     void mutateAllocatedBlocks(const BlockIdList& blocks, Validator&& validate, Mutator&& mutate) {
@@ -102,6 +106,8 @@ protected:
     void     checkAllocatedNoLock(BlockIdxType block) const;
     uint32_t treeRefCountNoLock(BlockIdxType block) const;
     uint32_t treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const;
+    bool     isActiveNoLock(BlockIdxType block) const;
+    void     updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active);
     void     freeAllocatedBlockNoLock(BlockIdxType block);
 
     mutable std::mutex mutex_;
@@ -133,6 +139,7 @@ private:
     std::vector<BlockIdxType>                                 free_blocks_;
     std::vector<BlockIdxType>                                 released_blocks_;
     size_t                                                    free_head_{0};
+    size_t                                                    active_blocks_num_{0};
 };
 
 }  // namespace rtp_llm

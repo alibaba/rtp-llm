@@ -12,7 +12,7 @@ struct CachePoolMetricsSnapshot {
     size_t      total_blocks              = 0;
     size_t      free_blocks               = 0;
     size_t      used_blocks               = 0;
-    size_t      active_tree_cached_blocks = 0;
+    size_t      active_blocks             = 0;
     std::string tier;
     std::string pool_name;
     size_t      block_size_bytes       = 0;
@@ -26,9 +26,8 @@ struct CachePoolMetricsSnapshot {
     float       used_ratio             = 0.0f;
 };
 
-// Allocator snapshots own every device pool field except available_blocks, which a same-named
-// BlockTree device snapshot overrides with its candidate-aware value. BlockTree pools missing from
-// the allocator are appended as tree-only snapshots.
+// Allocator snapshots own device pool metrics. BlockTree pools missing from the allocator are appended,
+// which covers Host, Disk, and any tree-only Device pool.
 std::vector<CachePoolMetricsSnapshot>
 mergeCachePoolMetricsSnapshots(const std::vector<KVCachePoolMetricsSnapshot>&   allocator_snapshots,
                                const std::vector<BlockTreePoolMetricsSnapshot>& tree_snapshots);

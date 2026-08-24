@@ -328,10 +328,11 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
     EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_failed_qps_metric, tags), 1);
 
     RtpLLMCacheTransferMetricsCollector transfer_collector;
-    transfer_collector.operation   = "load";
-    transfer_collector.source_tier = "host";
-    transfer_collector.target_tier = "device";
-    transfer_collector.success     = true;
+    transfer_collector.operation        = "load";
+    transfer_collector.source_tier      = "host";
+    transfer_collector.target_tier      = "device";
+    transfer_collector.descriptor_count = 3;
+    transfer_collector.success          = true;
     ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
         nullptr, &transfer_collector)));
     RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
@@ -340,6 +341,8 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
     transfer_tags.AddTag("source_tier", "host");
     transfer_tags.AddTag("target_tier", "device");
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_failed_qps_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_descriptor_count_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_descriptor_count_metric, transfer_tags), 3);
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_failed_qps_metric, transfer_tags), 0);
     transfer_collector.success = false;
     ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
@@ -347,6 +350,8 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_failed_qps_metric, transfer_tags), 1);
 
     RtpLLMCacheReuseMetricsCollector no_load_collector;
+    no_load_collector.report_match_to_ready_latency = true;
+    no_load_collector.match_to_ready_latency_us     = 10;
     ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
         nullptr, &no_load_collector)));
     RtpLLMCacheReuseMetrics* reuse_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
@@ -355,12 +360,20 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
     EXPECT_EQ(metricSeriesCount(reuse_metrics->load_fail_qps_metric), 0u);
 
     RtpLLMCacheReuseMetricsCollector load_collector;
-    load_collector.report_load_metrics = true;
-    load_collector.load_success        = true;
+    load_collector.report_load_metrics           = true;
+    load_collector.report_match_to_ready_latency = true;
+    load_collector.match_to_ready_latency_us     = 20;
+    load_collector.load_attempted                = true;
+    load_collector.load_success                  = true;
     ASSERT_TRUE((
         metrics_reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &load_collector)));
     EXPECT_EQ(metricSeriesCount(reuse_metrics->load_qps_metric), 1u);
     EXPECT_EQ(metricSeriesCount(reuse_metrics->load_fail_qps_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(reuse_metrics->match_to_ready_latency_us_metric), 2u);
+    kmonitor::MetricsTags no_load_tags("load_attempted", "false");
+    kmonitor::MetricsTags load_tags("load_attempted", "true");
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->match_to_ready_latency_us_metric, no_load_tags), 10);
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->match_to_ready_latency_us_metric, load_tags), 20);
     EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_qps_metric, tags), 1);
     EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_fail_qps_metric, tags), 0);
     load_collector.load_success = false;
@@ -845,7 +858,7 @@ void expectSameJointLifecycleMetrics(const BlockTreePoolMetricsSnapshot& expecte
     EXPECT_EQ(actual.free_blocks, expected.free_blocks) << context;
     EXPECT_EQ(actual.used_blocks, expected.used_blocks) << context;
     EXPECT_EQ(actual.available_blocks, expected.available_blocks) << context;
-    EXPECT_EQ(actual.active_tree_cached_blocks, expected.active_tree_cached_blocks) << context;
+    EXPECT_EQ(actual.active_blocks, expected.active_blocks) << context;
     EXPECT_EQ(actual.request_ref_blocks, expected.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
@@ -883,7 +896,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
         size_t available_blocks;
         size_t request_ref_blocks;
         size_t block_cache_ref_blocks;
-        size_t active_tree_cached_blocks;
+        size_t active_blocks;
     };
     auto expect_joint_stage = [&](const std::string& stage, const JointStage& expected) {
         const std::vector<BlockTreePoolMetricsSnapshot> snapshots = cache->poolMetricsSnapshots();
@@ -900,7 +913,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
             EXPECT_EQ(snapshot->available_blocks, expected.available_blocks) << context;
             EXPECT_EQ(snapshot->request_ref_blocks, expected.request_ref_blocks) << context;
             EXPECT_EQ(snapshot->block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
-            EXPECT_EQ(snapshot->active_tree_cached_blocks, expected.active_tree_cached_blocks) << context;
+            EXPECT_EQ(snapshot->active_blocks, expected.active_blocks) << context;
             EXPECT_EQ(snapshot->load_ref_blocks, 0u) << context;
             EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << context;
             EXPECT_EQ(snapshot->store_ref_blocks, 0u) << context;
@@ -928,10 +941,10 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
     ASSERT_EQ(cache->getStats().device_heap_total_size, 1u);
     expect_joint_stage("tree_and_request_held",
                        JointStage{/*used_blocks=*/1,
-                                  /*available_blocks=*/total_blocks,
+                                  /*available_blocks=*/total_blocks - 1,
                                   /*request_ref_blocks=*/1,
                                   /*block_cache_ref_blocks=*/1,
-                                  /*active_tree_cached_blocks=*/1});
+                                  /*active_blocks=*/1});
 
     for (size_t member_group_id = 0; member_group_id < pools.size(); ++member_group_id) {
         pools[member_group_id]->decRef(device_blocks[member_group_id]);
@@ -944,7 +957,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
                                   /*available_blocks=*/total_blocks,
                                   /*request_ref_blocks=*/0,
                                   /*block_cache_ref_blocks=*/1,
-                                  /*active_tree_cached_blocks=*/0});
+                                  /*active_blocks=*/0});
 
     // Stage C: host/disk tiers are disabled and evictForGroup force-drops, so the joint eviction
     // completes synchronously without any transfer task.
@@ -957,7 +970,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
                                   /*available_blocks=*/total_blocks,
                                   /*request_ref_blocks=*/0,
                                   /*block_cache_ref_blocks=*/0,
-                                  /*active_tree_cached_blocks=*/0});
+                                  /*active_blocks=*/0});
 }
 
 TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {

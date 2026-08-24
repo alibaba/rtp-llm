@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -13,8 +12,6 @@
 namespace rtp_llm {
 
 namespace {
-
-using DeviceCandidateBlocks = std::unordered_map<const IBlockPool*, std::unordered_set<BlockIdxType>>;
 
 constexpr std::array<Tier, 3>           kMetricTiers      = {Tier::DEVICE, Tier::HOST, Tier::DISK};
 constexpr std::array<CacheGroupType, 3> kMetricGroupTypes = {
@@ -50,60 +47,27 @@ int metricGroupTypeIndex(CacheGroupType group_type) {
     return -1;
 }
 
-BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool& pool, size_t candidate_blocks) {
+BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool& pool) {
     BlockTreePoolMetricsSnapshot snapshot;
-    snapshot.tier                      = tier;
-    snapshot.pool_name                 = pool.poolName();
-    snapshot.block_size_bytes          = pool.blockSizeBytes();
-    snapshot.total_blocks              = pool.totalBlocksNum();
-    snapshot.free_blocks               = pool.freeBlocksNum();
-    snapshot.used_blocks               = snapshot.total_blocks - snapshot.free_blocks;
-    snapshot.available_blocks          = std::min(snapshot.total_blocks, snapshot.free_blocks + candidate_blocks);
-    snapshot.block_cache_ref_blocks    = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
-    snapshot.load_ref_blocks           = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
-    snapshot.eviction_ref_blocks       = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
-    snapshot.store_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::STORE);
+    snapshot.tier                   = tier;
+    snapshot.pool_name              = pool.poolName();
+    snapshot.block_size_bytes       = pool.blockSizeBytes();
+    snapshot.total_blocks           = pool.totalBlocksNum();
+    snapshot.free_blocks            = pool.freeBlocksNum();
+    snapshot.used_blocks            = snapshot.total_blocks - snapshot.free_blocks;
+    snapshot.active_blocks          = pool.activeBlocksNum();
+    snapshot.available_blocks       = snapshot.total_blocks - snapshot.active_blocks;
+    snapshot.block_cache_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
+    snapshot.load_ref_blocks        = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
+    snapshot.eviction_ref_blocks    = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
+    snapshot.store_ref_blocks       = pool.referencedBlocksNum(BlockTreeRefType::STORE);
     return snapshot;
 }
 
-BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool& pool, size_t candidate_blocks) {
-    BlockTreePoolMetricsSnapshot snapshot = makePoolMetricsSnapshot(Tier::DEVICE, pool, candidate_blocks);
-    snapshot.active_tree_cached_blocks    = pool.activeTreeCachedBlocksNum();
+BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool& pool) {
+    BlockTreePoolMetricsSnapshot snapshot = makePoolMetricsSnapshot(Tier::DEVICE, pool);
     snapshot.request_ref_blocks           = pool.referencedBlocksNum();
     return snapshot;
-}
-
-DeviceCandidateBlocks collectDeviceCandidateBlocks(const std::vector<GroupSetPtr>& group_sets,
-                                                   const BlockTreeEvictor&         evictor) {
-    DeviceCandidateBlocks candidate_blocks;
-    for (const GroupSetPtr& group_set : group_sets) {
-        const std::vector<TreeNode*> candidate_nodes = evictor.candidateNodes(group_set->groupSetId(), Tier::DEVICE);
-        const std::vector<DeviceBlockPoolPtr>& device_pools = group_set->devicePools();
-        for (TreeNode* node : candidate_nodes) {
-            if (node == nullptr || group_set->groupSetId() >= node->group_set_resources.size()) {
-                continue;
-            }
-            const std::vector<BlockIdxType> blocks =
-                node->group_set_resources[group_set->groupSetId()].getBlocks(Tier::DEVICE);
-            const size_t block_count = std::min(blocks.size(), device_pools.size());
-            for (size_t pool_index = 0; pool_index < block_count; ++pool_index) {
-                if (device_pools[pool_index] == nullptr || isNullBlockIdx(blocks[pool_index])) {
-                    continue;
-                }
-                const std::pair<std::unordered_set<BlockIdxType>::iterator, bool> insert_result =
-                    candidate_blocks[device_pools[pool_index].get()].insert(blocks[pool_index]);
-                if (!insert_result.second) {
-                    continue;
-                }
-            }
-        }
-    }
-    return candidate_blocks;
-}
-
-size_t deviceCandidateBlockCount(const DeviceCandidateBlocks& candidate_blocks, const IBlockPool* pool) {
-    const DeviceCandidateBlocks::const_iterator candidates_it = candidate_blocks.find(pool);
-    return candidates_it == candidate_blocks.end() ? 0 : candidates_it->second.size();
 }
 
 }  // namespace
@@ -118,9 +82,7 @@ bool BlockTreeCacheMetricsReporter::enabled() const {
 }
 
 std::vector<BlockTreePoolMetricsSnapshot>
-BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
-                                                           const BlockTreeEvictor&         evictor) const {
-    const DeviceCandidateBlocks           device_candidate_blocks = collectDeviceCandidateBlocks(group_sets, evictor);
+BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const {
     std::unordered_set<const IBlockPool*> reported_device_pools;
     std::vector<BlockTreePoolMetricsSnapshot> snapshots;
     for (const GroupSetPtr& group_set : group_sets) {
@@ -134,20 +96,17 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Gro
             if (!insert_result.second) {
                 continue;
             }
-            snapshots.push_back(
-                makeDevicePoolMetricsSnapshot(*pool, deviceCandidateBlockCount(device_candidate_blocks, pool.get())));
+            snapshots.push_back(makeDevicePoolMetricsSnapshot(*pool));
         }
 
         const std::shared_ptr<HostBlockPool> host_pool = group_set->hostPool();
         if (host_pool != nullptr) {
-            snapshots.push_back(makePoolMetricsSnapshot(
-                Tier::HOST, *host_pool, evictor.candidateCount(group_set->groupSetId(), Tier::HOST)));
+            snapshots.push_back(makePoolMetricsSnapshot(Tier::HOST, *host_pool));
         }
 
         const std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = group_set->diskPool();
         if (disk_pool != nullptr) {
-            snapshots.push_back(makePoolMetricsSnapshot(
-                Tier::DISK, *disk_pool, evictor.candidateCount(group_set->groupSetId(), Tier::DISK)));
+            snapshots.push_back(makePoolMetricsSnapshot(Tier::DISK, *disk_pool));
         }
     }
     return snapshots;
@@ -406,12 +365,12 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperat
 }
 
 void BlockTreeCacheMetricsReporter::reportTransferFinished(
-    CacheTransferOperation                  operation,
-    Tier                                    source_tier,
-    Tier                                    target_tier,
-    size_t                                  block_count,
-    int64_t                                 begin_time_us,
-    bool                                    success,
+    CacheTransferOperation                 operation,
+    Tier                                   source_tier,
+    Tier                                   target_tier,
+    size_t                                 descriptor_count,
+    int64_t                                begin_time_us,
+    bool                                   success,
     const std::vector<TransferDescriptor>& successful_descriptors,
     const std::vector<GroupSetPtr>&        group_sets) {
     if (metrics_reporter_ == nullptr) {
@@ -428,13 +387,13 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(
     accumulateTransferBytes(successful_descriptors, group_sets, transfer_bytes);
 
     RtpLLMCacheTransferMetricsCollector collector;
-    collector.operation   = cacheTransferOperationName(operation);
-    collector.source_tier = tierName(source_tier);
-    collector.target_tier = tierName(target_tier);
-    collector.block_count = static_cast<int64_t>(block_count);
-    collector.latency_us  = currentTimeUs() - begin_time_us;
-    collector.in_flight   = in_flight;
-    collector.success     = success;
+    collector.operation        = cacheTransferOperationName(operation);
+    collector.source_tier      = tierName(source_tier);
+    collector.target_tier      = tierName(target_tier);
+    collector.descriptor_count = static_cast<int64_t>(descriptor_count);
+    collector.latency_us       = currentTimeUs() - begin_time_us;
+    collector.in_flight        = in_flight;
+    collector.success          = success;
     collector.transfer_bytes.reserve(transfer_bytes.size());
     for (const auto& transfer_bytes_entry : transfer_bytes) {
         RtpLLMCacheTransferMetricsCollector::TransferBytesEntry entry;
