@@ -551,6 +551,7 @@ public class EngineHealthReporter {
                             "role", serverStatus.getRole().name(),
                             "strategy", strategyName(ctx, serverStatus.getRole()),
                             "engineIp", serverStatus.getServerIp(),
+                            "engineIndex", String.valueOf(serverStatus.getRoutingEngineIndex()),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
                     );

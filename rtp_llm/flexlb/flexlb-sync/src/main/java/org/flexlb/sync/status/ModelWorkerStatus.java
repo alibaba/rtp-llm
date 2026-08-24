@@ -17,14 +17,18 @@ public class ModelWorkerStatus {
     /**
      * Non-PD separation mode
      */
-    private Map<String/*ipPort*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort@engineIndex*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> prefillStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort@engineIndex*/, WorkerStatus> prefillStatusMap = new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> decodeStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort@engineIndex*/, WorkerStatus> decodeStatusMap = new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
+    private Map<String/*ipPort@engineIndex*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
 
+    /**
+     * Returns the status map for a role, keyed by logical worker identity in
+     * {@code ip:port@engineIndex} format.
+     */
     public Map<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
         return switch (roleType) {
             case DECODE -> decodeStatusMap;

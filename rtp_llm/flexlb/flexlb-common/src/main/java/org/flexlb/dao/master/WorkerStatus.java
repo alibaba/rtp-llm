@@ -26,8 +26,11 @@ public class WorkerStatus {
     private String role;
     private String group;
     private String deploymentName;
+    private String endpointAddress = "";
     private String ip;
     private int port;
+    private int engineIndex;
+    private int multiEngineNum = 1;
     private String site;
     private Long availableConcurrency;
     private boolean alive;
@@ -61,6 +64,24 @@ public class WorkerStatus {
     private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false); // Status check in progress flag
     private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false); // Cache check in progress flag
     private AtomicLong statusVersion = new AtomicLong(-1L);
+
+    /** Returns the physical frontend address in {@code ip:port} format. */
+    public String getPhysicalIpPort() {
+        return ip == null ? null : ip + ":" + port;
+    }
+
+    /**
+     * Returns the logical worker identity in {@code ip:port@engineIndex} format. The index
+     * identifies one independently routable engine behind the physical frontend.
+     */
+    public String getLogicalIpPort() {
+        String physicalIpPort = getPhysicalIpPort();
+        return physicalIpPort == null ? null : physicalIpPort + "@" + engineIndex;
+    }
+
+    public String getPhysicalGroupKey() {
+        return endpointAddress + "|" + group + "|" + getPhysicalIpPort();
+    }
 
     /**
      * Add task to local running queue
@@ -349,6 +370,7 @@ public class WorkerStatus {
                 group,
                 ip,
                 port,
+                engineIndex,
                 taskState,
                 inputTokens,
                 blockSize,
@@ -523,14 +545,9 @@ public class WorkerStatus {
     }
 
     /**
-     * Get IP:PORT format address
-     *
-     * @return IP:PORT string
+     * Returns the logical worker identity used by routing and cache ownership.
      */
     public String getIpPort() {
-        if (ip == null) {
-            return null;
-        }
-        return ip + ":" + port;
+        return getLogicalIpPort();
     }
 }

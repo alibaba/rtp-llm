@@ -56,7 +56,7 @@ class CacheMetadataUpdateOrchestratorTest {
                 orchestrator(true).updateFromWorkerStatus(workerStatus);
 
         assertFalse(result.isSuccess());
-        assertEquals("127.0.0.1:8080", result.getEngineIpPort());
+        assertEquals("127.0.0.1:8080@0", result.getLogicalIpPort());
         assertEquals(
                 "Local Sync cache metadata updates are disabled when KVCM is enabled",
                 result.getErrorMessage());

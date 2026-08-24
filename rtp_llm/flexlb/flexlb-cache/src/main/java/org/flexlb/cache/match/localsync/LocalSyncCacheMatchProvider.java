@@ -47,32 +47,32 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
 
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
         long startTime = System.nanoTime() / 1000;
-        String engineIpPort = workerStatus.getIpPort();
+        String logicalIpPort = workerStatus.getLogicalIpPort();
         String role = workerStatus.getRole();
 
         try {
             CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(engineIpPort, role, startTime, "0");
+                WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, "Worker Cache Status is null");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "0");
                 return result;
             }
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
             if (cachedKeys == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(engineIpPort, role, startTime, "0");
+                WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, "Worker Cached Keys is null");
+                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "0");
                 return result;
             }
 
-            kvCacheManager.updateEngineCache(engineIpPort, role, cachedKeys);
+            kvCacheManager.updateEngineCache(logicalIpPort, role, cachedKeys);
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(engineIpPort, role, startTime, "1");
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "1");
             return result;
         } catch (Throwable e) {
-            log.error("Error updating worker cache for: {}", engineIpPort, e);
-            WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(engineIpPort, role, startTime, "0");
+            log.error("Error updating worker cache for: {}", logicalIpPort, e);
+            WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, e.getMessage());
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(logicalIpPort, role, startTime, "0");
             return result;
         }
     }
@@ -80,7 +80,7 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
     private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
         return WorkerCacheUpdateResult.builder()
                 .success(true)
-                .engineIpPort(workerStatus.getIpPort())
+                .logicalIpPort(workerStatus.getLogicalIpPort())
                 .cacheBlockCount(cacheStatus.getCachedKeys().size())
                 .availableKvCache(cacheStatus.getAvailableKvCache())
                 .totalKvCache(cacheStatus.getTotalKvCache())
@@ -88,10 +88,10 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
                 .build();
     }
 
-    private WorkerCacheUpdateResult buildFailureResult(String engineIpPort, String errorMessage) {
+    private WorkerCacheUpdateResult buildFailureResult(String logicalIpPort, String errorMessage) {
         return WorkerCacheUpdateResult.builder()
                 .success(false)
-                .engineIpPort(engineIpPort)
+                .logicalIpPort(logicalIpPort)
                 .errorMessage(errorMessage)
                 .build();
     }

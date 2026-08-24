@@ -29,8 +29,9 @@ class LocalSyncCacheMatchProviderTest {
 
         assertTrue(result.isSuccess());
         assertEquals(2, result.getCacheBlockCount());
-        verify(kvCacheManager).updateEngineCache("127.0.0.1:8080", "PREFILL", Set.of(11L, 22L));
-        verify(metricsReporter).reportUpdateEngineBlockCacheRT(eq("127.0.0.1:8080"), eq("PREFILL"), anyLong(), eq("1"));
+        verify(kvCacheManager).updateEngineCache("127.0.0.1:8080@0", "PREFILL", Set.of(11L, 22L));
+        verify(metricsReporter).reportUpdateEngineBlockCacheRT(
+                eq("127.0.0.1:8080@0"), eq("PREFILL"), anyLong(), eq("1"));
     }
 
     private WorkerStatus workerStatus() {

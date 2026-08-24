@@ -153,6 +153,7 @@ class EngineHealthReporterTest {
         ServerStatus serverStatus = new ServerStatus();
         serverStatus.setRole(RoleType.PREFILL);
         serverStatus.setServerIp("10.0.0.1");
+        serverStatus.setSelectedEngineIndex(0, 1);
         Response response = new Response();
         response.setSuccess(true);
         response.setCode(200);
@@ -169,6 +170,7 @@ class EngineHealthReporterTest {
                 "role", "PREFILL",
                 "strategy", "CacheAffinityFirst",
                 "engineIp", "10.0.0.1",
+                "engineIndex", "0",
                 "success", "true",
                 "code", "200"), 1.0);
     }

@@ -297,8 +297,8 @@ class CacheAffinityFirstStrategyTest {
         Assertions.assertSame(cacheFallback, selectedWorker.worker());
         var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
         Assertions.assertEquals("CACHE_AFFINITY_FALLBACK", decision.selectionReason());
-        Assertions.assertEquals("127.0.0.1:8080", decision.cacheAffinityDecision().cacheLeaderIpPort());
-        Assertions.assertEquals("127.0.0.3:8080", decision.cacheAffinityDecision().shortestTtftWorkerIpPort());
+        Assertions.assertEquals("127.0.0.1:8080@0", decision.cacheAffinityDecision().cacheLeaderIpPort());
+        Assertions.assertEquals("127.0.0.3:8080@0", decision.cacheAffinityDecision().shortestTtftWorkerIpPort());
     }
 
     @Test

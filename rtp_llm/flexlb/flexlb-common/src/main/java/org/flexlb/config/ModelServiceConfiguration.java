@@ -50,11 +50,40 @@ public class ModelServiceConfiguration {
             throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must contain at least one role endpoint");
         }
         for (Endpoint endpoint : endpoints) {
+            validateMultiEngineEndpoint(endpoint);
             serviceDiscovery.validate(endpoint);
         }
 
         validateKvcm(serviceRoute.getKvcm(), serviceDiscovery);
         validateOptimizer(serviceRoute.getOptimizer(), serviceDiscovery);
+    }
+
+    private void validateMultiEngineEndpoint(Endpoint endpoint) {
+        int multiEngineNum = endpoint.getMultiEngineNum();
+        if (multiEngineNum < 1) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint multi_engine_num must be greater than zero: "
+                            + endpoint.getAddress());
+        }
+        Integer workerStatusPort = endpoint.getWorkerStatusPort();
+        if (workerStatusPort != null && (workerStatusPort < 1 || workerStatusPort > 65_535)) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint worker_status_port must be between 1 and 65535: "
+                            + endpoint.getAddress());
+        }
+        if (multiEngineNum == 1) {
+            return;
+        }
+        if (workerStatusPort == null) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint worker_status_port must be configured "
+                            + "when multi_engine_num is greater than one: " + endpoint.getAddress());
+        }
+        if ((long) workerStatusPort + multiEngineNum - 1 > 65_535) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG endpoint worker status port range exceeds 65535: "
+                            + endpoint.getAddress());
+        }
     }
 
     private void validateKvcm(KvcmConfig kvcm, RoutingServiceDiscovery serviceDiscovery) {

@@ -104,8 +104,8 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, eligibleWorkers, List.of(),
                 shortestTtftWorker.ttft(), 0, roleType, group, seqLen, selectionReason.name(),
                 new CacheAffinityDecision(
-                        cacheLeader.worker().getIpPort(),
-                        shortestTtftWorker.worker().getIpPort(),
+                        cacheLeader.worker().getLogicalIpPort(),
+                        shortestTtftWorker.worker().getLogicalIpPort(),
                         decision.cacheLeadTokens(),
                         decision.extraWorkTokens(),
                         decision.toleratedExtraWorkTokens(),
@@ -134,8 +134,8 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, List.of(), List.of(),
                 shortestTtftWorker.ttft(), 0, roleType, group, seqLen, selectionReason.name(),
                 new CacheAffinityDecision(
-                        cacheLeader.worker().getIpPort(),
-                        shortestTtftWorker.worker().getIpPort(),
+                        cacheLeader.worker().getLogicalIpPort(),
+                        shortestTtftWorker.worker().getLogicalIpPort(),
                         Math.max(0, cacheLeader.hitCacheTokens() - shortestTtftWorker.hitCacheTokens()),
                         cacheLeader.ttft() - shortestTtftWorker.ttft(),
                         configuredMaxExtraWorkTokens(config),

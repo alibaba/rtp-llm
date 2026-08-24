@@ -70,7 +70,7 @@ public class KvCacheManager {
      * @param blockCacheKeys List of cache block hash values to query
      * @param roleType       Engine role to query
      * @param group          Engine group to query
-     * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
+     * @return prefix match lengths keyed by logical {@code ip:port@engineIndex} identity
      */
     public Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys,
         RoleType roleType, String group) {
@@ -91,7 +91,9 @@ public class KvCacheManager {
     /**
      * Update engine cache status
      *
-     * @param engineIPort    Engine IP:Port
+     * @param engineIPort    logical worker identity in {@code ip:port@engineIndex} format; the
+     *                       index identifies one independently routable engine behind the physical
+     *                       frontend
      * @param role           Engine role
      * @param newCacheBlocks New cache block set (blockCacheKeys)
      */
@@ -135,6 +137,9 @@ public class KvCacheManager {
 
     /**
      * Remove cache metadata for engines that are no longer present in service discovery.
+     *
+     * @param activeEngineIpPorts active logical worker identities in
+     *                            {@code ip:port@engineIndex} format
      */
     public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
         if (activeEngineIpPorts == null) {

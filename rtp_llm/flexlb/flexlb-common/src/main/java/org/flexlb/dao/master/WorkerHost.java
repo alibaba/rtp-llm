@@ -33,6 +33,18 @@ public class WorkerHost {
      */
     private final int workerStatusPort;
     /**
+     * Logical engine index behind the shared frontend.
+     */
+    private final int engineIndex;
+    /**
+     * Expected number of logical engines for this physical frontend.
+     */
+    private final int multiEngineNum;
+    /**
+     * Endpoint configuration address that produced this host.
+     */
+    private final String endpointAddress;
+    /**
      * Data center/site information
      */
     private final String site;
@@ -68,11 +80,28 @@ public class WorkerHost {
 
     public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
                       String site, String group, String deploymentName) {
+        this(ip, httpPort, grpcPort, httpServerPort, workerStatusPort,
+                site, group, deploymentName, 0, 1, "");
+    }
+
+    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
+                      String site, String group, String deploymentName,
+                      int engineIndex, int multiEngineNum) {
+        this(ip, httpPort, grpcPort, httpServerPort, workerStatusPort,
+                site, group, deploymentName, engineIndex, multiEngineNum, "");
+    }
+
+    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
+                      String site, String group, String deploymentName,
+                      int engineIndex, int multiEngineNum, String endpointAddress) {
         this.ip = ip;
         this.httpPort = httpPort;
         this.grpcPort = grpcPort;
         this.httpServerPort = httpServerPort;
         this.workerStatusPort = workerStatusPort;
+        this.engineIndex = engineIndex;
+        this.multiEngineNum = multiEngineNum;
+        this.endpointAddress = endpointAddress != null ? endpointAddress : "";
         this.site = site != null ? site : "";
         this.group = group != null ? group : "";
         this.deploymentName = deploymentName != null ? deploymentName : "";
@@ -100,12 +129,29 @@ public class WorkerHost {
     }
 
     /**
-     * Get IP:Port format string
+     * Get the physical frontend address.
      *
-     * @return IP:Port format string
+     * @return physical address in {@code ip:port} format, without an engine index
      */
     public String getIpPort() {
         return ip + ":" + httpPort;
+    }
+
+    /** Returns the physical frontend address in {@code ip:port} format. */
+    public String getPhysicalIpPort() {
+        return ip + ":" + httpPort;
+    }
+
+    /**
+     * Returns the logical worker identity in {@code ip:port@engineIndex} format. The index
+     * identifies one independently routable engine behind the physical frontend.
+     */
+    public String getLogicalIpPort() {
+        return getPhysicalIpPort() + "@" + engineIndex;
+    }
+
+    public String getPhysicalGroupKey() {
+        return endpointAddress + "|" + group + "|" + getPhysicalIpPort();
     }
 
     /**

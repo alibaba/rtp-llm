@@ -93,11 +93,6 @@ public class DefaultRouter implements Router {
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
 
-        if (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS == null) {
-            Logger.error("targetModelRoleWorkerStatus is null");
-            return Response.error(NO_AVAILABLE_WORKER);
-        }
-
         return null;
     }
 
@@ -151,12 +146,12 @@ public class DefaultRouter implements Router {
 
         List<ServerStatus> partialResults = routingResult.serverStatusList();
         for (ServerStatus serverStatus : partialResults) {
-            String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+            String logicalIpPort = serverStatus.getLogicalIpPort();
             String requestId = balanceContext.getRequestId();
 
             RoleType role = serverStatus.getRole();
             LoadBalancer loadBalancer = getLoadBalancer(role);
-            loadBalancer.rollBack(serverIpPort, requestId);
+            loadBalancer.rollBack(logicalIpPort, requestId);
         }
     }
 

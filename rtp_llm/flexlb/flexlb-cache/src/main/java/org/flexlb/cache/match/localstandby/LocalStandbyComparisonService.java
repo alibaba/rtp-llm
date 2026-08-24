@@ -93,7 +93,7 @@ public class LocalStandbyComparisonService {
     }
 
     private CacheHitComparisonResult withLocalStandbyPrediction(CacheHitFeedback feedback, StandbyPrediction standbyPrediction) {
-        String workerIpPort = feedback.workerIp() + ":" + feedback.workerPort();
+        String workerIpPort = feedback.logicalWorkerId();
         HostCacheMatch match = standbyPrediction.matches().get(workerIpPort);
         long localStandbyPredictedHitTokens = match == null
                 ? 0

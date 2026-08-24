@@ -18,8 +18,23 @@ public class Endpoint {
     @JsonProperty("path")
     private String path;
 
+    /**
+     * Base TCP port of the engine worker-status gRPC endpoint. Engine with index i exposes
+     * its status endpoint at {@code workerStatusPort + i}. Required when
+     * {@code multiEngineNum > 1}; when unset for a single engine, discovery falls back to
+     * the engine gRPC port. Validated at config load against the port range.
+     */
     @JsonProperty("worker_status_port")
     private Integer workerStatusPort;
+
+    /**
+     * Number of engine processes sharing this physical endpoint (DS_LLM_MULTI_ENGINE_NUM).
+     * Service discovery expands one endpoint into this many logical workers, each identified
+     * by an engine index in {@code [0, multiEngineNum)} and its own worker status port.
+     * Defaults to 1 for single-engine deployments.
+     */
+    @JsonProperty("multi_engine_num")
+    private int multiEngineNum = 1;
 
     @JsonProperty("discovery")
     private DiscoveryConfig discovery;
