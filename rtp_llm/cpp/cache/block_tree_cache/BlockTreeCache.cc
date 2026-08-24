@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
@@ -93,18 +94,12 @@ bool BlockTreeCache::init() {
                          group_set->diskPool() ? "enabled" : "null");
     }
     if (config_.full_prefix_scan_interval_ms > 0) {
-        FullPrefixScanOptions scan_options;
-        scan_options.interval_ms = config_.full_prefix_scan_interval_ms;
-        scan_options.world_rank  = config_.world_rank;
-        scan_options.local_rank  = config_.local_rank;
-        auto scanner             = std::make_unique<FullPrefixInvariantScanner>(*tree_, mutex_, scan_options);
+        auto scanner =
+            std::make_unique<FullPrefixInvariantScanner>(*tree_, mutex_, config_.full_prefix_scan_interval_ms);
         if (scanner->start()) {
             full_prefix_scanner_ = std::move(scanner);
-            RTP_LLM_LOG_INFO(
-                "FULL prefix invariant scanner enabled, interval_ms=%ld nodes_per_round=%zu max_details=%zu",
-                scan_options.interval_ms,
-                scan_options.nodes_per_round,
-                scan_options.max_details_per_cycle);
+            RTP_LLM_LOG_INFO("FULL prefix invariant scanner enabled, interval_ms=%ld",
+                             config_.full_prefix_scan_interval_ms);
         }
     }
     initialized_ = true;
