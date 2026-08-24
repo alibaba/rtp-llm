@@ -5,6 +5,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEXLB_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 REPO_ROOT="$(cd "${FLEXLB_DIR}/../.." && pwd)"
 
+# Shared JavaLoadClient helpers: env-var mapping (run_java_load_client) and
+# JDK 21 detection (java_major/detect_java21_home/require_java21).
+# JAVA_LOAD_CLIENT_HEAP_SIZE (historical knob) feeds the lib's Xmx default;
+# export either JAVA_LOAD_CLIENT_HEAP_SIZE or JAVA_LOAD_CLIENT_JVM_XMX/XMS
+# before this script runs to override the load client JVM sizing.
+JAVA_LOAD_CLIENT_JVM_XMX="${JAVA_LOAD_CLIENT_JVM_XMX:-${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}}"
+source "${SCRIPT_DIR}/lib_load_client.sh"
+
 FLEXLB_NETWORK_ISOLATED="${FLEXLB_NETWORK_ISOLATED:-0}"
 if [[ "${FLEXLB_NETWORK_ISOLATED}" == "1" \
       && "${FLEXLB_NETWORK_NAMESPACE_ACTIVE:-0}" != "1" ]]; then
@@ -26,12 +34,17 @@ N_PREFILL="${N_PREFILL:-2}"
 N_DECODE="${N_DECODE:-4}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 MOCK_ENGINE_IMPL="${MOCK_ENGINE_IMPL:-java}"
+# NOTE: the three assignments below (JAVA_MOCK_ENGINE_JAR, JAVA_LOAD_CLIENT_JAR,
+# MAVEN_PROFILES) duplicate defaults already applied by lib_load_client.sh at
+# source time (same values), so they are no-ops here. They are kept as
+# self-documentation of this script's tunable knobs; the effective defaults
+# live in the lib.
 JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
 # Load client implementation switch: java (JavaLoadClient, carries trace
 # priority onto the wire) or python (legacy flexlb_load_client.py fallback,
 # no priority passthrough). Single env var, no other override layer.
 LOAD_CLIENT_IMPL="${LOAD_CLIENT_IMPL:-java}"
-JAVA_LOAD_CLIENT_JAR="${JAVA_LOAD_CLIENT_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
+JAVA_LOAD_CLIENT_JAR="${JAVA_LOAD_CLIENT_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"  # no-op see NOTE above
 JAVA_LOAD_CLIENT_HEAP_SIZE="${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
 JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
@@ -61,7 +74,7 @@ FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-7002}"
 FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar}"
 START_FLEXLB="${START_FLEXLB:-1}"
 START_MOCK="${START_MOCK:-1}"
-MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"
+MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"  # no-op, see NOTE above (lib default)
 
 LIMIT="${LIMIT:-1000}"
 DURATION_S="${DURATION_S:-0}"
@@ -189,41 +202,8 @@ JAVA_MODULE_OPTS=(
 # Limit Reactor boundedElastic scheduler threads to prevent thread explosion
 JVM_SYSTEM_PROPS=(-Dreactor.schedulers.defaultBoundedElasticSize=64)
 
-java_major() {
-  local java_bin="${1:-java}"
-  "${java_bin}" -version 2>&1 | awk -F'[\".]' '/version/ {print ($2 == "1" ? $3 : $2); exit}'
-}
-
-detect_java21_home() {
-  if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
-    if [[ "$(java_major "${JAVA_HOME}/bin/java")" -ge 21 ]]; then
-      echo "${JAVA_HOME}"
-      return 0
-    fi
-  fi
-  if [[ -n "${JAVA21_HOME:-}" && -x "${JAVA21_HOME}/bin/java" ]]; then
-    echo "${JAVA21_HOME}"
-    return 0
-  fi
-  if [[ -x "${HOME}/java21/bin/java" \
-        && "$(java_major "${HOME}/java21/bin/java")" -ge 21 ]]; then
-    echo "${HOME}/java21"
-    return 0
-  fi
-  local java_bin
-  while IFS= read -r java_bin; do
-    if [[ -x "${java_bin}" && "$(java_major "${java_bin}")" -ge 21 ]]; then
-      dirname "$(dirname "${java_bin}")"
-      return 0
-    fi
-  done < <(
-    {
-      alternatives --display java 2>/dev/null || true
-      update-alternatives --display java 2>/dev/null || true
-    } | awk '/bin\/java/ {print $1}' | sort -u
-  )
-  return 1
-}
+# java_major / detect_java21_home are provided by lib_load_client.sh (sourced
+# above); do not redefine them here.
 
 JAVA21_HOME_DETECTED="$(detect_java21_home || true)"
 if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
@@ -473,14 +453,20 @@ if [[ "${LOAD_CLIENT_IMPL}" != "java" && "${LOAD_CLIENT_IMPL}" != "python" ]]; t
   exit 1
 fi
 if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
-  if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
-    echo "Java load client jar not found: ${JAVA_LOAD_CLIENT_JAR}" >&2
-    echo "Build it with: ./mvnw package -DskipTests -P '!internal'" >&2
-    exit 1
-  fi
   if [[ "$(java_major java)" -lt 21 ]]; then
     echo "Java 21 is required to run JavaLoadClient. Set JAVA21_HOME or JAVA_HOME." >&2
     exit 1
+  fi
+  if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
+    echo "Java load client jar not found, auto-building: ${JAVA_LOAD_CLIENT_JAR} (first build may take several minutes)"
+    if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
+      echo "Failed to build Java load client jar via Maven (this may take several minutes on a cold cache)" >&2
+      exit 1
+    fi
+    if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
+      echo "Failed to build Java load client jar: ${JAVA_LOAD_CLIENT_JAR}" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -497,9 +483,15 @@ if [[ "${START_MOCK}" == "1" ]]; then
       "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))")
     assert_ports_free "${JAVA_MOCK_PORTS[@]}"
     if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
-      echo "Java mock engine jar not found: ${JAVA_MOCK_ENGINE_JAR}" >&2
-      echo "Build it with: ./mvnw package -DskipTests -P '!internal'" >&2
-      exit 1
+      echo "Java mock engine jar not found, auto-building: ${JAVA_MOCK_ENGINE_JAR} (first build may take several minutes)"
+      if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
+        echo "Failed to build Java mock engine jar via Maven (this may take several minutes on a cold cache)" >&2
+        exit 1
+      fi
+      if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
+        echo "Failed to build Java mock engine jar: ${JAVA_MOCK_ENGINE_JAR}" >&2
+        exit 1
+      fi
     fi
     java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
       -XX:+ExitOnOutOfMemoryError \
@@ -707,7 +699,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     exit 1
   fi
   wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  if [[ "${FLEXLB_WARMUP_SECONDS:-0}" -gt 0 ]]; then
+  if [[ "${FLEXLB_WARMUP_SECONDS:-10}" -gt 0 ]]; then
     echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS}s before starting load..."
     sleep "${FLEXLB_WARMUP_SECONDS}"
   fi
@@ -767,44 +759,54 @@ if [[ "${GRADIENT}" == "1" ]]; then
 fi
 
 # JavaLoadClient reads its configuration exclusively from environment
-# variables (no CLI flags); mirror CLIENT_ARGS one-to-one per shard.
-# PRIORITY is deliberately not set: priority comes from the trace records
-# only, and records without one stay unset on the wire (no default 50).
+# variables (no CLI flags); lib_load_client.sh's run_java_load_client is
+# the single source of truth for that mapping — every JavaLoadClient env
+# var is exported explicitly there (unpassed ones blanked), so no ambient
+# environment can leak in. PRIORITY is deliberately not passed: priority
+# comes from the trace records only, and records without one stay unset on
+# the wire (no default 50); the lib blanks ambient PRIORITY for us.
 launch_java_load_client() {
   local output_dir="$1"
   local num_shards="$2"
   local shard_index="$3"
   local max_concurrency="$4"
   local skip_server_latency="$5"
-  env \
-    TRACE_FILE="${TRACE_FILE}" \
-    TARGET_ADDR="${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
-    OUTPUT_DIR="${output_dir}" \
-    NUM_SHARDS="${num_shards}" \
-    SHARD_INDEX="${shard_index}" \
-    MAX_CONCURRENCY="${max_concurrency}" \
-    SKIP_SERVER_LATENCY="${skip_server_latency}" \
-    REPLAY_SPEED="${REPLAY_SPEED}" \
-    DURATION_S="${DURATION_S}" \
-    LIMIT="${LIMIT}" \
-    TIMEOUT_MS="${TIMEOUT_MS}" \
-    SLA_TTFT_MS="${SLA_TTFT_MS}" \
-    ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY}" \
-    SCHEDULE_ONLY="${SCHEDULE_ONLY}" \
-    LOOP="${LOOP}" \
-    SEND_MODE="${SEND_MODE}" \
-    SEND_MODE_QPS="${SEND_MODE_QPS}" \
-    GRADIENT="${GRADIENT}" \
-    GRADIENT_START_SPEED="${GRADIENT_START_SPEED}" \
-    GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED}" \
-    MAX_INPUT_LEN="${MAX_INPUT_LEN}" \
-    MAX_OUTPUT_LEN="${MAX_OUTPUT_LEN}" \
-    PUSHGATEWAY_URL="${PUSHGATEWAY_URL}" \
-    RESPONSE_TIMEOUT="${RESPONSE_TIMEOUT:-}" \
-    START_AT_EPOCH_MS="${CLIENT_START_EPOCH_MS}" \
-    LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS}" \
-    java -Xmx"${JAVA_LOAD_CLIENT_HEAP_SIZE}" -XX:+ExitOnOutOfMemoryError \
-      -cp "${JAVA_LOAD_CLIENT_JAR}" org.flexlb.mockengine.JavaLoadClient
+  run_java_load_client \
+    "TRACE_FILE=${TRACE_FILE}" \
+    "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
+    "GRPC_TARGET=${GRPC_TARGET:-}" \
+    "DURATION_S=${DURATION_S}" \
+    "MAX_CONCURRENCY=${max_concurrency}" \
+    "REPLAY_SPEED=${REPLAY_SPEED}" \
+    "LOAD_CLIENT_WORKERS=${LOAD_CLIENT_WORKERS}" \
+    "OUTPUT_DIR=${output_dir}" \
+    "NUM_SHARDS=${num_shards}" \
+    "SHARD_INDEX=${shard_index}" \
+    "LIMIT=${LIMIT}" \
+    "TIMEOUT_MS=${TIMEOUT_MS}" \
+    "SLA_TTFT_MS=${SLA_TTFT_MS}" \
+    "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
+    "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
+    "LOOP=${LOOP}" \
+    "SEND_MODE=${SEND_MODE}" \
+    "SEND_MODE_QPS=${SEND_MODE_QPS}" \
+    "N_CHANNELS=${N_CHANNELS:-}" \
+    "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
+    "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
+    "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-}" \
+    "SKIP_SERVER_LATENCY=${skip_server_latency}" \
+    "MODEL=${MODEL:-}" \
+    "API_KEY=${API_KEY:-}" \
+    "FLEXLB_EXPECT_FETCH_RESPONSE=${FLEXLB_EXPECT_FETCH_RESPONSE:-}" \
+    "GRADIENT=${GRADIENT}" \
+    "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
+    "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
+    "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
+    "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
+    "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
+    "ENABLE_FALLBACK=${ENABLE_FALLBACK:-0}" \
+    "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
+    "DRY_RUN=${DRY_RUN:-0}"
 }
 
 if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
@@ -928,8 +930,17 @@ validity_checks = {
     "master_completion_matches_success": server.get("completion_count", 0) == success_count,
     "client_pacing_p99_within_limit": pacing["p99"] <= pacing_limit_ms,
 }
+# Uniform send-mode fields are propagated from the shard summaries so the
+# aggregated report shows the arrival process (fields absent in replay mode).
+send_mode_fields = {}
+if shards and shards[0].get("send_mode") == "uniform":
+    send_mode_fields = {
+        key: shards[0].get(key)
+        for key in ("send_mode", "target_qps", "per_shard_qps", "uniform_interval_ms")
+    }
 summary = {
     "load_client_workers": worker_count,
+    **send_mode_fields,
     "sent_task_count": sent_task_count,
     "actual_rpc_start_count": actual_rpc_start_count,
     "recorded_result_count": recorded_result_count,
