@@ -538,10 +538,11 @@ class MMEmbeddingAsyncCacheTest(TestCase):
 
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
-    def _make_engine(self, mm_part=None):
+    def _make_engine(self, mm_part=None, vit_concurrency=64):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
+        vit_config.vit_concurrency = vit_concurrency
         return MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -602,6 +603,49 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         keys2 = engine.async_submit([inp])
         self.assertEqual(keys1, keys2)
         engine.stop()
+
+    def test_async_compute_concurrency_is_bounded(self):
+        engine = self._make_engine(vit_concurrency=2)
+        release = threading.Event()
+        saturated = threading.Event()
+        completed = threading.Event()
+        lock = threading.Lock()
+        active = 0
+        max_active = 0
+        completed_count = 0
+
+        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+            nonlocal active, max_active, completed_count
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                if active == 2:
+                    saturated.set()
+            try:
+                release.wait(timeout=5)
+                entry.complete((torch.tensor(0), None))
+            finally:
+                with lock:
+                    active -= 1
+                    completed_count += 1
+                    if completed_count == 8:
+                        completed.set()
+
+        engine._async_compute = blocked_compute
+        try:
+            for index in range(8):
+                engine.async_submit([self._make_input(f"fake://bounded-{index}")])
+
+            self.assertTrue(saturated.wait(timeout=2))
+            time.sleep(0.1)
+            self.assertEqual(max_active, 2)
+
+            release.set()
+            self.assertTrue(completed.wait(timeout=5))
+            self.assertEqual(max_active, 2)
+        finally:
+            release.set()
+            engine.stop()
 
     def test_multiple_inputs_independent(self):
         engine = self._make_engine()

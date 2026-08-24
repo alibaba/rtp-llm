@@ -177,6 +177,14 @@ def init_vit_group_args(parser, vit_config):
         help="多模态预处理时最大线程数量",
     )
     vit_group.add_argument(
+        "--vit_concurrency",
+        env_name="VIT_CONCURRENCY",
+        bind_to=(vit_config, "vit_concurrency"),
+        type=int,
+        default=64,
+        help="ViT 异步计算的最大并发数",
+    )
+    vit_group.add_argument(
         "--biencoder_preprocess",
         env_name="BIENCODER_PREPROCESS",
         bind_to=(vit_config, "biencoder_preprocess"),
