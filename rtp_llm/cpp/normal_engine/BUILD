@@ -2,6 +2,33 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "pp_executor",
+    hdrs = [
+        "pipeline/PPExecutor.h",
+        "pipeline/PPTransport.h",
+        "pipeline/PPTypes.h",
+    ],
+    srcs = ["pipeline/PPExecutor.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/engine_base:executor",
+        "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/model_utils:model_utils",
+        "//rtp_llm/cpp/models:eplb",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:op_data",
+        "@com_google_absl//absl/status",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
@@ -12,6 +39,7 @@ cc_library(
         "speculative/*.cc",
     ]),
     deps = [
+        ":pp_executor",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",
