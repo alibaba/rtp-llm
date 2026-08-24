@@ -629,19 +629,23 @@ int StreamCacheResource::mallocFailedTimes() const {
 bool StreamCacheResource::reuseCache() const {
     // AND logic: global REUSE_CACHE=1 AND per-request reuse_cache both must be true.
     // Per-request field flows frontend → FlexLB → engine via protobuf.
-    return resource_context_.reuse_cache && stream_->reuseCache();
+    return resource_context_.reuse_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->reuseCache());
 }
 
 bool StreamCacheResource::enableRemoteCache() const {
-    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
+    return resource_context_.enable_remote_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->enableRemoteCache());
 }
 
 bool StreamCacheResource::enableMemoryCache() const {
-    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
+    return resource_context_.enable_memory_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->enableMemoryCache());
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
-    return resource_context_.enable_device_cache && stream_->enableDeviceCache();
+    return resource_context_.enable_device_cache
+           && (resource_context_.ignore_request_cache_switches || stream_->enableDeviceCache());
 }
 
 bool StreamCacheResource::enableTieredMemoryCache() const {

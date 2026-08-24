@@ -271,6 +271,54 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
+TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitchesEnv) {
+    KVCacheConfig       kv_cache_config;
+    FIFOSchedulerConfig scheduler_config;
+    kv_cache_config.device_cache_min_free_blocks = 1;
+
+    {
+        autil::EnvGuard env_guard("RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES", "0");
+        ResourceContext resource_context;
+        resource_context.initCacheConfig(kv_cache_config, scheduler_config, /*max_seq_len=*/1);
+        EXPECT_FALSE(resource_context.ignore_request_cache_switches);
+    }
+    {
+        autil::EnvGuard env_guard("RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES", "1");
+        ResourceContext resource_context;
+        resource_context.initCacheConfig(kv_cache_config, scheduler_config, /*max_seq_len=*/1);
+        EXPECT_TRUE(resource_context.ignore_request_cache_switches);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, testDeploymentCanIgnoreRequestCacheSwitches) {
+    prepareResource(/*reuse_cache=*/true);
+    auto& resource   = stream_->streamCacheResource();
+    auto& deployment = resource.resource_context_;
+    auto& request    = *stream_->generate_input_->generate_config;
+
+    deployment.enable_memory_cache = true;
+    deployment.enable_remote_cache = true;
+    deployment.enable_device_cache = true;
+    request.reuse_cache             = false;
+    request.enable_memory_cache     = false;
+    request.enable_remote_cache     = false;
+    request.enable_device_cache     = false;
+
+    EXPECT_FALSE(resource.reuseCache());
+    EXPECT_FALSE(resource.enableMemoryCache());
+    EXPECT_FALSE(resource.enableRemoteCache());
+    EXPECT_FALSE(resource.enableDeviceCache());
+
+    deployment.ignore_request_cache_switches = true;
+    EXPECT_TRUE(resource.reuseCache());
+    EXPECT_TRUE(resource.enableMemoryCache());
+    EXPECT_TRUE(resource.enableRemoteCache());
+    EXPECT_TRUE(resource.enableDeviceCache());
+
+    deployment.reuse_cache = false;
+    EXPECT_FALSE(resource.reuseCache());
+}
+
 TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdatesReuseLen) {
     // initKVBlock() ends with loadCacheSync() (same as GenerateStream::initKVBlock).
     prepareResource(/*reuse_cache=*/true);
