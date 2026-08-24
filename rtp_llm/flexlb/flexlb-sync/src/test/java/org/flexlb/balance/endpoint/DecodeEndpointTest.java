@@ -279,14 +279,22 @@ class DecodeEndpointTest {
 
     @Test
     void unregisteredEngineReportIsNotAdopted() {
-        // 影子开账语义：正常 observe 模式只认本地已开账条目——引擎上报的
-        // 外来请求只计 unknown 事件、不收养（收养仅 rebuild 重放路径）。
+        // 影子开账语义：端点首报是重启重建窗口——未知 running 按引擎上报
+        // 收养（引擎上报即事实源，master 重启后账本由此重建）；首报之后的
+        // 正常 observe 只认本地已开账条目，引擎上报的外来请求只计 unknown
+        // 事件、不再收养。
         TaskInfo foreign = task(999L);
         foreign.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of("999", foreign), null, 10000);
+        assertEquals(1, endpoint.decodeEngineWorkCount());
+        assertEquals(1, endpoint.decodeTotalLoad());
 
-        assertEquals(0, endpoint.decodeEngineWorkCount());
-        assertEquals(0, endpoint.decodeTotalLoad());
+        TaskInfo anotherForeign = task(998L);
+        anotherForeign.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("999", foreign, "998", anotherForeign), null, 10000);
+
+        assertEquals(1, endpoint.decodeEngineWorkCount());
+        assertEquals(1, endpoint.decodeTotalLoad());
         assertEquals(0, endpoint.decodeInflightHardKvReserved());
         assertEquals(0, endpoint.decodeInflightExpectedKvReserved());
     }

@@ -210,12 +210,20 @@ class PrefillEndpointTest {
 
     @Test
     void unregisteredEngineReportIsNotAdopted() {
-        // 影子开账语义：正常 observe 模式只认本地已开账条目——外来请求
-        // 只计 unknown 事件、不收养（收养仅 rebuild 重放路径）。
+        // 影子开账语义：端点首报是重启重建窗口——未知 running 按引擎上报
+        // 收养（引擎上报即事实源，master 重启后账本由此重建）；首报之后的
+        // 正常 observe 只认本地已开账条目，新的外来请求只计 unknown 事件、
+        // 不再收养。
         pumpEngineReport(Map.of("999", runningTask(999L, -1L, TaskPhase.RUNNING)), null);
+        assertEquals(1, endpoint.prefillActiveRequestCount());
+        assertEquals(1, endpoint.prefillEngineOwnedCount());
 
-        assertEquals(0, endpoint.prefillActiveRequestCount());
-        assertEquals(0, endpoint.prefillEngineOwnedCount());
+        pumpEngineReport(Map.of(
+                "999", runningTask(999L, -1L, TaskPhase.RUNNING),
+                "998", runningTask(998L, -1L, TaskPhase.RUNNING)), null);
+
+        assertEquals(1, endpoint.prefillActiveRequestCount());
+        assertEquals(1, endpoint.prefillEngineOwnedCount());
     }
 
     // ---- estimated waiting time ----

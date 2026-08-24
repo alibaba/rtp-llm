@@ -121,6 +121,22 @@ public final class StateLedger {
     }
 
     /**
+     * 收养观察（非清空式）：与 {@link #rebuild} 共享重放语义——未知 running
+     * 按引擎收养入账（batchId=-1、engineOwned=true、binding=观察端点世代），
+     * 未知 finished 静默跳过（收养基线不含历史终局），本 tick 不触发 janitor
+     * 缺席扫描（round 基线未建立，缺席判定从下一完整 tick 起算）。
+     *
+     * <p>与 {@code rebuild} 的差别是不清空既有账目：master 重启后事件泵对每
+     * 端点<b>首份报文</b>的增量收养入口（引擎上报即当前事实，无需全量历史
+     * 缓冲；窗口内本地生命周期点开账的新请求不受影响）。收养条目引擎持续
+     * 上报则 lastSeenRound 逐 tick 刷新（缺席追踪清零），消失则缺席判死兜底。
+     * </p>
+     */
+    public void observeAdopting(EngineObservation observation) {
+        observeInternal(observation, true);
+    }
+
+    /**
      * 跨侧推导视图（只读推导，不参与裁决）。
      *
      * <p>KV_TRANSFERRING = P 条目 P_RUNNING ∧ D 条目已报（engineOwned）——

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import org.flexlb.state.internal.LedgerJanitor;
 import org.flexlb.state.spi.EngineObservation;
 import org.flexlb.state.spi.EnginePhase;
 import org.flexlb.state.spi.StateRole;
@@ -120,5 +121,58 @@ class StateLedgerRebuildTest {
         // 旧代整报拒绝：条目 1 保持新代观察的 P_RUNNING(8)
         assertEquals(8, ledger.prefill().get(1L).orElseThrow().phaseOrdinal());
         assertEquals(1L, ledger.snapshot().crossGenerationRejects());
+    }
+
+    /**
+     * observeAdopting（非清空式收养）：master 重启后每端点首报的增量收养——
+     * 既有账目不清空（重启窗口内本地开账的新请求不受影响，与 rebuild 的关键
+     * 差别），未知 running 收养、未知 finished 静默跳过；收养条目经后续正常
+     * observe 接续生命周期，首报 tick 不触发 janitor 缺席扫描。
+     */
+    @Test
+    void observeAdoptingAdoptsUnknownRunningWithoutClearingExistingEntries() {
+        StateLedger ledger = new StateLedger();
+        TestEndpoints.Endpoint pEp = TestEndpoints.ep(1L, StateRole.PREFILL, 5_000L);
+        LedgerJanitor janitor = ledger.createJanitor(
+                new LedgerJanitorConfig(3, 60_000L, 120_000L, 100));
+
+        // 重启后本地先开账的新请求（master 重启窗口内新 submit）
+        assertEquals(RegisterResult.OK, ledger.prefill().register(10L, -1L));
+        ledger.prefill().onQueued(10L);
+
+        // 首报收养：未知 running 20 收养；未知 finished 99（重启前已终局）静默跳过
+        ledger.observeAdopting(TestEndpoints.observation(pEp, 1L, 1_000L,
+                List.of(TestEndpoints.running(20L, StateRole.PREFILL, EnginePhase.RUNNING, -1L, 256L, 1L)),
+                List.of(TestEndpoints.finished(99L, StateRole.PREFILL, 0, 1_000L, 1L))));
+
+        // 既有条目未被清空（与 rebuild 的关键差别）
+        assertTrue(ledger.prefill().get(10L).isPresent(), "observeAdopting 不得清空既有账目");
+
+        // 未知 running 收养入账（engineOwned、batchId=-1、binding=观察端点世代）
+        PrefillRequestStateView adopted = ledger.prefill().get(20L).orElseThrow();
+        assertTrue(adopted.engineOwned());
+        assertEquals(-1L, adopted.batchId());
+        assertEquals(new GenerationTriple(1, 5_000L, -1L), adopted.binding());
+        assertEquals(256L, adopted.kvTokensReported());
+
+        // 未知 finished 静默跳过（收养基线不含历史终局——不计 unknown、无墓碑）
+        LedgerSnapshot s = ledger.snapshot();
+        assertEquals(0L, s.unknownFinishedEvents());
+        assertEquals(0L, s.prefillTombstones());
+
+        // 首报 tick 不触发 janitor 缺席扫描（round 基线未建立，缺席判定从下一完整 tick 起算）
+        assertEquals(0L, janitor.stats().roundEndTicks());
+        ledger.observe(TestEndpoints.runningOnly(pEp, 2L, 1_100L,
+                TestEndpoints.running(20L, StateRole.PREFILL, EnginePhase.RUNNING, -1L, 512L, 2L)));
+        assertEquals(1L, janitor.stats().roundEndTicks(), "后续正常 observe 才推缺席扫描");
+
+        // 收养条目经后续正常 observe 接续生命周期（running 观察刷新 → finished 终局）
+        assertEquals(512L, ledger.prefill().get(20L).orElseThrow().kvTokensReported());
+        ledger.observe(TestEndpoints.finishedOnly(pEp, 3L, 1_200L,
+                TestEndpoints.finished(20L, StateRole.PREFILL, 0, 1_200L, 3L)));
+        assertTrue(ledger.prefill().get(20L).isEmpty(), "收养条目 finished 后正常终局");
+        assertEquals(TerminalState.COMPLETED,
+                ledger.terminalOutcomeOf(20L, StateRole.PREFILL).orElseThrow().state());
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
     }
 }

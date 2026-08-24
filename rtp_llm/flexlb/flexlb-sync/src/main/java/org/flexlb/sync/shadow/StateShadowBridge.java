@@ -24,6 +24,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -107,6 +108,14 @@ public final class StateShadowBridge {
      */
     private final ConcurrentHashMap<Long, TerminalMetricContext> pendingTerminalMetrics;
 
+    /**
+     * 已见端点键（role:ipPort）：master 重启后每端点首份报文走收养观察
+     * （{@link StateLedger#observeAdopting}）——引擎上报即当前 inflight 事实，
+     * 未开账 running 收养入账，恢复重启前丢失的账本计数。首报资格以
+     * translate 成功为准（翻译异常的报文不消耗）。
+     */
+    private final Set<String> observedEndpoints;
+
     /** DISABLED 构造。 */
     private StateShadowBridge() {
         this.enabled = false;
@@ -117,6 +126,7 @@ public final class StateShadowBridge {
         this.janitorScheduler = null;
         this.terminalMetricHelper = null;
         this.pendingTerminalMetrics = null;
+        this.observedEndpoints = null;
     }
 
     private StateShadowBridge(StateLedger ledger,
@@ -133,6 +143,7 @@ public final class StateShadowBridge {
         this.janitorScheduler = janitorScheduler;
         this.terminalMetricHelper = terminalMetricHelper;
         this.pendingTerminalMetrics = new ConcurrentHashMap<>();
+        this.observedEndpoints = ConcurrentHashMap.newKeySet();
     }
 
     /**
@@ -238,6 +249,10 @@ public final class StateShadowBridge {
     /**
      * 引擎状态报文影子消费（versionAdvanced 分支、latestFinishedVersion 水位推进之前
      * 调用——保证相位事件顺序与旧路径同 tick 一致）。
+     *
+     * <p>每端点首份报文走收养观察（master 重启重建：未开账 running 按引擎事实
+     * 收养入账，恢复 inflight 计数——引擎上报是唯一事实源）；后续报文正常
+     * observe。首报带 running 时打 WARN（重启重建的运行证据，验收日志佐证）。</p>
      */
     public void observeWorkerStatus(WorkerStatusResponse response, RoleType roleType, String ipPort) {
         if (!enabled) {
@@ -248,7 +263,18 @@ public final class StateShadowBridge {
             if (observation == null) {
                 return; // 非 P/D 分离角色（PDFUSION/VIT）：事件泵不覆盖
             }
-            ledger.observe(observation);
+            boolean firstReport = ipPort != null
+                    && observedEndpoints.add(roleType + ":" + ipPort);
+            if (firstReport) {
+                ledger.observeAdopting(observation);
+                if (!observation.running().isEmpty()) {
+                    logger.warn("[state-shadow] master restart rebuild: first report from {} endpoint {} "
+                            + "adopted {} running entries (engine report is the source of truth)",
+                            roleType, ipPort, observation.running().size());
+                }
+            } else {
+                ledger.observe(observation);
+            }
             diff.onEvent();
             // finished 明细 → 影子终态对账（observe 同步完成后墓碑即可见）
             for (EngineObservation.FinishedObservation finished : observation.finished()) {

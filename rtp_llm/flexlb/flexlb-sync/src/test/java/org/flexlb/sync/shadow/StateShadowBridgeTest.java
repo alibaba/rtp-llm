@@ -6,6 +6,7 @@ import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.state.DecodeEndpointCounters;
@@ -163,6 +164,101 @@ class StateShadowBridgeTest {
         config.setFlexlbStateV2ShadowEnabled(true);
         // autoStartJanitor=false——不创建调度线程（确定性 + 线程卫生）
         return StateShadowBridge.create(config, null, false);
+    }
+
+    // ==================== master 重启重建（首报收养）====================
+
+    /** running 明细 TaskInfo 构造 helper。 */
+    private static TaskInfo runningTask(long requestId, TaskPhase phase, long kvTokens) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setPhase(phase);
+        task.setKvTokens(kvTokens);
+        return task;
+    }
+
+    private static WorkerStatusResponse statusResponse(long statusVersion, RoleType role,
+                                                        Map<String, TaskInfo> running,
+                                                        Map<String, TaskInfo> finished) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setStatusVersion(statusVersion);
+        response.setRole(role);
+        response.setRunningDetailCount(running == null ? 0L : (long) running.size());
+        if (running != null) {
+            response.setRunningTaskInfo(running);
+        }
+        if (finished != null) {
+            response.setFinishedTaskInfo(finished);
+        }
+        return response;
+    }
+
+    /**
+     * master 重启后每端点首份报文：未开账 running 按引擎事实收养入账（恢复
+     * 重启前丢失的 inflight 计数——引擎上报是唯一事实源）；同端点后续报文
+     * 正常 observe（未知 running 不再收养）。
+     */
+    @Test
+    void shouldAdoptUnknownRunningOnFirstReport_thenObserveNormally() {
+        StateShadowBridge bridge = enabledBridge();
+
+        // 首报（master 重启语义，无本地开账前置）：running 42 → 收养
+        bridge.observeWorkerStatus(
+                statusResponse(1L, RoleType.DECODE,
+                        Map.of("42", runningTask(42L, TaskPhase.RUNNING, 512L)), null),
+                RoleType.DECODE, "10.0.0.9:9000");
+
+        var adopted = bridge.ledger().decode().get(42L).orElseThrow();
+        assertTrue(adopted.engineOwned(), "首报未知 running 应按引擎事实收养");
+        assertEquals(0L, bridge.diffCollector().errorCount());
+
+        // 次报（同端点）：未知 running 43 不再收养（正常 observe 只计 unknown）
+        bridge.observeWorkerStatus(
+                statusResponse(2L, RoleType.DECODE,
+                        Map.of("43", runningTask(43L, TaskPhase.RUNNING, 0L)), null),
+                RoleType.DECODE, "10.0.0.9:9000");
+        assertTrue(bridge.ledger().decode().get(43L).isEmpty(), "次报未知 running 不收养");
+
+        // 不同端点（新 ipPort）各自独立首报：另一端点的首报同样收养
+        bridge.observeWorkerStatus(
+                statusResponse(1L, RoleType.DECODE,
+                        Map.of("77", runningTask(77L, TaskPhase.RUNNING, 0L)), null),
+                RoleType.DECODE, "10.0.0.11:9000");
+        assertTrue(bridge.ledger().decode().get(77L).isPresent(), "新端点首报同样收养");
+        assertEquals(0L, bridge.diffCollector().errorCount());
+    }
+
+    /**
+     * 收养条目经引擎 finished 正常终局（重启恢复的 inflight 走完生命周期）：
+     * 墓碑落账 + 新侧终态入 diff 对账窗口（重启场景无旧侧配对是预期形态，
+     * 不算 shadow.error）。
+     */
+    @Test
+    void adoptedEntrySettlesViaEngineFinishedWithoutShadowError() {
+        StateShadowBridge bridge = enabledBridge();
+
+        // 首报收养 42
+        bridge.observeWorkerStatus(
+                statusResponse(1L, RoleType.DECODE,
+                        Map.of("42", runningTask(42L, TaskPhase.RUNNING, 512L)), null),
+                RoleType.DECODE, "10.0.0.10:9000");
+
+        // 次报：引擎 finished 42 → 终局墓碑 + 新侧终态入对账窗口
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(42L);
+        finished.setErrorCode(0L);
+        finished.setEndTimeMs(1L);
+        bridge.observeWorkerStatus(
+                statusResponse(2L, RoleType.DECODE, null, Map.of("42", finished)),
+                RoleType.DECODE, "10.0.0.10:9000");
+
+        assertTrue(bridge.ledger().terminalOutcomeOf(42L, org.flexlb.state.spi.StateRole.DECODE).isPresent(),
+                "收养条目 finished 后应终局落墓碑");
+        assertEquals(TerminalState.COMPLETED,
+                bridge.ledger().terminalOutcomeOf(42L, org.flexlb.state.spi.StateRole.DECODE).get().state());
+        assertEquals(1, bridge.diffCollector().pendingNew(),
+                "重启收养条目无旧侧配对 → 新侧终态入窗等待（预期形态，非 error）");
+        assertEquals(0L, bridge.diffCollector().errorCount());
     }
 
     // ==================== 清理层装配（janitor 挂载/调度/配置传播）====================
