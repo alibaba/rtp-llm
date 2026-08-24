@@ -195,6 +195,8 @@ __global__ void ReuseKVCacheIndexedBatchedKernel(T*             final_compressed
         (num_batches <= 64) ? s_batch_info[batch_idx * 4 + 2] : batch_reuse_info_vec[batch_idx * 4 + 2];
     const int local_idx            = tid - final_offset;
     const int compressed_kv_offset = (num_batches <= 64) ? s_qo_indptr[batch_idx] : qo_indptr[batch_idx];
+    // row * dim exceeds int32 once gathered rows pass 2^31 / dim (4,194,304 rows at dim 512)
+    const int64_t row = tid;
 
     // 优化3: 向量化内存访问
     using VecType = typename std::conditional<
@@ -222,7 +224,7 @@ __global__ void ReuseKVCacheIndexedBatchedKernel(T*             final_compressed
         const T* cache_token = cache_block + token_in_block * kv_cache_entry_stride;
 
         // 向量化复制 compressed_kv 部分
-        T* dst_compressed = final_compressed_kv + tid * compressed_kv_dim;
+        T* dst_compressed = final_compressed_kv + row * compressed_kv_dim;
         if (use_vec && compressed_kv_dim % vec_size == 0
             && reinterpret_cast<uintptr_t>(dst_compressed) % sizeof(VecType) == 0
             && reinterpret_cast<uintptr_t>(cache_token) % sizeof(VecType) == 0) {
@@ -248,7 +250,7 @@ __global__ void ReuseKVCacheIndexedBatchedKernel(T*             final_compressed
         }
 
         // 向量化复制 k_pe 部分
-        T*       dst_k_pe = final_k_pe + tid * k_pe_dim;
+        T*       dst_k_pe = final_k_pe + row * k_pe_dim;
         const T* src_k_pe = cache_token + compressed_kv_dim;
         if (use_vec && k_pe_dim % vec_size == 0 && reinterpret_cast<uintptr_t>(dst_k_pe) % sizeof(VecType) == 0
             && reinterpret_cast<uintptr_t>(src_k_pe) % sizeof(VecType) == 0) {
@@ -282,8 +284,8 @@ __global__ void ReuseKVCacheIndexedBatchedKernel(T*             final_compressed
         const int compressed_kv_global_idx = compressed_kv_offset + compressed_kv_local_idx;
 
         // 向量化复制 compressed_kv
-        T*       dst_compressed = final_compressed_kv + tid * compressed_kv_dim;
-        const T* src_compressed = compressed_kv + compressed_kv_global_idx * compressed_kv_dim;
+        T*       dst_compressed = final_compressed_kv + row * compressed_kv_dim;
+        const T* src_compressed = compressed_kv + (int64_t)compressed_kv_global_idx * compressed_kv_dim;
         if (use_vec && compressed_kv_dim % vec_size == 0
             && reinterpret_cast<uintptr_t>(dst_compressed) % sizeof(VecType) == 0
             && reinterpret_cast<uintptr_t>(src_compressed) % sizeof(VecType) == 0) {
@@ -309,8 +311,8 @@ __global__ void ReuseKVCacheIndexedBatchedKernel(T*             final_compressed
         }
 
         // 向量化复制 k_pe
-        T*       dst_k_pe = final_k_pe + tid * k_pe_dim;
-        const T* src_k_pe = k_pe + compressed_kv_global_idx * k_pe_dim;
+        T*       dst_k_pe = final_k_pe + row * k_pe_dim;
+        const T* src_k_pe = k_pe + (int64_t)compressed_kv_global_idx * k_pe_dim;
         if (use_vec && k_pe_dim % vec_size == 0 && reinterpret_cast<uintptr_t>(dst_k_pe) % sizeof(VecType) == 0
             && reinterpret_cast<uintptr_t>(src_k_pe) % sizeof(VecType) == 0) {
             const int      vec_count = k_pe_dim / vec_size;
