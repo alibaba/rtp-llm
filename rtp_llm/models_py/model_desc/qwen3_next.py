@@ -1,5 +1,6 @@
 import logging
 import sys
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -34,6 +35,12 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
+from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
+    AiterFlydslGdnDecodeStateMetadata,
+    aiter_flydsl_gdn_decode,
+    is_aiter_flydsl_gdn_decode_supported,
+    prepare_aiter_flydsl_gdn_decode_state_indices,
+)
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
@@ -66,6 +73,14 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
 
 
+@dataclass(frozen=True)
+class _AiterFlydslGdnDecodeCacheEntry:
+    state_metadata: AiterFlydslGdnDecodeStateMetadata
+    read_indices: torch.Tensor
+    write_indices: torch.Tensor
+    invalid_row_flags: torch.Tensor
+
+
 class Qwen3NextMetadata(object):
     def __init__(
         self,
@@ -84,6 +99,13 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
+        # One metadata instance is shared by all layers in a model forward.
+        # Decode state indices are layer-independent, so cache them by the
+        # backing block-table/length storage and reuse them across GDN layers.
+        self.aiter_flydsl_gdn_decode_indices: dict[
+            tuple[object, ...], _AiterFlydslGdnDecodeCacheEntry
+        ] = {}
+        self.aiter_flydsl_gdn_decode_unsupported: set[tuple[object, ...]] = set()
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -390,6 +412,19 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
+    @staticmethod
+    def _is_target_verify(
+        attn_inputs: PyAttentionInputs, attn_meta: Qwen3NextMetadata
+    ) -> bool:
+        is_target_verify = attn_meta.is_target_verify
+        if (
+            torch.version.hip is not None
+            and is_target_verify
+            and attn_inputs.prefix_lengths.numel() == 0
+        ):
+            return False
+        return is_target_verify
+
     def _get_fla_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
         block_map = attn_inputs.kv_cache_kernel_block_id_device
         if (
@@ -442,8 +477,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: torch.Tensor,
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
-        is_target_verify: bool,
+        attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
+        is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
@@ -464,26 +500,92 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
-
-        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
-        g = g.view(batch, seq, self.local_num_v_heads)
-        beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            g=g,
-            beta=beta,
-            scale=None,
-            initial_state=ssm_states,
-            inplace_final_state=True,
-            block_map=self._get_fla_block_map(attn_inputs),
-            seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
-            use_qk_l2norm_in_kernel=True,
-        )
+        block_map = attn_inputs.kv_cache_kernel_block_id_device
+        cache_entry = None
+        # The state-index adapter resolves one recurrent transition per request.
+        # Target verification advances multiple tokens and retains Triton.
+        if not is_target_verify and block_map is not None:
+            sequence_lengths = attn_inputs.sequence_lengths_plus_1_device
+            state_metadata = AiterFlydslGdnDecodeStateMetadata(
+                block_map=block_map,
+                sequence_lengths_plus_1=sequence_lengths,
+                seq_size_per_block=seq_size_per_block,
+                host_sequence_lengths=attn_inputs.sequence_lengths,
+                state_pool_size=ssm_states.shape[0],
+            )
+            cache_key = state_metadata.cache_key(ssm_states.dtype)
+            cache_entry = attn_meta.aiter_flydsl_gdn_decode_indices.get(cache_key)
+            if (
+                cache_entry is None
+                and cache_key not in attn_meta.aiter_flydsl_gdn_decode_unsupported
+            ):
+                supported = is_aiter_flydsl_gdn_decode_supported(
+                    query,
+                    key,
+                    value,
+                    a,
+                    b,
+                    ssm_states,
+                    self.alog,
+                    self.dt_bias,
+                    scale=None,
+                    block_map=block_map,
+                    sequence_lengths_plus_1=sequence_lengths,
+                    seq_size_per_block=seq_size_per_block,
+                    host_sequence_lengths=attn_inputs.sequence_lengths,
+                    state_pool_size=ssm_states.shape[0],
+                )
+                if supported:
+                    read_indices, write_indices, invalid_row_flags = (
+                        prepare_aiter_flydsl_gdn_decode_state_indices(state_metadata)
+                    )
+                    cache_entry = _AiterFlydslGdnDecodeCacheEntry(
+                        state_metadata=state_metadata,
+                        read_indices=read_indices,
+                        write_indices=write_indices,
+                        invalid_row_flags=invalid_row_flags,
+                    )
+                    attn_meta.aiter_flydsl_gdn_decode_indices[cache_key] = cache_entry
+                else:
+                    attn_meta.aiter_flydsl_gdn_decode_unsupported.add(cache_key)
+
+        if cache_entry is not None:
+            core_attn_out = aiter_flydsl_gdn_decode(
+                A_log=self.alog,
+                a=a,
+                dt_bias=self.dt_bias,
+                q=query,
+                k=key,
+                v=value,
+                b=b,
+                state=ssm_states,
+                read_indices=cache_entry.read_indices,
+                write_indices=cache_entry.write_indices,
+                scale=None,
+                use_qk_l2norm_in_kernel=True,
+                already_validated=True,
+            )
+        else:
+            # NVIDIA CUDA and unsupported ROCm inputs retain the original path.
+            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+            # contiguous is applied by fused_recurrent_gated_delta_rule.
+            g = g.view(batch, seq, self.local_num_v_heads)
+            beta = beta.view(batch, seq, self.local_num_v_heads)
+            core_attn_out, _ = fused_recurrent_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                scale=None,
+                initial_state=ssm_states,
+                inplace_final_state=True,
+                block_map=self._get_fla_block_map(attn_inputs),
+                seq_size_per_block=seq_size_per_block,
+                sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+                use_qk_l2norm_in_kernel=True,
+            )
         res = core_attn_out.reshape(
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
         )
@@ -505,7 +607,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: torch.Tensor = kv_cache.kv_cache_base.reshape(
             kv_cache.kv_cache_base.shape[0], -1
         )
-        is_target_verify = attn_meta.is_target_verify
+        is_target_verify = self._is_target_verify(attn_inputs, attn_meta)
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
@@ -520,7 +622,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
-            is_target_verify,
+            attn_meta,
         )
 
         return attn_out
@@ -1169,8 +1271,34 @@ class Qwen3NextModel(GptModelBase):
         hidden_states = self.word_embedding(inputs)
 
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+        linear_layer_idx = next(
+            (
+                layer_idx
+                for layer_idx, layer in enumerate(self.layers)
+                if layer.layer_type == HybridAttentionType.LINEAR
+            ),
+            None,
+        )
+        if linear_layer_idx is not None:
+            linear_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, linear_layer_idx
+            )
+            if isinstance(linear_attention_inputs, list):
+                raise RuntimeError(
+                    "Qwen3Next LINEAR layer must map to exactly one attention-input tag"
+                )
+            attention_inputs = linear_attention_inputs
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
+        if (
+            torch.version.hip is not None
+            and is_target_verify
+            and attention_inputs.prefix_lengths.numel() == 0
+        ):
+            # A genuine target-verify batch has one prefix row per request.
+            # ROCm normal decode can carry the generic flag with no prefixes;
+            # normalize only that impossible speculative shape.
+            is_target_verify = False
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
 
         full_prefill_conv1d_meta = None
