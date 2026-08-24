@@ -39,6 +39,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
         os.environ["SP_DETERMINISTIC_DRAFT_EXACT_MATCH"] = "1"
         os.environ["MAX_THINKING_TOKENS"] = "123"
+        os.environ["VIT_CONCURRENCY"] = "12"
 
         sys.argv = ["prog"]
 
@@ -88,6 +89,7 @@ class ServerArgsSetTest(TestCase):
             "dfs://bucket/jit/writer",
         )
         self.assertEqual(py_env_configs.generate_env_config.max_thinking_tokens, 123)
+        self.assertEqual(py_env_configs.vit_config.vit_concurrency, 12)
         self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
         restored_sp_config = pickle.loads(pickle.dumps(py_env_configs.sp_config))
         self.assertTrue(restored_sp_config.deterministic_draft_exact_match)
@@ -126,6 +128,8 @@ class ServerArgsSetTest(TestCase):
             "2",
             "--sp_deterministic_draft_exact_match",
             "true",
+            "--vit_concurrency",
+            "24",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -178,6 +182,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
         self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
+        self.assertEqual(py_env_configs.vit_config.vit_concurrency, 24)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""

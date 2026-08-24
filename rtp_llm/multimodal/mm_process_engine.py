@@ -497,6 +497,16 @@ class MMProcessEngine:
                 f"MMProcessEngine: Using MULTIPROCESS preprocessing mode with {vit_config.mm_preprocess_max_workers} workers"
             )
 
+        async_compute_workers = max(1, int(vit_config.vit_concurrency))
+        self._async_compute_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=async_compute_workers,
+            thread_name_prefix="mm-async-compute",
+        )
+        logging.info(
+            "MMProcessEngine: async compute executor max_workers=%d",
+            async_compute_workers,
+        )
+
         # Embedding scheduler: always an MMScheduler; gpu-batch vs serial is
         # resolved by VitConfig (serial = one request per forward, no batching).
         scheduler_args = vit_config.embedding_scheduler_args()
@@ -779,12 +789,7 @@ class MMProcessEngine:
             state, entry = self._async_cache.try_acquire(cache_key)
             if state == "miss":
                 single_input = [mm_input]
-                thread = threading.Thread(
-                    target=self._async_compute,
-                    args=(single_input, cache_key, entry, request_id),
-                    daemon=True,
-                )
-                thread.start()
+                self._submit_async_compute(single_input, cache_key, entry, request_id)
             verdict = entry.wait_greennet(timeout=timeout_ms / 1000.0)
             if verdict is not None and not verdict.passed:
                 return verdict
@@ -1001,12 +1006,7 @@ class MMProcessEngine:
             state, entry = self._async_cache.try_acquire(cache_key)
             if state == "miss":
                 single_input = [mm_input]
-                thread = threading.Thread(
-                    target=self._async_compute,
-                    args=(single_input, cache_key, entry, request_id),
-                    daemon=True,
-                )
-                thread.start()
+                self._submit_async_compute(single_input, cache_key, entry, request_id)
 
         return cache_keys
 
@@ -1019,7 +1019,7 @@ class MMProcessEngine:
         """Retrieve embedding results, blocking until ready if necessary.
 
         Each input is looked up independently by its cache_key.
-        If a key was never submitted, computes synchronously.
+        If a key was never submitted, queues it on the shared async executor.
         If in-progress, blocks until the computing thread finishes.
         If complete, returns immediately.
         """
@@ -1035,12 +1035,66 @@ class MMProcessEngine:
             state, entry = self._async_cache.try_acquire(cache_key)
 
             if state == "miss":
-                self._async_compute([mm_input], cache_key, entry, request_id)
+                self._submit_async_compute([mm_input], cache_key, entry, request_id)
 
             raw_result = entry.wait(timeout=timeout_ms / 1000.0)
             results.append(self._work_item_result_to_response(raw_result))
 
         return results
+
+    def _fail_async_compute(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        error: Exception,
+    ) -> None:
+        if not entry.is_greennet_decided:
+            entry.set_greennet_verdict(
+                GreenNetVerdict(passed=False, code=11, message=str(error))
+            )
+        self._embedding_cache.fail(cache_key, entry, error)
+
+    def _on_async_compute_done(
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        future: concurrent.futures.Future,
+    ) -> None:
+        if future.cancelled():
+            self._fail_async_compute(
+                cache_key,
+                entry,
+                RuntimeError("ViT async compute cancelled during shutdown"),
+            )
+            return
+
+        error = future.exception()
+        if error is not None:
+            self._fail_async_compute(cache_key, entry, error)
+
+    def _submit_async_compute(
+        self,
+        mm_inputs: List[MultimodalInput],
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        request_id: int = 0,
+    ) -> concurrent.futures.Future:
+        try:
+            future = self._async_compute_executor.submit(
+                self._async_compute,
+                mm_inputs,
+                cache_key,
+                entry,
+                request_id,
+            )
+        except RuntimeError as error:
+            self._fail_async_compute(cache_key, entry, error)
+            raise
+
+        future.add_done_callback(
+            lambda completed: self._on_async_compute_done(cache_key, entry, completed)
+        )
+        return future
 
     def _async_compute(
         self,
@@ -1083,16 +1137,13 @@ class MMProcessEngine:
         except Exception as e:
             # If greennet never decided (preprocess crash etc.), surface a
             # process-error verdict so WaitGreenNetVerdict doesn't hang.
-            if not entry.is_greennet_decided:
-                entry.set_greennet_verdict(
-                    GreenNetVerdict(passed=False, code=11, message=str(e))
-                )
-            self._embedding_cache.fail(cache_key, entry, e)
+            self._fail_async_compute(cache_key, entry, e)
         finally:
             self._cancel_greennet(handle)
 
     def stop(self) -> None:
         """Shutdown the preprocessing executor and embedding scheduler."""
+        self._async_compute_executor.shutdown(wait=False, cancel_futures=True)
         self.preprocess_executor.shutdown()
         self._scheduler.close()
         self._shutdown_greennet_loop()

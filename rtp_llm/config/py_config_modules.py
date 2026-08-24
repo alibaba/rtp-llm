@@ -265,6 +265,7 @@ class VitConfig:
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
         self.mm_preprocess_max_workers: int = 4
+        self.vit_concurrency: int = 64
         self.biencoder_preprocess: bool = False
         self.extra_input_in_mm_embedding = ""
         # Matches the --mm_timeout_ms / MM_TIMEOUT_MS server-arg default so this
