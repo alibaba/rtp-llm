@@ -14,7 +14,6 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import (
     ColumnParallelLinear,
@@ -457,6 +456,20 @@ class KimiLinearMetadata:
         self.is_target_verify = is_target_verify
 
 
+def _write_linear_cache_store(
+    attn_inputs: PyAttentionInputs, kv_cache: Optional[LayerKVCache]
+) -> None:
+    """Register a linear-attention cache only when CacheStore is active."""
+    cache_store_inputs = attn_inputs.cache_store_inputs
+    cache_store_writer = attn_inputs.cache_store_writer
+    if (
+        kv_cache is not None
+        and cache_store_inputs is not None
+        and cache_store_writer is not None
+    ):
+        cache_store_writer.write(cache_store_inputs, kv_cache)
+
+
 class KimiLinearKDA(RtpModule):
     """Kimi Delta Attention with direct checkpoint-owned NewLoader modules."""
 
@@ -739,14 +752,7 @@ class KimiLinearKDA(RtpModule):
                 seq_size_per_block,
                 chunk_size=64,
             )
-        if kv_cache is not None:
-            compute_ops.write_cache_store(
-                attention_inputs.input_lengths,
-                attention_inputs.prefix_lengths,
-                attention_inputs.kv_cache_block_id,
-                attention_inputs.cache_store_inputs,
-                kv_cache,
-            )
+        _write_linear_cache_store(attention_inputs, kv_cache)
         return output.squeeze(0)
 
     @staticmethod
