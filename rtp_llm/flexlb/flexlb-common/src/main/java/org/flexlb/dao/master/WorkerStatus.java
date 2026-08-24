@@ -18,6 +18,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
+
 @Data
 @Slf4j
 public class WorkerStatus {
@@ -76,7 +78,9 @@ public class WorkerStatus {
      */
     public String getLogicalIpPort() {
         String physicalIpPort = getPhysicalIpPort();
-        return physicalIpPort == null ? null : physicalIpPort + "@" + engineIndex;
+        return physicalIpPort == null
+                ? null
+                : physicalIpPort + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + engineIndex;
     }
 
     public String getPhysicalGroupKey() {

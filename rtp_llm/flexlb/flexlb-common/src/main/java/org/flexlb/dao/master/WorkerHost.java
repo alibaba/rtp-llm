@@ -2,6 +2,8 @@ package org.flexlb.dao.master;
 
 import lombok.Getter;
 
+import static org.flexlb.constant.CommonConstants.LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR;
+
 /**
  * WorkerHost - Worker node host information
  * Unified host information representation for service discovery and worker management
@@ -147,7 +149,7 @@ public class WorkerHost {
      * identifies one independently routable engine behind the physical frontend.
      */
     public String getLogicalIpPort() {
-        return getPhysicalIpPort() + "@" + engineIndex;
+        return getPhysicalIpPort() + LOGICAL_WORKER_ENGINE_INDEX_SEPARATOR + engineIndex;
     }
 
     public String getPhysicalGroupKey() {
