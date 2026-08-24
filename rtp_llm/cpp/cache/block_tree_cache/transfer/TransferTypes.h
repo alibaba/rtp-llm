@@ -26,7 +26,6 @@ struct DeviceHostCopyOptions {
     size_t staged_sm_min_bytes{64 * 1024};
     bool   staged_sm_copy_enabled{false};
     bool   cuda_batch_copy_enabled{true};
-    bool   cuda_batch_serialize{true};
 };
 
 struct HostBufferView {

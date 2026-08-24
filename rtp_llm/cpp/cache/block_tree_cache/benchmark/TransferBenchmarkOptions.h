@@ -35,12 +35,6 @@ struct TransferOptions {
     // fallback or mixed execution.
     std::string copy_strategy{"auto"};  // "auto", "batch" or "staged-sm"
 
-    // Safety switch for the CUDA batch path. When enabled, only the CUDA batch
-    // API submission is serialized per device; stream completion remains
-    // concurrent. Enabled by default because concurrent submissions can crash
-    // or hang in the deployed CUDA stack.
-    bool cuda_batch_serialize{true};
-
     // Measured-phase duration floor (seconds). A pilot run scales the
     // operation count so the measured phase lasts at least this long.
     size_t min_measured_seconds{30};
