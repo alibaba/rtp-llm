@@ -17,10 +17,6 @@ namespace rtp_llm {
 class BlockTree;
 struct TreeNode;
 
-constexpr size_t kFullPrefixScanNodesPerRound      = 1024;
-constexpr size_t kFullPrefixScanNodesPerRoundLimit = 4096;
-constexpr size_t kFullPrefixScanMaxDetailsPerCycle = 10;
-
 enum class FullViolationType : uint8_t {
     LOWER_TO_DEVICE,
     GAP_TO_DATA,
@@ -58,59 +54,37 @@ struct FullViolationDetail {
     NodeBrief             current;
 };
 
-struct FullPrefixScanOptions {
-    int64_t interval_ms{0};  // 0 = disabled, no thread
-    int     world_rank{0};
-    int     local_rank{0};
-    size_t  nodes_per_round{kFullPrefixScanNodesPerRound};
-    size_t  max_details_per_cycle{kFullPrefixScanMaxDetailsPerCycle};
-};
-
-struct FullPrefixScanStats {
-    // Cumulative.
-    uint64_t batches_started{0};
-    uint64_t cycles_completed{0};
-    // Current cycle.
-    bool   cycle_active{false};
-    size_t nodes_scanned{0};
-    size_t stable_violations{0};
-    size_t transient_violations{0};
-    size_t details_logged{0};
-    size_t details_suppressed{0};
-};
-
 InvalidResourceReason invalidResourceReason(const GroupSetResource& resource);
 NodeBrief             makeNodeBrief(const TreeNode& node, const GroupSetResource& resource);
 // Appends every violation observable from `node` alone (plus its parent edge) to `details`.
 void detectNodeViolations(const BlockTree& tree, const TreeNode& node, std::vector<FullViolationDetail>& details);
 
-std::string formatViolationDetail(const FullViolationDetail& detail, int world_rank, int local_rank);
+std::string formatViolationDetail(const FullViolationDetail& detail);
 
 // Periodically checks the FULL prefix invariant in bounded batches. Observation only:
 // it never mutates the tree, resources, block pools or refcounts.
 class FullPrefixInvariantScanner {
 public:
-    FullPrefixInvariantScanner(const BlockTree& tree, std::mutex& cache_mutex, FullPrefixScanOptions options);
+    FullPrefixInvariantScanner(const BlockTree& tree, std::mutex& cache_mutex, int64_t interval_ms);
     ~FullPrefixInvariantScanner();
 
     FullPrefixInvariantScanner(const FullPrefixInvariantScanner&)            = delete;
     FullPrefixInvariantScanner& operator=(const FullPrefixInvariantScanner&) = delete;
 
-    bool                start();
-    void                stop();
-    void                runOneBatch();
-    FullPrefixScanStats stats() const;
+    bool start();
+    void stop();
 
 private:
     void runBatchGuarded();
+    void runBatch();
     void publishBatch(const std::vector<FullViolationDetail>& details,
                       size_t                                  nodes_scanned,
                       size_t                                  tree_size,
                       bool                                    cycle_complete);
 
-    const BlockTree&            tree_;
-    std::mutex&                 cache_mutex_;
-    const FullPrefixScanOptions options_;
+    const BlockTree& tree_;
+    std::mutex&      cache_mutex_;
+    const int64_t    interval_ms_;
 
     // LoopThread::stop() cannot interrupt a batch that is already waiting for the cache
     // mutex, so the batch re-checks this flag once it owns the lock.
@@ -118,19 +92,16 @@ private:
     autil::LoopThreadPtr loop_thread_;
 
     // Touched only by the thread running a batch.
-    size_t cursor_{0};
-    size_t cycle_end_index_{0};
-    bool   cycle_active_{false};
-    size_t cycle_tree_size_{0};
-    size_t cycle_nodes_scanned_{0};
-    size_t cycle_stable_{0};
-    size_t cycle_transient_{0};
-    size_t cycle_details_logged_{0};
-    size_t cycle_details_suppressed_{0};
-
-    // Mirror of the counters above plus the cumulative totals, for stats().
-    mutable std::mutex  stats_mutex_;
-    FullPrefixScanStats stats_;
+    size_t   cursor_{0};
+    size_t   cycle_end_index_{0};
+    bool     cycle_active_{false};
+    size_t   cycle_tree_size_{0};
+    size_t   cycle_nodes_scanned_{0};
+    size_t   cycle_stable_{0};
+    size_t   cycle_transient_{0};
+    size_t   cycle_details_logged_{0};
+    size_t   cycle_details_suppressed_{0};
+    uint64_t cycles_completed_{0};
 };
 
 }  // namespace rtp_llm
