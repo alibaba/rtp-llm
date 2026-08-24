@@ -34,6 +34,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactor
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
+from rtp_llm.openai.renderer_factory_register import get_renderer_class
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
@@ -45,6 +46,16 @@ _SERVICER_CLOSE_TIMEOUT_S = 10.0
 _PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 _PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 _DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
+
+
+def _resolve_pretokenized_chat_constraint_applier(model_type: str):
+    """Resolve an opt-in model renderer hook for pre-tokenized requests."""
+    renderer_class = get_renderer_class(model_type)
+    if renderer_class is None:
+        return None
+    return getattr(
+        renderer_class, "apply_pretokenized_chat_request_constraints", None
+    )
 
 
 def _pre_stop_drain_seconds() -> float:
@@ -572,6 +583,13 @@ class DashScApp:
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
+                    model_type=model_config.model_type,
+                    mm_download_headers=self.py_env_configs.vit_config.download_headers,
+                    pretokenized_chat_constraint_applier=(
+                        _resolve_pretokenized_chat_constraint_applier(
+                            model_config.model_type
+                        )
+                    ),
                 )
 
             loop = self._start_enqueue_loop()

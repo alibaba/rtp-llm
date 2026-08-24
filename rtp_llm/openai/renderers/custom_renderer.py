@@ -189,7 +189,7 @@ class StreamStatusSync:
         remove_stop_word_ids_func,
     ):
         self.index += 1
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        delta_output_ids = output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
         self.output_ids = remove_stop_word_ids_func(
@@ -313,6 +313,9 @@ class RenderedInputs:
 
 
 class CustomChatRenderer:
+    cpp_http_constraints_enabled = False
+    explicit_reasoning_delta_sync = False
+
     def __init__(
         self,
         tokenizer: BaseTokenizer,
@@ -452,6 +455,36 @@ class CustomChatRenderer:
             f"tool_choice={tool_choice!r} is not supported by "
             f"{self.__class__.__name__}",
         )
+
+    def apply_chat_completion_constraints_from_json(
+        self, request_json: str, generate_config_json: str
+    ) -> tuple[str, List[str]]:
+        """Bridge renderer-owned request constraints into the C++ HTTP server.
+
+        The C++ server owns a native ``GenerateConfig`` while renderer policy is
+        intentionally implemented in Python.  Return only fields changed by the
+        renderer so native-only config fields remain untouched.  Fields cleared
+        to ``None`` are returned separately because a partial JSON object cannot
+        express resetting an existing C++ ``optional`` reliably.
+        """
+
+        request = self.getRequest(request_json)
+        generate_config = GenerateConfig.model_validate_json(generate_config_json)
+        before = generate_config.model_dump(mode="json")
+        self.apply_chat_completion_constraints(request, generate_config)
+        after = generate_config.model_dump(mode="json")
+
+        updates = {
+            name: value
+            for name, value in after.items()
+            if value is not None and before.get(name) != value
+        }
+        cleared = [
+            name
+            for name, value in after.items()
+            if value is None and before.get(name) is not None
+        ]
+        return json.dumps(updates, ensure_ascii=False, separators=(",", ":")), cleared
 
     async def generate_choice(
         self,
@@ -1527,9 +1560,13 @@ class CustomChatRenderer:
             if len(response.choices) != len(all_choices):
                 if all_choices == []:
                     for i, choice in enumerate(response.choices):
-                        content, reasoning_content = split_think_tag(
-                            choice.delta.content
-                        )
+                        if self.explicit_reasoning_delta_sync:
+                            content = choice.delta.content
+                            reasoning_content = choice.delta.reasoning_content
+                        else:
+                            content, reasoning_content = split_think_tag(
+                                choice.delta.content
+                            )
                         all_choices.append(
                             ChatCompletionResponseChoice(
                                 index=i,
@@ -1551,19 +1588,32 @@ class CustomChatRenderer:
                     )
             else:
                 for i in range(len(all_choices)):
-                    if all_choices[i].message.content == None:
-                        all_choices[i].message.content = (
-                            response.choices[i].delta.content or None
-                        )
+                    delta = response.choices[i].delta
+                    if self.explicit_reasoning_delta_sync:
+                        if delta.reasoning_content is not None:
+                            if all_choices[i].message.reasoning_content is None:
+                                all_choices[i].message.reasoning_content = (
+                                    delta.reasoning_content or None
+                                )
+                            else:
+                                all_choices[i].message.reasoning_content += (
+                                    delta.reasoning_content or ""
+                                )
+                        if delta.content is not None:
+                            if all_choices[i].message.content is None:
+                                all_choices[i].message.content = delta.content or None
+                            else:
+                                all_choices[i].message.content += delta.content or ""
                     else:
-                        all_choices[i].message.content += (
-                            response.choices[i].delta.content or ""
+                        if all_choices[i].message.content == None:
+                            all_choices[i].message.content = delta.content or None
+                        else:
+                            all_choices[i].message.content += delta.content or ""
+                        content, reasoning_content = split_think_tag(
+                            all_choices[i].message.content
                         )
-                    content, reasoning_content = split_think_tag(
-                        all_choices[i].message.content
-                    )
-                    all_choices[i].message.content = content
-                    all_choices[i].message.reasoning_content = reasoning_content
+                        all_choices[i].message.content = content
+                        all_choices[i].message.reasoning_content = reasoning_content
                     all_choices[i].message.role = (
                         response.choices[i].delta.role or all_choices[i].message.role
                     )

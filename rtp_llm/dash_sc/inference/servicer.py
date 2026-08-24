@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
@@ -38,6 +39,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
+    PRETOKENIZED_CHAT_CONTROL_NAMES,
     DashErrorSpec,
     DashScParameterError,
     LLMFinishReason,
@@ -49,6 +51,7 @@ from rtp_llm.dash_sc.codec import (
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
     parse_multimodal_parts_from_request,
+    parse_pretokenized_chat_controls_with_sources,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -87,6 +90,49 @@ _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 _KIMI_K3_IMAGE_PLACEHOLDER = "<|kimi_image_placeholder|>"
 _KIMI_K3_MEDIA_CONTENT = "<|media_content|>"
+_PRETOKENIZED_CHAT_FALLBACK_LOG_COUNTS: dict[tuple[Any, ...], int] = {}
+_PRETOKENIZED_CHAT_FALLBACK_LOG_LOCK = threading.Lock()
+
+
+def _log_pretokenized_chat_constraint_fallback(
+    tag: str,
+    fallback_type: str,
+    controls: dict[str, Any],
+    sources: dict[str, str],
+) -> None:
+    """Log fallback diagnostics at exponentially decreasing frequency.
+
+    The fingerprint contains only field names and source labels. Tool schemas
+    and values are deliberately excluded from both the key and the log body.
+    """
+    missing_fields = tuple(
+        name for name in PRETOKENIZED_CHAT_CONTROL_NAMES if name not in controls
+    )
+    source_fields = tuple(
+        (name, sources[name])
+        for name in PRETOKENIZED_CHAT_CONTROL_NAMES
+        if name in sources
+    )
+    fingerprint = (fallback_type, missing_fields, source_fields)
+    with _PRETOKENIZED_CHAT_FALLBACK_LOG_LOCK:
+        occurrences = _PRETOKENIZED_CHAT_FALLBACK_LOG_COUNTS.get(fingerprint, 0) + 1
+        _PRETOKENIZED_CHAT_FALLBACK_LOG_COUNTS[fingerprint] = occurrences
+
+    # Emit at occurrences 1, 2, 4, 8, ... so persistent failures remain
+    # observable without producing one warning per request.
+    if occurrences & (occurrences - 1):
+        return
+    missing = ",".join(missing_fields) or "none"
+    source_summary = ",".join(f"{name}:{source}" for name, source in source_fields)
+    logging.warning(
+        "[DashScGrpc] [%s] pretokenized chat constraint fallback: "
+        "fallback=%s missing=%s sources=%s occurrences=%d",
+        tag,
+        fallback_type,
+        missing,
+        source_summary or "none",
+        occurrences,
+    )
 
 
 def _build_mm_inputs(
@@ -667,6 +713,7 @@ async def iter_real_model_stream_infer(
     mm_inputs: Optional[list] = None,
     is_kimi_k3: bool = False,
     mm_download_headers: str = "",
+    pretokenized_chat_constraint_applier: Optional[Callable] = None,
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -746,6 +793,26 @@ async def iter_real_model_stream_infer(
         ):
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_request_overrides(generate_config, sampling, other, runtime)
+        if (
+            pretokenized_chat_constraint_applier is not None
+            and generate_config.structural_tag is None
+        ):
+            chat_controls, chat_control_sources = (
+                parse_pretokenized_chat_controls_with_sources(request)
+            )
+            constraint_source = pretokenized_chat_constraint_applier(
+                chat_controls,
+                generate_config,
+                bool(getattr(generate_config, "in_think_mode", False)),
+            )
+            fallback_type = constraint_source or "common_prompt_tail_fallback"
+            if fallback_type == "common_prompt_tail_fallback":
+                _log_pretokenized_chat_constraint_fallback(
+                    tag,
+                    fallback_type,
+                    chat_controls,
+                    chat_control_sources,
+                )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -1316,6 +1383,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         think_runtime: Optional[_ThinkRuntime] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
+        model_type: Optional[str] = None,
+        mm_download_headers: str = "",
+        pretokenized_chat_constraint_applier: Optional[Callable] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
@@ -1346,6 +1416,13 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._rank_id = rank_id
         self._server_id = to_optional_int(server_id)
         self._rep_cfg = repetition_monitor_config or RequestRepetitionMonitorConfig()
+        self._is_kimi_k3 = (
+            str(model_type or "").replace("-", "_").lower() == "kimi_k3"
+        )
+        self._mm_download_headers = mm_download_headers
+        self._pretokenized_chat_constraint_applier = (
+            pretokenized_chat_constraint_applier
+        )
 
     def _record_and_report_chunk(
         self,
@@ -1567,6 +1644,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         access_agg=record,
                         is_kimi_k3=self._is_kimi_k3,
                         mm_download_headers=self._mm_download_headers,
+                        pretokenized_chat_constraint_applier=(
+                            self._pretokenized_chat_constraint_applier
+                        ),
                         yield_access_stats=True,
                     ):
                         (
