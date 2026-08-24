@@ -96,6 +96,7 @@ cc_library(
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "@havenask//aios/autil:scope",
     ],
 )
 

@@ -3,8 +3,10 @@
 #include <cmath>
 #include <memory>
 #include <unistd.h>
+#include <exception>
 #include <c10/core/InferenceMode.h>
 #include <pybind11/pybind11.h>
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -368,7 +370,13 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         telemetry::synthesizePhaseSpans(
             generate_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Fusion, request_ok);
     });
-    std::shared_ptr<GenerateInput>     input;
+    const int                      uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard              rpc_completion_guard([&generate_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            generate_context.markRpcHandlingCompleted();
+        }
+    });
+    std::shared_ptr<GenerateInput> input;
     {
         auto mm_res = prepareInput(*request, input);
         if (!mm_res.ok()) {
@@ -393,6 +401,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
 
+    if (generate_context.hasError() && generate_context.getStream() && generate_context.getStream()->hasError()) {
+        generate_context.error_info = generate_context.getStream()->statusInfo();
+    }
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
 }

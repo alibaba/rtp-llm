@@ -56,6 +56,7 @@ public:
     void                                     reportMetrics(RpcMetricsCollector& collector);
     virtual void                             setStream(const std::shared_ptr<GenerateStream>& stream);
     virtual std::shared_ptr<GenerateStream>& getStream();
+    void                                     markRpcHandlingCompleted();
 
 public:
     int64_t                               request_id;
@@ -86,8 +87,11 @@ protected:
     std::chrono::system_clock::time_point request_begin_time_;
 
     static constexpr int64_t kStopStreamWaitTimeoutMs = 2000;
+    bool rpc_handling_completed_ = false;
 
 protected:
+    void cancelStreamOnTeardown() noexcept;
+    void stopStreamForRetry();
     void stopStream();
 };
 

@@ -77,14 +77,8 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
 }
 
 void PrefillGenerateContext::stopStream() {
+    cancelStreamOnTeardown();
     if (stream_) {
-        if (!stream_->finishOrCancel(prefill_stop_stream_wait_timeout_ms_, "cancel prefill stream")) {
-            RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
-                                prefill_stop_stream_wait_timeout_ms_,
-                                stream_->generateInput()->request_id);
-        }
-        // Dequeue captures terminal status for runtime scheduling metadata.
-        // Do it after cancellation/finish settlement to preserve its error.
         dequeueStreamFromRuntimeMeta();
         markRequestEnd();
         stream_.reset();
