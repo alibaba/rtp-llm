@@ -44,6 +44,18 @@ def parse_args() -> argparse.Namespace:
         "--decode-checkpoint-path",
         default=env_default("DECODE_CHECKPOINT_PATH", env_default("CHECKPOINT_PATH")),
     )
+    parser.add_argument(
+        "--prefill-sp-checkpoint-path",
+        default=env_default(
+            "PREFILL_SP_CHECKPOINT_PATH", env_default("SP_CHECKPOINT_PATH")
+        ),
+    )
+    parser.add_argument(
+        "--decode-sp-checkpoint-path",
+        default=env_default(
+            "DECODE_SP_CHECKPOINT_PATH", env_default("SP_CHECKPOINT_PATH")
+        ),
+    )
     parser.add_argument("--prefill-endpoint", default=env_default("PREFILL_ENDPOINT"))
     parser.add_argument("--decode-endpoint", default=env_default("DECODE_ENDPOINT"))
     parser.add_argument("--run-id", default=env_default("SMOKE_RUN_ID"))
@@ -118,6 +130,8 @@ def parse_args() -> argparse.Namespace:
         "decode_repo_root",
         "prefill_checkpoint_path",
         "decode_checkpoint_path",
+        "prefill_sp_checkpoint_path",
+        "decode_sp_checkpoint_path",
         "prefill_endpoint",
         "decode_endpoint",
         "run_id",
@@ -148,6 +162,9 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_REQUEST_TIMEOUT_S",
         "SMOKE_RESULT_TIMEOUT_S",
         "SMOKE_MAX_TOKENS",
+        "SMOKE_IDENTITY_MAX_TOKENS",
+        "SMOKE_SINGLE_EXACT_MAX_TOKENS",
+        "SMOKE_MTP_CHUNK_MAX_TOKENS",
         "SMOKE_EXPECTED_LAYERS",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",
@@ -177,11 +194,17 @@ def role_launch_parts(
     checkpoint = (
         args.prefill_checkpoint_path if is_prefill else args.decode_checkpoint_path
     )
+    sp_checkpoint = (
+        args.prefill_sp_checkpoint_path
+        if is_prefill
+        else args.decode_sp_checkpoint_path
+    )
     runtime = (
         args.prefill_container_runtime if is_prefill else args.decode_container_runtime
     )
     role_environment = {
         "CHECKPOINT_PATH": checkpoint,
+        "SP_CHECKPOINT_PATH": sp_checkpoint,
         "PREFILL_ENDPOINT": args.prefill_endpoint,
         "DECODE_ENDPOINT": args.decode_endpoint,
         "SMOKE_RUN_ID": args.run_id,

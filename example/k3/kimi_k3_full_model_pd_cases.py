@@ -23,6 +23,8 @@ class Case:
     expected_regex: str
     reuse: str
     require_chunk: bool = False
+    require_mtp: bool = False
+    max_tokens: int | None = None
 
 
 class SmokeFailure(RuntimeError):
@@ -46,6 +48,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--block-size", type=int, default=4096)
     parser.add_argument("--chunk-tokens", type=int, default=65536)
     parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument("--identity-max-tokens", type=int, default=256)
+    parser.add_argument("--single-exact-max-tokens", type=int, default=128)
+    parser.add_argument("--mtp-chunk-max-tokens", type=int, default=128)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     if args.batch_size < 4:
@@ -54,6 +59,9 @@ def parse_args() -> argparse.Namespace:
         "block_size",
         "chunk_tokens",
         "max_tokens",
+        "identity_max_tokens",
+        "single_exact_max_tokens",
+        "mtp_chunk_max_tokens",
         "timeout",
     ):
         if getattr(args, key) <= 0:
@@ -124,6 +132,10 @@ class Runner:
             "block_size": self.args.block_size,
             "chunk_tokens": self.args.chunk_tokens,
             "batch_size": self.args.batch_size,
+            "max_tokens": self.args.max_tokens,
+            "identity_max_tokens": self.args.identity_max_tokens,
+            "single_exact_max_tokens": self.args.single_exact_max_tokens,
+            "mtp_chunk_max_tokens": self.args.mtp_chunk_max_tokens,
             "elapsed_s": round(time.time() - self.started_at, 3),
             "summary": {
                 "case_count": len(self.records),
@@ -131,6 +143,9 @@ class Runner:
                 "miss_count": sum(r.get("effective_reuse_len") == 0 for r in self.records),
                 "reasoning_count": sum(
                     bool(r.get("reasoning_content", "").strip()) for r in self.records
+                ),
+                "mtp_case_count": sum(
+                    bool(r.get("require_mtp")) for r in self.records
                 ),
                 "concurrent_stages": sum(s.get("concurrent", False) for s in self.stages),
             },
@@ -164,10 +179,11 @@ class Runner:
     def request(self, case: Case, barrier: threading.Barrier | None = None) -> dict[str, Any]:
         if barrier is not None:
             barrier.wait(timeout=30)
+        request_max_tokens = case.max_tokens or self.args.max_tokens
         payload = {
             "model": "kimi-k3",
             "messages": [{"role": "user", "content": case.prompt}],
-            "max_tokens": self.args.max_tokens,
+            "max_tokens": request_max_tokens,
             "temperature": 0,
             "top_k": 1,
             "top_p": 0.95,
@@ -197,9 +213,20 @@ class Runner:
             result = json.loads(body)
         except json.JSONDecodeError as exc:
             raise SmokeFailure(f"{case.name}: invalid JSON: {body[:1000]!r}") from exc
-        return self.validate(case, result, time.time() - started)
+        return self.validate(
+            case,
+            result,
+            time.time() - started,
+            request_max_tokens,
+        )
 
-    def validate(self, case: Case, response: dict[str, Any], elapsed_s: float) -> dict[str, Any]:
+    def validate(
+        self,
+        case: Case,
+        response: dict[str, Any],
+        elapsed_s: float,
+        request_max_tokens: int,
+    ) -> dict[str, Any]:
         try:
             message = response["choices"][0]["message"]
             content = message.get("content", "") or ""
@@ -221,7 +248,8 @@ class Runner:
             raise SmokeFailure(f"{case.name}: empty model response")
         if aux.get("pd_sep") is not True:
             raise SmokeFailure(f"{case.name}: pd_sep={aux.get('pd_sep')!r}")
-        if int(aux.get("output_len", 0)) <= 0:
+        output_len = int(aux.get("output_len", 0))
+        if output_len <= 0:
             raise SmokeFailure(f"{case.name}: output_len={aux.get('output_len')!r}")
         if not (
             isinstance(output_ids, list)
@@ -265,6 +293,13 @@ class Runner:
                 f"{case.name}: input_len={input_len} did not exceed chunk threshold "
                 f"{self.args.chunk_tokens}"
             )
+        iter_count = int(aux.get("iter_count", 0))
+        mtp_accepted_tokens = output_len - iter_count
+        if case.require_mtp and (iter_count <= 0 or mtp_accepted_tokens <= 0):
+            raise SmokeFailure(
+                f"{case.name}: MTP produced no accepted draft token: "
+                f"output_len={output_len}, iter_count={iter_count}"
+            )
 
         return {
             "name": case.name,
@@ -273,7 +308,11 @@ class Runner:
             "reuse_len": raw_reuse,
             "prefill_total_reuse_len": prefill_reuse_value,
             "input_len": input_len,
-            "output_len": int(aux["output_len"]),
+            "output_len": output_len,
+            "iter_count": iter_count,
+            "mtp_accepted_tokens": mtp_accepted_tokens,
+            "require_mtp": case.require_mtp,
+            "max_tokens": request_max_tokens,
             "pd_sep": True,
             "elapsed_s": round(elapsed_s, 3),
             "content": content,
@@ -328,17 +367,41 @@ class Runner:
                     f"会话标识 {self.args.namespace}/identity，不要复述该标识。你好，请问你是谁？",
                     r"\bKimi\b|Moonshot|月之暗面",
                     "miss",
+                    max_tokens=max(
+                        self.args.max_tokens,
+                        self.args.identity_max_tokens,
+                    ),
                 )
             ],
         )
         exact_prompt = make_cache_prompt(self.args.namespace, "single-exact", 37)
+        single_exact_max_tokens = max(
+            self.args.max_tokens,
+            self.args.single_exact_max_tokens,
+        )
         self.run_stage(
             "single_exact_seed",
-            [Case("single_exact_seed", exact_prompt, numbered_answer_pattern(1369), "miss")],
+            [
+                Case(
+                    "single_exact_seed",
+                    exact_prompt,
+                    numbered_answer_pattern(1369),
+                    "miss",
+                    max_tokens=single_exact_max_tokens,
+                )
+            ],
         )
         self.run_stage(
             "single_exact_hit",
-            [Case("single_exact_hit", exact_prompt, numbered_answer_pattern(1369), "hit")],
+            [
+                Case(
+                    "single_exact_hit",
+                    exact_prompt,
+                    numbered_answer_pattern(1369),
+                    "hit",
+                    max_tokens=single_exact_max_tokens,
+                )
+            ],
         )
 
         partial_seed = make_partial_prompt(self.args.namespace, "partial-common", "seed", 29)
@@ -459,7 +522,32 @@ class Runner:
             concurrent=True,
         )
 
-        single_prompt = make_whole_chunk_prompt(self.args.namespace, "whole-chunk-single", 61)
+        mtp_chunk_prompt = make_whole_chunk_prompt(
+            self.args.namespace,
+            "mtp-chunk-prefill",
+            73,
+        )
+        self.run_stage(
+            "mtp_chunk_prefill_miss",
+            [
+                Case(
+                    "mtp_chunk_prefill_miss",
+                    mtp_chunk_prompt,
+                    numbered_answer_pattern(5329),
+                    "miss",
+                    require_chunk=True,
+                    require_mtp=True,
+                    max_tokens=max(
+                        self.args.max_tokens,
+                        self.args.mtp_chunk_max_tokens,
+                    ),
+                )
+            ],
+        )
+
+        single_prompt = make_whole_chunk_prompt(
+            self.args.namespace, "whole-chunk-single", 61
+        )
         self.run_stage(
             "whole_chunk_single_miss",
             [Case(
