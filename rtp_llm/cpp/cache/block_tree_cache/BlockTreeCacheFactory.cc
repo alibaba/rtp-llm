@@ -401,8 +401,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
             const size_t group_id = static_cast<size_t>(members.front());
             if (cache_config.topology().groupById(group_id).policy.group_type == CacheGroupType::LINEAR) {
-                RTP_LLM_LOG_ERROR(
-                    "disk cache does not support reusable LINEAR group sets, group_id=%zu", group_id);
+                RTP_LLM_LOG_ERROR("disk cache does not support reusable LINEAR group sets, group_id=%zu", group_id);
                 return nullptr;
             }
         }
@@ -540,14 +539,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
     config.max_descriptors_per_transfer_batch = static_cast<size_t>(max_batch_descriptors);
 
-    const int64_t scan_interval_ms = kv_cache_config.block_tree_full_prefix_scan_interval_ms;
-    if (scan_interval_ms < 0 || (scan_interval_ms > 0 && scan_interval_ms < 1000)) {
-        RTP_LLM_LOG_ERROR("block_tree_full_prefix_scan_interval_ms must be 0 or >= 1000, got %ld", scan_interval_ms);
+    const int64_t configured_scan_interval_ms = kv_cache_config.block_tree_full_prefix_scan_interval_ms;
+    if (configured_scan_interval_ms < 0 || (configured_scan_interval_ms > 0 && configured_scan_interval_ms < 1000)
+        || configured_scan_interval_ms > std::numeric_limits<int64_t>::max() / 1000) {
+        RTP_LLM_LOG_ERROR("block_tree_full_prefix_scan_interval_ms must be 0 or >= 1000, got %ld",
+                          configured_scan_interval_ms);
         return nullptr;
     }
-    config.full_prefix_scan_interval_ms = scan_interval_ms;
-    config.world_rank                   = static_cast<int>(parallelism_config.world_rank);
-    config.local_rank                   = static_cast<int>(parallelism_config.local_rank);
+    // Only tp_rank 0 of a non-FFN service drives normal request scheduling, so it is the
+    // single rank per DP group that owns a mutable BlockTree worth scanning.
+    const bool owns_mutable_block_tree =
+        parallelism_config.tp_rank == 0 && !parallelism_config.ffn_disaggregate_config.is_ffn_service();
+    config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
     auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         DeviceHostCopyOptions{},
