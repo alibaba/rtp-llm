@@ -26,7 +26,6 @@ struct BatchedMemoryCopyTile {
 struct BatchedMemoryCopyParams {
     std::vector<BatchedMemoryCopyTile> tiles;
     int                                device_index = -1;
-    bool                               serialize_calls = true;
 };
 
 enum class BatchedMemoryCopyStatus {
@@ -62,15 +61,15 @@ struct StagedMemoryCopyParams {
 };
 
 struct StagedMemoryCopyScratch {
-    void*  host_staging       = nullptr;
-    size_t host_capacity      = 0;
-    void*  device_staging     = nullptr;
-    size_t device_capacity    = 0;
-    void*  device_ptrs        = nullptr;
-    void*  device_offsets     = nullptr;
-    void*  device_sizes       = nullptr;
-    size_t meta_capacity      = 0;
-    int    device_index       = -1;
+    void*  host_staging    = nullptr;
+    size_t host_capacity   = 0;
+    void*  device_staging  = nullptr;
+    size_t device_capacity = 0;
+    void*  device_ptrs     = nullptr;
+    void*  device_offsets  = nullptr;
+    void*  device_sizes    = nullptr;
+    size_t meta_capacity   = 0;
+    int    device_index    = -1;
 };
 
 // Multi-tensor non-blocking copy with device-specific implementation.
