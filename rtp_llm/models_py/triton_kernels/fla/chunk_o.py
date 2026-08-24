@@ -37,7 +37,7 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
 #     ],
 #     key=["H", "K", "V", "BT"],
 # )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "T_FLAT"])
 def chunk_fwd_kernel_o(
     q,
     k,
@@ -49,6 +49,7 @@ def chunk_fwd_kernel_o(
     chunk_indices,
     scale,
     T,
+    T_FLAT,
     H: tl.constexpr,
     Hg: tl.constexpr,
     K: tl.constexpr,
@@ -59,9 +60,12 @@ def chunk_fwd_kernel_o(
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_LOG2: tl.constexpr,
+    V_HEAD_MAJOR: tl.constexpr,
+    G_HEAD_MAJOR: tl.constexpr,
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
+    i_b64, i_h64 = i_b.to(tl.int64), i_h.to(tl.int64)
 
     if IS_VARLEN:
         i_tg = i_t
@@ -75,15 +79,27 @@ def chunk_fwd_kernel_o(
         NT = tl.cdiv(T, BT)
     else:
         NT = tl.cdiv(T, BT)
-        i_tg = i_b * NT + i_t
-        bos, eos = i_b * T, i_b * T + T
+        i_tg = i_b64 * NT + i_t
+        bos, eos = i_b64 * T, i_b64 * T + T
+
+    # Promote indices before any stride multiplication. Long packed sequences
+    # and head-major tensors can otherwise overflow int32 while computing the
+    # element offset, even if the completed expression is cast to int64 later.
+    i_tg64 = i_tg.to(tl.int64)
+    bos64 = bos.to(tl.int64)
 
     # offset calculation
-    q += (bos * Hg + i_h // (H // Hg)) * K
-    k += (bos * Hg + i_h // (H // Hg)) * K
-    v += (bos * H + i_h) * V
-    o += (bos * H + i_h) * V
-    h += (i_tg * H + i_h).to(tl.int64) * K * V
+    q += (bos64 * Hg + i_h64 // (H // Hg)) * K
+    k += (bos64 * Hg + i_h64 // (H // Hg)) * K
+    if V_HEAD_MAJOR:
+        if IS_VARLEN:
+            v += (i_h64 * T_FLAT + bos64) * V
+        else:
+            v += ((i_b64 * H + i_h64) * T_FLAT) * V
+    else:
+        v += (bos64 * H + i_h64) * V
+    o += (bos64 * H + i_h64) * V
+    h += (i_tg64 * H + i_h64) * K * V
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
@@ -112,8 +128,16 @@ def chunk_fwd_kernel_o(
         b_A += tl.dot(b_q, b_k)
 
     if USE_G:
-        g += bos * H + i_h
-        p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        if G_HEAD_MAJOR:
+            if IS_VARLEN:
+                g += i_h64 * T_FLAT + bos64
+            else:
+                g += (i_b64 * H + i_h64) * T_FLAT
+            g_stride = 1
+        else:
+            g += bos64 * H + i_h64
+            g_stride = H
+        p_g = tl.make_block_ptr(g, (T,), (g_stride,), (i_t * BT,), (BT,), (0,))
         b_g = tl.load(p_g, boundary_check=(0,))
         if IS_LOG2:
             # AMD path: g is in log2 domain (RCP_LN2-scaled cumsum upstream).
@@ -141,8 +165,9 @@ def chunk_fwd_kernel_o(
         m_A = o_i[:, None] >= o_i[None, :]
     b_A = tl.where(m_A, b_A, 0)
 
+    v_stride_t = V if V_HEAD_MAJOR else H * V
     p_v = tl.make_block_ptr(
-        v, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
+        v, (T, V), (v_stride_t, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
     )
     p_o = tl.make_block_ptr(
         o, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0)
@@ -191,6 +216,7 @@ def chunk_fwd_o(
         chunk_indices,
         scale,
         T=T,
+        T_FLAT=T,
         H=H,
         Hg=Hg,
         K=K,
@@ -199,7 +225,74 @@ def chunk_fwd_o(
         BK=64 if is_amd else 128,
         BV=128 if is_amd else 64,
         IS_LOG2=is_amd,
+        V_HEAD_MAJOR=False,
+        G_HEAD_MAJOR=False,
         num_warps=(4 if h.dtype == torch.float32 else 1) if is_amd else 4,
         num_stages=1 if is_amd_cdna3 else 2,
     )
     return o
+
+
+def chunk_fwd_o_head_major_vk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    h: torch.Tensor,
+    g: torch.Tensor,
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+) -> torch.Tensor:
+    """Run RTP K6 directly on AITER's head-major K5 outputs.
+
+    AITER returns ``v`` as ``[B, H, T, V]`` and cumulative gates as
+    ``[B, H, T]``. Compile-time layout flags avoid transpose/contiguous copies;
+    the returned output keeps RTP's token-major ``[B, T, H, V]`` contract.
+    """
+    if v.ndim != 4 or g.ndim != 3:
+        raise ValueError("head-major RTP K6 expects rank-4 v and rank-3 g")
+    B, T, Hg, K = q.shape
+    v_batch, H, T_flat, V = v.shape
+    if v_batch != B or g.shape != (B, H, T_flat):
+        raise ValueError("head-major RTP K6 received incompatible v/g shapes")
+    if T_flat != T:
+        raise ValueError(f"expected v token extent {T}, got {T_flat}")
+
+    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    chunk_indices = (
+        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    )
+    NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    if scale is None:
+        scale = K**-0.5
+    output = torch.empty(B, T, H, V, dtype=v.dtype, device=v.device)
+
+    def grid(meta):
+        return (triton.cdiv(V, meta["BV"]), NT, B * H)
+
+    chunk_fwd_kernel_o[grid](
+        q,
+        k,
+        v,
+        h,
+        g,
+        output,
+        cu_seqlens,
+        chunk_indices,
+        scale,
+        T=T,
+        T_FLAT=T_flat,
+        H=H,
+        Hg=Hg,
+        K=K,
+        V=V,
+        BT=BT,
+        BK=64 if is_amd else 128,
+        BV=128 if is_amd else 64,
+        IS_LOG2=is_amd,
+        V_HEAD_MAJOR=True,
+        G_HEAD_MAJOR=True,
+        num_warps=(4 if h.dtype == torch.float32 else 1) if is_amd else 4,
+        num_stages=1 if is_amd_cdna3 else 2,
+    )
+    return output
