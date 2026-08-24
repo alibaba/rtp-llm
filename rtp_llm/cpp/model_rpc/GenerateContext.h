@@ -37,6 +37,7 @@ public:
     void                                     reportMetrics(RpcMetricsCollector& collector);
     virtual void                             setStream(const std::shared_ptr<GenerateStream>& stream);
     virtual std::shared_ptr<GenerateStream>& getStream();
+    void                                     markRpcHandlingCompleted();
 
 public:
     int64_t                               request_id;
@@ -56,9 +57,12 @@ public:
 
 protected:
     std::shared_ptr<GenerateStream> stream_;
-    bool                            retryable_ = true;
+    bool                            retryable_              = true;
+    bool                            rpc_handling_completed_ = false;
 
 protected:
+    void cancelStreamOnTeardown() noexcept;
+    void stopStreamForRetry();
     void stopStream();
 };
 
@@ -79,9 +83,8 @@ protected:
                 ErrorCode::GENERATE_TIMEOUT,                                                                           \
                 "request cost time is " + std::to_string(request_cost_time_ms) + " ms" + ", request timeout is "       \
                     + std::to_string(generate_context.request_timeout_ms) + " ms");                                    \
-            generate_context.error_status = serializeErrorMsg(generate_context.request_key, \
-                                                              generate_context.request_info, \
-                                                              generate_context.error_info); \
+            generate_context.error_status = serializeErrorMsg(                                                         \
+                generate_context.request_key, generate_context.request_info, generate_context.error_info);             \
             return generate_context.error_status;                                                                      \
         }                                                                                                              \
     }
@@ -89,9 +92,8 @@ protected:
 #define CHECK_REQUEST_CANCELLED(generate_context)                                                                      \
     if (generate_context.server_context->IsCancelled()) {                                                              \
         generate_context.error_info   = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");                       \
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, \
-                                                          generate_context.request_info, \
-                                                          generate_context.error_info); \
+        generate_context.error_status = serializeErrorMsg(                                                             \
+            generate_context.request_key, generate_context.request_info, generate_context.error_info);                 \
         return generate_context.error_status;                                                                          \
     }
 

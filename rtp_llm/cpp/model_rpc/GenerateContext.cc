@@ -3,8 +3,14 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && stream_->getStatus() != StreamState::FINISHED) {
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+    if (!rpc_handling_completed_) {
+        RTP_LLM_LOG_ERROR("request [%s] GenerateContext destroyed before RPC handling completed, grpc code [%d], "
+                          "grpc message [%s], finished [%d], has stream [%d]",
+                          request_key.c_str(),
+                          static_cast<int>(error_status.error_code()),
+                          error_status.error_message().c_str(),
+                          finished,
+                          static_cast<bool>(stream_));
     }
     stopStream();
     reportTime();
@@ -47,9 +53,9 @@ void GenerateContext::reportTime() {
 }
 
 void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
-    collector.qps                = true;
-    collector.error_qps          = hasError();
-    collector.cancel_qps         = cancelled();
+    collector.qps        = true;
+    collector.error_qps  = hasError();
+    collector.cancel_qps = cancelled();
     if (error_info.hasError()) {
         collector.error_code = error_info.code();
     } else if (stream_ && stream_->hasError()) {
@@ -72,21 +78,46 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
 }
 
 void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
+    if (stream_ && stream_ != stream) {
+        stopStreamForRetry();
+    }
     stream_ = stream;
     if (stream) {
         meta->enqueue(request_id, stream_);
     }
 }
 
-void GenerateContext::stopStream() {
-    if (stream_) {
-        // if is waiting, cancel it
+void GenerateContext::markRpcHandlingCompleted() {
+    rpc_handling_completed_ = true;
+}
+
+void GenerateContext::cancelStreamOnTeardown() noexcept {
+    const bool request_cancelled = server_context && server_context->IsCancelled();
+    if ((rpc_handling_completed_ && !hasError() && !request_cancelled) || !stream_
+        || stream_->getStatus() == StreamState::FINISHED || stream_->hasError()) {
+        return;
+    }
+    stream_->reportError(ErrorCode::CANCELLED, "RPC handling failed, was cancelled, or exited unexpectedly");
+}
+
+void GenerateContext::stopStreamForRetry() {
+    if (!stream_) {
+        return;
+    }
+    if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
+        stream_->reportError(ErrorCode::CANCELLED, "cancel abandoned retry attempt");
+    }
+    if (meta) {
         meta->dequeue(request_id, stream_);
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
-        // if is running, waiting util done
-        while (stream_->getStatus() == StreamState::RUNNING) {
-            RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
-            usleep(1000);
+    }
+    stream_.reset();
+}
+
+void GenerateContext::stopStream() {
+    cancelStreamOnTeardown();
+    if (stream_) {
+        if (meta) {
+            meta->dequeue(request_id, stream_);
         }
         stream_.reset();
     }

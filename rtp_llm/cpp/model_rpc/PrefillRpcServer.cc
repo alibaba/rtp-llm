@@ -1,6 +1,8 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include <exception>
+#include "autil/Scope.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -616,6 +618,12 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   meta_);
     prefill_context.onflight_requests      = onflight_requests_;
     prefill_context.loading_cache_requests = loading_cache_requests_;
+    const int         uncaught_exceptions  = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&prefill_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            prefill_context.markRpcHandlingCompleted();
+        }
+    });
 
     auto max_retry_times      = maga_init_params_.pd_sep_config.prefill_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.prefill_retry_timeout_ms;

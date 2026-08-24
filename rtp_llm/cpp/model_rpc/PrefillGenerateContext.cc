@@ -70,17 +70,11 @@ PrefillGenerateContext::~PrefillGenerateContext() {
 }
 
 void PrefillGenerateContext::stopStream() {
+    cancelStreamOnTeardown();
     if (stream_) {
-        // if is waiting, cancel it
-        meta->dequeue(request_id, stream_);
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
-        // if is running, waiting util done
-        while (stream_->getStatus() == StreamState::RUNNING) {
-            RTP_LLM_LOG_DEBUG("waiting prefill stream [%d] running done to cancel",
-                              stream_->generateInput()->request_id);
-            usleep(1000);
+        if (meta) {
+            meta->dequeue(request_id, stream_);
         }
-        // stream status will only be set to finished by scheduler.
         markRequestEnd();
         stream_.reset();
     }
@@ -165,18 +159,18 @@ void PrefillGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request          = loading_cache_requests;
-    collector.get_rpc_connection_rt_us       = stat_info.get_rpc_connection_rt_us;
-    collector.remote_allocate_resource_rt_us = stat_info.remote_allocate_resource_rt_us;
-    collector.multimodal_process_rt_us       = stat_info.multimodal_process_rt_us;
-    collector.enqueue_request_rt_us          = stat_info.enqueue_request_rt_us;
-    collector.remote_load_cache_start_rt_us  = stat_info.remote_load_cache_start_rt_us;
-    collector.remote_load_cache_wait_stream_rt_us = stat_info.remote_load_cache_wait_stream_rt_us;
+    collector.loading_cache_request                 = loading_cache_requests;
+    collector.get_rpc_connection_rt_us              = stat_info.get_rpc_connection_rt_us;
+    collector.remote_allocate_resource_rt_us        = stat_info.remote_allocate_resource_rt_us;
+    collector.multimodal_process_rt_us              = stat_info.multimodal_process_rt_us;
+    collector.enqueue_request_rt_us                 = stat_info.enqueue_request_rt_us;
+    collector.remote_load_cache_start_rt_us         = stat_info.remote_load_cache_start_rt_us;
+    collector.remote_load_cache_wait_stream_rt_us   = stat_info.remote_load_cache_wait_stream_rt_us;
     collector.remote_load_cache_write_request_rt_us = stat_info.remote_load_cache_write_request_rt_us;
-    collector.poll_local_output_rt_us        = stat_info.poll_local_output_rt_us;
-    collector.remote_load_cache_end_rt_us    = stat_info.remote_load_cache_end_rt_us;
-    collector.remote_generate_rt_us          = stat_info.remote_generate_rt_us;
-    collector.poll_remote_output_rt_us       = stat_info.poll_remote_output_rt_us;
+    collector.poll_local_output_rt_us               = stat_info.poll_local_output_rt_us;
+    collector.remote_load_cache_end_rt_us           = stat_info.remote_load_cache_end_rt_us;
+    collector.remote_generate_rt_us                 = stat_info.remote_generate_rt_us;
+    collector.poll_remote_output_rt_us              = stat_info.poll_remote_output_rt_us;
 
     reportMetrics(collector);
     metrics_reporter.reset();  // avoid to report metrics in base class

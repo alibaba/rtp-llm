@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
@@ -8,6 +9,7 @@
 #include <unordered_set>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
+#include "autil/Scope.h"
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -264,7 +266,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         // device-state tensors on the wrong GPU.
         c10::DeviceGuard device_guard(torch::Device(
             torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
-        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
         if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
             RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
@@ -1269,6 +1271,12 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
+    const int         uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&decode_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            decode_context.markRpcHandlingCompleted();
+        }
+    });
 
     auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
