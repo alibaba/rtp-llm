@@ -201,12 +201,15 @@ def get_fmha_impl(
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
 
+    rejected: List[str] = []
+
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
 
         # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+            rejected.append(f"{impl_class_name}: disabled by config")
             continue
 
         # Check parallelism config first to avoid calling support() on impls
@@ -216,21 +219,30 @@ def get_fmha_impl(
         if attn_inputs.is_prefill and not impl.support_parallelism_config(
             parallelism_config
         ):
+            rejected.append(f"{impl_class_name}: does not support prefill CP")
             continue
 
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
+            rejected.append(f"{impl_class_name}: support() returned False")
             continue
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
+            rejected.append(f"{impl_class_name}: no cuda graph support")
 
         except Exception as e:
             # If instantiation fails, continue to next impl
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
+            rejected.append(f"{impl_class_name}: raised {type(e).__name__}: {e}")
             continue
-    raise Exception(f"can not find mha type")
+    raise Exception(
+        "can not find mha type for "
+        f"{'prefill' if attn_inputs.is_prefill else 'decode'} "
+        f"(is_cuda_graph={is_cuda_graph}, candidates={len(mha_impls)}): "
+        + "; ".join(rejected)
+    )
 
 
 class AttnImplFactory(object):

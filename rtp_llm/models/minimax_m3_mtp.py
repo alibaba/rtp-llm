@@ -164,9 +164,7 @@ class MiniMaxM3MTP(MiniMaxM3):
             draft_weight.data_ptr(),
         )
 
-    def _load(self, device: str):
-        super()._load(device)
-
+    def _bind_colocated_weights(self, device: str):
         from rtp_llm.models.minimax_m3 import _get_target_embedding, _get_target_lm_head
 
         target_embedding = _get_target_embedding(device)

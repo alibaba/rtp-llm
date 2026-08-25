@@ -4,7 +4,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
 import torch
 from tqdm.auto import tqdm
@@ -50,6 +50,10 @@ class BaseDatabase:
     def ft_weight_params(self) -> Optional[Dict[str, Any]]:
         return None
 
+    @property
+    def ft_weight_sharding(self) -> Optional[Dict[str, Any]]:
+        return None
+
 
 class CkptDatabase(BaseDatabase):
 
@@ -83,6 +87,10 @@ class CkptDatabase(BaseDatabase):
             self._parse_ft_weight_params(path) if self._is_ft_style else None
         )
 
+        self._ft_weight_sharding = (
+            self._parse_ft_weight_sharding(path) if self._is_ft_style else None
+        )
+
         logging.debug(
             f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}"
         )
@@ -110,6 +118,10 @@ class CkptDatabase(BaseDatabase):
     @property
     def ft_weight_params(self) -> Optional[Dict[str, Any]]:
         return self._ft_weight_params
+
+    @property
+    def ft_weight_sharding(self) -> Optional[Dict[str, Any]]:
+        return self._ft_weight_sharding
 
     def get_max_file_size(self) -> int:
         if not self.pretrain_file_list:
@@ -235,8 +247,33 @@ class CkptDatabase(BaseDatabase):
         return orders
 
     def load_tensors_by_prefix(
-        self, prefix_list: List[str], device: str, direct_io: bool
+        self,
+        prefix_list: List[str],
+        device: str,
+        direct_io: bool,
+        shard_fn: Optional[Callable[[str], Optional[Tuple[int, int]]]] = None,
     ) -> dict[str, List[torch.Tensor]]:
+        """Load every tensor whose name starts with one of prefix_list.
+
+        With shard_fn, tensors are read one at a time and only this rank's dim-0 slice is
+        pulled off the disk. Without it, whole files are read at once, which is faster per
+        byte but needs the entire matching set to fit on the device.
+        """
+        if shard_fn is not None:
+            res: dict[str, List[torch.Tensor]] = {}
+            for ckptfile in self.pretrain_file_list:
+                names = [
+                    name
+                    for name in ckptfile.get_tensor_names()
+                    if name.startswith(prefix_list)
+                ]
+                if not names:
+                    continue
+                tensors = ckptfile.load_tensors_by_row_shard(names, device, shard_fn)
+                for k, v in tensors.items():
+                    res.setdefault(k, []).append(v)
+            return res
+
         try:
             from fast_safetensors import LoadWithShm
 
@@ -351,8 +388,14 @@ class CkptDatabase(BaseDatabase):
         else:
             return False
 
-    def _parse_ft_weight_params(self, ckpt_path: str):
+    def _parse_ft_index_key(self, ckpt_path: str, key: str):
         meta_file = os.path.join(ckpt_path, "model.safetensors.index.json")
         with open(meta_file, "r") as reader:
             meta_json = json.loads(reader.read())
-            return meta_json.get("__env__params__", None)
+            return meta_json.get(key, None)
+
+    def _parse_ft_weight_params(self, ckpt_path: str):
+        return self._parse_ft_index_key(ckpt_path, "__env__params__")
+
+    def _parse_ft_weight_sharding(self, ckpt_path: str):
+        return self._parse_ft_index_key(ckpt_path, "ft_weight_sharding")

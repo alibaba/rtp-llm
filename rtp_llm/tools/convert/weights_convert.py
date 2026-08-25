@@ -6,6 +6,7 @@ import logging
 import multiprocessing
 import os
 import shutil
+import sys
 from typing import Dict, Optional
 
 import torch
@@ -29,6 +30,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
     ProfilingDebugLoggingConfig,
 )
+from rtp_llm.server.server_args.util import str2_cp_rotate_method
 from rtp_llm.tools.api.model_basic_info_analyzer import (
     parse_ft_model_type,
     parse_model_basic_info,
@@ -42,7 +44,12 @@ ONE_MB = 1024**2
 
 class WeightConverter:
     def __init__(
-        self, model_path: str, model_type: Optional[str], env_params: Dict[str, str]
+        self,
+        model_path: str,
+        model_type: Optional[str],
+        env_params: Dict[str, str],
+        draft_model_type: Optional[str] = None,
+        draft_model_path: Optional[str] = None,
     ) -> None:
         self.model_basic_info = parse_model_basic_info(model_path, {})
         if self.model_basic_info is not None and not model_type:
@@ -64,6 +71,19 @@ class WeightConverter:
             assert model_type
         self.model_type = model_type
         self.model_cls = ModelFactory.get_model_cls(self.model_type)
+        # A speculative draft model lives in the same checkpoint as its target, so
+        # it has to be dumped alongside it; otherwise serving with speculative
+        # decoding falls back to reading the raw checkpoint and the ft_style dump
+        # is useless to it.
+        self.draft_model_type = (
+            draft_model_type or env_params.get("SP_MODEL_TYPE") or ""
+        )
+        self.draft_model_path = draft_model_path or env_params.get("DRAFT_SRC") or ""
+        if self.draft_model_type:
+            ModelFactory.get_model_cls(self.draft_model_type)
+
+    def _convert_scope(self) -> str:
+        return str(self.env_params.get("CONVERT_SCOPE", "both")).lower()
 
     def convert(self, output_dir_base: str):
         output_dir_base = fetch_remote_file_to_local(
@@ -72,8 +92,27 @@ class WeightConverter:
         # 确定并发进程数，不超过tp_size
         pool_size = self._estimate_convert_parallel_num()
         logging.info(f"now start [{pool_size}] process tor convert")
+        scope = self._convert_scope()
+        if scope == "draft":
+            if not self.draft_model_type:
+                raise ValueError("CONVERT_SCOPE=draft requires SP_MODEL_TYPE")
+            model_types = [self.draft_model_type]
+        elif scope == "target":
+            model_types = [self.model_type]
+        else:
+            model_types = [self.model_type]
+            if self.draft_model_type:
+                model_types.append(self.draft_model_type)
+        logging.info(f"convert scope={scope}, model_types={model_types}")
         args_list = [
-            (tp_rank, dp_rank, tp_rank + dp_rank * self.tp_size, output_dir_base)
+            (
+                tp_rank,
+                dp_rank,
+                tp_rank + dp_rank * self.tp_size,
+                output_dir_base,
+                model_type,
+            )
+            for model_type in model_types
             for dp_rank in range(self.dp_size)
             for tp_rank in range(self.tp_size)
         ]
@@ -83,10 +122,13 @@ class WeightConverter:
             with ctx.Pool(processes=pool_size) as pool:
                 pool.starmap(self._convert, args_list)
         else:
-            for tp_rank, dp_rank, world_rank, _ in args_list:
-                self._convert(tp_rank, dp_rank, world_rank, output_dir_base)
+            for tp_rank, dp_rank, world_rank, _, model_type in args_list:
+                self._convert(tp_rank, dp_rank, world_rank, output_dir_base, model_type)
         # copy other files:
-        self._save_converted(self.model_path, output_dir_base)
+        meta_src = self.model_path
+        if scope == "draft" and self.draft_model_path:
+            meta_src = self.draft_model_path
+        self._save_converted(meta_src, output_dir_base)
 
         return 0
 
@@ -159,10 +201,14 @@ class WeightConverter:
             return 1
 
     def _build_parallelism_config(self) -> ParallelismConfig:
-        """Build parallelism_config by reading env vars directly (TP_SIZE, WORLD_SIZE, etc.)."""
+        """Build parallelism_config from --env_params, falling back to the ambient env."""
+
+        def _lookup(key: str) -> Optional[str]:
+            v = self.env_params.get(key)
+            return str(v) if v is not None else os.environ.get(key)
 
         def _env_int(key: str, default: int) -> int:
-            v = os.environ.get(key)
+            v = _lookup(key)
             return int(v) if v is not None else default
 
         pc = ParallelismConfig()
@@ -174,6 +220,13 @@ class WeightConverter:
         pc.local_world_size = _env_int("LOCAL_WORLD_SIZE", 1)
         pc.ep_size = _env_int("EP_SIZE", 0)
         pc.ffn_sp_size = _env_int("FFN_SP_SIZE", 1)
+
+        cp_rotate_method = _lookup("CP_ROTATE_METHOD")
+        if cp_rotate_method:
+            pc.prefill_cp_config.method = str2_cp_rotate_method(cp_rotate_method)
+            pc.prefill_cp_config.kv_cache_sharded = (
+                _lookup("CP_KV_CACHE_SHARDED") or "0"
+            ) == "1"
 
         if pc.world_size > 1 and pc.local_world_size == 1:
             n = (
@@ -209,8 +262,21 @@ class WeightConverter:
 
     @timer_wrapper("convert 1 tp")
     def _convert(
-        self, tp_rank: int, dp_rank: int, world_rank: int, output_dir_base: str
+        self,
+        tp_rank: int,
+        dp_rank: int,
+        world_rank: int,
+        output_dir_base: str,
+        model_type: Optional[str] = None,
     ):
+        model_type = model_type or self.model_type
+        model_cls = ModelFactory.get_model_cls(model_type)
+        is_draft = model_type != self.model_type
+        ckpt_path = (
+            self.draft_model_path
+            if is_draft and self.draft_model_path
+            else self.model_path
+        )
         env_params = copy.deepcopy(self.env_params)
         # Set rank in env first so _build_parallelism_config() sees them (it reads os.environ)
         env_params["WORLD_RANK"] = world_rank
@@ -236,20 +302,32 @@ class WeightConverter:
             if int(int8_mode) == 1 or weight_type == "INT8":
                 quantization = "INT8"
 
+        load_method = LoadMethod(
+            str(env_params.get("LOAD_METHOD", LoadMethod.AUTO.value)).lower()
+        )
+
         # Create config using _create_config
-        model_config: ModelConfig = self.model_cls._create_config(self.model_path)
+        model_config: ModelConfig = model_cls._create_config(ckpt_path)
 
         # Create ModelArgs from config
         model_args = ModelArgs()
-        model_args.ckpt_path = self.model_path
-        model_args.tokenizer_path = self.model_path
-        model_args.model_type = self.model_type
-        model_args.act_type = env_params.get("ACT_TYPE", "")
+        model_args.ckpt_path = ckpt_path
+        model_args.tokenizer_path = ckpt_path
+        model_args.model_type = model_type
+
+        # A draft model is configured by the SP_* variables at serving time, and the
+        # dump has to be produced under those same settings to be loadable.
+        def draft_aware(key: str, default: str = "") -> str:
+            if is_draft and f"SP_{key}" in env_params:
+                return str(env_params[f"SP_{key}"])
+            return str(env_params.get(key, default))
+
+        model_args.act_type = draft_aware("ACT_TYPE")
 
         kv_cache_config = KVCacheConfig()
         kv_cache_config.seq_size_per_block = 64
-        kv_cache_config.fp8_kv_cache = int(env_params.get("FP8_KV_CACHE", 0))
-        kv_cache_config.int8_kv_cache = int(env_params.get("INT8_KV_CACHE", 0))
+        kv_cache_config.fp8_kv_cache = int(draft_aware("FP8_KV_CACHE", "0"))
+        kv_cache_config.int8_kv_cache = int(draft_aware("INT8_KV_CACHE", "0"))
 
         quantization_config = QuantizationConfig()
         quantization_config.quantization = quantization
@@ -264,9 +342,12 @@ class WeightConverter:
             embedding_config=None,  # Fake loader doesn't need embedding_config
         )
 
-        model_config.num_layers = int(
-            env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
-        )
+        # HACK_LAYER_NUM truncates the target's layer stack; a draft model has a
+        # fixed layer count of its own that must not be overridden.
+        if not is_draft:
+            model_config.num_layers = int(
+                env_params.get("HACK_LAYER_NUM", str(model_config.num_layers))
+            )
         parallelism_config = self._build_parallelism_config()
 
         # Create other required configs
@@ -276,18 +357,22 @@ class WeightConverter:
         device_resource_config = DeviceResourceConfig()
         vit_config = VitConfig()
 
-        model = self.model_cls.from_config(
+        model = model_cls.from_config(
             model_config=model_config,
             parallelism_config=parallelism_config,
             hw_kernel_config=hw_kernel_config,
             kv_cache_config=kv_cache_config,
             fmha_config=fmha_config,
             moe_config=moe_config,
-            load_method=LoadMethod.AUTO,
+            load_method=load_method,
             max_generate_batch_size=0,
             vit_config=vit_config,
             merge_lora=False,
             device_resource_config=device_resource_config,
+            force_cpu_load_weights=str(
+                env_params.get("FORCE_CPU_LOAD_WEIGHTS", "0")
+            ).lower()
+            in ("1", "true"),
             skip_python_model=True,
         )
         loader = model.create_model_loader()
@@ -296,19 +381,19 @@ class WeightConverter:
         for i in range(max_retry_times):
             try:
                 loader.dump_weight_as_ft_style(device_str, output_dir_base)
-                logging.info(f"dump rank:[{world_rank}] done")
+                logging.info(f"dump {model_type} rank:[{world_rank}] done")
                 break
             except Exception as e:
                 logging.warn(
-                    f"dump rank:[{world_rank}] failed, {str(e)}, retry {i} times"
+                    f"dump {model_type} rank:[{world_rank}] failed, {str(e)}, retry {i} times"
                 )
                 if i == max_retry_times - 1:
                     logging.error(
-                        f"dump rank:[{world_rank}] retry {i} times, but still failed"
+                        f"dump {model_type} rank:[{world_rank}] retry {i} times, but still failed"
                     )
                     raise RuntimeError(f"Failed after 10 retries: {str(e)}") from e
                 continue
-        logging.info(f"convert model rank:{world_rank} done")
+        logging.info(f"convert model {model_type} rank:{world_rank} done")
 
     @timer_wrapper("save convert result")
     def _save_converted(self, input_path, output_path: str):
@@ -362,10 +447,21 @@ class WeightConverter:
             except Exception as e:
                 logging.warning(f"无法读取文件 '{st_file}': {e}")
 
+        pc = self._build_parallelism_config()
         index = {
             "metadata": {"total_size": total_size},
             "weight_map": weight_map,
             "is_ft_style_weight": True,
+            "ft_weight_sharding": {
+                "attn_tp_size": int(pc.get_attn_tp_size()),
+                "ffn_tp_size": int(pc.get_ffn_tp_size()),
+                "dp_size": int(pc.dp_size),
+                "ep_size": int(pc.ep_size),
+                "lm_head_tp_size": int(pc.tp_size),
+            },
+            "ft_model_types": [
+                t for t in (self.model_type, self.draft_model_type) if t
+            ],
             "__env__params__": self.env_params,
         }
 
@@ -433,11 +529,34 @@ def main():
     parser.add_argument(
         "--env_params", type=str, default="{}", help="[Optinal] env args."
     )
+    parser.add_argument(
+        "--draft_model_type",
+        type=str,
+        default="",
+        help="[Optional] speculative draft model to dump alongside the target; "
+        "defaults to SP_MODEL_TYPE from --env_params.",
+    )
+
+    parser.add_argument(
+        "--draft_pretrained_model_dir",
+        type=str,
+        default="",
+        help="[Optional] HF checkpoint for the draft model when it differs from the "
+        "target (e.g. MXFP8 target without bundled MTP weights).",
+    )
 
     # 解析参数
     args = parser.parse_args()
+
+    sys.argv = sys.argv[:1]
+
+    env_params = json.loads(args.env_params)
     converter = WeightConverter(
-        args.pretrained_model_dir, args.model_type, json.loads(args.env_params)
+        args.pretrained_model_dir,
+        args.model_type,
+        env_params,
+        args.draft_model_type,
+        args.draft_pretrained_model_dir or env_params.get("DRAFT_SRC"),
     )
 
     ret_code = converter.convert(args.output_dir_base)
