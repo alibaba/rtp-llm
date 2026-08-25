@@ -11,7 +11,6 @@ import org.springframework.http.MediaType;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.Disposable;
-import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -39,9 +38,7 @@ public class RequestCancelTest {
         this.routeService = routeService;
     }
 
-    public static RequestCancelTest init(EnvironmentVariables environmentVariables, ConfigService configService, RouteService routeService) {
-        environmentVariables.set("DOMAIN_ADDRESS:com.prefill.hosts.address", "127.0.0.100:8080,127.0.0.101:8080");
-        environmentVariables.set("DOMAIN_ADDRESS:com.decode.hosts.address", "127.0.0.102:8080,127.0.0.103:8080");
+    public static RequestCancelTest init(ConfigService configService, RouteService routeService) {
         WebClient webClient = WebClient.builder().baseUrl("http://localhost:7001").build();
         return new RequestCancelTest(webClient, configService, routeService);
     }
@@ -130,13 +127,14 @@ public class RequestCancelTest {
     private String buildRequestBody() {
         return """
                 {
-                  "request_id": 12345,
+                  "request_id": "request-12345",
                   "model": "engine_service",
-                  "block_ids": [
+                  "block_cache_keys": [
                     1001,
                     1002,
                     1003
                   ],
+                  "block_size": 256,
                   "seq_len": 1000,
                   "debug": 1
                 }""";

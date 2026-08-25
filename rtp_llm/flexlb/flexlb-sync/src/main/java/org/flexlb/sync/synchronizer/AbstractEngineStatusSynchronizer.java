@@ -2,11 +2,9 @@ package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,8 +43,6 @@ public abstract class AbstractEngineStatusSynchronizer {
 
     protected final ModelMetaConfig modelMetaConfig;
 
-    protected final FlexlbConfig flexlbConfig;
-
     public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
                                             EngineHealthReporter engineHealthReporter,
                                             EngineWorkerStatus engineWorkerStatus,
@@ -65,16 +61,6 @@ public abstract class AbstractEngineStatusSynchronizer {
         statusCheckExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
-
-        String masterConfigStr = System.getenv("FLEXLB_CONFIG");
-        logger.warn("FLEXLB_CONFIG = {}", masterConfigStr);
-        FlexlbConfig masterConfig;
-        if (masterConfigStr != null) {
-            masterConfig = JsonUtils.toObject(masterConfigStr, FlexlbConfig.class);
-        } else {
-            masterConfig = new FlexlbConfig();
-        }
-        this.flexlbConfig = masterConfig;
     }
 
     protected abstract void syncEngineStatus();

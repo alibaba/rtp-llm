@@ -5,12 +5,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.BodyInserters;
-import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
@@ -23,9 +23,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.QUEUE_FULL;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * FlexLB queue stress test
@@ -49,11 +48,7 @@ public class QueueStressTest {
         this.configService = configService;
     }
 
-    public static QueueStressTest init(WebTestClient webClient, EnvironmentVariables environmentVariables,
-                                       ConfigService configService
-    ) {
-        environmentVariables.set("DOMAIN_ADDRESS:com.prefill.hosts.address", "127.0.0.100:8080,127.0.0.101:8080");
-        environmentVariables.set("DOMAIN_ADDRESS:com.decode.hosts.address", "127.0.0.102:8080,127.0.0.103:8080");
+    public static QueueStressTest init(WebTestClient webClient, ConfigService configService) {
         return new QueueStressTest(webClient, configService);
     }
 
@@ -287,9 +282,10 @@ public class QueueStressTest {
     private String buildRequestBody(int requestId) {
         return String.format("""
                 {
-                  "request_id": %d,
+                  "request_id": "request-%d",
                   "model": "engine_service",
                   "block_cache_keys": [%d, %d, %d],
+                  "block_size": 256,
                   "seq_len": 1000,
                   "generate_timeout": %d,
                   "debug": 1

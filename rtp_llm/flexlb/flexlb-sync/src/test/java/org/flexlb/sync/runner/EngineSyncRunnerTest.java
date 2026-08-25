@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
@@ -19,7 +20,9 @@ import java.util.concurrent.atomic.LongAdder;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class EngineSyncRunnerTest {
@@ -45,7 +48,7 @@ class EngineSyncRunnerTest {
     private RoleType roleType;
 
     @Mock
-    private CacheAwareService localKvCacheAwareManager;
+    private CacheAwareService cacheAwareService;
 
     private final long syncRequestTimeoutMs = 5000L;
 
@@ -68,10 +71,11 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
-                syncEngineStatusInterval
+                syncEngineStatusInterval,
+                false
         );
     }
 
@@ -95,10 +99,11 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
-                syncEngineStatusInterval
+                syncEngineStatusInterval,
+                false
         );
 
         // Execute
@@ -106,5 +111,30 @@ class EngineSyncRunnerTest {
 
         // Verify
         verify(statusCheckExecutor, never()).submit(any(Runnable.class));
+    }
+
+    @Test
+    void should_only_submit_worker_status_check_when_kvcmIsEnabled() {
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(java.util.List.of(WorkerHost.of("127.0.0.1", 8080)));
+
+        EngineSyncRunner kvcmRunner = new EngineSyncRunner(
+                modelName,
+                new ConcurrentHashMap<>(),
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                RoleType.PREFILL,
+                cacheAwareService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                true
+        );
+
+        kvcmRunner.run();
+
+        verify(statusCheckExecutor, times(1)).submit(any(Runnable.class));
     }
 }

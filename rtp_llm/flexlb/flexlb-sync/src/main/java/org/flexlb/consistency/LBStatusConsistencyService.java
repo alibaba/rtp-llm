@@ -2,12 +2,12 @@ package org.flexlb.consistency;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
-import org.flexlb.domain.consistency.LBConsistencyConfig;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -30,12 +30,17 @@ public class LBStatusConsistencyService implements MasterElectService {
     );
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
+    private final DeploymentIdentity deploymentIdentity;
     private LBConsistencyConfig lbConsistencyConfig;
     private String serverPort;
     private String roleId;
 
-    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService) {
+    public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
+                                      ConfigService configService,
+                                      DeploymentIdentity deploymentIdentity) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
+        this.deploymentIdentity = deploymentIdentity;
+        this.lbConsistencyConfig = configService.loadBalanceConfig().getFlexlbSyncConsistencyConfig();
         this.init();
     }
 
@@ -49,17 +54,7 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         serverPort = System.getProperty("server.port", "7001");
         log.info("hostIp:{}, serverPort:{}.", hostIp, serverPort);
-        roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("HIPPO_ROLE env is blank");
-        }
-        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
-        log.info("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-        if (configStr == null) {
-            lbConsistencyConfig = new LBConsistencyConfig();
-        } else {
-            lbConsistencyConfig = JsonUtils.toObject(configStr, LBConsistencyConfig.class);
-        }
+        roleId = deploymentIdentity.getDeploymentId();
         if (!isNeedConsistency()) {
             log.warn("LBStatusConsistencyService is not need.");
             return;

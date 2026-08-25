@@ -2,32 +2,25 @@ package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
 /**
  * Prefill role resource measure
- * Availability criteria: queue wait time below threshold
+ * Availability criteria: effective pending task count below threshold
  *
  * @author saichen.sm
  * @since 2025/12/23
  */
 @Component
 public class PrefillResourceMeasure implements ResourceMeasure {
-    private final long queueSizeThreshold;
-    private final long hysteresisBiasPercent;
-    private final long maxQueueSize;
+    private final ConfigService configService;
 
     public PrefillResourceMeasure(ConfigService configService) {
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
-        this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
-        this.maxQueueSize = config.getMaxPrefillQueueSize();
+        this.configService = configService;
     }
 
     @Override
@@ -36,8 +29,11 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
-        return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
+        return workerStatus.getInTransitAndWaitingTaskCount() < currentThreshold();
+    }
+
+    private long currentThreshold() {
+        return configService.loadBalanceConfig().getPrefillQueueSizeThreshold();
     }
 
     @Override
@@ -55,7 +51,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         int count = 0;
 
         for (WorkerStatus worker : workerStatusMap.values()) {
-            double waterLevel = calculateWaterLevel(worker);
+            double waterLevel = calculateWorkerWaterLevel(worker);
             totalWaterLevel += waterLevel;
             count++;
         }
@@ -63,19 +59,23 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         return count > 0 ? totalWaterLevel / count : 0.0;
     }
 
-    private double calculateWaterLevel(WorkerStatus workerStatus) {
+    @Override
+    public double calculateWorkerWaterLevel(WorkerStatus workerStatus) {
         if (workerStatus == null) {
             return 0.0;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
-
-        if (queueSize <= 0) {
-            return 0.0;
-        } else if (queueSize >= maxQueueSize) {
-            return 100.0;
-        } else {
-            return (queueSize * 100.0) / maxQueueSize;
-        }
+        return waterLevel(workerStatus.getInTransitAndWaitingTaskCount(), currentThreshold());
     }
+
+    private double waterLevel(long value, long threshold) {
+        if (value <= 0) {
+            return 0.0;
+        }
+        if (threshold <= 0 || value >= threshold) {
+            return 100.0;
+        }
+        return (value * 100.0) / threshold;
+    }
+
 }

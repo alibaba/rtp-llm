@@ -11,6 +11,7 @@ import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -19,15 +20,15 @@ import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for RequestScheduler routing logic.
- * Tests handleRoutingResult behavior including retry limits.
+ * Tests request completion and retry-limit behavior.
  */
 @ExtendWith(MockitoExtension.class)
 class RequestSchedulerTest {
@@ -50,13 +51,14 @@ class RequestSchedulerTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setScheduleWorkerSize(1);
         config.setMaxRetryCount(3); // Explicitly set for test, default is 0 (unlimited)
+        config.setRoutingRetryIntervalMs(0);
         lenient().when(configService.loadBalanceConfig()).thenReturn(config);
         scheduler = new RequestScheduler(router, configService, queueManager, dynamicWorkerManager, metrics);
     }
 
     @Test
     void processRequest_shouldCompleteOnSuccess() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         Response successResponse = new Response();
         successResponse.setSuccess(true);
         when(router.route(ctx)).thenReturn(successResponse);
@@ -68,27 +70,36 @@ class RequestSchedulerTest {
 
         assertTrue(ctx.getFuture().isDone());
         assertTrue(ctx.getFuture().get().isSuccess());
-        verify(metrics).reportRoutingSuccessQps(0);
+        verify(metrics).reportRoutingSuccessQps();
     }
 
     @Test
     void processRequest_shouldRetryOnRetryableError() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        Response successResponse = new Response();
+        successResponse.setSuccess(true);
+        when(router.route(ctx)).thenReturn(errorResponse, successResponse);
 
         var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
         method.setAccessible(true);
         method.invoke(scheduler, ctx);
 
         assertEquals(1, ctx.getRetryCount());
-        verify(queueManager).offerToHead(ctx);
+        assertTrue(ctx.getFuture().get().isSuccess());
+        verify(router, times(2)).route(ctx);
         verify(metrics).reportRoutingFailureQps(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
+        verify(metrics).reportRoutingRetryQps();
+
+        InOrder retryBeforeNextAttempt = inOrder(router, metrics);
+        retryBeforeNextAttempt.verify(router).route(ctx);
+        retryBeforeNextAttempt.verify(metrics).reportRoutingRetryQps();
+        retryBeforeNextAttempt.verify(router).route(ctx);
     }
 
     @Test
     void processRequest_shouldNotRetryOnNonRetryableError() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
         when(router.route(ctx)).thenReturn(errorResponse);
 
@@ -97,19 +108,13 @@ class RequestSchedulerTest {
         method.invoke(scheduler, ctx);
 
         assertEquals(0, ctx.getRetryCount());
-        verify(queueManager, never()).offerToHead(any());
         assertTrue(ctx.getFuture().isDone());
         assertFalse(ctx.getFuture().get().isSuccess());
     }
 
     @Test
     void processRequest_shouldStopRetryingAfterMaxRetries() throws Exception {
-        BalanceContext ctx = createContext(1L);
-        // Simulate already retried 3 times (max)
-        for (int i = 0; i < 3; i++) {
-            ctx.incrementRetryCount();
-        }
-
+        BalanceContext ctx = createContext("request-1");
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
         when(router.route(ctx)).thenReturn(errorResponse);
 
@@ -117,8 +122,9 @@ class RequestSchedulerTest {
         method.setAccessible(true);
         method.invoke(scheduler, ctx);
 
-        // Should NOT re-queue, should complete with error
-        verify(queueManager, never()).offerToHead(any());
+        assertEquals(3, ctx.getRetryCount());
+        verify(router, times(4)).route(ctx);
+        verify(metrics, times(3)).reportRoutingRetryQps();
         assertTrue(ctx.getFuture().isDone());
         assertFalse(ctx.getFuture().get().isSuccess());
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), ctx.getFuture().get().getCode());
@@ -126,7 +132,7 @@ class RequestSchedulerTest {
 
     @Test
     void processRequest_shouldCompleteExceptionallyOnException() throws Exception {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         when(router.route(ctx)).thenThrow(new RuntimeException("routing error"));
 
         var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
@@ -136,7 +142,33 @@ class RequestSchedulerTest {
         assertTrue(ctx.getFuture().isCompletedExceptionally());
     }
 
-    private BalanceContext createContext(long requestId) {
+    @Test
+    void processRequest_shouldUseRetryIntervalFromConfigChangedAfterConstruction() throws Exception {
+        FlexlbConfig hotConfig = new FlexlbConfig();
+        hotConfig.setMaxRetryCount(3);
+        hotConfig.setRoutingRetryIntervalMs(0);
+        when(configService.loadBalanceConfig()).thenReturn(hotConfig);
+        RequestScheduler hotScheduler = new RequestScheduler(router, configService, queueManager, dynamicWorkerManager, metrics);
+        hotConfig.setRoutingRetryIntervalMs(120);
+
+        BalanceContext ctx = createContext("request-1");
+        Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
+        Response successResponse = new Response();
+        successResponse.setSuccess(true);
+        when(router.route(ctx)).thenReturn(errorResponse, successResponse);
+
+        var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
+        method.setAccessible(true);
+        long startNs = System.nanoTime();
+        method.invoke(hotScheduler, ctx);
+        long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+
+        assertTrue(ctx.getFuture().get().isSuccess());
+        assertTrue(elapsedMs >= 100,
+                "retry wait should use the hot-updated interval, elapsed: " + elapsedMs + "ms");
+    }
+
+    private BalanceContext createContext(String requestId) {
         BalanceContext ctx = new BalanceContext();
         Request request = new Request();
         request.setRequestId(requestId);

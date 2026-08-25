@@ -14,13 +14,14 @@ import org.apache.curator.framework.recipes.leader.Participant;
 import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.utils.CloseableUtils;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.LBConsistencyConfig;
 import org.flexlb.constant.ZkMasterEvent;
-import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -50,6 +51,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private LBConsistencyConfig lbConsistencyConfig;
     private final GeneralHttpNettyService generalHttpNettyService;
     private final EngineHealthReporter engineHealthReporter;
+    private final DeploymentIdentity deploymentIdentity;
     @Setter
     private String roleId;
     @Setter
@@ -69,18 +71,21 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
 
     public ZookeeperMasterElectService(GeneralHttpNettyService generalHttpNettyService,
-                                       EngineHealthReporter engineHealthReporter) {
+                                       EngineHealthReporter engineHealthReporter,
+                                       ConfigService configService,
+                                       DeploymentIdentity deploymentIdentity) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
         this.generalHttpNettyService = generalHttpNettyService;
         this.engineHealthReporter = engineHealthReporter;
+        this.deploymentIdentity = deploymentIdentity;
+        this.lbConsistencyConfig = configService.loadBalanceConfig().getFlexlbSyncConsistencyConfig();
 
         init();
     }
 
     public void init() {
-        initializeLBConsistencyConfig();
         if (!lbConsistencyConfig.isNeedConsistency()) {
             LOGGER.warn("Consistency is not required for LBConsistencyConfig.");
             return;
@@ -93,10 +98,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     private void initializeRoleId() {
-        roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("Environment variable HIPPO_ROLE is not set or is blank");
-        }
+        roleId = deploymentIdentity.getDeploymentId();
     }
 
     private void initializeIpAndPort() {
@@ -106,15 +108,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }
         port = Integer.parseInt(System.getProperty("server.port", "7001"));
-    }
-
-    private void initializeLBConsistencyConfig() {
-        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
-        LOGGER.warn("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-
-        lbConsistencyConfig = configStr == null
-                ? new LBConsistencyConfig()
-                : JsonUtils.toObject(configStr, LBConsistencyConfig.class);
     }
 
     private void initializeZookeeperClient() {
@@ -358,7 +351,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             Collection<Participant> participants = leaderSelector.getParticipants();
             for (Participant participant : participants) {
                 // Only notify non-master participants
-                if (!participant.isLeader() && localIp.equals(participant.getId())) {
+                if (!participant.isLeader() && !localIp.equals(participant.getId())) {
                     notifyParticipant(participant.getId());
                 }
             }

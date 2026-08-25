@@ -3,8 +3,8 @@ package org.flexlb.service.grpc;
 import lombok.Getter;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -91,7 +91,8 @@ public class EngineGrpcService {
                 .setLatestCacheVersion((int) cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)
                 .build();
-        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, needCacheKeys);
+        logger.debug("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}",
+                ip, cacheVersion, needCacheKeys);
         return engineGrpcClient.getCacheStatus(ip, grpcPort, request, requestTimeoutMs);
     }
 
@@ -116,7 +117,8 @@ public class EngineGrpcService {
                 .setLatestCacheVersion((int) cacheVersion)
                 .setNeedCacheKeys(needCacheKeys)
                 .build();
-        logger.info("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}", ip, cacheVersion, needCacheKeys);
+        logger.debug("Get cache status Request: {}, cacheVersion: {}, needCacheKeys: {}",
+                ip, cacheVersion, needCacheKeys);
 
         // Use MultimodalRpcService for VIT role, RpcService for others
         if (RoleType.VIT.equals(roleType)) {

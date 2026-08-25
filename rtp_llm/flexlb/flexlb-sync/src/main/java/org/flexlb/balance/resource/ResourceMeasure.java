@@ -30,6 +30,14 @@ public interface ResourceMeasure {
     ResourceMeasureIndicatorEnum getResourceMeasureIndicator();
 
     /**
+     * Calculate one worker's resource water level (0-100).
+     *
+     * @param workerStatus Worker status
+     * @return Water level percentage used by capacity control
+     */
+    double calculateWorkerWaterLevel(WorkerStatus workerStatus);
+
+    /**
      * Calculate average water level for the role (0-100)
      *
      * @param workerStatusMap Worker status map

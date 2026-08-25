@@ -83,24 +83,11 @@ public class QueueManager {
                 .timeout(Duration.ofMillis(ctx.getRequest().getGenerateTimeout()))
                 .onErrorResume(e -> handleQueueException(ctx, e))
                 .doFinally(signalType -> {
-                    if (ctx.getDequeueTime() > 0) {
-                        long routeExecutionTimeMs = System.currentTimeMillis() - ctx.getDequeueTime();
+                    if (ctx.getDequeueTime() > 0 && ctx.getRouteEndTime() > 0) {
+                        long routeExecutionTimeMs = ctx.getRouteEndTime() - ctx.getDequeueTime();
                         metrics.reportRouteExecutionMetric(routeExecutionTimeMs);
                     }
                 });
-    }
-
-    /**
-     * Offer to queue head (for retry on failure)
-     *
-     * @param ctx Load balancing context
-     */
-    public void offerToHead(BalanceContext ctx) {
-        boolean added = queue.offerFirst(ctx);
-        if (!added) {
-            Logger.warn("Failed to re-queue request id: {} (queue full), completing with error", ctx.getRequestId());
-            ctx.getFuture().complete(Response.error(StrategyErrorType.QUEUE_FULL));
-        }
     }
 
     /**

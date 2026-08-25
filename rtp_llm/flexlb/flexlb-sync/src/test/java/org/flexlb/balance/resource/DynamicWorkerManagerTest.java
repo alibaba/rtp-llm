@@ -100,6 +100,21 @@ class DynamicWorkerManagerTest {
     }
 
     @Test
+    void recalculate_withFixedPermits_shouldKeepConfiguredWorkerSize() {
+        config.setScheduleWorkerSize(1);
+        config.setFixedScheduleWorkerPermits(true);
+        manager = new DynamicWorkerManager(configService, resourceMeasureFactory);
+        manager.startScheduler();
+        setupWorkers(100.0);
+
+        for (int i = 0; i < 10; i++) {
+            manager.recalculateWorkerCapacity();
+        }
+
+        assertEquals(1, manager.getTotalPermits());
+    }
+
+    @Test
     void totalPermits_shouldNeverGoNegative() {
         setupWorkers(100.0);
 

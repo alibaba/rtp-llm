@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.enums.KvCacheGroupMode;
 
 import java.util.Map;
 
@@ -58,6 +59,15 @@ public class WorkerStatusResponse {
 
     @JsonProperty("tpSize")
     private long tpSize;
+
+    @JsonProperty("block_hash_lookahead_tokens")
+    private int blockHashLookaheadTokens;
+
+    @JsonProperty("cache_match_rollback_blocks")
+    private int cacheMatchRollbackBlocks;
+
+    @JsonProperty("kv_cache_group_mode")
+    private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
 
     @JsonProperty("alive")
     private boolean alive;

@@ -13,13 +13,13 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.util.concurrent.CompletableFuture;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -43,7 +43,7 @@ class QueueManagerTest {
 
     @Test
     void tryRouteAsync_shouldEnqueueSuccessfully() {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         var mono = queueManager.tryRouteAsync(ctx);
 
         assertNotNull(mono);
@@ -56,11 +56,11 @@ class QueueManagerTest {
     void tryRouteAsync_shouldRejectWhenQueueFull() {
         // Fill the queue
         for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createContext(i));
+            queueManager.tryRouteAsync(createContext("request-" + i));
         }
 
         // 11th request should be rejected
-        BalanceContext ctx = createContext(11L);
+        BalanceContext ctx = createContext("request-11");
         Response response = queueManager.tryRouteAsync(ctx).block();
 
         assertNotNull(response);
@@ -77,63 +77,60 @@ class QueueManagerTest {
 
     @Test
     void takeRequest_shouldReturnEnqueuedRequest() {
-        BalanceContext ctx = createContext(1L);
+        BalanceContext ctx = createContext("request-1");
         queueManager.tryRouteAsync(ctx);
 
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(1L, taken.getRequestId());
+        assertEquals("request-1", taken.getRequestId());
     }
 
     @Test
     void takeRequest_shouldSkipCancelledRequests() {
-        BalanceContext cancelled = createContext(1L);
+        BalanceContext cancelled = createContext("request-1");
         queueManager.tryRouteAsync(cancelled);
         cancelled.cancel();
 
-        BalanceContext valid = createContext(2L);
+        BalanceContext valid = createContext("request-2");
         queueManager.tryRouteAsync(valid);
 
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
+        assertEquals("request-2", taken.getRequestId());
     }
 
     @Test
-    void offerToHead_shouldRequeueAtFront() {
-        BalanceContext first = createContext(1L);
-        queueManager.tryRouteAsync(first);
-
-        BalanceContext retried = createContext(2L);
-        retried.setFuture(new CompletableFuture<>());
-        retried.setEnqueueTime(System.currentTimeMillis());
-        queueManager.offerToHead(retried);
-
+    void tryRouteAsync_shouldReportRouteExecutionWhenRoutingFinished() {
+        BalanceContext ctx = createContext("request-1");
+        var mono = queueManager.tryRouteAsync(ctx);
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
-        assertEquals(2L, taken.getRequestId());
+
+        long dequeueTime = taken.getDequeueTime();
+        taken.setRouteEndTime(dequeueTime + 20);
+        taken.getFuture().complete(new Response());
+
+        Response response = mono.block();
+        assertNotNull(response);
+        verify(metrics).reportRouteExecutionMetric(20L);
     }
 
     @Test
-    void offerToHead_shouldCompleteWithErrorWhenQueueFull() {
-        // Fill the queue
-        for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createContext(i));
-        }
+    void tryRouteAsync_shouldNotReportRouteExecutionWhenTerminatedBeforeRouting() {
+        BalanceContext ctx = createContext("request-1");
+        var mono = queueManager.tryRouteAsync(ctx);
+        BalanceContext taken = queueManager.takeRequest(false, 0);
+        assertNotNull(taken);
+        assertTrue(taken.getDequeueTime() > 0);
 
-        BalanceContext ctx = createContext(99L);
-        CompletableFuture<Response> future = new CompletableFuture<>();
-        ctx.setFuture(future);
+        taken.getFuture().completeExceptionally(new java.util.concurrent.CancellationException("cancelled"));
 
-        queueManager.offerToHead(ctx);
-
-        assertTrue(future.isDone());
-        Response response = future.join();
-        assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), response.getCode());
+        Response response = mono.block();
+        assertNotNull(response);
+        verify(metrics, never()).reportRouteExecutionMetric(anyLong());
     }
 
-    private BalanceContext createContext(long requestId) {
+    private BalanceContext createContext(String requestId) {
         BalanceContext ctx = new BalanceContext();
         Request request = new Request();
         request.setRequestId(requestId);

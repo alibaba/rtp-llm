@@ -5,6 +5,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -14,8 +15,6 @@ import javax.annotation.PreDestroy;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 
 /**
  * Request scheduler - manages worker thread pool, consumes request queue, and executes routing.
@@ -113,33 +112,74 @@ public class RequestScheduler {
 
     private void processRequest(BalanceContext ctx) {
         try {
-            Response response = router.route(ctx);
-            handleRoutingResult(ctx, response);
+            while (!ctx.getFuture().isDone()) {
+                Response response = router.route(ctx);
+                if (response.isSuccess() || !isRetryable(response)) {
+                    completeRouting(ctx, response);
+                    return;
+                }
+                if (!hasRetryBudget(ctx)) {
+                    logRetryLimitReached(ctx);
+                    completeRouting(ctx, response);
+                    return;
+                }
+                recordRoutingRetry(ctx, response);
+                waitBeforeRetry();
+            }
+        } catch (InterruptedException e) {
+            Logger.warn("Routing retry interrupted for request id:{}, retry count: {}", ctx.getRequestId(), ctx.getRetryCount());
+            Thread.currentThread().interrupt();
+            ctx.setRouteEndTime(System.currentTimeMillis());
+            ctx.getFuture().completeExceptionally(e);
         } catch (Exception e) {
             Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), e);
+            ctx.setRouteEndTime(System.currentTimeMillis());
             ctx.getFuture().completeExceptionally(e);
         }
     }
 
-    private void handleRoutingResult(BalanceContext ctx, Response response) {
+    /**
+     * Returns whether the request can make another routing attempt.
+     */
+    private boolean hasRetryBudget(BalanceContext ctx) {
         int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
-        boolean retryAllowed = maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
-        if (!response.isSuccess() && shouldRetry(response) && retryAllowed) {
-            ctx.incrementRetryCount();
-            Logger.warn("Route failed for request id:{}, error: {}, retry count: {}",
-                    ctx.getRequestId(),
-                    response.getCode(),
-                    ctx.getRetryCount());
-            metrics.reportRoutingFailureQps(response.getCode());
+        return maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
+    }
 
-            queueManager.offerToHead(ctx);
-        } else {
-            if (!response.isSuccess() && !retryAllowed) {
-                Logger.warn("Max retry count ({}) exceeded for request id:{}, completing with error",
-                        maxRetry, ctx.getRequestId());
-            }
-            ctx.getFuture().complete(response);
-            metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+    /**
+     * Records a routing attempt that will be retried by the current scheduling worker.
+     */
+    private void recordRoutingRetry(BalanceContext ctx, Response response) {
+        ctx.incrementRetryCount();
+        Logger.debug("Route failed for request id:{}, error: {}, retry count: {}",
+                ctx.getRequestId(),
+                response.getCode(),
+                ctx.getRetryCount());
+        metrics.reportRoutingFailureQps(response.getCode());
+        metrics.reportRoutingRetryQps();
+    }
+
+    /**
+     * Logs that a retryable request has consumed its configured retry budget.
+     */
+    private void logRetryLimitReached(BalanceContext ctx) {
+        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
+        Logger.warn("Retry limit ({}) reached for request id:{}, completing with error", maxRetry, ctx.getRequestId());
+    }
+
+    /**
+     * Completes the request with the final routing response.
+     */
+    private void completeRouting(BalanceContext ctx, Response response) {
+        ctx.setRouteEndTime(System.currentTimeMillis());
+        ctx.getFuture().complete(response);
+        metrics.reportRoutingSuccessQps();
+    }
+
+    private void waitBeforeRetry() throws InterruptedException {
+        long routingRetryIntervalMs = configService.loadBalanceConfig().getRoutingRetryIntervalMs();
+        if (routingRetryIntervalMs > 0) {
+            Thread.sleep(routingRetryIntervalMs);
         }
     }
 
@@ -151,7 +191,7 @@ public class RequestScheduler {
      * @param response Routing response
      * @return true if request should be retried, false otherwise
      */
-    private boolean shouldRetry(Response response) {
+    private boolean isRetryable(Response response) {
         StrategyErrorType errorType = StrategyErrorType.fromErrorCode(response.getCode());
         return errorType != null && errorType.isCanRetry();
     }

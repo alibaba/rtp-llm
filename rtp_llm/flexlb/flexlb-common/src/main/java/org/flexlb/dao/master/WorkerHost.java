@@ -29,6 +29,10 @@ public class WorkerHost {
      */
     private final int httpServerPort;
     /**
+     * gRPC port for GetWorkerStatus.
+     */
+    private final int workerStatusPort;
+    /**
      * Data center/site information
      */
     private final String site;
@@ -36,6 +40,12 @@ public class WorkerHost {
      * Worker group name
      */
     private final String group;
+
+    /**
+     * Deployment name associated with this discovered instance, when provided by
+     * the discovery backend.
+     */
+    private final String deploymentName;
 
     /**
      * Full constructor
@@ -48,12 +58,24 @@ public class WorkerHost {
      * @param group          Worker group name
      */
     public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, String site, String group) {
+        this(ip, httpPort, grpcPort, httpServerPort, grpcPort, site, group, "");
+    }
+
+    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort,
+                      String site, String group, String deploymentName) {
+        this(ip, httpPort, grpcPort, httpServerPort, grpcPort, site, group, deploymentName);
+    }
+
+    public WorkerHost(String ip, int httpPort, int grpcPort, int httpServerPort, int workerStatusPort,
+                      String site, String group, String deploymentName) {
         this.ip = ip;
         this.httpPort = httpPort;
         this.grpcPort = grpcPort;
         this.httpServerPort = httpServerPort;
+        this.workerStatusPort = workerStatusPort;
         this.site = site != null ? site : "";
         this.group = group != null ? group : "";
+        this.deploymentName = deploymentName != null ? deploymentName : "";
     }
 
     /**
@@ -116,5 +138,9 @@ public class WorkerHost {
      */
     public static WorkerHost of(String ip, int port, String site) {
         return new WorkerHost(ip, port, site);
+    }
+
+    public static WorkerHost of(String ip, int port, String site, String deploymentName) {
+        return new WorkerHost(ip, port, port + 1, port + 5, site, "", deploymentName);
     }
 }
