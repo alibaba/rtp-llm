@@ -437,6 +437,36 @@ verify_rdma_log() {
     fi
 }
 
+verify_decode_cuda_graph_capture_log() {
+    [[ "${role}" == "decode" ]] || return 0
+    local evidence_file="${role_dir}/cuda-graph-evidence.txt"
+    local search_paths=(
+        "${service_log}"
+        "${role_dir}/runtime/logs/decode"
+        "${role_dir}/runtime/work/decode/logs"
+    )
+    : >"${evidence_file}"
+    grep -RhsF "CUDA graph capture is enabled" "${search_paths[@]}" \
+        >>"${evidence_file}" 2>/dev/null \
+        || die "Decode log has no positive CUDA Graph enablement evidence"
+    grep -RhsF "capture success for batch size: 4" "${search_paths[@]}" \
+        >>"${evidence_file}" 2>/dev/null \
+        || die "Decode log has no successful batch-size-4 graph capture evidence"
+}
+
+verify_decode_cuda_graph_replay_log() {
+    [[ "${role}" == "decode" ]] || return 0
+    local evidence_file="${role_dir}/cuda-graph-evidence.txt"
+    local search_paths=(
+        "${service_log}"
+        "${role_dir}/runtime/logs/decode"
+        "${role_dir}/runtime/work/decode/logs"
+    )
+    grep -RhsF "replay end check for batch size 4" "${search_paths[@]}" \
+        >>"${evidence_file}" 2>/dev/null \
+        || die "Decode log has no successful graph replay check evidence"
+}
+
 verify_role_environment() {
     local env_file="${role_dir}/service.env"
     # Never dump the full process environment: it can contain unrelated
@@ -497,14 +527,17 @@ expected = {
     "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
     "DEEPGEMM_JIT_COMPILER": "auto",
     "FT_CORE_DUMP_ON_EXCEPTION": "1",
-    "SP_TYPE": "eagle3",
-    "SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3",
-    "SP_CHECKPOINT_PATH": sp_checkpoint_path,
-    "SP_ACT_TYPE": "BF16",
-    "GEN_NUM_PER_CIRCLE": "3",
-    "KIMI_K3_EAGLE3_AUX_LAYER_IDS": eagle3_aux_layer_ids,
 }
-absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb"]
+absent = [
+    "CUDA_LAUNCH_BLOCKING",
+    "large_segment_size_mb",
+    "SP_TYPE",
+    "SP_MODEL_TYPE",
+    "SP_CHECKPOINT_PATH",
+    "SP_ACT_TYPE",
+    "GEN_NUM_PER_CIRCLE",
+    "KIMI_K3_EAGLE3_AUX_LAYER_IDS",
+]
 expected["KIMI_K3_DECODE_TOPOLOGY"] = decode_topology
 expected["KIMI_K3_DECODE_KTP"] = (
     "1" if role == "decode" and decode_topology == "dp8_ep8_tp1_ktp8" else "0"
@@ -546,6 +579,20 @@ else:
         "RTP_LLM_DROP_BROAD_SYNC": "1",
         "RTP_LLM_STREAM_ASYNC": "1",
     })
+    if decode_topology == "dp8_ep8_tp1_ktp8":
+        expected.update({
+            "ENABLE_CUDA_GRAPH": "1",
+            # One capture key is mandatory: every KTP rank must replay the
+            # same collective shapes even when its live DP-local BS differs.
+            "DECODE_CAPTURE_CONFIG": "4",
+            "KIMI_K3_KTP_LOCAL_BS_BUCKET": "4",
+        })
+    else:
+        expected.update({
+            "ENABLE_CUDA_GRAPH": "1",
+            "DECODE_CAPTURE_CONFIG": "1,2,3,4",
+        })
+        absent.append("KIMI_K3_KTP_LOCAL_BS_BUCKET")
     absent.extend([
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD",
         "KIMI_K3_PREFILL_CHUNK_TOKENS",
@@ -619,12 +666,10 @@ apply_validated_common_profile() {
     export FLASHINFER_CUDA_ARCH_LIST=10.3a
     export DEEPGEMM_JIT_COMPILER=auto
     export FT_CORE_DUMP_ON_EXCEPTION=1
-    export SP_TYPE=eagle3
-    export SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3
-    export SP_CHECKPOINT_PATH="${sp_checkpoint_real}"
-    export SP_ACT_TYPE=BF16
-    export GEN_NUM_PER_CIRCLE=3
-    export KIMI_K3_EAGLE3_AUX_LAYER_IDS="${smoke_eagle3_aux_layer_ids}"
+    # This acceptance run isolates Decode CUDA Graph. MTP/Eagle3 is a separate
+    # follow-up matrix and must not leak in from the caller's environment.
+    unset SP_TYPE SP_MODEL_TYPE SP_CHECKPOINT_PATH SP_ACT_TYPE
+    unset GEN_NUM_PER_CIRCLE KIMI_K3_EAGLE3_AUX_LAYER_IDS
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
     # the externally visible run ID is descriptive and long.
@@ -663,10 +708,18 @@ apply_validated_decode_profile() {
     export MEGA_MOE_MAX_TOKENS_PER_RANK=16
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB
-    export ENABLE_CUDA_GRAPH=1
-    # The smoke issues four concurrent requests. Capture every possible
-    # coalesced Decode batch size instead of aborting above batch size one.
-    export DECODE_CAPTURE_CONFIG=1,2,3,4
+    if [[ "${decode_topology}" == "dp8_ep8_tp1_ktp8" ]]; then
+        # All DP workers capture the same local-BS=4 KTP collective schedule;
+        # smaller live batches replay this graph with framework dummy rows.
+        export ENABLE_CUDA_GRAPH=1
+        export DECODE_CAPTURE_CONFIG=4
+        export KIMI_K3_KTP_LOCAL_BS_BUCKET=4
+    else
+        # Leave headroom for CUDA graph capture with the validated TP8 baseline.
+        export ENABLE_CUDA_GRAPH=1
+        export DECODE_CAPTURE_CONFIG=1,2,3,4
+        unset KIMI_K3_KTP_LOCAL_BS_BUCKET
+    fi
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
@@ -698,6 +751,7 @@ wait_for_backend_ranks
 verify_fastsafetensors_log
 verify_rdma_log
 verify_role_environment
+verify_decode_cuda_graph_capture_log
 
 if [[ "${role}" == "decode" ]]; then
     # One-shot result endpoint. It accepts only the matching run ID and writes
@@ -760,6 +814,7 @@ PY
     [[ -f "${result_file}" ]] || die "timed out waiting for Prefill result"
     verdict="$(tr -d '[:space:]' <"${result_file}")"
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
+    verify_decode_cuda_graph_replay_log
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     exit 0
 fi

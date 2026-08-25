@@ -541,6 +541,123 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         }
         py_attn_inputs.kv_cache_kernel_block_id_host = py_attn_inputs.kv_cache_kernel_block_id_host_by_group[0];
     }
+
+    // Decode DP owns only its MLA requests, whereas every KTP rank owns a
+    // persistent KDA shadow shard for every runnable request.  CUDA Graph
+    // replay mirrors these local rows into its fixed capture buffers before a
+    // captured KTP AllGather builds the global KDA table.  Populate the live
+    // source table here; Python replay is intentionally not involved.
+    const int kda_group_id = py_attn_inputs.kda_shadow_group_id;
+    if (cache_manager_ && cache_manager_->kdaShadowRegistry() && kda_group_id >= 0) {
+        RTP_LLM_CHECK_WITH_INFO(
+            static_cast<size_t>(kda_group_id) < py_attn_inputs.kv_cache_kernel_block_id_device_by_group.size(),
+            "KDA shadow group id %d exceeds device cache groups %zu",
+            kda_group_id,
+            py_attn_inputs.kv_cache_kernel_block_id_device_by_group.size());
+        const auto& original = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[kda_group_id];
+        RTP_LLM_CHECK_WITH_INFO(original.dim() == 2,
+                                "KDA local kernel block table must be 2-D, got dim=%ld",
+                                original.dim());
+        const int64_t batch = original.size(0);
+        const int64_t width = original.size(1);
+        auto local_host = torch::zeros(
+            {batch, width}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+
+        if (!py_attn_inputs.is_fake_stream && batch > 0) {
+            RTP_LLM_CHECK_WITH_INFO(py_attn_inputs.request_ids_host.defined()
+                                        && py_attn_inputs.generation_epochs_host.defined(),
+                                    "real KTP Decode rows require request ids and generation epochs");
+            auto request_ids = py_attn_inputs.request_ids_host;
+            auto epochs      = py_attn_inputs.generation_epochs_host;
+            if (request_ids.device().is_cuda()) {
+                request_ids = request_ids.cpu();
+            }
+            if (epochs.device().is_cuda()) {
+                epochs = epochs.cpu();
+            }
+            request_ids = request_ids.to(torch::kInt64).contiguous().reshape({-1});
+            epochs      = epochs.to(torch::kInt64).contiguous().reshape({-1});
+            RTP_LLM_CHECK_WITH_INFO(request_ids.numel() == batch && epochs.numel() == batch,
+                                    "KTP request metadata rows mismatch: request=%ld epoch=%ld batch=%ld",
+                                    request_ids.numel(),
+                                    epochs.numel(),
+                                    batch);
+
+            const auto& keys   = py_attn_inputs.kda_shadow_keys_host;
+            const auto& shadow = py_attn_inputs.kda_shadow_kernel_block_ids_host;
+            RTP_LLM_CHECK_WITH_INFO(keys.defined() && shadow.defined() && keys.dim() == 2 && keys.size(1) == 2
+                                        && shadow.dim() == 2 && shadow.size(0) == keys.size(0),
+                                    "KTP Decode requires a valid READY KDA shadow snapshot");
+            const auto* request_ptr = request_ids.data_ptr<int64_t>();
+            const auto* epoch_ptr   = epochs.data_ptr<int64_t>();
+            const auto* key_ptr     = keys.data_ptr<int64_t>();
+            const auto* shadow_ptr  = shadow.data_ptr<int32_t>();
+            auto*       local_ptr   = local_host.data_ptr<int32_t>();
+            const int64_t shadow_width = shadow.size(1);
+            RTP_LLM_CHECK_WITH_INFO(shadow_width == width,
+                                    "KDA shadow table width mismatch: snapshot=%ld live=%ld",
+                                    shadow_width,
+                                    width);
+            for (int64_t local_row = 0; local_row < batch; ++local_row) {
+                int64_t snapshot_row = -1;
+                for (int64_t row = 0; row < keys.size(0); ++row) {
+                    if (key_ptr[2 * row] == request_ptr[local_row]
+                        && key_ptr[2 * row + 1] == epoch_ptr[local_row]) {
+                        snapshot_row = row;
+                        break;
+                    }
+                }
+                RTP_LLM_CHECK_WITH_INFO(snapshot_row >= 0,
+                                        "KDA shadow shard is not READY for request=%ld epoch=%ld",
+                                        request_ptr[local_row],
+                                        epoch_ptr[local_row]);
+                if (width > 0) {
+                    std::memcpy(local_ptr + local_row * width,
+                                shadow_ptr + snapshot_row * shadow_width,
+                                static_cast<size_t>(width) * sizeof(int32_t));
+                }
+            }
+        }
+
+        buffer_holder_.hold_host(local_host);
+        auto local_device = tensorHoldHostAndToCuda(local_host);
+        py_attn_inputs.kv_cache_kernel_block_id_device_by_group[kda_group_id] = local_device;
+        if (static_cast<size_t>(kda_group_id) < py_attn_inputs.kv_cache_kernel_block_id_host_by_group.size()) {
+            py_attn_inputs.kv_cache_kernel_block_id_host_by_group[kda_group_id] = local_host;
+        }
+        if (kda_group_id == 0) {
+            py_attn_inputs.kv_cache_kernel_block_id_device = local_device;
+            py_attn_inputs.kv_cache_kernel_block_id_host   = local_host;
+        }
+
+        // The KTP graph captures KDA with the per-group table above, while
+        // TokenSpeed MLA still consumes the legacy singular table during
+        // graph replay.  K3 has exactly one non-KDA cache group; point the
+        // compatibility fields at that owner-local MLA table instead of the
+        // group-0 default.  This also keeps non-owner ranks from accidentally
+        // replaying MLA against a KDA shadow table.
+        int non_kda_group_id = -1;
+        for (size_t group_id = 0;
+             group_id < py_attn_inputs.kv_cache_kernel_block_id_device_by_group.size();
+             ++group_id) {
+            if (static_cast<int>(group_id) == kda_group_id) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(non_kda_group_id < 0,
+                                    "K3 KTP CUDA Graph requires exactly one non-KDA cache group");
+            non_kda_group_id = static_cast<int>(group_id);
+        }
+        RTP_LLM_CHECK_WITH_INFO(non_kda_group_id >= 0,
+                                "K3 KTP CUDA Graph requires an owner-local MLA cache group");
+        py_attn_inputs.kv_cache_kernel_block_id_device =
+            py_attn_inputs.kv_cache_kernel_block_id_device_by_group[non_kda_group_id];
+        RTP_LLM_CHECK_WITH_INFO(
+            static_cast<size_t>(non_kda_group_id)
+                < py_attn_inputs.kv_cache_kernel_block_id_host_by_group.size(),
+            "K3 KTP CUDA Graph requires a host MLA cache block table");
+        py_attn_inputs.kv_cache_kernel_block_id_host =
+            py_attn_inputs.kv_cache_kernel_block_id_host_by_group[non_kda_group_id];
+    }
 }
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs

@@ -253,6 +253,36 @@ class KtpBatchPlan:
     descriptors: tuple[KtpStepDescriptor, ...]
     rank: int
 
+    @classmethod
+    def for_cuda_graph(
+        cls, context: KdaParallelContext, *, fixed_bucket: int
+    ) -> "KtpBatchPlan":
+        """Return the one static rank-major layout captured by Decode KTP.
+
+        CUDA Graph replay does not execute Python, so replay-time DP metadata
+        cannot drive descriptor compaction.  Every KTP rank instead captures
+        the same fixed local bucket and the graph runner zero-pads smaller live
+        batches into that storage.  Padding rows use reserved cache block 0 and
+        are trimmed from the graph output by ``CudaGraphRunner``.
+        """
+
+        if context.group != Group.KTP or context.size <= 1:
+            raise ValueError("Decode KTP CUDA Graph requires an enabled KTP context")
+        if fixed_bucket <= 0:
+            raise ValueError(
+                f"KTP CUDA Graph local bucket must be positive, got {fixed_bucket}"
+            )
+        descriptors = tuple(
+            KtpStepDescriptor.build(
+                rank=rank,
+                step_epoch=0,
+                local_batch=fixed_bucket,
+                bucket=fixed_bucket,
+            )
+            for rank in range(context.size)
+        )
+        return cls(descriptors, context.rank)
+
     def __post_init__(self) -> None:
         if not self.descriptors or not 0 <= self.rank < len(self.descriptors):
             raise ValueError("invalid KTP batch plan rank or descriptor set")
@@ -510,6 +540,73 @@ def build_ktp_attention_inputs(
     return result
 
 
+def build_ktp_cuda_graph_attention_inputs(
+    attention_inputs: PyAttentionInputs,
+    plan: KtpBatchPlan,
+    *,
+    device: torch.device,
+    kda_group_id: int,
+) -> PyAttentionInputs:
+    """Build capture-only KDA metadata without host rendezvous or D2H reads.
+
+    The local KDA group table is populated from the rank-local shadow registry
+    by ``PyWrappedModel`` before replay.  Capturing its KTP AllGather makes the
+    graph consume live per-rank block ids while preserving one static global
+    row order and collective shape.
+    """
+
+    if attention_inputs.is_prefill:
+        raise ValueError("KTP CUDA Graph attention metadata is Decode-only")
+    if plan.valid_rows != plan.physical_rows:
+        raise ValueError("KTP CUDA Graph capture requires every physical row")
+    local_input = attention_inputs.input_lengths
+    local_sequence = attention_inputs.sequence_lengths
+    if (
+        int(local_input.numel()) != plan.bucket
+        or int(local_sequence.numel()) != plan.bucket
+    ):
+        raise ValueError(
+            "KTP CUDA Graph capture rows do not match the fixed local bucket: "
+            f"input={local_input.numel()} sequence={local_sequence.numel()} "
+            f"bucket={plan.bucket}"
+        )
+
+    result = copy.copy(attention_inputs)
+    result.input_lengths = plan.all_gather_rows(local_input)
+    result.sequence_lengths = plan.all_gather_rows(local_sequence)
+    result.sequence_lengths_plus_1_d = result.sequence_lengths + 1
+    result.prefix_lengths = result.input_lengths.new_empty((0,))
+    result.cu_seqlens = torch.arange(
+        plan.physical_rows + 1, dtype=torch.int32, device=device
+    )
+    result.decode_cu_seqlens_d = result.cu_seqlens
+    result.cu_kv_seqlens = torch.zeros_like(result.cu_seqlens)
+    result.padding_offset = torch.empty((0,), dtype=torch.int32, device=device)
+    result.total_tokens = plan.physical_rows
+
+    tables = list(
+        getattr(attention_inputs, "kv_cache_kernel_block_id_device_by_group", ())
+        or ()
+    )
+    if not 0 <= int(kda_group_id) < len(tables):
+        raise RuntimeError(
+            "KTP CUDA Graph is missing its KDA cache group table: "
+            f"group={kda_group_id}, groups={len(tables)}"
+        )
+    local_table = tables[int(kda_group_id)]
+    if local_table.ndim != 2 or int(local_table.shape[0]) != plan.bucket:
+        raise ValueError(
+            "KTP CUDA Graph local KDA block table has an invalid shape: "
+            f"shape={tuple(local_table.shape)}, bucket={plan.bucket}"
+        )
+    global_table = plan.all_gather_rows(local_table)
+    tables[int(kda_group_id)] = global_table
+    result.kv_cache_kernel_block_id_device_by_group = tables
+    result.kv_cache_kernel_block_id_device = global_table
+    result.kda_shadow_group_id = int(kda_group_id)
+    return result
+
+
 def rendezvous_ktp_step(
     context: KdaParallelContext,
     *,
@@ -685,6 +782,7 @@ __all__ = [
     "KtpStepDescriptor",
     "KdaParallelContext",
     "build_owner_attention_inputs",
+    "build_ktp_cuda_graph_attention_inputs",
     "build_ktp_attention_inputs",
     "decode_ktp_enabled",
     "logical_tp1_parallelism",

@@ -10,6 +10,7 @@ from rtp_llm.models.kimi_k3.decode_ktp import (
     KdaParallelContext,
     KtpBatchPlan,
     KtpStepDescriptor,
+    build_ktp_cuda_graph_attention_inputs,
     build_ktp_attention_inputs,
     build_owner_attention_inputs,
     rendezvous_ktp_step,
@@ -306,6 +307,16 @@ class KtpBatchRendezvousTest(unittest.TestCase):
         self.assertEqual((idle.valid_rows, idle.physical_rows), (0, 8))
         self.assertFalse(idle.valid_mask(torch.device("cpu")).any())
 
+    def test_cuda_graph_plan_uses_one_full_fixed_bucket_on_every_rank(self):
+        plan = KtpBatchPlan.for_cuda_graph(
+            KdaParallelContext(8, 5, Group.KTP), fixed_bucket=4
+        )
+        self.assertEqual(plan.rank, 5)
+        self.assertEqual(plan.local_batch, 4)
+        self.assertEqual(plan.valid_rows, 32)
+        self.assertEqual(plan.physical_rows, 32)
+        self.assertTrue(plan.valid_mask(torch.device("cpu")).all())
+
     def test_compact_and_expand_never_execute_padding_rows(self):
         plan = KtpBatchPlan(
             self._descriptors([0, 1, 0, 2, 0, 1, 0, 2], bucket=2), rank=3
@@ -462,6 +473,41 @@ class KtpBatchRendezvousTest(unittest.TestCase):
         )
         self.assertEqual(select_block_map_for_layer(result, 0, 1), 1)
         self.assertTrue(torch.equal(result.kv_cache_kernel_block_id_device, kernel))
+
+    def test_cuda_graph_metadata_captures_kda_table_all_gather(self):
+        plan = KtpBatchPlan.for_cuda_graph(
+            KdaParallelContext(8, 2, Group.KTP), fixed_bucket=4
+        )
+        attention = PyAttentionInputs()
+        attention.is_prefill = False
+        attention.input_lengths = torch.ones(4, dtype=torch.int32)
+        attention.sequence_lengths = torch.arange(100, 104, dtype=torch.int32)
+        local_table = torch.arange(12, dtype=torch.int32).reshape(4, 3)
+        attention.kv_cache_kernel_block_id_device_by_group = [
+            torch.zeros(4, 3, dtype=torch.int32),
+            local_table,
+        ]
+        global_input = torch.ones(32, dtype=torch.int32)
+        global_sequence = torch.arange(100, 132, dtype=torch.int32)
+        global_table = torch.arange(96, dtype=torch.int32).reshape(32, 3)
+        with patch.object(
+            KtpBatchPlan,
+            "all_gather_rows",
+            side_effect=[global_input, global_sequence, global_table],
+        ):
+            result = build_ktp_cuda_graph_attention_inputs(
+                attention,
+                plan,
+                device=torch.device("cpu"),
+                kda_group_id=1,
+            )
+
+        self.assertEqual(tuple(result.sequence_lengths_plus_1_d.shape), (32,))
+        self.assertEqual(result.total_tokens, 32)
+        self.assertTrue(
+            torch.equal(result.kv_cache_kernel_block_id_device_by_group[1], global_table)
+        )
+        self.assertTrue(torch.equal(result.kv_cache_kernel_block_id_device, global_table))
 
 
 if __name__ == "__main__":
