@@ -19,9 +19,9 @@
 namespace rtp_llm {
 namespace {
 
-TEST(PerRankBlockTransferEngineConfigTest, PreservesLegacyConstructorDefault) {
+TEST(PerRankBlockTransferEngineConfigTest, UsesFourSharedWorkersByDefault) {
     PerRankBlockTransferEngine engine(std::vector<GroupSetPtr>{});
-    EXPECT_EQ(engine.transferWorkerCount(), 1u);
+    EXPECT_EQ(engine.transferWorkerCount(), 4u);
 }
 
 TEST(PerRankBlockTransferEngineConfigTest, PreservesExplicitWorkerOverride) {
@@ -174,7 +174,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
     auto disk_pool = makeDiskPool(host_block_size_, 8, temp_dir_.path, std::move(owned_io), "split_batch");
     auto group = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, DeviceHostCopyOptions{}, 4, 2);
+        std::vector<GroupSetPtr>{group}, DeviceHostCopyOptions{}, 4, 2, 4, 2);
     std::vector<TransferDescriptor> descriptors;
     for (size_t index = 0; index < 5; ++index) {
         descriptors.push_back(makeDescriptor(
@@ -188,7 +188,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksAreSerialized) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUseSharedWorkers) {
     auto owned_io = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::WRITE);
     auto* io = owned_io.get();
     auto host_pool = makeHostPool(host_block_size_, 3, false);
@@ -206,12 +206,12 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksAreSe
     io->release();
     first_context->waitDone();
     second_context->waitDone();
-    EXPECT_FALSE(second_started_before_release);
+    EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first_context->success());
     EXPECT_TRUE(second_context->success());
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksAreSerialized) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksMayUseSharedWorkers) {
     auto owned_io = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::READ);
     auto* io = owned_io.get();
     auto host_pool = makeHostPool(host_block_size_, 3, false);
@@ -230,7 +230,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksAreSe
     io->release();
     first_context->waitDone();
     second_context->waitDone();
-    EXPECT_FALSE(second_started_before_release);
+    EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first_context->success());
     EXPECT_TRUE(second_context->success());
 }
