@@ -1,7 +1,11 @@
 #include <algorithm>
+#include <charconv>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -36,6 +40,22 @@ bool maxTokensExcludeThinking() {
     return enabled;
 }
 
+std::optional<int64_t> hackMaxNewTokens() {
+    const char* raw_cap = std::getenv("HACK_MAX_NEW_TOKENS");
+    if (raw_cap == nullptr) {
+        return std::nullopt;
+    }
+
+    const std::string_view value(raw_cap);
+    int64_t                cap = 0;
+    const auto [end, error]    = std::from_chars(value.data(), value.data() + value.size(), cap);
+    if (error != std::errc() || end != value.data() + value.size() || cap <= 0) {
+        RTP_LLM_LOG_WARNING("ignore invalid HACK_MAX_NEW_TOKENS=%s: expected a positive integer", raw_cap);
+        return std::nullopt;
+    }
+    return cap;
+}
+
 }  // namespace
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
@@ -47,6 +67,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                bool                             perf_test):
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
+    hack_max_new_tokens_(hackMaxNewTokens()),
     vocab_size_(model_config.vocab_size),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
         this, resource_context, input->need_release_resource, input->generate_config->adapter_name)),
@@ -956,6 +977,9 @@ size_t GenerateStream::maxTokenNum() const {
 
     const auto& config              = generate_input_->generate_config;
     int64_t     output_token_budget = config->max_new_tokens;
+    if (hack_max_new_tokens_.has_value()) {
+        output_token_budget = hack_max_new_tokens_.value();
+    }
     if (maxTokensExcludeThinking() && config->in_think_mode && config->max_thinking_tokens > 0) {
         int64_t think_output_budget = config->max_thinking_tokens;
         for (const auto& processor : logits_processor_list_) {

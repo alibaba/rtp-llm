@@ -808,6 +808,7 @@ protected:
     std::vector<StreamState>              sub_generate_status_;
     std::vector<int64_t>                  sub_generate_output_lengths_;
     int                                   max_seq_len_;
+    std::optional<int64_t>                hack_max_new_tokens_;
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
