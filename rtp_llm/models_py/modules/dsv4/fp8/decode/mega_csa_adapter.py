@@ -1,4 +1,4 @@
-"""Thin TP1 DSV4-Pro CSA attention-sublayer megakernel adapter."""
+"""Thin TP1 DSV4 CSA attention-sublayer megakernel adapter."""
 
 from __future__ import annotations
 
@@ -67,10 +67,15 @@ class MegaCSAAdapter:
     @staticmethod
     def supports_decode_shape(hidden: torch.Tensor, metadata: Any) -> bool:
         """Return whether this request can enter the fixed TP1 kernel geometry."""
+        if hidden.dim() != 4:
+            return False
+        batch_size, q_len = int(hidden.shape[0]), int(hidden.shape[1])
         return (
-            int(getattr(metadata, "q_len_per_req", 0)) == 1
-            and hidden.dim() == 4
-            and 1 <= int(hidden.shape[0]) <= MAX_BATCH
+            batch_size >= 1
+            and q_len >= 1
+            and batch_size * q_len <= MAX_BATCH
+            and int(getattr(metadata, "batch_size", 0)) == batch_size
+            and int(getattr(metadata, "q_len_per_req", 0)) == q_len
         )
 
     @staticmethod
@@ -256,12 +261,13 @@ class MegaCSAAdapter:
         assert main_cache is not None
         assert indexer_cache is not None
         assert swa_cache is not None
+        batch_size = int(metadata.batch_size)
 
         def require_block_table(attn_type: int, name: str) -> torch.Tensor:
             table = metadata.pool_block_tables.get(attn_type)
-            if table is None or int(table.shape[0]) < token_count:
+            if table is None or int(table.shape[0]) < batch_size:
                 raise RuntimeError(f"DSV4 mega metadata is missing {name} block table")
-            table = table[:token_count]
+            table = table[:batch_size]
             if table.dtype != torch.int32 or not table.is_contiguous():
                 raise TypeError(
                     f"DSV4 mega {name} block table must be contiguous int32"
@@ -338,19 +344,26 @@ class MegaCSAAdapter:
         g = self._geometry
         if hidden.dim() != 4 or tuple(hidden.shape[2:]) != (HC, g.dim):
             raise ValueError(
-                f"DSV4 mega hidden must be [B,1,{HC},{g.dim}], "
+                f"DSV4 mega hidden must be [B,S,{HC},{g.dim}], "
                 f"got {tuple(hidden.shape)}"
             )
-        m, q_len = int(hidden.shape[0]), int(hidden.shape[1])
-        if q_len != 1 or not 1 <= m <= MAX_BATCH:
-            raise ValueError(f"DSV4 mega requires q_len=1 and batch in [1,{MAX_BATCH}]")
+        batch_size, q_len = int(hidden.shape[0]), int(hidden.shape[1])
+        token_count = batch_size * q_len
+        if batch_size < 1 or q_len < 1 or token_count > MAX_BATCH:
+            raise ValueError(
+                f"DSV4 mega requires B>=1, S>=1, and B*S<={MAX_BATCH}; "
+                f"got B={batch_size}, S={q_len}"
+            )
         if (
             hidden.dtype != torch.bfloat16
             or not hidden.is_cuda
             or not hidden.is_contiguous()
         ):
             raise TypeError("DSV4 mega hidden must be contiguous CUDA bfloat16")
-        if metadata.batch_size != m or metadata.q_len_per_req != 1:
+        if (
+            metadata.batch_size != batch_size
+            or metadata.q_len_per_req != q_len
+        ):
             raise ValueError("DSV4 mega hidden and metadata geometry disagree")
         if metadata.position_ids_long is None:
             raise RuntimeError("DSV4 mega metadata is missing int64 positions")
@@ -364,7 +377,7 @@ class MegaCSAAdapter:
         attn._block_tables_by_type = metadata.pool_block_tables
         try:
             attn._ensure_freqs_cis_bound()
-            pools = self._bind_pools(block, metadata, m)
+            pools = self._bind_pools(block, metadata, token_count)
             return self._forward_bound(block, hidden, metadata, pools, dsv4_mega)
         finally:
             attn._kv_cache = previous_kv
@@ -388,20 +401,35 @@ class MegaCSAAdapter:
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         attn = block.attn
-        m = int(hidden.shape[0])
-        positions_i32 = metadata.position_ids[:m]
-        positions_i64 = metadata.position_ids_long[:m]
+        batch_size, q_len = int(hidden.shape[0]), int(hidden.shape[1])
+        token_count = batch_size * q_len
+        positions_i32 = metadata.position_ids[:token_count]
+        positions_i64 = metadata.position_ids_long[:token_count]
         if positions_i32.dtype != torch.int32 or positions_i64.dtype != torch.int64:
             raise TypeError("DSV4 mega positions must provide int32 and int64 tensors")
         rope_cos, rope_sin = self.runtime.rope_tables(attn.freqs_cis)
-        num_split = self.runtime.num_hc_splits(m, hidden.device, g.dim)
-        workspace = self.runtime.layer_workspace(m, num_split, hidden.device, g)
-        hidden_rows = hidden.view(m, HC, g.dim)
+        num_split = self.runtime.num_hc_splits(token_count, hidden.device, g.dim)
+        workspace = self.runtime.layer_workspace(
+            token_count, num_split, hidden.device, g
+        )
+        hidden_rows = hidden.view(token_count, HC, g.dim)
 
-        compressed_lengths = metadata.compressed_lens.get(COMPRESS_RATIO)
-        if compressed_lengths is None or int(compressed_lengths.numel()) < m:
-            raise RuntimeError("DSV4 mega metadata is missing CSA compressed lengths")
-        compressed_lengths = compressed_lengths[:m]
+        compressed_lengths_2d = metadata.compressed_lens_per_token.get(
+            COMPRESS_RATIO
+        )
+        if (
+            compressed_lengths_2d is None
+            or compressed_lengths_2d.dim() != 2
+            or int(compressed_lengths_2d.shape[0]) < batch_size
+            or int(compressed_lengths_2d.shape[1]) < q_len
+        ):
+            raise RuntimeError(
+                "DSV4 mega metadata is missing per-token CSA compressed lengths"
+            )
+        compressed_lengths_2d = compressed_lengths_2d[
+            :batch_size, :q_len
+        ].contiguous()
+        compressed_lengths = compressed_lengths_2d.view(token_count)
         if (
             compressed_lengths.dtype != torch.int32
             or not compressed_lengths.is_cuda
@@ -414,13 +442,18 @@ class MegaCSAAdapter:
         topk = int(attn.indexer.index_topk)
         topk_buffer = metadata.topk_buffer_compressed
         if (
-            topk_buffer.dtype != torch.int32
+            topk_buffer.dim() != 3
+            or int(topk_buffer.shape[0]) < batch_size
+            or int(topk_buffer.shape[1]) < q_len
+            or int(topk_buffer.shape[2]) < topk
+            or topk_buffer.dtype != torch.int32
             or not topk_buffer.is_cuda
             or not topk_buffer.is_contiguous()
-            or int(topk_buffer.numel()) < m * topk
         ):
             raise TypeError("DSV4 mega TopK output must be contiguous CUDA int32")
-        topk_output = topk_buffer[:m].reshape(m, topk)
+        topk_output = topk_buffer[:batch_size, :q_len, :topk].reshape(
+            token_count, topk
+        )
 
         for attn_type, name in ((SWA_KV, "SWA_KV"), (CSA_KV, "CSA_KV")):
             pool = attn._pool_view_3d_fp8(attn_type)
@@ -437,20 +470,22 @@ class MegaCSAAdapter:
         attn._get_fp8_decode_op()
         get_or_build_sched_meta(
             metadata,
-            batch_size=m,
-            q_len=1,
+            batch_size=batch_size,
+            q_len=q_len,
             num_heads=attn.n_heads,
             topk=attn.window_size,
             extra_attn_type=CSA_KV,
         )
 
         score_capacity = int(pools.indexer_block_table.shape[1]) * pools.indexer_entries
-        logits = self.runtime.logits(m, score_capacity, hidden.device)
-        schedule = self.runtime.mqa_schedule(compressed_lengths, pools.indexer_entries)
+        logits = self.runtime.logits(token_count, score_capacity, hidden.device)
+        schedule = self.runtime.mqa_schedule(
+            compressed_lengths_2d, pools.indexer_entries
+        )
         topk_workspace = _get_topk_workspace(hidden.device)
 
         tf32_hc_prenorm_gemm(
-            hidden_rows.view(m, HC * g.dim),
+            hidden_rows.view(token_count, HC * g.dim),
             self.weights.hc_fn,
             workspace.hc_partial,
             workspace.hc_sum_sq,
@@ -487,7 +522,7 @@ class MegaCSAAdapter:
             self.weights.hc_base,
             self.weights.hc_scale,
             workspace.post,
-            workspace.comb.view(m, HC * HC),
+            workspace.comb.view(token_count, HC * HC),
             out=workspace.front_out,
             hc_eps=block.attn_hc.hc_eps,
             main_state=pools.main_state,
@@ -520,7 +555,7 @@ class MegaCSAAdapter:
             idx_state_row=pools.slots.indexer_state_rows,
             state_ring_entries=pools.indexer_state_entries,
             idx_state_block_table=pools.indexer_state_block_table,
-            idx_token_to_req=metadata.req_id_per_token[:m],
+            idx_token_to_req=metadata.req_id_per_token[:token_count],
             idx_state_tokens_per_block=pools.indexer_state_tokens_per_block,
             win_y2=workspace.window_y,
             win_norm=self.weights.window_norm,
@@ -542,14 +577,13 @@ class MegaCSAAdapter:
             pdl=True,
         )
         q_raw, indexer_q, folded_weights = wq_outputs[:3]
-        q_ready = q_raw.view(m, 1, g.main_heads, HEAD_DIM)
 
         dsv4_mega.mqa_logits_fp8_decode_out(
             indexer_q,
             pools.indexer_cache,
             folded_weights,
-            compressed_lengths.view(m, 1),
-            pools.indexer_block_table,
+            compressed_lengths_2d,
+            pools.indexer_block_table[:batch_size],
             schedule,
             logits,
             kv_entries_per_block=pools.indexer_entries,
@@ -562,7 +596,7 @@ class MegaCSAAdapter:
             comp_state_row=pools.slots.main_state_rows,
             comp_state_ring_entries=pools.main_state_entries,
             comp_state_block_table=pools.main_state_block_table,
-            comp_token_to_req=metadata.req_id_per_token[:m],
+            comp_token_to_req=metadata.req_id_per_token[:token_count],
             comp_state_tokens_per_block=pools.main_state_tokens_per_block,
             cmp_cache=pools.main_cache,
             cmp_dst=pools.slots.main_destinations,
@@ -576,6 +610,8 @@ class MegaCSAAdapter:
             query_eps=attn.eps,
             pdl=True,
         )
+        # The fused MQA tail normalizes and rotates q_raw in place.
+        q_ready = q_raw.view(batch_size, q_len, g.main_heads, HEAD_DIM)
 
         rtp_llm_ops.dsv4_persistent_topk(
             logits,
@@ -587,14 +623,14 @@ class MegaCSAAdapter:
         )
         attention = attn._forward_decode_compressed(
             q_ready,
-            topk_output.view(m, 1, topk),
-            m,
-            1,
+            topk_output.view(batch_size, q_len, topk),
+            batch_size,
+            q_len,
             metadata,
             cmp_attn_type=CSA_KV,
         )
         dsv4_mega.mla_o_inv_rope_quant(
-            attention.view(m, g.main_heads, HEAD_DIM),
+            attention.view(token_count, g.main_heads, HEAD_DIM),
             positions_i64,
             rope_cos,
             rope_sin,
@@ -602,14 +638,17 @@ class MegaCSAAdapter:
             workspace.o_proj_scale,
         )
         o_lora = attn._wo_a_einsum_from_fp8(
-            workspace.o_proj_fp8, workspace.o_proj_scale, m, 1
+            workspace.o_proj_fp8,
+            workspace.o_proj_scale,
+            batch_size,
+            q_len,
         )
         projected = attn._lin(attn.wo_b, o_lora.flatten(2))
         return block.attn_hc.post(
             projected,
             hidden,
-            workspace.post.view(m, 1, HC, 1),
-            workspace.comb.view(m, 1, HC, HC),
+            workspace.post.view(batch_size, q_len, HC, 1),
+            workspace.comb.view(batch_size, q_len, HC, HC),
         )
 
 

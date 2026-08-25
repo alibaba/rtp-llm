@@ -190,7 +190,8 @@ def _make_pools(
 ) -> _Pools:
     compressed_pages_per_request = max_seq_len // _TOKENS_PER_BLOCK
     compressed_blocks = 1 + batch_size * compressed_pages_per_request
-    fixed_blocks = 1 + batch_size
+    fixed_blocks_per_request = 2
+    fixed_blocks = 1 + batch_size * fixed_blocks_per_request
     hca_stride = _align_up(
         _HCA_ENTRIES_PER_BLOCK * _KV_ENTRY_BYTES,
         _KV_BLOCK_ALIGNMENT_BYTES,
@@ -219,8 +220,11 @@ def _make_pools(
         device=device,
     ).view(batch_size, compressed_pages_per_request)
     fixed_tables = torch.arange(
-        1, 1 + batch_size, dtype=torch.int32, device=device
-    ).view(batch_size, 1)
+        1,
+        1 + batch_size * fixed_blocks_per_request,
+        dtype=torch.int32,
+        device=device,
+    ).view(batch_size, fixed_blocks_per_request)
     block_tables = {
         HCA_KV: compressed_tables,
         HCA_STATE: fixed_tables,
@@ -385,13 +389,13 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         cls.mega_pools = _make_pools(cls.device, batch_size=1)
         cls.reference_pools = _make_pools(cls.device, batch_size=1)
 
-    def _metadata(self, position: int, pools: _Pools):
+    def _metadata(self, position: int, pools: _Pools, q_len: int = 1):
         batch_size = int(pools.block_tables[HCA_KV].shape[0])
         return build_decode_metadata_fp8(
             attention_inputs=torch.full(
                 (batch_size,), position, dtype=torch.int32, device=self.device
             ),
-            q_len=1,
+            q_len=q_len,
             window_size=128,
             head_dim=HEAD_DIM,
             max_seq_len=pools.max_seq_len,
@@ -435,7 +439,7 @@ class MegaHCARTPEagerTest(unittest.TestCase):
     def _run_mega_step(
         self, position: int, hidden: torch.Tensor, pools: _Pools
     ) -> tuple[torch.Tensor, object]:
-        metadata = self._metadata(position, pools)
+        metadata = self._metadata(position, pools, int(hidden.shape[1]))
         self.runtime.begin_decode(metadata)
         output = self._forward_mega(hidden, metadata, pools)
         self.assertEqual(tuple(output.shape), tuple(hidden.shape))
@@ -446,7 +450,7 @@ class MegaHCARTPEagerTest(unittest.TestCase):
     def _run_reference_step(
         self, position: int, hidden: torch.Tensor, pools: _Pools
     ) -> tuple[torch.Tensor, object]:
-        metadata = self._metadata(position, pools)
+        metadata = self._metadata(position, pools, int(hidden.shape[1]))
         output = self._forward_reference(hidden, metadata, pools)
         self.assertEqual(tuple(output.shape), tuple(hidden.shape))
         self.assertTrue(torch.isfinite(output).all().item())
@@ -469,14 +473,15 @@ class MegaHCARTPEagerTest(unittest.TestCase):
             mega_slots = mega_metadata.pool_write_slot_mappings[attn_type]
             reference_slots = reference_metadata.pool_write_slot_mappings[attn_type]
             torch.testing.assert_close(mega_slots, reference_slots, rtol=0.0, atol=0.0)
-            self.assertTrue((mega_slots >= 0).all().item(), msg=f"{label} {name}")
+            valid = mega_slots >= 0
+            self.assertTrue(valid.any().item(), msg=f"{label} {name}")
             mega_value = dequantize_slots_to_bf16(
                 mega_pools.packed_view(attn_type, entries, _KV_ENTRY_BYTES),
-                mega_slots.to(torch.int64),
+                mega_slots[valid].to(torch.int64),
             )
             reference_value = dequantize_slots_to_bf16(
                 reference_pools.packed_view(attn_type, entries, _KV_ENTRY_BYTES),
-                reference_slots.to(torch.int64),
+                reference_slots[valid].to(torch.int64),
             )
             value_diff = calc_diff(mega_value.float(), reference_value.float())
             print(f"{label} Mega/reference {name} calc_diff: {value_diff:.6e}")
@@ -595,6 +600,45 @@ class MegaHCARTPEagerTest(unittest.TestCase):
             f"calc_diff: {output_diff:.6e}"
         )
         self.assertLess(output_diff, 1.0e-3)
+
+    def test_mtp_matches_original_rtp_across_compression_boundary(self) -> None:
+        batch_size, q_len = 2, 3
+        mega_pools = _make_pools(self.device, batch_size=batch_size)
+        reference_pools = _make_pools(self.device, batch_size=batch_size)
+        _fill_random_context(mega_pools, self.device, seed=1618)
+        _fill_random_context(reference_pools, self.device, seed=1618)
+        _fill_random_state(mega_pools, self.device, seed=2718)
+        _fill_random_state(reference_pools, self.device, seed=2718)
+        generator = torch.Generator(device=self.device).manual_seed(3141)
+        hidden = torch.randn(
+            (batch_size, q_len, HC, DIM),
+            generator=generator,
+            device=self.device,
+            dtype=torch.bfloat16,
+        ).mul_(0.05)
+
+        # Positions 125, 126, 127 include one ratio-128 compression boundary.
+        reference_output, reference_metadata = self._run_reference_step(
+            125, hidden.clone(), reference_pools
+        )
+        mega_output, mega_metadata = self._run_mega_step(
+            125, hidden.clone(), mega_pools
+        )
+
+        output_diff = calc_diff(mega_output.float(), reference_output.float())
+        print(
+            "Mega/reference HCA MTP attention sublayer "
+            f"B={batch_size}, S={q_len}: calc_diff={output_diff:.6e}"
+        )
+        self.assertLess(output_diff, 1.0e-3)
+        self._assert_written_pools_match(
+            mega_metadata,
+            reference_metadata,
+            mega_pools,
+            reference_pools,
+            label=f"HCA MTP B={batch_size} S={q_len}",
+            expect_boundary_write=True,
+        )
 
     def test_cuda_graph_capture_and_replay(self) -> None:
         self.mega_pools.reset()

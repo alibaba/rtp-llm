@@ -1,4 +1,4 @@
-"""Thin TP1 DSV4-Pro HCA attention-sublayer megakernel adapter."""
+"""Thin TP1 DSV4 HCA attention-sublayer megakernel adapter."""
 
 from __future__ import annotations
 
@@ -59,10 +59,15 @@ class MegaHCAAdapter:
     @staticmethod
     def supports_decode_shape(hidden: torch.Tensor, metadata: Any) -> bool:
         """Return whether this request can enter the fixed TP1 kernel geometry."""
+        if hidden.dim() != 4:
+            return False
+        batch_size, q_len = int(hidden.shape[0]), int(hidden.shape[1])
         return (
-            int(getattr(metadata, "q_len_per_req", 0)) == 1
-            and hidden.dim() == 4
-            and 1 <= int(hidden.shape[0]) <= MAX_BATCH
+            batch_size >= 1
+            and q_len >= 1
+            and batch_size * q_len <= MAX_BATCH
+            and int(getattr(metadata, "batch_size", 0)) == batch_size
+            and int(getattr(metadata, "q_len_per_req", 0)) == q_len
         )
 
     @staticmethod
@@ -264,19 +269,26 @@ class MegaHCAAdapter:
         g = self._geometry
         if hidden.dim() != 4 or tuple(hidden.shape[2:]) != (HC, g.dim):
             raise ValueError(
-                f"DSV4 mega hidden must be [B,1,{HC},{g.dim}], "
+                f"DSV4 mega hidden must be [B,S,{HC},{g.dim}], "
                 f"got {tuple(hidden.shape)}"
             )
-        m, q_len = int(hidden.shape[0]), int(hidden.shape[1])
-        if q_len != 1 or not 1 <= m <= MAX_BATCH:
-            raise ValueError(f"DSV4 mega requires q_len=1 and batch in [1,{MAX_BATCH}]")
+        batch_size, q_len = int(hidden.shape[0]), int(hidden.shape[1])
+        token_count = batch_size * q_len
+        if batch_size < 1 or q_len < 1 or token_count > MAX_BATCH:
+            raise ValueError(
+                f"DSV4 mega requires B>=1, S>=1, and B*S<={MAX_BATCH}; "
+                f"got B={batch_size}, S={q_len}"
+            )
         if (
             hidden.dtype != torch.bfloat16
             or not hidden.is_cuda
             or not hidden.is_contiguous()
         ):
             raise TypeError("DSV4 mega hidden must be contiguous CUDA bfloat16")
-        if metadata.batch_size != m or metadata.q_len_per_req != 1:
+        if (
+            metadata.batch_size != batch_size
+            or metadata.q_len_per_req != q_len
+        ):
             raise ValueError("DSV4 mega hidden and metadata geometry disagree")
         if metadata.position_ids_long is None:
             raise RuntimeError("DSV4 mega metadata is missing int64 positions")
@@ -290,7 +302,7 @@ class MegaHCAAdapter:
         attn._block_tables_by_type = metadata.pool_block_tables
         try:
             attn._ensure_freqs_cis_bound()
-            pools = self._bind_pools(block, metadata, m)
+            pools = self._bind_pools(block, metadata, token_count)
             return self._forward_bound(block, hidden, metadata, pools, dsv4_mega)
         finally:
             attn._kv_cache = previous_kv
@@ -312,23 +324,31 @@ class MegaHCAAdapter:
         )
 
         attn = block.attn
-        m = int(hidden.shape[0])
-        positions_i64 = metadata.position_ids_long[:m]
+        batch_size, q_len = int(hidden.shape[0]), int(hidden.shape[1])
+        token_count = batch_size * q_len
+        positions_i64 = metadata.position_ids_long[:token_count]
         if positions_i64.dtype != torch.int64:
             raise TypeError("DSV4 mega positions must provide an int64 tensor")
         rope_cos, rope_sin = self.runtime.rope_tables(attn.freqs_cis)
-        num_split = self.runtime.num_hc_splits(m, hidden.device, g.dim)
-        workspace = self.runtime.hca_layer_workspace(m, num_split, hidden.device, g)
-        hidden_rows = hidden.view(m, HC, g.dim)
+        num_split = self.runtime.num_hc_splits(token_count, hidden.device, g.dim)
+        workspace = self.runtime.hca_layer_workspace(
+            token_count, num_split, hidden.device, g
+        )
+        hidden_rows = hidden.view(token_count, HC, g.dim)
 
         # Dense compressed index — built once per step for every HCA layer.
         window = int(attn.window_size)
         dense_total = metadata.topk_total_by_ratio.get(HCA_COMPRESS_RATIO)
-        if dense_total is None or int(dense_total.shape[0]) < m:
+        if (
+            dense_total is None
+            or dense_total.dim() != 3
+            or int(dense_total.shape[0]) < batch_size
+            or int(dense_total.shape[1]) < q_len
+        ):
             raise RuntimeError(
                 "DSV4 mega metadata is missing the HCA dense compressed index"
             )
-        cmp_local_raw = dense_total[:m, :, window:]
+        cmp_local_raw = dense_total[:batch_size, :q_len, window:]
 
         for attn_type, name in ((SWA_KV, "SWA_KV"), (HCA_KV, "HCA_KV")):
             pool = attn._pool_view_3d_fp8(attn_type)
@@ -345,15 +365,15 @@ class MegaHCAAdapter:
         attn._get_fp8_decode_op()
         get_or_build_sched_meta(
             metadata,
-            batch_size=m,
-            q_len=1,
+            batch_size=batch_size,
+            q_len=q_len,
             num_heads=attn.n_heads,
             topk=window,
             extra_attn_type=HCA_KV,
         )
 
         tf32_hc_prenorm_gemm(
-            hidden_rows.view(m, HC * g.dim),
+            hidden_rows.view(token_count, HC * g.dim),
             self.weights.hc_fn,
             workspace.hc_partial,
             workspace.hc_sum_sq,
@@ -367,7 +387,7 @@ class MegaHCAAdapter:
             self.weights.hc_scale,
             block.attn_hc.hc_eps,
             block.attn_hc.norm_eps,
-            workspace.collapsed[:m],
+            workspace.collapsed[:token_count],
             workspace.pre,
             workspace.post,
             workspace.comb,
@@ -375,8 +395,8 @@ class MegaHCAAdapter:
             attn_norm_w=self.weights.attn_norm,
             attn_norm_eps=block.attn_hc.norm_eps,
             mix_out=workspace.mix,
-            xq_out=workspace.hidden_fp8[:m].view(torch.uint8),
-            xsf_out=workspace.hidden_sf[:m],
+            xq_out=workspace.hidden_fp8[:token_count].view(torch.uint8),
+            xsf_out=workspace.hidden_sf[:token_count],
             pdl=False,
         )
         # PDL stays off by design: the op's bf16 feature tasks read
@@ -394,13 +414,13 @@ class MegaHCAAdapter:
             self.weights.hc_base,
             self.weights.hc_scale,
             workspace.post,
-            workspace.comb.view(m, HC * HC),
+            workspace.comb.view(token_count, HC * HC),
             positions_i64,
             pools.slots.state_rows,
             self.weights.compressor_ape,
             pools.state_kv,
             pools.state_gate,
-            m,
+            token_count,
             hc_eps=block.attn_hc.hc_eps,
             pdl=False,
         )
@@ -431,20 +451,20 @@ class MegaHCAAdapter:
         # final RoPE dimensions before entering the unchanged FlashMLA path.
         freqs_cis = attn.freqs_cis.index_select(0, positions_i64).contiguous()
         q_ready = dsv4_mega.q_rmsnorm_rope_cuda_(
-            q_raw.view(m, 1, g.main_heads, HEAD_DIM),
+            q_raw.view(batch_size, q_len, g.main_heads, HEAD_DIM),
             freqs_cis,
             eps=attn.eps,
         )
         attention = attn._forward_decode_compressed(
             q_ready,
             cmp_local_raw,
-            m,
-            1,
+            batch_size,
+            q_len,
             metadata,
             cmp_attn_type=HCA_KV,
         )
         dsv4_mega.mla_o_inv_rope_quant(
-            attention.view(m, g.main_heads, HEAD_DIM),
+            attention.view(token_count, g.main_heads, HEAD_DIM),
             positions_i64,
             rope_cos,
             rope_sin,
@@ -452,14 +472,17 @@ class MegaHCAAdapter:
             workspace.o_proj_scale,
         )
         o_lora = attn._wo_a_einsum_from_fp8(
-            workspace.o_proj_fp8, workspace.o_proj_scale, m, 1
+            workspace.o_proj_fp8,
+            workspace.o_proj_scale,
+            batch_size,
+            q_len,
         )
         projected = attn._lin(attn.wo_b, o_lora.flatten(2))
         return block.attn_hc.post(
             projected,
             hidden,
-            workspace.post.view(m, 1, HC, 1),
-            workspace.comb.view(m, 1, HC, HC),
+            workspace.post.view(batch_size, q_len, HC, 1),
+            workspace.comb.view(batch_size, q_len, HC, HC),
         )
 
 

@@ -124,17 +124,34 @@ class MegaHCARoutingTest(unittest.TestCase):
         block.attn_hc.pre.assert_not_called()
         block.attn.forward_decode.assert_not_called()
 
-    def test_target_verify_keeps_existing_attention_path(self) -> None:
+    def test_target_verify_within_flat_token_limit_uses_mega(self) -> None:
         adapter = MagicMock()
-        adapter.supports_decode_shape.return_value = False
+        adapter.supports_decode_shape.side_effect = MegaHCAAdapter.supports_decode_shape
+        adapter.forward_attention_sublayer.side_effect = (
+            lambda _block, value, *_a, **_k: value
+        )
         block = _block_stub(adapter)
         hidden = torch.zeros(2, 3, 1, 4)
-        metadata = SimpleNamespace(q_len_per_req=3)
+        metadata = SimpleNamespace(batch_size=2, q_len_per_req=3)
 
-        block.forward_decode(hidden, metadata, torch.zeros(2, 3, dtype=torch.long))
+        result = block.forward_decode(
+            hidden, metadata, torch.zeros(2, 3, dtype=torch.long)
+        )
+
+        self.assertEqual(tuple(result.shape), tuple(hidden.shape))
+        adapter.forward_attention_sublayer.assert_called_once()
+        block.attn_hc.pre.assert_not_called()
+        block.attn.forward_decode.assert_not_called()
+
+    def test_flat_token_count_above_limit_keeps_existing_attention_path(self) -> None:
+        adapter = MagicMock(wraps=MegaHCAAdapter.__new__(MegaHCAAdapter))
+        block = _block_stub(adapter)
+        hidden = torch.zeros(43, 3, 1, 4)
+        metadata = SimpleNamespace(batch_size=43, q_len_per_req=3)
+
+        block.forward_decode(hidden, metadata, torch.zeros(43, 3))
 
         adapter.forward_attention_sublayer.assert_not_called()
-        block.attn_hc.pre.assert_called_once()
         block.attn.forward_decode.assert_called_once()
 
     def test_hca_failure_is_not_retried_on_existing_path(self) -> None:
