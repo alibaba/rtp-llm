@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
+#include "rtp_llm/models_py/bindings/common/FusedCopyOp.h"
 #include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
 #include "rtp_llm/models_py/bindings/rocm/hip_host_utils.h"
 #include "rtp_llm/models_py/bindings/rocm/FakeBalanceExpertOp.h"
@@ -12,6 +13,12 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("fused_multimodal_copy_",
+                  &fusedMultimodalCopy,
+                  "Fuse multimodal embedding D2D copies",
+                  py::arg("dst"),
+                  py::arg("srcs"),
+                  py::arg("row_offsets"));
     rtp_ops_m.def("fused_add_layernorm",
                   &fused_add_layernorm,
                   "Fused Add LayerNorm kernel",
