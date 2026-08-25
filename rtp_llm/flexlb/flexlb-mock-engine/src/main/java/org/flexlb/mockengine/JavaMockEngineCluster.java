@@ -56,6 +56,8 @@ public final class JavaMockEngineCluster {
     static final long DEFAULT_TOTAL_KV_TOKENS = 6_291_456L;
     /** Default decode available_concurrency reported to the master (previously hard-coded 132). */
     static final int DEFAULT_DECODE_MAX_CONCURRENCY = 132;
+    /** CLI flag for unique per-engine loopback advertisement IPs (default on). */
+    static final String UNIQUE_ENGINE_IPS_FLAG = "--unique-engine-ips";
 
     private JavaMockEngineCluster() {
     }
@@ -155,8 +157,12 @@ public final class JavaMockEngineCluster {
             int grpcPort = config.baseGrpcPort + portOffset + i;
             int cacheCapacity = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                     ? config.prefillCacheBlocks : config.decodeCacheBlocks;
+            // Declared (advertisement) host: unique 127.x.y.z per engine when
+            // enabled. portOffset + i is the engine's global index (prefill
+            // first, decode after). The gRPC server bind below stays wildcard
+            // (forPort) — only the advertised address changes.
             FastRpcService service = new FastRpcService(
-                    roleName + "-" + i, config.host, roleName, roleType, grpcPort,
+                    roleName + "-" + i, declaredHost(config, portOffset + i), roleName, roleType, grpcPort,
                     services, scheduler, performance, cacheCapacity, stats,
                     config.totalKvTokens, config.decodeMaxConcurrency);
             services.put(grpcPort, service);
@@ -266,9 +272,9 @@ public final class JavaMockEngineCluster {
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
-        String prefillAddresses = addressList(config.host, config.baseGrpcPort, config.nPrefill);
+        String prefillAddresses = addressList(config, 0, config.baseGrpcPort, config.nPrefill);
         String decodeAddresses = addressList(
-                config.host, config.baseGrpcPort + config.nPrefill, config.nDecode);
+                config, config.nPrefill, config.baseGrpcPort + config.nPrefill, config.nDecode);
 
         Map<String, Object> prefillEndpoint = new LinkedHashMap<>();
         prefillEndpoint.put("address", config.prefillDomain);
@@ -318,13 +324,62 @@ public final class JavaMockEngineCluster {
         }
     }
 
-    private static String addressList(String host, int firstGrpcPort, int count) {
+    /**
+     * Declared host for engine {@code engineIndex} (global index: prefill
+     * engines first, then decode): a unique 127.x.y.z loopback address when
+     * {@code --unique-engine-ips} is on (default), else {@link Config#host}.
+     *
+     * <p>Motivation: when every engine advertises host 127.0.0.1, the master's
+     * Prometheus {@code engineIp} label has a single variant and per-engine
+     * gauge series (batcher queue / KV / inflight) overwrite each other. Unique
+     * advertisement IPs make the labels distinct. The gRPC server bind is
+     * unchanged (wildcard {@code forPort}); Linux routes all of 127.0.0.0/8 to
+     * loopback, so master-to-engine connections to these addresses work on the
+     * remote eval hosts.
+     */
+    static String declaredHost(Config config, int engineIndex) {
+        return config.uniqueEngineIps ? derivedLoopbackIp(engineIndex) : config.host;
+    }
+
+    /**
+     * Derives the unique loopback advertisement IP for engine index
+     * {@code engineIndex}: {@code 127.(idx/250 + 1).(idx%250)} — the third
+     * octet starts at 1 to stay out of the real 127.0.0.x range, and 250
+     * slots per third octet mean 1250 engines (750P + 500D) fit inside
+     * 127.1.0.0-127.5.249. Valid for engineIndex in [0, 63749].
+     */
+    static String derivedLoopbackIp(int engineIndex) {
+        if (engineIndex < 0) {
+            throw new IllegalArgumentException("engine index must be >= 0");
+        }
+        int thirdOctet = engineIndex / 250 + 1;
+        if (thirdOctet > 255) {
+            throw new IllegalArgumentException(
+                    "engine index " + engineIndex + " exceeds the unique loopback IP space (max 63749)");
+        }
+        return "127." + thirdOctet + "." + (engineIndex % 250);
+    }
+
+    /** Parses a strict true/false CLI value for {@code flag}. */
+    static boolean parseBooleanFlag(String value, String flag) {
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException(
+                "Invalid boolean value for " + flag + ": " + value + " (expected true|false)");
+    }
+
+    private static String addressList(Config config, int firstEngineIndex, int firstGrpcPort, int count) {
         StringBuilder addresses = new StringBuilder(count * 20);
         for (int i = 0; i < count; i++) {
             if (i > 0) {
                 addresses.append(',');
             }
-            addresses.append(host).append(':').append(firstGrpcPort + i - 1);
+            addresses.append(declaredHost(config, firstEngineIndex + i))
+                    .append(':').append(firstGrpcPort + i - 1);
         }
         return addresses.toString();
     }
@@ -336,14 +391,15 @@ public final class JavaMockEngineCluster {
                                          String role) {
         for (int i = 0; i < count; i++) {
             int grpcPort = config.baseGrpcPort + portOffset + i;
+            String host = declaredHost(config, portOffset + i);
             Map<String, Object> engine = new LinkedHashMap<>();
             engine.put("name", role + "-" + i);
             engine.put("role", role);
-            engine.put("ip", config.host);
+            engine.put("ip", host);
             engine.put("grpc_port", grpcPort);
             engine.put("http_port", grpcPort - 1);
-            engine.put("grpc_addr", config.host + ":" + grpcPort);
-            engine.put("http_addr", config.host + ":" + (grpcPort - 1));
+            engine.put("grpc_addr", host + ":" + grpcPort);
+            engine.put("http_addr", host + ":" + (grpcPort - 1));
             engines.add(engine);
         }
     }
@@ -2206,11 +2262,25 @@ public final class JavaMockEngineCluster {
         int blockSize = 0;
         int decodeMaxConcurrency = DEFAULT_DECODE_MAX_CONCURRENCY;
         int statsIntervalMs = 5000;
+        /**
+         * Unique per-engine loopback advertisement IPs (127.x.y.z), default on:
+         * keeps the master-side engineIp Prometheus label distinct per engine.
+         * Disable with --unique-engine-ips=false for the legacy single-host
+         * behavior (every engine declares Config.host).
+         */
+        boolean uniqueEngineIps = true;
 
         static Config parse(String[] args) {
             Config config = new Config();
             for (int i = 0; i < args.length; i++) {
                 String key = args[i];
+                // Boolean flag glued form (--unique-engine-ips=false): the
+                // value travels with the key, so no separate value is consumed.
+                if (key.startsWith(UNIQUE_ENGINE_IPS_FLAG + "=")) {
+                    config.uniqueEngineIps = parseBooleanFlag(
+                            key.substring(UNIQUE_ENGINE_IPS_FLAG.length() + 1), UNIQUE_ENGINE_IPS_FLAG);
+                    continue;
+                }
                 if (i + 1 >= args.length) {
                     throw new IllegalArgumentException("Missing value for " + key);
                 }
@@ -2234,6 +2304,8 @@ public final class JavaMockEngineCluster {
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
                     case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
+                    case UNIQUE_ENGINE_IPS_FLAG -> config.uniqueEngineIps =
+                            parseBooleanFlag(value, UNIQUE_ENGINE_IPS_FLAG);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
                 }
             }

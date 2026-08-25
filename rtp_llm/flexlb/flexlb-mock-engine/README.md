@@ -210,6 +210,17 @@ The sections above describe the shared `feat/flexlb_mock_engine_v2` baseline.
 This branch (`feat/flexlb_mock_engine_v2_intake`, based on
 `codex/auto-tpm-request-mode`) additionally carries the following capabilities.
 
+### Unique engine advertisement IPs
+
+Every engine advertises a unique 127.x.y.z loopback IP (default on; `--unique-engine-ips=false`
+reverts to the legacy shared `--host`) instead of all declaring 127.0.0.1, so the master-side
+`engineIp` Prometheus label stays distinct per engine — with a shared host, per-engine gauge
+series (batcher queue / KV / inflight) overwrote each other. The gRPC bind stays wildcard
+(`forPort`), only the advertised address changes (worker status, `DOMAIN_ADDRESS`,
+endpoints.json, `/metrics` `engine_ip` label); Linux routes all of 127.0.0.0/8 to loopback, but
+macOS only reaches 127.0.0.1 by default — disable the flag for local macOS runs that connect
+across engine addresses.
+
 ### Cancel channel
 
 - **`MockEngineCancelChannel`** (`src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java`):
