@@ -1,9 +1,10 @@
-package org.flexlb.cache.core;
+package org.flexlb.cache.match.localsync;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,7 +12,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -29,16 +32,16 @@ import java.util.concurrent.atomic.LongAdder;
 @Getter
 @Component
 public class KvCacheManager {
-    
+
     @Autowired
     private GlobalCacheIndex globalCacheIndex;
-    
+
     @Autowired
     private EngineLocalView engineLocalView;
-    
+
     @Autowired
     private WorkerStatusProvider workerStatusProvider;
-    
+
     /**
      * Cache metrics reporter
      */
@@ -54,7 +57,7 @@ public class KvCacheManager {
     public void init() {
         log.info("KvCacheManager initialized successfully");
     }
-    
+
     @PreDestroy
     public void destroy() {
         log.info("KvCacheManager shutting down...");
@@ -77,7 +80,9 @@ public class KvCacheManager {
         }
 
         // Use candidate engine list
-        List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(roleType, group);
+        List<String> enginesIpPorts = workerStatusProvider.getWorkerStatuses(roleType, group).stream()
+                .map(WorkerStatus::getIpPort)
+                .toList();
 
         // Batch calculate prefix match length
         return globalCacheIndex.batchCalculatePrefixMatchLength(enginesIpPorts, blockCacheKeys);
@@ -127,7 +132,25 @@ public class KvCacheManager {
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
-    
+
+    /**
+     * Remove cache metadata for engines that are no longer present in service discovery.
+     */
+    public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
+        if (activeEngineIpPorts == null) {
+            return;
+        }
+        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
+        staleEngineIpPorts.removeAll(new HashSet<>(activeEngineIpPorts));
+        for (String staleEngineIpPort : staleEngineIpPorts) {
+            long startTime = System.nanoTime() / 1000;
+            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            log.info("Removed stale engine cache: {}, cost={}us",
+                    staleEngineIpPort, System.nanoTime() / 1000 - startTime);
+        }
+    }
+
     /**
      * Clear all data
      */

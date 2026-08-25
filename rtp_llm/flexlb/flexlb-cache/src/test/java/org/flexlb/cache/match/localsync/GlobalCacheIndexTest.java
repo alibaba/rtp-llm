@@ -1,4 +1,4 @@
-package org.flexlb.cache.core;
+package org.flexlb.cache.match.localsync;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,7 +45,7 @@ class GlobalCacheIndexTest {
     void testBasicPrefixMatching() {
         // Set up test data
         // Block 1L: engine1, engine2, engine3
-        // Block 2L: engine1, engine3  
+        // Block 2L: engine1, engine3
         // Block 3L: engine1
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");
@@ -151,8 +151,7 @@ class GlobalCacheIndexTest {
         // Test single block single engine case
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
-                List.of("engine1"), List.of(1L));
+        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(List.of("engine1"), List.of(1L));
 
         assertEquals(1, result.get("engine1").intValue(), "Single engine should match single block");
     }

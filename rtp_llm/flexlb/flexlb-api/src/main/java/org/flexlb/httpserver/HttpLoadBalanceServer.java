@@ -1,26 +1,33 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.cache.hash.RequestBlockHashService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.MasterInfoResponse;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.address.FlexlbInstanceAddressService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -30,6 +37,8 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
@@ -46,19 +55,34 @@ public class HttpLoadBalanceServer {
     private final EngineHealthReporter engineHealthReporter;
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
+    private final RequestBlockHashService requestBlockHashService;
+    private final CacheAwareService cacheAwareService;
+    private final FlexlbInstanceAddressService instanceAddressService;
+    private final OptimizerClient optimizerClient;
+    private final ExecutorService doFinallyExecutor;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
                                  LBStatusConsistencyService lbStatusConsistencyService,
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
-                                 ActiveRequestCounter activeRequestCounter) {
+                                 ActiveRequestCounter activeRequestCounter,
+                                 RequestBlockHashService requestBlockHashService,
+                                 CacheAwareService cacheAwareService,
+                                 FlexlbInstanceAddressService instanceAddressService,
+                                 OptimizerClient optimizerClient,
+                                 @Qualifier("doFinallyExecutor") ExecutorService doFinallyExecutor) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
+        this.requestBlockHashService = requestBlockHashService;
+        this.cacheAwareService = cacheAwareService;
+        this.instanceAddressService = instanceAddressService;
+        this.optimizerClient = optimizerClient;
+        this.doFinallyExecutor = doFinallyExecutor;
     }
 
     @Bean
@@ -72,8 +96,6 @@ public class HttpLoadBalanceServer {
                         this::dumpLBStatus)
                 .POST("/rtp_llm/notify_master", accept(MediaType.APPLICATION_JSON),
                         this::notifyParticipant)
-                .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
-                        this::debugMode)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
                 .build();
@@ -87,29 +109,42 @@ public class HttpLoadBalanceServer {
      */
     public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
         BalanceContext ctx = new BalanceContext();
+        request.headers().contentLength().ifPresent(ctx::setRequestBodyBytes);
+        long bodyReadStartTimeNs = System.nanoTime();
         return request.bodyToMono(Request.class)
                 .flatMap(req -> {
-                    if (req.getRequestId() == 0) {
-                        throw new IllegalArgumentException("requestId is 0");
-                    }
                     ctx.setRequest(req);
+                    if (req.getInputIds() != null) {
+                        ctx.setInputIdsCount((long) req.getInputIds().length);
+                    }
+                    ctx.recordRequestTiming(
+                            req.getRequestTimeMs(),
+                            (System.nanoTime() - bodyReadStartTimeNs) / 1_000);
+                    if (StringUtils.isBlank(req.getRequestId())) {
+                        throw new IllegalArgumentException("requestId must not be blank");
+                    }
                     return Mono.using(
                             activeRequestCounter::acquire,
                             ignored -> processScheduledRequest(ctx, req),
                             ActiveRequestCounter.RequestToken::close);
                 })
                 .onErrorResume(e -> handleRequestError(ctx, e))
-                .doFinally(signal -> finalizeRequestContext(ctx));
+                .doFinally(signal -> doFinallyAsync(ctx));
     }
 
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
         engineHealthReporter.reportArriveDelayTime(ctx);
 
+        if (routeService.isFallbackEnabled()) {
+            return handleRoutingResult(ctx, Response.error(StrategyErrorType.FALLBACK));
+        }
+
         if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
             return forwardRequestToMaster(ctx, req);
         }
 
-        return routeService.route(ctx)
+        return requestBlockHashService.prepareBlockCacheKeys(ctx)
+                .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .doOnCancel(() -> {
                     ctx.setSuccess(false);
@@ -118,32 +153,17 @@ public class HttpLoadBalanceServer {
                 });
     }
 
-    private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
-        return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
-                .flatMap(logLevelUpdateRequest -> {
-                    Logger.setGlobalLogLevel(logLevelUpdateRequest.getLogLevel());
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + Logger.getGlobalLogLevel()), String.class);
-                }).onErrorResume(e -> {
-                    Logger.error("update logLevel error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                });
-    }
-
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
-                    Response result = new Response();
+                    MasterInfoResponse result = new MasterInfoResponse();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    result.setPodIp(instanceAddressService.getPodIp());
+                    result.setInstanceIp(instanceAddressService.getInstanceIp());
                     result.setQueueLength(queueManager.getQueue().size());
-                    result.setCode(200);
-                    result.setSuccess(true);
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(result), Response.class);
+                            .bodyValue(result);
                 }).onErrorResume(e -> {
                     Logger.error("responseMasterInfo error", e);
                     Response errorResponse = new Response();
@@ -233,9 +253,13 @@ public class HttpLoadBalanceServer {
     }
 
     private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
-        return routeService.route(ctx)
+        return requestBlockHashService.prepareBlockCacheKeys(ctx)
+                .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .onErrorResume(e -> {
+                    if (e instanceof RejectedExecutionException) {
+                        return Mono.error(e);
+                    }
                     Logger.error("[Fallback] Local routing failed", e);
                     Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
                     return ServerResponse.status(500)
@@ -253,6 +277,7 @@ public class HttpLoadBalanceServer {
      */
     private Mono<ServerResponse> handleRoutingResult(BalanceContext ctx, Response response) {
 
+        ctx.setResponse(response);
         response.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
 
         if (response.isSuccess()) {
@@ -262,6 +287,22 @@ public class HttpLoadBalanceServer {
             ctx.setSuccess(false);
             ctx.setErrorMessage("error_code:" + response.getErrorMessage());
             return buildErrorResponse(response);
+        }
+    }
+
+    private void fireTraceQuery(BalanceContext ctx) {
+        try {
+            Request req = ctx.getRequest();
+            Response response = ctx.getResponse();
+            if (ctx.isSuccess() && req != null && response != null && response.isSuccess()) {
+                ServerStatus selectedWorker = response.getServerStatus() == null
+                        || response.getServerStatus().isEmpty()
+                        ? null
+                        : response.getServerStatus().getFirst();
+                optimizerClient.traceQuery(req, selectedWorker);
+            }
+        } catch (Exception e) {
+            Logger.warn("Failed to dispatch optimizer trace query", e);
         }
     }
 
@@ -297,23 +338,76 @@ public class HttpLoadBalanceServer {
      * @return error response
      */
     private Mono<ServerResponse> handleRequestError(BalanceContext ctx, Throwable throwable) {
-        Logger.error("Request processing error", throwable);
         ctx.setSuccess(false);
         ctx.setErrorMessage(throwable.getMessage());
 
+        if (throwable instanceof IllegalArgumentException) {
+            Logger.warn("Invalid schedule request: {}", throwable.getMessage());
+            Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
+            errorResponse.setErrorMessage(throwable.getMessage());
+            return ServerResponse.badRequest()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(errorResponse);
+        }
+
+        if (throwable instanceof RejectedExecutionException) {
+            Logger.warn("Block hash executor is saturated");
+            ctx.setErrorMessage("block hash executor queue is full");
+            Response errorResponse = Response.error(StrategyErrorType.QUEUE_FULL);
+            errorResponse.setErrorMessage("block hash executor queue is full");
+            return ServerResponse.status(503)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(errorResponse);
+        }
+
+        Logger.error("Request processing error", throwable);
         return ServerResponse.status(500)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Mono.just(throwable.getMessage()), String.class);
     }
 
     /**
-     * Finalizes the request context by reporting metrics.
+     * Finalizes request metrics and publishes request-derived cache metadata.
      *
      * @param ctx the balance context to finalize
      */
     private void finalizeRequestContext(BalanceContext ctx) {
+        ctx.finishRequestTiming();
+        engineHealthReporter.reportRequestPayload(ctx);
         engineHealthReporter.reportBalancingService(ctx);
         logPvRecord(ctx);
+        updateRequestCacheMetadata(ctx);
+    }
+
+    /**
+     * Request finalization writes logs, reports metrics, and updates cache metadata, so it is
+     * kept off the Reactor event loop during normal operation.
+     */
+    private void doFinallyAsync(BalanceContext ctx) {
+        doFinallyExecutor.execute(() -> doFinally(ctx));
+    }
+
+    private void doFinally(BalanceContext ctx) {
+        try {
+            finalizeRequestContext(ctx);
+        } catch (Exception e) {
+            Logger.error("Failed to finalize request context", e);
+        }
+        fireTraceQuery(ctx);
+    }
+
+    private void updateRequestCacheMetadata(BalanceContext ctx) {
+        try {
+            Response response = ctx.getResponse();
+            if (!ctx.isSuccess()
+                    || response == null || !response.isSuccess()
+                    || response.getServerStatus() == null || response.getServerStatus().isEmpty()) {
+                return;
+            }
+            cacheAwareService.updateFromRoutedRequest(ctx.getRequest(), response.getServerStatus());
+        } catch (Exception e) {
+            Logger.warn("Failed to update request cache metadata", e);
+        }
     }
 
     /**
@@ -322,10 +416,8 @@ public class HttpLoadBalanceServer {
      * @param ctx the balance context containing PV log data
      */
     private void logPvRecord(BalanceContext ctx) {
-
-        PvLogData pvLogData = new PvLogData(ctx);
-
         try {
+            PvLogData pvLogData = new PvLogData(ctx);
             String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
             if (pvLogData.isSuccess()) {
                 pvLogger.info(jsonLog);

@@ -1,5 +1,6 @@
 package org.flexlb.dao.loadbalance;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
@@ -15,11 +16,29 @@ public class Request {
     @JsonProperty("block_cache_keys")
     private List<Long> blockCacheKeys;
 
+    @JsonIgnore
+    @ToString.Exclude
+    private List<Long> localStandbyBlockCacheKeys;
+
+    @JsonIgnore
+    @ToString.Exclude
+    private List<Long> localStandbyCacheableBlockCacheKeys;
+
+    @JsonIgnore
+    private long localStandbyBlockSize;
+
+    @ToString.Exclude
+    @JsonProperty("input_ids")
+    private int[] inputIds;
+
+    @JsonProperty("block_size")
+    private long blockSize;
+
     @JsonProperty("seq_len")
     private long seqLen;
 
     @JsonProperty("request_id")
-    private long requestId;
+    private String requestId;
 
     @JsonProperty("generate_timeout")
     private long generateTimeout = 3600 * 1000;

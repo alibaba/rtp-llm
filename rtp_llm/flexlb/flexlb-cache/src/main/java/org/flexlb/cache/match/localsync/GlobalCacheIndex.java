@@ -1,4 +1,4 @@
-package org.flexlb.cache.core;
+package org.flexlb.cache.match.localsync;
 
 import com.google.common.collect.Sets;
 import lombok.extern.slf4j.Slf4j;
@@ -32,7 +32,7 @@ public class GlobalCacheIndex {
      * Read-write lock for data consistency
      */
     private final ReentrantLock lock = new ReentrantLock();
-    
+
     /**
      * Statistics
      */
@@ -50,7 +50,7 @@ public class GlobalCacheIndex {
             log.warn("Invalid parameters: blockCacheKey={}, engineIpPort={}", blockCacheKey, engineIpPort);
             return;
         }
-        
+
         lock.lock();
         try {
             Set<String> engines = blockToEnginesMap.computeIfAbsent(blockCacheKey, k -> {
@@ -77,7 +77,7 @@ public class GlobalCacheIndex {
         if (blockCacheKey == null || engineIp == null) {
             return;
         }
-        
+
         lock.lock();
         try {
             Set<String> engines = blockToEnginesMap.get(blockCacheKey);
