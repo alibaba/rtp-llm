@@ -58,7 +58,7 @@ class EngineSyncRunnerTest {
     private RoleType roleType;
 
     @Mock
-    private CacheAwareService localKvCacheAwareManager;
+    private CacheAwareService cacheAwareService;
 
     private final long syncRequestTimeoutMs = 5000L;
 
@@ -81,7 +81,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -111,7 +111,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -135,7 +135,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
-                localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
+                cacheAwareService, syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, null, null);
 
         runner.run();
@@ -166,7 +166,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, statuses, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
-                localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
+                cacheAwareService, syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, null, registry);
         runner.run();
 
@@ -186,7 +186,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,

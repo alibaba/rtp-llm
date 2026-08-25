@@ -1,19 +1,26 @@
 package org.flexlb.sync.schedule;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -72,6 +79,46 @@ class ExpirationCleanerTest {
         assertSame(status, statusMap.get(ipPort));
         assertTrue(status.isAlive());
         assertSame(status, registry.get(RoleType.VIT, ipPort).getStatus());
+    }
+
+    @Test
+    void should_remove_unconfirmed_task_after_configured_timeout() {
+        WorkerStatus workerStatus = status(RoleType.PREFILL, 8080);
+        workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(123L);
+        task.setInputLength(1_000);
+        task.setPrefixLength(200);
+        task.setPredictedPrefixLength(200);
+        task.setCacheMatchSource("KVCM");
+        workerStatus.putLocalTask("123", task);
+        task.setLastActiveTimeUs(System.nanoTime() / 1000 - TimeUnit.SECONDS.toMicros(11));
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        statuses.put(workerStatus.getIpPort(), workerStatus);
+        ExpirationCleaner cleaner = new ExpirationCleaner(
+                registry, TimeUnit.MINUTES.toMicros(1), TimeUnit.SECONDS.toMicros(10));
+
+        ch.qos.logback.classic.Logger pvLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
+        ListAppender<ILoggingEvent> pvEvents = new ListAppender<>();
+        pvEvents.start();
+        pvLogger.addAppender(pvEvents);
+        try {
+            cleaner.doClean(statuses, RoleType.PREFILL);
+        } finally {
+            pvLogger.detachAppender(pvEvents);
+            pvEvents.stop();
+        }
+
+        assertFalse(workerStatus.getLocalTaskMap().containsKey("123"));
+        assertEquals(TaskStateEnum.CLEANED, task.getTaskState());
+        assertEquals(0, workerStatus.getRunningQueueTime().get());
+        assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(1, pvEvents.list.size());
+        String event = pvEvents.list.getFirst().getFormattedMessage();
+        assertTrue(event.contains("\"eventType\":\"task_confirmation_timeout\""));
+        assertTrue(event.contains("\"requestId\":123"));
+        assertTrue(event.contains("\"confirmationTimeoutMs\":10000"));
     }
 
     private static WorkerStatus status(RoleType role, int port) {
