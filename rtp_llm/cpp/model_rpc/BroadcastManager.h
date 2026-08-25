@@ -2,7 +2,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <functional>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -13,12 +20,13 @@ namespace rtp_llm {
 template<typename RequestPB, typename ResponsePB>
 class BroadcastResult {
 public:
+    using DoneCallback = std::function<void()>;
+
     struct WorkerRpcContext {
         std::shared_ptr<RpcService::Stub>    stub;
         std::shared_ptr<grpc::ClientContext> client_context;
         RequestPB                            request;
         ResponsePB                           response;
-        grpc::CompletionQueue                completion_queue;
         grpc::Status                         status;
         std::string                          server_addr;
         int                                  timeout_ms;
@@ -30,102 +38,52 @@ public:
     ~BroadcastResult() = default;
 
 public:
-    /// Snapshot of internal completion counters, not a live probe of RPC completion.
-    ///
-    /// Progress (polling gRPC completion queues and updating `finished_*`) happens only inside
-    /// `waitDone()` / `waitDone(int)`. This method does not poll or advance completion; it only
-    /// reflects state already updated by prior `waitDone()` work. Callers must not infer that
-    /// work is still in flight from `done() == false` without also driving `waitDone()`, nor
-    /// assume `done() == true` reflects anything that `waitDone()` has not yet observed.
     bool done() const {
-        return finished_count_.load() == static_cast<int>(worker_contexts_.size());
+        return already_done_.load(std::memory_order_acquire);
     }
 
-    /// Polls completion queues until every client RPC has a terminal Finish event or
-    /// `timeout_ms` elapses (0 = no limit). A terminal client event does not by itself
-    /// prove that a server handler has physically stopped when its gRPC status is non-OK.
     bool waitDone(int timeout_ms) {
-        if (already_done_.load()) {
-            return true;
-        }
-
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
-        if (already_done_.load()) {
-            return true;
-        }
-
-        const int  worker_size = worker_contexts_.size();
-        const auto deadline    = (timeout_ms > 0) ?
-                                     std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms) :
-                                     std::chrono::steady_clock::time_point::max();
-
-        while (true) {
-            if (finished_count_.load() == worker_size) {
-                break;
-            }
-            if (timeout_ms > 0 && std::chrono::steady_clock::now() >= deadline) {
+        const auto completed = [this] { return already_done_.load(std::memory_order_acquire); };
+        if (timeout_ms > 0) {
+            if (!wait_done_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), completed)) {
                 return false;
             }
-            const int  once_timeout_ms = 1;
-            const auto once_deadline   = std::chrono::system_clock::now() + std::chrono::milliseconds(once_timeout_ms);
-            for (int rank = 0; rank < worker_size; ++rank) {
-                if (finished_[rank]) {
-                    continue;
-                }
-
-                auto& ctx         = worker_contexts_.at(rank);
-                void* got_tag     = nullptr;
-                bool  ok          = false;
-                auto  next_status = ctx->completion_queue.AsyncNext(&got_tag, &ok, once_deadline);
-                if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-                    continue;
-                }
-                if (next_status != grpc::CompletionQueue::NextStatus::GOT_EVENT || !ok) {
-                    RTP_LLM_FAIL("broadcast rpc cq failed, rank=%d status=%d ok=%d addr=%s",
-                                 rank,
-                                 static_cast<int>(next_status),
-                                 static_cast<int>(ok),
-                                 ctx->server_addr.c_str());
-                }
-                ++finished_count_;
-                finished_[rank] = true;
-
-                const auto& status = ctx->status;
-                if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                    RTP_LLM_FAIL("broadcast rpc timeout, timeout_ms=%d rank=%d err=%d(%s) addr=%s",
-                                 ctx->timeout_ms,
-                                 rank,
-                                 status.error_code(),
-                                 status.error_message().c_str(),
-                                 ctx->server_addr.c_str());
-                }
-                if (!status.ok()) {
-                    RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%d err=%d(%s) addr=%s",
-                                        rank,
-                                        status.error_code(),
-                                        status.error_message().c_str(),
-                                        ctx->server_addr.c_str());
-                    grpc_status_failure_seen_ = true;
-                }
-            }
+        } else {
+            wait_done_cv_.wait(lock, completed);
         }
-
-        // Finalize after every rank's client-side Finish event has been observed.
-        all_request_success_.store(!grpc_status_failure_seen_);
-        already_done_.store(true);
+        const std::string fatal_error = fatal_error_;
+        lock.unlock();
+        if (!fatal_error.empty()) {
+            RTP_LLM_FAIL("%s", fatal_error.c_str());
+        }
         return true;
     }
 
-    /// Same as `waitDone(0)`; drives completion state for `done()` / `success()`.
     void waitDone() {
         (void)waitDone(/*timeout_ms=*/0);
     }
 
-    /// Aggregated client-side gRPC result. It is meaningful only after `waitDone(int)`
-    /// returns true or `waitDone()` returns normally. True means every observed gRPC
-    /// status is OK; false does not prove that the server handlers have physically stopped.
     bool success() const {
-        return all_request_success_.load();
+        return all_request_success_.load(std::memory_order_acquire);
+    }
+
+    void onDone(DoneCallback callback) {
+        if (!callback) {
+            return;
+        }
+        bool run_now = false;
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            if (already_done_.load(std::memory_order_acquire)) {
+                run_now = true;
+            } else {
+                callbacks_.push_back(std::move(callback));
+            }
+        }
+        if (run_now) {
+            callback();
+        }
     }
 
     std::vector<ResponsePB> responses() const {
@@ -138,20 +96,81 @@ public:
         return responses;
     }
 
+    void finishRank(size_t rank, bool cq_event_ok) {
+        std::vector<DoneCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            if (already_done_.load(std::memory_order_relaxed)) {
+                return;
+            }
+            if (rank >= worker_contexts_.size()) {
+                fatal_error_ = "broadcast rpc cq tag rank out of range: rank=" + std::to_string(rank);
+                finishLocked(callbacks);
+            } else if (finished_[rank]) {
+                return;
+            } else {
+                finished_[rank] = true;
+                ++finished_count_;
+                const auto& ctx = worker_contexts_[rank];
+                if (!cq_event_ok) {
+                    fatal_error_ = "broadcast rpc cq event failed, rank=" + std::to_string(rank)
+                                   + " addr=" + ctx->server_addr;
+                } else if (ctx->status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                    fatal_error_ = "broadcast rpc timeout, timeout_ms=" + std::to_string(ctx->timeout_ms)
+                                   + " rank=" + std::to_string(rank) + " err="
+                                   + std::to_string(ctx->status.error_code()) + "(" + ctx->status.error_message()
+                                   + ") addr=" + ctx->server_addr;
+                } else if (!ctx->status.ok()) {
+                    RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%zu err=%d(%s) addr=%s",
+                                        rank,
+                                        ctx->status.error_code(),
+                                        ctx->status.error_message().c_str(),
+                                        ctx->server_addr.c_str());
+                    grpc_status_failure_seen_ = true;
+                }
+                if (finished_count_ == static_cast<int>(worker_contexts_.size())) {
+                    finishLocked(callbacks);
+                }
+            }
+        }
+        wait_done_cv_.notify_all();
+        for (auto& callback : callbacks) {
+            callback();
+        }
+    }
+
 private:
+    friend class BroadcastManager;
+
+    void finishLocked(std::vector<DoneCallback>& callbacks) {
+        finished_count_ = static_cast<int>(worker_contexts_.size());
+        all_request_success_.store(fatal_error_.empty() && !grpc_status_failure_seen_, std::memory_order_release);
+        already_done_.store(true, std::memory_order_release);
+        callbacks.swap(callbacks_);
+    }
+
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
-    std::atomic<int>                               finished_count_{0};
+    int                                            finished_count_{0};
     std::atomic<bool>                              already_done_{false};
     std::atomic<bool>                              all_request_success_{false};
     bool                                           grpc_status_failure_seen_{false};
+    std::string                                    fatal_error_;
     mutable std::mutex                             wait_done_mutex_;
+    std::condition_variable                        wait_done_cv_;
+    std::vector<DoneCallback>                      callbacks_;
 };
 
 class BroadcastManager {
 public:
     explicit BroadcastManager(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {}
     ~BroadcastManager() {
+        if (completion_queue_) {
+            completion_queue_->Shutdown();
+        }
+        if (completion_thread_.joinable()) {
+            completion_thread_.join();
+        }
         rpc_pool_.reset();
     }
 
@@ -163,6 +182,8 @@ public:
         }
 
         rpc_pool_ = std::make_shared<RPCPool>();
+        completion_queue_ = std::make_unique<grpc::CompletionQueue>();
+        completion_thread_ = std::thread([this] { pollCompletions(); });
         return true;
     }
 
@@ -175,8 +196,13 @@ public:
                 "broadcast failed, requests size mismatch, req: %zu, worker size: %zu", requests.size(), worker_size);
             return nullptr;
         }
+        if (!rpc_pool_ || !completion_queue_) {
+            RTP_LLM_LOG_WARNING("broadcast failed, manager is not initialized");
+            return nullptr;
+        }
 
         using CtxT = typename BroadcastResult<RequestPB, ResponsePB>::WorkerRpcContext;
+        using ResultT = BroadcastResult<RequestPB, ResponsePB>;
         std::vector<std::shared_ptr<CtxT>> contexts(worker_size);
         const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
@@ -198,13 +224,23 @@ public:
             ctx->client_context->set_deadline(deadline);
         }
 
+        auto result = std::make_shared<ResultT>(std::move(contexts));
         for (int rank = 0; rank < worker_size; ++rank) {
-            auto& ctx    = contexts.at(rank);
-            auto  reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, &ctx->completion_queue);
-            reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
+            auto& ctx = result->worker_contexts_.at(rank);
+            try {
+                auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
+                RTP_LLM_CHECK_WITH_INFO(reader != nullptr, "broadcast rpc call returned null reader, rank=%d", rank);
+                auto tag = std::make_unique<CompletionTag<ResultT>>(result, static_cast<size_t>(rank));
+                reader->Finish(&ctx->response, &ctx->status, tag.get());
+                (void)tag.release();
+            } catch (const std::exception& error) {
+                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s", rank, error.what());
+            } catch (...) {
+                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error", rank);
+            }
         }
 
-        return std::make_shared<BroadcastResult<RequestPB, ResponsePB>>(std::move(contexts));
+        return result;
     }
 
     size_t workerNum() const {
@@ -212,8 +248,42 @@ public:
     }
 
 private:
+    struct CompletionTagBase {
+        virtual ~CompletionTagBase() = default;
+        virtual void complete(bool ok) = 0;
+    };
+
+    template<typename ResultT>
+    struct CompletionTag final: CompletionTagBase {
+        CompletionTag(std::shared_ptr<ResultT> result, size_t rank): result(std::move(result)), rank(rank) {}
+
+        void complete(bool ok) override {
+            result->finishRank(rank, ok);
+        }
+
+        std::shared_ptr<ResultT> result;
+        size_t                   rank;
+    };
+
+    void pollCompletions() {
+        void* raw_tag = nullptr;
+        bool  ok      = false;
+        while (completion_queue_->Next(&raw_tag, &ok)) {
+            std::unique_ptr<CompletionTagBase> tag(static_cast<CompletionTagBase*>(raw_tag));
+            try {
+                tag->complete(ok);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("broadcast completion callback failed: %s", error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("broadcast completion callback failed: unknown error");
+            }
+        }
+    }
+
     std::vector<std::string> worker_addrs_;
-    std::shared_ptr<RPCPool> rpc_pool_;
+    std::shared_ptr<RPCPool>                  rpc_pool_;
+    std::unique_ptr<grpc::CompletionQueue>    completion_queue_;
+    std::thread                               completion_thread_;
 };
 
 }  // namespace rtp_llm
