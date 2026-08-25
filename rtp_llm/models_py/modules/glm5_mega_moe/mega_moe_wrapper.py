@@ -280,5 +280,11 @@ class MegaMoeWrapper(nn.Module):
             hidden_states,
             topk_weights,
             topk_ids,
-            self.mega_moe,
+            lambda h, w, i: self.mega_moe(
+                h,
+                w,
+                i,
+                activation=activation,
+                extra_expert_args=extra_expert_args,
+            ),
         )

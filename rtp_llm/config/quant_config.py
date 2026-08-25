@@ -158,6 +158,49 @@ class QuantizationConfig(ABC):
         if quant_config is None:
             return None
 
+        # MiniMax-M3 mixed MXFP4/MXFP8 checkpoints use ModelOpt's
+        # MIXED_PRECISION schema instead of the legacy ``config_groups``
+        # schema.  RTP-LLM executes the non-routed linears with the existing
+        # MXFP8 loader; the native MXFP4 routed experts are intercepted by the
+        # MegaMoE offline loader after quant-weight construction.
+        if quant_method == "modelopt" and "config_groups" not in quant_config:
+            mixed = quant_config.get("quantization") or {}
+            if str(mixed.get("quant_algo", "")).upper() == "MIXED_PRECISION":
+                quantized_layers = (
+                    quant_config.get("quantized_layers")
+                    or mixed.get("quantized_layers")
+                    or {}
+                )
+                layer_algos = {
+                    str(layer.get("quant_algo", "")).upper()
+                    for layer in quantized_layers.values()
+                    if isinstance(layer, dict)
+                }
+                unsupported = layer_algos - {"MXFP4", "MXFP8"}
+                if unsupported:
+                    raise ValueError(
+                        "unsupported MiniMax mixed-precision quant algorithms: "
+                        f"{sorted(unsupported)}"
+                    )
+                if "MXFP8" not in layer_algos or "MXFP4" not in layer_algos:
+                    raise ValueError(
+                        "ModelOpt MIXED_PRECISION checkpoint must contain both "
+                        "MXFP8 and MXFP4 quantized layers"
+                    )
+                cfg = Fp8MxBlockWiseQuantConfig.from_config(
+                    {
+                        "bits": 8,
+                        "method": Fp8MxBlockWiseQuantConfig.get_method(),
+                        "group_size": 128,
+                        "is_quanted": True,
+                    }
+                )
+                cfg.mixed_precision_quantized_layers = quantized_layers
+                excluded = mixed.get("exclude_modules") or []
+                if excluded:
+                    cfg.exclude_modules = set(excluded)
+                return cfg
+
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
         if quant_method == "mxfp8":

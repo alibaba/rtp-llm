@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe_fp8_se_wrapper,
     mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
+    mega_moe_se_wrapper,
     mega_moe_wrapper,
 )
 from rtp_llm.utils.model_weight import W
@@ -50,7 +51,12 @@ def _config(hidden_size=8, inter=4, max_seq_len=16, gen_num_per_cycle=0):
 
 
 def _parallelism(role_type=None):
-    return SimpleNamespace(ep_size=1, ep_rank=0, role_type=role_type)
+    return SimpleNamespace(
+        ep_size=1,
+        ep_rank=0,
+        role_type=role_type,
+        get_ffn_tp_size=lambda: 1,
+    )
 
 
 class MegaMoeWrapperLayoutTest(unittest.TestCase):
@@ -177,6 +183,42 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         torch.testing.assert_close(captured["w1_scale"], shared_s1)
         torch.testing.assert_close(captured["w2_fp8"], shared_w2)
         torch.testing.assert_close(captured["w2_scale"], shared_s2)
+
+    def test_fp4_se_wrapper_loads_routed_fp4_and_shared_mxfp8(self):
+        config = _config(hidden_size=8, inter=4)
+        routed_up = torch.full((2, 4, 4), 3, dtype=torch.int8)
+        routed_gate = torch.full((2, 4, 4), 7, dtype=torch.int8)
+        routed_up_scale = torch.full((2, 4, 1), 5, dtype=torch.float32)
+        routed_gate_scale = torch.full((2, 4, 1), 11, dtype=torch.float32)
+        fp8 = torch.float8_e4m3fn
+        shared_w1 = torch.full((8, 8), 3, dtype=torch.float32).to(fp8)
+        shared_s1 = torch.full((8, 1), 0.5, dtype=torch.float32)
+        shared_w2 = torch.full((8, 4), 7, dtype=torch.float32).to(fp8)
+        shared_s2 = torch.full((8, 1), 0.25, dtype=torch.float32)
+        weights = {
+            W.moe_w1: torch.cat([routed_up, routed_gate], dim=1),
+            W.moe_s1: torch.cat([routed_up_scale, routed_gate_scale], dim=1),
+            W.moe_w2: torch.ones((2, 8, 2), dtype=torch.int8),
+            W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
+            W.ffn_w13: shared_w1,
+            W.ffn_s13: shared_s1,
+            W.ffn_w2: shared_w2,
+            W.ffn_s2: shared_s2,
+        }
+
+        with patch.object(mega_moe_se_wrapper, "GLM5MegaMoESE", _FakeMegaMoE):
+            mega_moe_se_wrapper.MegaMoeSEWrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        routed = _FakeMegaMoE.instance.fp4_kwargs
+        torch.testing.assert_close(routed["w1_w"][:, :4], routed_gate)
+        torch.testing.assert_close(routed["w1_w"][:, 4:], routed_up)
+        shared = _FakeMegaMoE.instance.shared_fp8_kwargs
+        torch.testing.assert_close(shared["w1_fp8"], shared_w1)
+        torch.testing.assert_close(shared["w1_scale"], shared_s1)
+        torch.testing.assert_close(shared["w2_fp8"], shared_w2)
+        torch.testing.assert_close(shared["w2_scale"], shared_s2)
 
     def test_decode_mtp_budget_includes_verify_width(self):
         from rtp_llm.ops import RoleType

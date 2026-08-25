@@ -34,7 +34,7 @@ from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     V4PerBlockFp8Weight,
 )
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity, stack_
 
 
 class FakeTensorSource(TensorSource):
@@ -189,6 +189,47 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
             [w.name for w in offline.scale.weights],
             ["model.layers.{i}.mlp.experts.0.gate_proj.weight_scale"],
         )
+
+    def test_native_mxfp4_scale_key_and_ue8m0_decode(self):
+        moe = MoeAtomicWeight(
+            W.moe_w2,
+            [
+                CkptWeightInfo(
+                    "language_model.model.layers.{i}.block_sparse_moe."
+                    "experts.w2_weight",
+                    identity,
+                )
+            ],
+            stack_,
+            config=MoeConfig(expert_num=2),
+            stacked_ckpt_keys=True,
+        )
+
+        offline = wrap_for_offline_fp4(moe)
+
+        self.assertIsInstance(offline, OfflineMegaMoeFp4MoeWeight)
+        self.assertEqual(
+            [w.name for w in offline.scale.weights],
+            [
+                "language_model.model.layers.{i}.block_sparse_moe."
+                "experts.w2_weight_scale"
+            ],
+        )
+        self.assertTrue(offline.scale.stacked_ckpt_keys)
+        decoded = offline.scale.process_fun(
+            [
+                torch.tensor([[127, 128]], dtype=torch.float32),
+                torch.tensor([[126, 129]], dtype=torch.float32),
+            ]
+        )
+        torch.testing.assert_close(
+            decoded,
+            torch.tensor([[[1.0, 2.0]], [[0.5, 4.0]]], dtype=torch.float32),
+        )
+
+        # Fastsafetensor splitting only recognizes identity ckpt merge funcs.
+        # Decode therefore belongs in process_fun, not the ckpt merge callback.
+        self.assertIs(offline.scale.weights[0].merge_fun, identity)
 
 
 class TestStackSplitTensorSource(unittest.TestCase):

@@ -159,6 +159,27 @@ def _should_load_raw_mxfp8_idx() -> bool:
     return _env_flag("M3_MSA_RAW_IDX_MXFP8")
 
 
+def stack_native_mxfp4_w13(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Convert native interleaved MXFP4 W13 to RTP's ``[up | gate]`` layout.
+
+    The MiniMax W4A8 checkpoint stores one stacked tensor per layer with rows
+    ``gate0, up0, gate1, up1, ...``.  ``MegaMoeWrapper`` consumes RTP's normal
+    routed W1 contract, ``[all up | all gate]``, and restacks it to DeepGEMM's
+    ``[all gate | all up]`` contract.  The operation is valid for both packed
+    FP4 bytes and their one-scale-per-K32 tensors because it only reorders the
+    output-row dimension.
+    """
+    stacked = stack_(ts)
+    if stacked.dim() != 3 or stacked.size(1) % 2 != 0:
+        raise ValueError(
+            "native MiniMax MXFP4 w13 must be [experts, 2*intermediate, K], "
+            f"got {tuple(stacked.shape)}"
+        )
+    gate = stacked[:, 0::2, :]
+    up = stacked[:, 1::2, :]
+    return torch.cat([up, gate], dim=1).contiguous()
+
+
 class MiniMaxM3Weight(ModelDeployWeightInfo):
     """Weight loader for MiniMax-M3 text backbone.
 
@@ -179,6 +200,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
 
     def __init__(self, *args: Any, **kwargs: Any):
         self._load_raw_mxfp8_idx = _should_load_raw_mxfp8_idx()
+        self._native_mxfp4_routed = False
         super().__init__(*args, **kwargs)
         # Multi-modal checkpoints prefix all LLM tensors with `language_model.`
         self.prefix = "language_model."
@@ -202,6 +224,12 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
         self.has_e_score_correction_bias = self._contains(
             weight_keys, ".block_sparse_moe.e_score_correction_bias"
         )
+        # The mixed W4A8 artifact replaces thousands of per-expert w1/w2/w3
+        # tensors with four fused tensors per MoE layer.  Remember that layout
+        # before weight-info construction so the loader declares the real keys.
+        self._native_mxfp4_routed = self._contains(
+            weight_keys, ".block_sparse_moe.experts.w13_weight"
+        ) and self._contains(weight_keys, ".block_sparse_moe.experts.w2_weight")
         # Discover sparse layers by checking which layer ids carry an
         # index_q_proj weight in the actual checkpoint. This avoids depending
         # on the config-side sparse_attention_freq list (and catches the case
@@ -556,12 +584,18 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                             W.moe_w2,
                             [
                                 CkptWeightInfo(
-                                    moe_root + "experts.{expert_id}.w2.weight",
+                                    (
+                                        moe_root + "experts.w2_weight"
+                                        if self._native_mxfp4_routed
+                                        else moe_root + "experts.{expert_id}.w2.weight"
+                                    ),
                                     identity,
                                 )
                             ],
                             stack_,
                             config=moe_config,
+                            stacked_ckpt_keys=self._native_mxfp4_routed,
+                            disable_quantization=self._native_mxfp4_routed,
                         ),
                         # Note: stack_moe_w1 stacks [up, gate] in that order;
                         # FusedMoE expects gate_up packed = [gate; up]; this
@@ -569,20 +603,28 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                         # — see Qwen3-MoE / GLM4-MoE which use the same call.
                         MoeAtomicWeight(
                             W.moe_w1,
-                            [
-                                CkptWeightInfo(
-                                    moe_root + "experts.{expert_id}.w3.weight",
-                                    identity,
-                                )
-                            ]
-                            + [
-                                CkptWeightInfo(
-                                    moe_root + "experts.{expert_id}.w1.weight",
-                                    identity,
-                                )
-                            ],
-                            stack_moe_w1,
+                            (
+                                [CkptWeightInfo(moe_root + "experts.w13_weight")]
+                                if self._native_mxfp4_routed
+                                else [
+                                    CkptWeightInfo(
+                                        moe_root + "experts.{expert_id}.w3.weight",
+                                        identity,
+                                    ),
+                                    CkptWeightInfo(
+                                        moe_root + "experts.{expert_id}.w1.weight",
+                                        identity,
+                                    ),
+                                ]
+                            ),
+                            (
+                                stack_native_mxfp4_w13
+                                if self._native_mxfp4_routed
+                                else stack_moe_w1
+                            ),
                             config=moe_config,
+                            stacked_ckpt_keys=self._native_mxfp4_routed,
+                            disable_quantization=self._native_mxfp4_routed,
                         ),
                     ],
                     config=moe_config,

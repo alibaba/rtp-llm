@@ -290,12 +290,12 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
-        activation: str = "swiglu",
+        activation: Optional[str] = None,
         extra_expert_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         import deep_gemm
 
-        activation_name = (activation or "swiglu").lower()
+        activation_name = (activation or self._activation_name).lower()
         if activation_name in ("siglu", "silu"):
             activation_name = "swiglu"
         if activation_name == "swiglu_oai":
