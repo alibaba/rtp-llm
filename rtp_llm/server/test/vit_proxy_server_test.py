@@ -1,7 +1,7 @@
 import threading
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaDescPB,
@@ -30,18 +30,29 @@ class VitWorkerRequestIdTest(TestCase):
         servicer.engine = engine
         servicer._rdma = None
         request = MultimodalInputsPB(request_id=987654321)
+        async_context = MagicMock()
+        wait_context = MagicMock()
+        remote_context = MagicMock()
+        wait_context.add_callback.return_value = True
+        remote_context.add_callback.return_value = True
 
-        servicer.AsyncSubmitEmbedding(request, MagicMock())
-        servicer.WaitGreenNetVerdict(request, MagicMock())
-        servicer.RemoteMultimodalEmbedding(request, MagicMock())
+        servicer.AsyncSubmitEmbedding(request, async_context)
+        servicer.WaitGreenNetVerdict(request, wait_context)
+        servicer.RemoteMultimodalEmbedding(request, remote_context)
 
         engine.async_submit.assert_called_once_with(converted, 987654321)
         engine.wait_greennet_verdict.assert_called_once_with(
-            converted, request_id=987654321
+            converted, request_id=987654321, cancellation_event=ANY
         )
         engine.get_embedding_result.assert_called_once_with(
-            converted, request_id=987654321
+            converted, request_id=987654321, cancellation_event=ANY
         )
+
+        wait_context.add_callback.call_args.args[0]()
+        remote_context.add_callback.call_args.args[0]()
+        self.assertEqual(engine.cancel_queued_request.call_count, 2)
+        for cancel_call in engine.cancel_queued_request.call_args_list:
+            self.assertEqual(cancel_call.args, (987654321,))
 
 
 class LoadBalancerRoundRobinTest(TestCase):
@@ -236,17 +247,25 @@ class VitProxyRdmaReleaseTest(TestCase):
             "worker-a": stub_a,
             "worker-b": stub_b,
         }[address]
-        stub_a.RemoteMultimodalEmbedding.return_value = MultimodalOutputPB(
+        call_a = MagicMock()
+        call_a.result.return_value = MultimodalOutputPB(
             output_rdma=MMRdmaDescPB(handle="handle-a")
         )
+        stub_a.RemoteMultimodalEmbedding.future.return_value = call_a
         response_b = MultimodalOutputPB()
         response_b.output_rdma_chunks.add(handle="handle-b-1")
         response_b.output_rdma_chunks.add(handle="handle-b-2")
-        stub_b.RemoteMultimodalEmbedding.return_value = response_b
+        call_b = MagicMock()
+        call_b.result.return_value = response_b
+        stub_b.RemoteMultimodalEmbedding.future.return_value = call_b
 
         servicer = VitProxyRpcServer(load_balancer, connection_pool)
-        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
-        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), MagicMock())
+        context_a = MagicMock()
+        context_a.add_callback.return_value = True
+        context_b = MagicMock()
+        context_b.add_callback.return_value = True
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context_a)
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context_b)
         servicer.ReleaseMultimodalEmbedding(
             ReleaseEmbeddingPB(handle=["handle-a", "handle-b-1", "handle-b-2"]),
             MagicMock(),
@@ -262,6 +281,29 @@ class VitProxyRdmaReleaseTest(TestCase):
         self.assertEqual(
             stub_b.ReleaseMultimodalEmbedding.call_args.kwargs["timeout"], 1.0
         )
+
+
+class VitProxyCancellationTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.init")
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_parent_rpc_cancellation_cancels_worker_rpc(self, _mock_report, _mock_init):
+        load_balancer = MagicMock()
+        load_balancer.get_worker.return_value = "worker-a"
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        worker_call = MagicMock()
+        worker_call.result.return_value = MultimodalOutputPB()
+        stub.RemoteMultimodalEmbedding.future.return_value = worker_call
+        context = MagicMock()
+        context.add_callback.return_value = True
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+
+        cancel_callback = context.add_callback.call_args.args[0]
+        cancel_callback()
+        worker_call.cancel.assert_called_once_with()
 
 
 if __name__ == "__main__":

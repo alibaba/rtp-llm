@@ -201,7 +201,8 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
     return ErrorInfo::OkStatus();
 }
 
-ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input) {
+ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
+                                                        grpc::ServerContext*                     server_context) {
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
@@ -214,8 +215,9 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
             }
         }
     }
-    CHECK_AND_RETURN_REF(mm_embedding_res,
-                         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id));
+    CHECK_AND_RETURN_REF(
+        mm_embedding_res,
+        MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
     input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
@@ -231,8 +233,10 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
-                                                        const std::string&                           vit_role_addr) {
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, vit_role_addr, input->request_id));
+                                                        const std::string&                           vit_role_addr,
+                                                        grpc::ServerContext*                         server_context) {
+    CHECK_AND_RETURN_REF(mm_embedding_res,
+                         MultimodalEmbedding(mm_inputs, vit_role_addr, input->request_id, server_context));
     MultimodalFeature mm_features;
     mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(expanded_ids,

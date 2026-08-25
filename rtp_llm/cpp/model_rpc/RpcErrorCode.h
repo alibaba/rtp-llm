@@ -10,6 +10,7 @@ namespace rtp_llm {
 inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
     const static std::unordered_map<ErrorCode, grpc::StatusCode> error_code_map = {
         {ErrorCode::CANCELLED, grpc::StatusCode::CANCELLED},
+        {ErrorCode::CONCURRENCY_LIMIT_ERROR, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::DECODE_MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::GENERATE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},

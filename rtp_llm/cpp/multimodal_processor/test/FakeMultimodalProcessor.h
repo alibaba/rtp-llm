@@ -20,8 +20,9 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "",
-                                                      int64_t request_id = 0) override {
+                                                      std::string                                 ip_port    = "",
+                                                      int64_t                                     request_id = 0,
+                                                      grpc::ServerContext* = nullptr) override {
         MultimodalOutput output;
         for (const auto& input : mm_inputs) {
             int embed_len = std::stoi(input.url);

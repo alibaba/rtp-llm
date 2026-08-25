@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -42,6 +43,15 @@ private:
     std::shared_ptr<MMRdmaTransport> rdma_transport_;
     // Deadline (ms) for the best-effort slot-release RPC; keeps it off the critical path.
     int64_t rdma_release_timeout_ms_ = 1000;
+
+    static std::unique_ptr<grpc::ClientContext> makeClientContext(grpc::ServerContext* server_context) {
+        if (server_context == nullptr) {
+            return std::make_unique<grpc::ClientContext>();
+        }
+        grpc::PropagationOptions options;
+        options.enable_deadline_propagation().enable_cancellation_propagation();
+        return grpc::ClientContext::FromServerContext(*server_context, options);
+    }
 
     // Best-effort: tell the encoder it can return the slot(s) to its free list. One response may
     // carry several slots (chunked output), so all handles are released in a single RPC.
@@ -147,7 +157,8 @@ private:
 
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
-                                                      int64_t                                     request_id = 0) {
+                                                      int64_t                                     request_id = 0,
+                                                      grpc::ServerContext* server_context = nullptr) {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
         }
@@ -155,17 +166,26 @@ private:
         if (!connection_status.ok()) {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, connection_status.status().ToString());
         }
-        auto&               connection = connection_status.value();
-        auto                stub       = connection.stub;
-        MultimodalOutputPB  output_pb;
-        grpc::ClientContext context;
+        auto&              connection = connection_status.value();
+        auto               stub       = connection.stub;
+        MultimodalOutputPB output_pb;
+        auto               context = makeClientContext(server_context);
 
         auto request = QueryConverter::transMMInputsPB(mm_inputs, request_id);
         if (rdma_transport_ != nullptr) {
             request.set_support_rdma(true);
         }
-        auto status = stub->RemoteMultimodalEmbedding(&context, request, &output_pb);
+        auto status = stub->RemoteMultimodalEmbedding(context.get(), request, &output_pb);
         if (!status.ok()) {
+            if (status.error_code() == grpc::StatusCode::CANCELLED) {
+                return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+                return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, status.error_message());
+            }
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
         }
 
@@ -230,9 +250,9 @@ private:
                                 "falling back to inline bytes",
                                 descs.size());
             request.set_support_rdma(false);
-            MultimodalOutputPB  fallback_pb;
-            grpc::ClientContext fallback_context;
-            auto fallback_status = stub->RemoteMultimodalEmbedding(&fallback_context, request, &fallback_pb);
+            MultimodalOutputPB fallback_pb;
+            auto               fallback_context = makeClientContext(server_context);
+            auto fallback_status = stub->RemoteMultimodalEmbedding(fallback_context.get(), request, &fallback_pb);
             if (!fallback_status.ok()) {
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
                                  "rdma read failed and inline-bytes fallback also failed: "

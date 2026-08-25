@@ -167,7 +167,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     // need to check client has buffer at first
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+        auto mm_res = mm_processor_->updateMultimodalFeatures(input, context);
         if (!mm_res.ok()) {
             generate_context.error_info = mm_res;
             generate_context.error_status =

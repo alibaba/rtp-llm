@@ -538,11 +538,12 @@ class MMEmbeddingAsyncCacheTest(TestCase):
 
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
-    def _make_engine(self, mm_part=None, vit_concurrency=64):
+    def _make_engine(self, mm_part=None, vit_concurrency=64, vit_max_queue_size=64):
         model = FakeModel(mm_part or FakeMultiModalEmbeddingInterface())
         vit_config = VitConfig()
         vit_config.use_local_preprocess = True
         vit_config.vit_concurrency = vit_concurrency
+        vit_config.vit_max_queue_size = vit_max_queue_size
         return MMProcessEngine(
             model.mm_part,
             model.model_config,
@@ -645,6 +646,184 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             self.assertEqual(max_active, 2)
         finally:
             release.set()
+            engine.stop()
+
+    def test_async_compute_queue_rejects_over_capacity(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+        release = threading.Event()
+        started = threading.Event()
+        completed = threading.Event()
+        lock = threading.Lock()
+        completed_count = 0
+
+        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+            nonlocal completed_count
+            started.set()
+            release.wait(timeout=5)
+            entry.complete((torch.tensor(0), None))
+            with lock:
+                completed_count += 1
+                if completed_count == 2:
+                    completed.set()
+
+        engine._async_compute = blocked_compute
+        first = self._make_input("fake://queue-running")
+        queued = self._make_input("fake://queue-waiting")
+        rejected = self._make_input("fake://queue-rejected")
+        try:
+            engine.async_submit([first])
+            self.assertTrue(started.wait(timeout=2))
+            engine.async_submit([queued])
+
+            with self.assertRaises(FtRuntimeException) as raised:
+                engine.async_submit([rejected])
+            self.assertEqual(
+                raised.exception.exception_type,
+                ExceptionType.CONCURRENCY_LIMIT_ERROR,
+            )
+            self.assertIsNone(engine._embedding_cache.peek(rejected.cache_key()))
+
+            release.set()
+            self.assertTrue(completed.wait(timeout=5))
+        finally:
+            release.set()
+            engine.stop()
+
+    def test_cancel_request_removes_only_queued_work(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+        release = threading.Event()
+        first_started = threading.Event()
+        first_done = threading.Event()
+        started_urls = []
+
+        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+            started_urls.append(mm_inputs[0].url)
+            first_started.set()
+            release.wait(timeout=5)
+            entry.complete((torch.tensor(0), None))
+            first_done.set()
+
+        engine._async_compute = blocked_compute
+        running = self._make_input("fake://cancel-running")
+        queued = self._make_input("fake://cancel-queued")
+        try:
+            engine.async_submit([running], request_id=101)
+            self.assertTrue(first_started.wait(timeout=2))
+            engine.async_submit([queued], request_id=102)
+
+            self.assertEqual(engine.cancel_queued_request(102), 1)
+            self.assertIsNone(engine._embedding_cache.peek(queued.cache_key()))
+            self.assertEqual(engine._async_admitted, 1)
+            self.assertEqual(engine.cancel_queued_request(101), 0)
+
+            release.set()
+            self.assertTrue(first_done.wait(timeout=5))
+            self.assertEqual(started_urls, [running.url])
+            running_entry = engine._embedding_cache.peek(running.cache_key())
+            self.assertIsNotNone(running_entry)
+            self.assertTrue(running_entry.is_done)
+        finally:
+            release.set()
+            engine.stop()
+
+    def test_cancel_keeps_queued_work_owned_by_another_request(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+        release = threading.Event()
+        first_started = threading.Event()
+        first_done = threading.Event()
+        started_urls = []
+
+        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+            started_urls.append(mm_inputs[0].url)
+            first_started.set()
+            release.wait(timeout=5)
+            entry.complete((torch.tensor(0), None))
+            first_done.set()
+
+        engine._async_compute = blocked_compute
+        running = self._make_input("fake://shared-running")
+        shared = self._make_input("fake://shared-queued")
+        try:
+            engine.async_submit([running], request_id=201)
+            self.assertTrue(first_started.wait(timeout=2))
+            engine.async_submit([shared], request_id=202)
+            engine.async_submit([shared], request_id=203)
+
+            self.assertEqual(engine.cancel_queued_request(202), 0)
+            self.assertIsNotNone(engine._embedding_cache.peek(shared.cache_key()))
+            self.assertEqual(engine.cancel_queued_request(203), 1)
+            self.assertIsNone(engine._embedding_cache.peek(shared.cache_key()))
+
+            release.set()
+            self.assertTrue(first_done.wait(timeout=5))
+            self.assertEqual(started_urls, [running.url])
+        finally:
+            release.set()
+            engine.stop()
+
+    def test_already_cancelled_request_is_not_submitted(self):
+        engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
+        cancellation_event = threading.Event()
+        cancellation_event.set()
+        inp = self._make_input("fake://cancel-before-submit")
+        try:
+            with self.assertRaises(FtRuntimeException) as raised:
+                engine.get_embedding_result(
+                    [inp],
+                    request_id=301,
+                    cancellation_event=cancellation_event,
+                )
+            self.assertEqual(
+                raised.exception.exception_type, ExceptionType.CANCELLED_ERROR
+            )
+            self.assertIsNone(engine._embedding_cache.peek(inp.cache_key()))
+            self.assertEqual(engine._async_admitted, 0)
+        finally:
+            engine.stop()
+
+    def test_get_submits_all_inputs_before_waiting(self):
+        engine = self._make_engine(vit_concurrency=2, vit_max_queue_size=0)
+        release = threading.Event()
+        both_started = threading.Event()
+        lock = threading.Lock()
+        started_count = 0
+        result = None
+        error = None
+
+        def blocked_compute(mm_inputs, cache_key, entry, request_id=0):
+            nonlocal started_count
+            with lock:
+                started_count += 1
+                if started_count == 2:
+                    both_started.set()
+            release.wait(timeout=5)
+            entry.complete((torch.tensor(0), None))
+
+        def get_results():
+            nonlocal result, error
+            try:
+                result = engine.get_embedding_result(
+                    [
+                        self._make_input("fake://parallel-get-0"),
+                        self._make_input("fake://parallel-get-1"),
+                    ]
+                )
+            except Exception as caught:
+                error = caught
+
+        engine._async_compute = blocked_compute
+        thread = threading.Thread(target=get_results)
+        try:
+            thread.start()
+            self.assertTrue(both_started.wait(timeout=2))
+            release.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertIsNone(error)
+            self.assertEqual(len(result), 2)
+        finally:
+            release.set()
+            thread.join(timeout=5)
             engine.stop()
 
     def test_multiple_inputs_independent(self):
