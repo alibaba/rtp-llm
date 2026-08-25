@@ -20,7 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -298,25 +297,35 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     @Test
-    void requestAtEngineTokenLimitIsRejectedBeforeDispatch() throws InterruptedException {
+    void longRequestAboveBatchTokenBudgetIsDispatchedAlone() throws InterruptedException {
         FlexlbConfig config = batchConfig();
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(0);
 
         WorkerStatus status = new WorkerStatus();
-        status.setMaxBatchTokensSize(100);
+        status.setMaxSeqLen(1_048_576L);
+        status.setMaxBatchTokensSize(409_600L);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
-        BatchItem item = enqueuedItem(1, 1, 100);
+        BatchItem longHead = enqueuedItem(1, 1, 910_537L);
+        BatchItem next = enqueuedItem(2, 2, 1_024L);
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
-                "test", endpoint, config, handler, queueWith(item),
+                "test", endpoint, config, handler, queueWith(longHead, next),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
-        verify(handler).onOfferFailure(eq(item), any(IllegalArgumentException.class));
-        verify(handler, never()).onDecisionGroupReady(anyList(), any(DecisionGroupMetadata.class));
+        assertEquals(1, context.size());
+        assertEquals(next, context.peek());
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
+        verify(handler, times(2)).onDecisionGroupReady(
+                dispatched.capture(), any(DecisionGroupMetadata.class));
+        verify(handler, never()).onOfferFailure(any(), any());
+        assertEquals(List.of(List.of(longHead), List.of(next)), dispatched.getAllValues());
         assertEquals(0, context.size());
     }
 

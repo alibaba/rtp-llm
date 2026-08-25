@@ -18,9 +18,6 @@ import java.util.concurrent.TimeUnit;
  *   <li>Request expiration: drop the head at its absolute expiration. This runs
  *       before backpressure to ensure stale requests are cleared even when
  *       the engine is under sustained backpressure.</li>
- *   <li>Oversized request rejection: if the head request's seqLen exceeds
- *       the worker token capacity, it can never be picked by any batch,
- *       so it is dropped immediately instead of waiting for the deadline.</li>
  *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
  *   <li>Batch full: if queue size reaches {@code dispatcher.maxRequests}, dispatch
  *       immediately without waiting for the window to expire.</li>
@@ -39,11 +36,9 @@ import java.util.concurrent.TimeUnit;
  * would exceed the latest worker-reported KV budget, remain in the queue for
  * a later batch.
  * <p>
- * However, a request whose own seqLen already exceeds
- * that capacity can never be picked by any batch. Such
- * oversized requests are rejected immediately when they reach the head of
- * the queue (see step 0.5 below), rather than waiting for the queue
- * request expiration.
+ * The head request is always eligible to run by itself. Batch token capacity
+ * limits only the addition of further members; standalone validity remains
+ * governed by the Engine's max-sequence-length and KV checks.
  *
  */
 public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
@@ -130,14 +125,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                             + "expires_at_ms={} now_ms={}",
                     head.requestId(), head.ctx().getRequestExpiresAtMs(), nowMs);
             ctx.dropHead(head);
-            return;
-        }
-
-        // The Engine admits a group only when padded context tokens are strictly
-        // below max_batch_tokens_size. Reject an impossible head explicitly so
-        // it cannot block the FIFO queue or cause an entire group to fast-fail.
-        if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
-            ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
             return;
         }
 

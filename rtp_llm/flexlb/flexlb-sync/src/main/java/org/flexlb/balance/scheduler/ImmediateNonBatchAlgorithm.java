@@ -20,11 +20,9 @@ final class ImmediateNonBatchAlgorithm implements BatcherAlgorithm {
             ctx.dropHead(head);
             return;
         }
-        long tokenCapacity = ctx.batchTokenCapacity();
-        if (!BatchShape.empty().add(head).fitsCompute(tokenCapacity)) {
-            ctx.rejectForBatchTokenCapacity(head, tokenCapacity);
-            return;
-        }
+        // NON_BATCH returns an individual route decision. Batch token capacity
+        // limits how requests may be combined; the Engine's max-sequence and KV
+        // checks remain authoritative for this standalone request.
         ctx.stageDecisionGroup(List.of(head),
                 new DecisionGroupMetadata("non_batch_immediate", ctx.size() - 1));
     }
