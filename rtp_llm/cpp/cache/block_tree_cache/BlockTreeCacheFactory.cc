@@ -556,13 +556,17 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                                         DeviceHostCopyOptions{},
                                                                         config.device_disk_staging_block_count,
                                                                         config.max_descriptors_per_transfer_batch,
-                                                                        config.transfer_worker_count);
+                                                                        config.transfer_worker_count,
+                                                                        config.max_descriptors_per_non_device_host_transfer_batch);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
-    auto transfer_dispatcher =
-        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
+    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
+        std::move(per_rank_engine),
+        std::move(multi_rank_engine),
+        config.max_descriptors_per_transfer_batch,
+        config.max_descriptors_per_non_device_host_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
 
