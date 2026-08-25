@@ -5,16 +5,22 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
@@ -36,7 +42,18 @@ import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_VISITOR_RT;
@@ -51,21 +68,41 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
+import static org.flexlb.constant.MetricConstant.ENGINE_IN_TRANSIT_TASK_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
+import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT;
+import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_QPS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WAITING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
+import static org.flexlb.constant.MetricConstant.REQUEST_BODY_BYTES;
+import static org.flexlb.constant.MetricConstant.REQUEST_INPUT_IDS_COUNT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
@@ -81,6 +118,8 @@ public class EngineHealthReporter {
 
     private final CacheMetricsReporter cacheMetricsReporter;
 
+    private final CacheMatchConfiguration cacheMatchConfiguration;
+
     private final EngineGrpcClient engineGrpcClient;
 
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
@@ -88,10 +127,12 @@ public class EngineHealthReporter {
     @Autowired
     public EngineHealthReporter(FlexMonitor monitor,
                                 CacheMetricsReporter cacheMetricsReporter,
+                                CacheMatchConfiguration cacheMatchConfiguration,
                                 EngineGrpcClient engineGrpcClient,
                                 LoopResources serverLoopResources) {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
+        this.cacheMatchConfiguration = cacheMatchConfiguration;
         this.engineGrpcClient = engineGrpcClient;
         this.eventLoopGroupMap = Map.of(
                 "serverWorker", serverLoopResources.onServer(true),
@@ -112,9 +153,12 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_STATUS_CHECK_FAIL_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_STATUS_CHECK_FAIL_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_FINISHED_TASK_LIST_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_WAITING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_KEY_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
@@ -123,23 +167,65 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_IN_TRANSIT_TASK_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_RT, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, FlexMetricType.QPS);
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
+        this.monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
+        this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_USED_KV_CACHE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(REQUEST_NETWORK_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_SERVER_PROCESS_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(REQUEST_INPUT_IDS_COUNT, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(REQUEST_BODY_BYTES, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
@@ -148,6 +234,98 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, result);
         monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, result2);
         logger.debug("Latency metric - model: {}, role: {}, stepLatency: {}, queryLen: {}", modelName, role, result, result2);
+    }
+
+    public void reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(String modelName,
+                                                                               String engineIp,
+                                                                               String role,
+                                                                               String group,
+                                                                               long latencyMs) {
+        FlexMetricTags metricTags = lifecycleTags(modelName, engineIp, role, group);
+        monitor.report(ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS,
+                metricTags, latencyMs);
+    }
+
+    public void reportFlexlbObservedWaitingToRunningLatency(String modelName,
+                                                            String engineIp,
+                                                            String role,
+                                                            String group,
+                                                            long latencyMs) {
+        monitor.report(ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS,
+                lifecycleTags(modelName, engineIp, role, group), latencyMs);
+    }
+
+    public void reportEngineObservedWaitingToRunningLatency(String modelName,
+                                                            String engineIp,
+                                                            String role,
+                                                            String group,
+                                                            long latencyMs) {
+        monitor.report(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS,
+                lifecycleTags(modelName, engineIp, role, group), latencyMs);
+    }
+
+    public void reportEngineObservedReceivedToWaitingLatency(String modelName,
+                                                             String engineIp,
+                                                             String role,
+                                                             String group,
+                                                             long latencyMs) {
+        monitor.report(ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS,
+                lifecycleTags(modelName, engineIp, role, group), latencyMs);
+    }
+
+    public void reportPrefillWorkerStatusTask(String modelName,
+                                               String engineIp,
+                                               String role,
+                                               String group,
+                                               TaskInfo task) {
+        FlexMetricTags metricTags = lifecycleTags(modelName, engineIp, role, group);
+        monitor.report(ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS, metricTags,
+                task.getHbmLocalMatchTokens());
+        monitor.report(ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS, metricTags,
+                task.getRemoteKvAddedMatchTokens());
+        monitor.report(ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT, metricTags,
+                task.getPrefillStepCount());
+        monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN, metricTags,
+                task.getPrefillNonfinalChunkTokensMin());
+        monitor.report(ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX, metricTags,
+                task.getPrefillNonfinalChunkTokensMax());
+
+        reportDuration(ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS, metricTags,
+                task.getInputQueueDrainTimeMs(), task.getInputQueueEnqueueTimeMs());
+        monitor.report(ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS, metricTags,
+                task.getRemoteKvWaitMs());
+        long schedulerToRunningMs = reportDuration(
+                ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS, metricTags,
+                task.getRunningEnteredTimeMs(), task.getWaitingEnteredTimeMs());
+        if (schedulerToRunningMs >= 0) {
+            monitor.report(ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS, metricTags,
+                    Math.max(0, schedulerToRunningMs - task.getRemoteKvWaitMs()));
+        }
+        reportDuration(ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS, metricTags,
+                task.getFirstTokenTimeMs(), task.getRunningEnteredTimeMs());
+    }
+
+    private FlexMetricTags lifecycleTags(String modelName,
+                                         String engineIp,
+                                         String role,
+                                         String group) {
+        return FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", engineIp,
+                "role", role,
+                "group", group);
+    }
+
+    private long reportDuration(String metric,
+                                FlexMetricTags metricTags,
+                                long endTimeMs,
+                                long startTimeMs) {
+        if (endTimeMs <= 0 || startTimeMs <= 0) {
+            return -1;
+        }
+        long durationMs = Math.max(0, endTimeMs - startTimeMs);
+        monitor.report(metric, metricTags, durationMs);
+        return durationMs;
     }
 
     @Scheduled(fixedRate = 2000)
@@ -185,6 +363,19 @@ public class EngineHealthReporter {
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
                 "role", role);
+        monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags,
+                (double) System.nanoTime() / 1000 - startTime);
+        monitor.report(ENGINE_STATUS_VISITOR_SUCCESS_QPS, metricTags, 1.0);
+    }
+
+    public void reportStatusCheckRemoteInfo(String modelName,
+                                            String engineIp,
+                                            String role,
+                                            Long startTime) {
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", engineIp == null ? "" : engineIp,
+                "role", role);
         monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
         monitor.report(ENGINE_STATUS_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
@@ -192,6 +383,19 @@ public class EngineHealthReporter {
     public void reportCacheStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
+                "role", role);
+        monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags,
+                (double) System.nanoTime() / 1000 - startTime);
+        monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
+    }
+
+    public void reportCacheStatusCheckRemoteInfo(String modelName,
+                                                 String engineIp,
+                                                 String role,
+                                                 Long startTime) {
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", engineIp == null ? "" : engineIp,
                 "role", role);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
@@ -201,9 +405,38 @@ public class EngineHealthReporter {
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
                 "code", String.valueOf(errorEnum.getCode()),
-                "role", role == null ? "" : role.getCode()
-        );
+                "role", role == null ? "" : role.getCode());
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
+        monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
+    }
+
+    public void reportStatusCheckerFail(String modelName,
+                                        BalanceStatusEnum errorEnum,
+                                        String ip,
+                                        RoleType role) {
+        FlexMetricTags metricTags = statusCheckFailureTags(modelName, errorEnum, ip, role);
+        monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
+        monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
+    }
+
+    public void reportStatusCheckFailureLatency(String modelName,
+                                                BalanceStatusEnum errorEnum,
+                                                String ip,
+                                                RoleType role,
+                                                long latencyUs) {
+        monitor.report(ENGINE_STATUS_CHECK_FAIL_RT,
+                statusCheckFailureTags(modelName, errorEnum, ip, role), latencyUs);
+    }
+
+    private FlexMetricTags statusCheckFailureTags(String modelName,
+                                                   BalanceStatusEnum errorEnum,
+                                                   String ip,
+                                                   RoleType role) {
+        return FlexMetricTags.of(
+                "model", modelName,
+                "code", String.valueOf(errorEnum.getCode()),
+                "engineIp", ip == null ? "" : ip,
+                "role", role == null ? "" : role.getCode());
     }
 
     public void reportCacheStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, RoleType role) {
@@ -211,6 +444,16 @@ public class EngineHealthReporter {
                 "model", modelName,
                 "code", String.valueOf(errorEnum.getCode()),
                 "role", role == null ? "" : role.getCode());
+        monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
+    }
+
+    public void reportCacheStatusCheckerFail(String modelName,
+                                             String engineIp,
+                                             BalanceStatusEnum errorEnum) {
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", engineIp == null ? "" : engineIp,
+                "code", String.valueOf(errorEnum.getCode()));
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
@@ -234,9 +477,64 @@ public class EngineHealthReporter {
             monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - lastUpdateTime);
         }
         monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, ep != null ? ep.getLoadMetric() : 0);
+        reportWorkerLocalTaskMetrics(metricTags, workerStatus);
+        reportCacheCapacityMetrics(modelName, workerStatus);
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
+    }
+
+    /**
+     * Compatibility entry point for the cleanup status-sync contract, which reports waiting,
+     * running and finished task counts directly from the worker response.
+     */
+    public void reportStatusCheckerSuccess(String modelName,
+                                           WorkerStatus workerStatus,
+                                           int waitingTaskInfoSize,
+                                           int runningTaskInfoSize,
+                                           int finishedTaskListSize) {
+        FlexMetricTags healthTags = FlexMetricTags.of(
+                "model", modelName,
+                "code", "0",
+                "engineIp", workerStatus.getIp(),
+                "role", workerStatus.getRole().name());
+        reportStatusHealthMetrics(healthTags, workerStatus,
+                workerStatus.getRunningQueueTime().get());
+        reportWorkerLocalTaskMetrics(healthTags, workerStatus);
+        reportCacheCapacityMetrics(modelName, workerStatus);
+
+        FlexMetricTags taskTags = FlexMetricTags.of(
+                "engineIp", workerStatus.getIp(),
+                "role", workerStatus.getRole().name());
+        monitor.report(ENGINE_WAITING_TASK_INFO_SIZE, taskTags, waitingTaskInfoSize);
+        monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, taskTags, runningTaskInfoSize);
+        monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, taskTags, finishedTaskListSize);
+    }
+
+    private void reportStatusHealthMetrics(FlexMetricTags metricTags,
+                                           WorkerStatus workerStatus,
+                                           long runningQueueTime) {
+        Long availableConcurrency = workerStatus.getAvailableConcurrency();
+        if (availableConcurrency != null) {
+            monitor.report(ENGINE_STATUS_AVAILABLE_CONCURRENCY, metricTags, availableConcurrency);
+        }
+        long lastUpdateTime = workerStatus.getStatusLastUpdateTime().get();
+        if (lastUpdateTime > 0) {
+            monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags,
+                    (double) System.nanoTime() / 1000 - lastUpdateTime);
+        }
+        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, runningQueueTime);
+    }
+
+    private void reportWorkerLocalTaskMetrics(FlexMetricTags metricTags,
+                                              WorkerStatus workerStatus) {
+        int localTaskMapSize = workerStatus.getLocalTaskMap() == null
+                ? 0
+                : workerStatus.getLocalTaskMap().size();
+        monitor.report(org.flexlb.constant.MetricConstant.ENGINE_LOCAL_TASK_MAP_SIZE,
+                metricTags, localTaskMapSize);
+        monitor.report(ENGINE_IN_TRANSIT_TASK_SIZE,
+                metricTags, workerStatus.getInTransitTaskCount());
     }
 
     public void reportCacheStatusCheckerSuccess(String modelName, WorkerStatus workerStatus) {
@@ -248,37 +546,60 @@ public class EngineHealthReporter {
                     "role", workerStatus.getRole().name());
             monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
         }
-        if (workerStatus.getCacheStatus() != null) {
-            long blockSize = workerStatus.getCacheStatus().getBlockSize();
-            long cacheKeySize = workerStatus.getCacheStatus().getCacheKeySize();
-            FlexMetricTags roleMetricTags = FlexMetricTags.of(
-                    "model", modelName,
-                    "role", workerStatus.getRole().name());
+        CacheStatus cacheStatus = workerStatus.getCacheStatus();
+        if (cacheStatus != null) {
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getIp(),
                     "role", workerStatus.getRole().name());
-            monitor.report(CACHE_BLOCK_SIZE, roleMetricTags, blockSize);
-            monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
+            monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheStatus.getCacheKeySize());
+        }
+    }
+
+    /** Reports the capacity snapshot populated by either worker- or cache-status synchronization. */
+    private void reportCacheCapacityMetrics(String modelName, WorkerStatus workerStatus) {
+        CacheStatus cacheStatus = workerStatus.getCacheStatus();
+        if (cacheStatus == null) {
+            return;
         }
 
-        long totalKvCacheTokens = workerStatus.getTotalKvCacheTokens().get();
-        long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
-        long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;
-
-        FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
+        FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
                 "engineIp", workerStatus.getIp(),
                 "role", workerStatus.getRole().name());
+        if (cacheStatus.getBlockSize() > 0) {
+            monitor.report(CACHE_BLOCK_SIZE, metricTags, cacheStatus.getBlockSize());
+        }
+        reportLocalStandbyBlockSize(metricTags, cacheStatus.getBlockSize());
 
-        monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
-        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
-        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS,
-                FlexMetricTags.of("model", modelName, "role", workerStatus.getRole().name()),
-                totalKvCacheTokens);
+        long usedKvCacheTokens = workerStatus.getUsedKvCacheTokens().get();
+        long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
+        long reportedTotal = workerStatus.getTotalKvCacheTokens().get();
+        long totalKvCacheTokens = Math.max(reportedTotal,
+                usedKvCacheTokens + availableKvCacheTokens);
+
+        monitor.report(CACHE_USED_KV_CACHE_TOKENS, metricTags, usedKvCacheTokens);
+        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, metricTags, availableKvCacheTokens);
+        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, metricTags, totalKvCacheTokens);
         if (totalKvCacheTokens > 0) {
             double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;
-            monitor.report(CACHE_USED_KV_CACHE_RATIO, kvCacheMetricTags, usedRatio);
+            monitor.report(CACHE_USED_KV_CACHE_RATIO, metricTags, usedRatio);
+        }
+    }
+
+    private void reportLocalStandbyBlockSize(FlexMetricTags metricTags,
+                                             long engineBlockSize) {
+        if (!cacheMatchConfiguration.isLocalStandbyEnabled()) {
+            return;
+        }
+        LocalStandbyConfig localStandbyConfig = cacheMatchConfiguration.getLocalStandbyConfig();
+        if (localStandbyConfig == null) {
+            return;
+        }
+        long configuredBlockSize = localStandbyConfig.getBlockSize();
+        long effectiveBlockSize = configuredBlockSize > 0 ? configuredBlockSize : engineBlockSize;
+        if (effectiveBlockSize > 0) {
+            monitor.report(CACHE_LOCAL_STANDBY_BLOCK_SIZE, metricTags, effectiveBlockSize);
         }
     }
 
@@ -298,9 +619,11 @@ public class EngineHealthReporter {
             int code = ctx.getResponse().getCode();
 
             for (ServerStatus serverStatus : ctx.getResponse().getServerStatus()) {
-                if (serverStatus.getRole() != null) {
+                if (serverStatus.getRole() != null && serverStatus.getServerIp() != null) {
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
+                            "strategy", strategyName(ctx, serverStatus.getRole()),
+                            "engineIp", serverStatus.getServerIp(),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
                     );
@@ -310,12 +633,36 @@ public class EngineHealthReporter {
         }
     }
 
+    private String strategyName(BalanceContext context, RoleType roleType) {
+        if (context.getConfig() == null) {
+            return "UNKNOWN";
+        }
+        LoadBalanceStrategyEnum strategy = context.getConfig().strategyFor(roleType);
+        return strategy == null ? "UNKNOWN" : strategy.getName();
+    }
+
+    public void reportRequestPayload(BalanceContext ctx) {
+        if (ctx == null) {
+            return;
+        }
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "success", String.valueOf(ctx.isSuccess()));
+        if (ctx.getInputIdsCount() != null) {
+            monitor.report(REQUEST_INPUT_IDS_COUNT, metricTags, ctx.getInputIdsCount());
+        }
+        if (ctx.getRequestBodyBytes() != null) {
+            monitor.report(REQUEST_BODY_BYTES, metricTags, ctx.getRequestBodyBytes());
+        }
+    }
+
     public void reportMasterNode(String master) {
         monitor.report(ZK_MASTER_NODE, FlexMetricTags.of("masterNode", master), 1.0);
     }
 
     public void reportPrefillBalanceMasterEvent(ZkMasterEvent event) {
-        monitor.report(ZK_MASTER_EVENT, FlexMetricTags.of("event", event.name()), 1.0);
+        monitor.report(ZK_MASTER_EVENT,
+                FlexMetricTags.of("event", event.name()),
+                System.currentTimeMillis());
     }
 
     public void reportThreadPoolInfo(String metricName, String name, ThreadPoolExecutor engineSyncExecutor) {
@@ -382,6 +729,63 @@ public class EngineHealthReporter {
                                             String engineIp,
                                             String decision) {
         cacheMetricsReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
+    }
+
+    public void reportKvcmSelectedMatch(RoleType roleType,
+                                        String engineIp,
+                                        long localMatchTokens,
+                                        long p2pFetchTokens,
+                                        long p2pTotalMatchTokens,
+                                        boolean available) {
+        if (!available) {
+            return;
+        }
+        cacheMetricsReporter.reportKvcmSelectedMatch(
+                roleType, engineIp, localMatchTokens, p2pFetchTokens, p2pTotalMatchTokens);
+    }
+
+    public void reportCacheHitComparisonMetrics(String modelName,
+                                                CacheHitComparisonResult comparison) {
+        if (comparison == null) {
+            return;
+        }
+        CacheHitComparisonResult.HitComparison routing = comparison.routing();
+        CacheHitComparisonResult.Actual actual = comparison.actual();
+        CacheHitComparisonResult.KvcmDetails kvcmDetails = comparison.kvcmDetails();
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", comparison.worker(),
+                "role", comparison.role(),
+                "group", comparison.group(),
+                "taskState", comparison.state(),
+                "cacheMatchSource", comparison.source() == null ? "" : comparison.source());
+        monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, metricTags, routing.hit());
+        monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, metricTags, actual.hit());
+        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, metricTags, routing.delta());
+        if (kvcmDetails != null) {
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS,
+                    metricTags, kvcmDetails.local().delta());
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS,
+                    metricTags, kvcmDetails.p2pTotal().delta());
+        }
+        long inputTokens = comparison.inputTokens();
+        if (inputTokens > 0) {
+            monitor.report(CACHE_HIT_COMPARISON_PREDICTED_RATIO,
+                    metricTags, routing.hit() / (double) inputTokens);
+            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO,
+                    metricTags, actual.hit() / (double) inputTokens);
+        }
+        CacheHitComparisonResult.HitComparison localStandby = comparison.localStandby();
+        if (localStandby != null) {
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS,
+                    metricTags, localStandby.hit());
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS,
+                    metricTags, localStandby.delta());
+            if (inputTokens > 0) {
+                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO,
+                        metricTags, localStandby.hit() / (double) inputTokens);
+            }
+        }
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {

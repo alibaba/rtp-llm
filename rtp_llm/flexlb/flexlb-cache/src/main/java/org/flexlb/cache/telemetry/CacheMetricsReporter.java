@@ -1,9 +1,11 @@
 package org.flexlb.cache.telemetry;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +24,14 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_MAPPING_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_MATCH_ACTIVE_SOURCE;
+import static org.flexlb.constant.MetricConstant.CACHE_MATCH_SOURCE_CHANGE_QPS;
+import static org.flexlb.constant.MetricConstant.CACHE_MATCH_STANDBY_FALLBACK_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
@@ -87,6 +97,9 @@ public class CacheMetricsReporter {
         // Cache hit rate metrics
         monitor.register(CACHE_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_HIT_RATIO, FlexMetricType.GAUGE);
+        monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_RECENT_KEY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
@@ -97,6 +110,15 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
+        monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS,
+                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
+        monitor.register(CACHE_MATCH_ACTIVE_SOURCE,
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_MATCH_SOURCE_CHANGE_QPS,
+                FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_MATCH_STANDBY_FALLBACK_QPS,
+                FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         // Cache service response time metrics
         monitor.register(CACHE_FIND_MATCHING_ENGINES_RT, FlexMetricType.GAUGE);
@@ -162,6 +184,54 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
         monitor.report(CACHE_HIT_RATIO, baseTags, hitRatio);
         monitor.report(CACHE_REQUEST_TOTAL, baseTags, 1.0);
+    }
+
+    public void reportKvcmSelectedMatch(RoleType roleType,
+                                        String engineIp,
+                                        long localMatchTokens,
+                                        long p2pFetchTokens,
+                                        long p2pTotalMatchTokens) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", roleType.name(),
+                "engineIp", engineIp);
+        monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, localMatchTokens);
+        monitor.report(CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS, tags, p2pFetchTokens);
+        monitor.report(CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS, tags, p2pTotalMatchTokens);
+    }
+
+    public void reportLocalStandbyCapacityRejected() {
+        monitor.report(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, 1.0);
+    }
+
+    public void reportLocalStandbyMappingCount(long mappingCount) {
+        monitor.report(CACHE_LOCAL_STANDBY_MAPPING_COUNT, mappingCount);
+    }
+
+    public void reportActiveCacheMatchSource(CacheMatchSource source) {
+        for (CacheMatchSource candidate : CacheMatchSource.values()) {
+            monitor.report(
+                    CACHE_MATCH_ACTIVE_SOURCE,
+                    FlexMetricTags.of("source", candidate.name()),
+                    candidate == source ? 1.0 : 0.0);
+        }
+    }
+
+    public void reportCacheMatchSourceChange(CacheMatchSource previousSource,
+                                             CacheMatchSource currentSource) {
+        reportActiveCacheMatchSource(currentSource);
+        monitor.report(
+                CACHE_MATCH_SOURCE_CHANGE_QPS,
+                FlexMetricTags.of(
+                        "from", previousSource.name(),
+                        "to", currentSource.name()),
+                1.0);
+    }
+
+    public void reportStandbyFallback(String reason) {
+        monitor.report(
+                CACHE_MATCH_STANDBY_FALLBACK_QPS,
+                FlexMetricTags.of("reason", reason),
+                1.0);
     }
 
     /**
