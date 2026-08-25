@@ -18,12 +18,53 @@ class ConfigServiceTest {
 
     @Test
     void empty_environment_uses_valid_defaults() {
-        FlexlbConfig config = new ConfigService(Map.of()).loadBalanceConfig();
+        ConfigService configService = new ConfigService(Map.of());
+        FlexlbConfig config = configService.loadBalanceConfig();
 
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isBatchDispatch());
         assertEquals(1, config.getSchemaVersion());
+        assertNull(configService.loadModelServiceConfig());
+    }
+
+    @Test
+    void loads_model_topology_independently_from_scheduling_config() {
+        ConfigService configService = new ConfigService(Map.of(
+                ConfigService.FLEXLB_CONFIG_ENV, """
+                        {
+                          "scheduler":{"type":"DIRECT"},
+                          "dispatcher":{"type":"NON_BATCH"}
+                        }
+                        """,
+                ConfigService.MODEL_SERVICE_CONFIG_ENV, """
+                        {
+                          "service_id":"test-service",
+                          "load_balance":true,
+                          "role_endpoints":[]
+                        }
+                        """));
+
+        assertTrue(configService.loadBalanceConfig().isDirect());
+        assertEquals("test-service", configService.loadModelServiceConfig().getServiceId());
+        assertTrue(configService.loadModelServiceConfig().getRoleEndpoints().isEmpty());
+    }
+
+    @Test
+    void rejects_invalid_model_service_config_document() {
+        ConfigValidationException error = assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        ConfigService.MODEL_SERVICE_CONFIG_ENV, "not-json")));
+
+        assertTrue(error.getMessage().contains("'MODEL_SERVICE_CONFIG'"));
+    }
+
+    @Test
+    void blank_model_service_config_is_treated_as_missing() {
+        ConfigService configService = new ConfigService(Map.of(
+                ConfigService.MODEL_SERVICE_CONFIG_ENV, "   "));
+
+        assertNull(configService.loadModelServiceConfig());
     }
 
     @Test

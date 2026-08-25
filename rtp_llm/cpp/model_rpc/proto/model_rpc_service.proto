@@ -440,12 +440,48 @@ message TaskInfoPB {
     int64 execution_time_ms = 13;
     PriorityPreemptionProgressPB priority_preemption_progress = 14;
     int32 priority = 15;
+    // True only after the engine has resolved and prepared the cache hit.
+    bool prefix_length_valid = 16;
+    // Wall clock time (ms) of the most recent entry into the waiting state.
+    // First enqueue = arrival time; preempted back to waiting = preemption time.
+    // 0 = unknown (edge paths that bypass the record point).
+    int64 waiting_entered_time_ms = 17;
+    // Wall clock time (ms) of the most recent entry into the running (scheduled) state.
+    // 0 = never entered running yet, or unknown.
+    int64 running_entered_time_ms = 18;
+    // Wall clock time (ms) when the engine received the request, before it entered the
+    // waiting queue. Reconciles against the master's dispatch-to-waiting observation.
+    // 0 = unknown (edge paths that bypass the record point).
+    int64 request_received_time_ms = 19;
+    int64 input_queue_enqueue_time_ms = 20;
+    int64 input_queue_drain_time_ms = 21;
+    int64 remote_kv_wait_ms = 22;
+    int64 first_token_time_ms = 23;
+    int64 hbm_local_match_tokens = 24;
+    int64 remote_kv_added_match_tokens = 25;
+    int64 first_prefill_step_id = 26;
+    int64 last_prefill_step_id = 27;
+    int64 prefill_step_count = 28;
+    int64 prefill_nonfinal_chunk_tokens_min = 29;
+    int64 prefill_nonfinal_chunk_tokens_max = 30;
+    // Progress is reported only after a prefill GPU forward has completed.
+    // Keep presence so an older engine's omitted fields are not interpreted as
+    // a completed request with zero remaining tokens.
+    optional int64 completed_prefill_tokens = 31;
+    optional int64 remaining_prefill_tokens = 32;
+    optional int64 last_completed_prefill_step_id = 33;
 }
 
 message UpdateWeightsRequestPB {
     string name = 1;
     string desc = 2;
     string method = 3;
+}
+
+enum KvCacheGroupModePB {
+    KV_CACHE_GROUP_MODE_UNSPECIFIED = 0;
+    KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY = 1;
+    KV_CACHE_GROUP_MODE_WITH_MAMBA = 2;
 }
 
 message WorkerStatusPB {
@@ -470,12 +506,18 @@ message WorkerStatusPB {
     int64 available_kv_cache = 17;
     int64 total_kv_cache = 18;
     reserved 19;
-    reserved "role_str";
+    reserved "role_str", "free_gpu_memory_bytes", "total_gpu_memory_bytes";
     RoleTypePB role_type = 20;
     // Static limits used by the running Engine. FlexLB uses these values to
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
+    int64 block_size = 23;
+    // Number of tokens after each full block included in its cache hash.
+    int32 block_hash_lookahead_tokens = 24;
+    KvCacheGroupModePB kv_cache_group_mode = 25;
+    // Number of matched cache blocks that must be recomputed by the engine.
+    int32 cache_match_rollback_blocks = 26;
 }
 
 message EmbeddingInputPB {

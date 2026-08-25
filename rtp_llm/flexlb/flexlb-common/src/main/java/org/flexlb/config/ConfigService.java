@@ -7,17 +7,20 @@ import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.Iterator;
 import java.util.Map;
 
-/** Loads the single, strict FLEXLB_CONFIG JSON document. */
+/** Loads the independent FLEXLB_CONFIG and MODEL_SERVICE_CONFIG JSON documents. */
 @Slf4j
 @Component
 public class ConfigService {
 
     static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    static final String MODEL_SERVICE_CONFIG_ENV = "MODEL_SERVICE_CONFIG";
 
     private static final ObjectMapper STRICT_MAPPER = JsonMapper.builder()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
@@ -31,6 +34,7 @@ public class ConfigService {
             .build();
 
     private final FlexlbConfig flexlbConfig;
+    private final ServiceRoute modelServiceConfig;
 
     public ConfigService() {
         this(System.getenv());
@@ -40,6 +44,11 @@ public class ConfigService {
         String document = environment.get(FLEXLB_CONFIG_ENV);
         this.flexlbConfig = document == null ? new FlexlbConfig() : parse(document);
         FlexlbConfigValidator.validate(flexlbConfig);
+
+        String modelServiceDocument = environment.get(MODEL_SERVICE_CONFIG_ENV);
+        this.modelServiceConfig = modelServiceDocument == null || modelServiceDocument.isBlank()
+                ? null
+                : parseModelServiceConfig(modelServiceDocument);
         logEffectiveConfig(flexlbConfig);
     }
 
@@ -60,6 +69,19 @@ public class ConfigService {
 
     public FlexlbConfig loadBalanceConfig() {
         return flexlbConfig;
+    }
+
+    static ServiceRoute parseModelServiceConfig(String document) {
+        try {
+            return JsonUtils.toObject(document, ServiceRoute.class);
+        } catch (Exception error) {
+            throw new ConfigValidationException(MODEL_SERVICE_CONFIG_ENV,
+                    "Invalid MODEL_SERVICE_CONFIG JSON: " + error.getMessage(), error);
+        }
+    }
+
+    public ServiceRoute loadModelServiceConfig() {
+        return modelServiceConfig;
     }
 
     public synchronized void updateTrafficPolicy(TrafficPolicyConfig groupSelector) {

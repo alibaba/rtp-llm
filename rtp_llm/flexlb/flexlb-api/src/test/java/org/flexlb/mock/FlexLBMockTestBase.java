@@ -8,8 +8,6 @@ import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.priority.UnsupportedEngineCancelChannel;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -21,6 +19,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -142,12 +141,11 @@ public abstract class FlexLBMockTestBase {
 
         CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
         GrpcReporter grpcReporter = mock(GrpcReporter.class);
-        EngineLocalView engineLocalView = mock(EngineLocalView.class);
-        GlobalCacheIndex globalCacheIndex = mock(GlobalCacheIndex.class);
+        EngineCacheInvalidator engineCacheInvalidator = mock(EngineCacheInvalidator.class);
 
         grpcClient = new EngineGrpcClient(
                 nameResolver, grpcExecutor, eventLoopGroup,
-                engineLocalView, globalCacheIndex, grpcReporter);
+                engineCacheInvalidator, grpcReporter);
 
         // 4. Create real dispatcher
         dispatcher = createDispatcher();

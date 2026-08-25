@@ -1,30 +1,28 @@
 package org.flexlb.config;
 
-import lombok.extern.slf4j.Slf4j;
-import org.flexlb.discovery.NoOpServiceDiscovery;
-import org.flexlb.discovery.ServiceDiscovery;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.flexlb.discovery.RoutingServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryProvider;
+import org.flexlb.discovery.StaticServiceDiscoveryProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.util.List;
 
 /**
  * ServiceDiscoveryConfiguration - Service discovery default configuration
  *
  * @author saichen.sm
  */
-@Slf4j
 @Configuration
 public class ServiceDiscoveryConfiguration {
-    /**
-     * Create default ServiceDiscovery Bean
-     * Used when no other ServiceDiscovery implementation is available
-     *
-     * @return NoOpServiceDiscovery instance
-     */
-    @Bean
-    @ConditionalOnMissingBean(ServiceDiscovery.class)
-    public ServiceDiscovery serviceDiscovery() {
-        log.info("Creating default NoOpServiceDiscovery (env-based discovery)");
-        return NoOpServiceDiscovery.getInstance();
+
+    @Bean(destroyMethod = "")
+    public StaticServiceDiscoveryProvider staticServiceDiscoveryProvider() {
+        return new StaticServiceDiscoveryProvider();
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    public RoutingServiceDiscovery routingServiceDiscovery(List<ServiceDiscoveryProvider> providers) {
+        return new RoutingServiceDiscovery(providers);
     }
 }

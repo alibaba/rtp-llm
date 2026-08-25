@@ -79,7 +79,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         }
         ServiceRoute serviceRoute = JsonUtils.toObject(modelConfig, new TypeReference<>() {
         });
-        ModelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
+        modelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
         modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
     }
 

@@ -5,12 +5,15 @@ import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,7 +28,7 @@ import java.util.Set;
  */
 @Slf4j
 @Component
-public class KvCacheManager {
+public class KvCacheManager implements EngineCacheInvalidator {
 
     @Autowired
     private GlobalCacheIndex globalCacheIndex;
@@ -117,6 +120,22 @@ public class KvCacheManager {
                 engineIPort.split(":")[0], role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
+    }
+
+    @Override
+    public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
+        if (activeEngineIpPorts == null) {
+            return;
+        }
+        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
+        staleEngineIpPorts.removeAll(new HashSet<>(activeEngineIpPorts));
+        for (String staleEngineIpPort : staleEngineIpPorts) {
+            long startTime = System.nanoTime() / 1000;
+            engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            log.info("Removed stale engine cache: {}, cost={}us",
+                    staleEngineIpPort, System.nanoTime() / 1000 - startTime);
+        }
     }
 
     /**
