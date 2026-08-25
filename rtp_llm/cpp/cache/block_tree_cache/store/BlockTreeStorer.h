@@ -52,6 +52,7 @@ private:
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier);
     void   runStoreTask(const StoreTaskPtr& task);
+    void   scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
     void   settleTask(const StoreTask& task, bool copy_success);
     size_t settleLocked(const StoreTask& task, bool publish);
 

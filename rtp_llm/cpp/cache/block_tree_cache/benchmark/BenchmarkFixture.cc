@@ -202,7 +202,11 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
         config.watermark_host.ratio = host_watermark_ratio;
     }
 
-    auto engine     = std::make_shared<PerRankBlockTransferEngine>(group_sets);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                               DeviceHostCopyOptions{},
+                                                               config.device_disk_staging_block_count,
+                                                               config.max_descriptors_per_transfer_batch,
+                                                               config.transfer_worker_count);
     auto dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000, "BlockTreeCacheBenchmarkTaskPool");

@@ -281,8 +281,12 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
     const std::vector<bool>&               joined_loads        = context->joinedLoads();
     const uint64_t                         context_id          = context->contextId();
     size_t                                 prepared_desc_count = 0;
+    bool                                   business_credit_acquired = false;
     block_tree_cache_detail::ScopeRollback rollback_guard(
-        [this, &load_descs, &joined_loads, &prepared_desc_count, context_id]() {
+        [this, &load_descs, &joined_loads, &prepared_desc_count, &business_credit_acquired, context_id]() {
+            if (business_credit_acquired) {
+                task_pool_->releaseBusinessCredit();
+            }
             abortLoadLocked(load_descs,
                             joined_loads,
                             prepared_desc_count,
@@ -310,8 +314,14 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
     }
 
     LoadTaskRunner::TaskPtr task = load_task_runner_.createTask(context);
-    if (task && !task_pool_->submit([this, task]() { runLoadTask(task); })) {
-        return false;
+    if (task) {
+        if (!task_pool_->acquireBusinessCredit()) {
+            return false;
+        }
+        business_credit_acquired = true;
+        if (!task_pool_->submit([this, task]() { runLoadTask(task); })) {
+            return false;
+        }
     }
 
     rollback_guard.dismiss();
@@ -382,21 +392,36 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 }
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
-    bool copy_success = false;
     try {
-        copy_success = load_task_runner_.runTransfer(
-            *task, *transfer_dispatcher_, metrics_reporter_, disk_timeout_ms_, host_timeout_ms_);
+        load_task_runner_.runTransfer(task,
+                                      *transfer_dispatcher_,
+                                      metrics_reporter_,
+                                      disk_timeout_ms_,
+                                      host_timeout_ms_,
+                                      [this, task](ErrorInfo error) {
+                                          scheduleLoadSettlement(task, std::move(error));
+                                      });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("load task runner failed with exception: %s", error.what());
+        scheduleLoadSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
     } catch (...) {
         RTP_LLM_LOG_ERROR("load task runner failed with unknown exception");
+        scheduleLoadSettlement(
+            task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown load task runner exception"));
     }
+}
 
-    {
+void BlockTreeLoader::scheduleLoadSettlement(const LoadTaskRunner::TaskPtr& task, ErrorInfo error) {
+    auto settle = [this, task, error = std::move(error)]() mutable {
+        block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!settleLoadLocked(*task, copy_success)) {
+        if (!settleLoadLocked(*task, error.ok())) {
             RTP_LLM_LOG_DEBUG("load task settled unsuccessfully");
         }
+    };
+    if (!task_pool_->submitCompletion(settle)) {
+        RTP_LLM_LOG_WARNING("load completion queue is closed; settling inline");
+        settle();
     }
 }
 

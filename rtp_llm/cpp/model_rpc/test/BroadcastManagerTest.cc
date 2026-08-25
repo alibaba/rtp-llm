@@ -1,8 +1,8 @@
 #include <chrono>
+#include <future>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
-#include "grpcpp/alarm.h"
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -188,6 +188,32 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     for (auto& server : servers) {
         server->shutdown();
     }
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_OnDoneCompletesWithoutWaitDone) {
+    auto service = std::make_unique<TestRpcService>();
+    auto server  = std::make_unique<TestRpcServer>(std::move(service));
+    ASSERT_TRUE(server->start());
+    auto manager = std::make_unique<BroadcastManager>(
+        std::vector<std::string>{"127.0.0.1:" + std::to_string(server->listenPort())});
+    ASSERT_TRUE(manager->init());
+
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue*                      cq) {
+        return stub->AsyncExecuteFunction(ctx.get(), req, cq);
+    };
+    auto result = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, 500, rpc_call);
+    ASSERT_NE(result, nullptr);
+    std::promise<void> done;
+    auto               future = done.get_future();
+    result->onDone([&] { done.set_value(); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(result->done());
+    EXPECT_TRUE(result->success());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
@@ -532,23 +558,25 @@ TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqEventNotOk) {
     auto result = std::make_shared<FunctionBroadcastResult>(
         std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
 
-    grpc::Alarm alarm;
-    alarm.Set(&ctx->completion_queue,
-              std::chrono::system_clock::now() + std::chrono::seconds(30),
-              reinterpret_cast<void*>(static_cast<intptr_t>(0)));
-    alarm.Cancel();
+    result->finishRank(/*rank=*/0, /*cq_event_ok=*/false);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
 }
 
-TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqShutdown) {
+TEST_F(BroadcastManagerTest, CqFailureStillPublishesCompletionCallback) {
     auto ctx    = makeIdleContext();
     auto result = std::make_shared<FunctionBroadcastResult>(
         std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+    std::promise<void> callback_done;
+    auto               callback_future = callback_done.get_future();
+    result->onDone([&] { callback_done.set_value(); });
 
-    ctx->completion_queue.Shutdown();
+    result->finishRank(/*rank=*/0, /*cq_event_ok=*/false);
 
+    EXPECT_EQ(callback_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
 }
 
 // ---------------------------- workerNum ----------------------------

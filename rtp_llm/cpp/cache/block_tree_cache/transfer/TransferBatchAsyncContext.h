@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <utility>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 
@@ -14,6 +15,7 @@ public:
         completion_guard_(std::move(completion_guard)) {}
 
     void      waitDone() override;
+    void      onDone(DoneCallback callback) override;
     bool      done() const override;
     bool      success() const override;
     ErrorInfo errorInfo() const override;
@@ -26,6 +28,7 @@ private:
     bool                    done_{false};
     ErrorInfo               error_{ErrorInfo::OkStatus()};
     std::shared_ptr<void>   completion_guard_;
+    std::vector<DoneCallback> callbacks_;
 };
 
 }  // namespace rtp_llm

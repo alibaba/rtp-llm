@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -52,6 +53,17 @@ std::shared_ptr<LoadAsyncContext> takeLoadContext(BlockTreeMatchResult& result) 
     }
     result.async_context.reset();
     return context;
+}
+
+size_t transferGroupCount(const std::vector<TransferDescriptor>& descriptors) {
+    std::vector<std::tuple<Tier, Tier, size_t>> groups;
+    for (const auto& descriptor : descriptors) {
+        const auto key = std::make_tuple(descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id);
+        if (std::find(groups.begin(), groups.end(), key) == groups.end()) {
+            groups.push_back(key);
+        }
+    }
+    return groups.size();
 }
 
 class PausablePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
@@ -1934,7 +1946,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     EXPECT_FALSE(joined_context->success());
     EXPECT_FALSE(environment->cache->abortPendingLoad(context));
     EXPECT_FALSE(environment->cache->abortPendingLoad(joined_context));
-    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), submits_before_join);
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), transferGroupCount(context->loadDescs()));
     EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
     EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
     if (GetParam() == Tier::HOST) {
@@ -2036,7 +2048,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
 
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
-    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), transferGroupCount(context->loadDescs()));
     EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
     EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
     const std::vector<GroupSetResource> resources_after = environment->resourcesForPathNode(0);
