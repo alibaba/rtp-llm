@@ -18,6 +18,11 @@ import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
+import org.flexlb.state.DecodeRequestStateView;
+import org.flexlb.state.GenerationTriple;
+import org.flexlb.state.LedgerTraceView;
+import org.flexlb.state.PrefillRequestStateView;
+import org.flexlb.sync.shadow.StateShadowBridge;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
@@ -34,6 +39,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
@@ -47,6 +53,7 @@ public class HttpLoadBalanceServer {
     private final EndpointRegistry endpointRegistry;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private final StateShadowBridge stateShadowBridge;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  ConfigService configService,
@@ -55,12 +62,29 @@ public class HttpLoadBalanceServer {
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
                                  ServerScheduleLatencyRecorder serverLatencyRecorder) {
+        this(lbStatusConsistencyService, configService, routeService, endpointRegistry,
+                masterEngineSynchronizer, serverLatencyRecorder, null);
+    }
+
+    // 两个构造器并存时 Spring 无法自动选择（无构造器级 @Autowired 会回退找
+    // 无参构造器并失败）；必须显式标注生产用构造器。测试可直接 new 任一构造器。
+    @org.springframework.beans.factory.annotation.Autowired
+    public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
+                                 ConfigService configService,
+                                 RouteService routeService,
+                                 EndpointRegistry endpointRegistry,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false)
+                                 MasterEngineSynchronizer masterEngineSynchronizer,
+                                 ServerScheduleLatencyRecorder serverLatencyRecorder,
+                                 @org.springframework.beans.factory.annotation.Autowired(required = false)
+                                 StateShadowBridge stateShadowBridge) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.routeService = routeService;
         this.endpointRegistry = endpointRegistry;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
+        this.stateShadowBridge = stateShadowBridge;
     }
 
     @Bean
@@ -82,6 +106,8 @@ public class HttpLoadBalanceServer {
                         this::inflightStatus)
                 .GET("/rtp_llm/server_latency", this::serverLatency)
                 .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
+                .GET("/rtp_llm/state_ledger/trace/{requestId}", accept(MediaType.APPLICATION_JSON),
+                        this::stateLedgerTrace)
                 .build();
     }
 
@@ -299,5 +325,119 @@ public class HttpLoadBalanceServer {
         return ServerResponse.ok()
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of("reset", true));
+    }
+
+    /**
+     * Per-request state-ledger diagnostic storyline (read-only, no auth — same
+     * exposure level as the other diagnostics endpoints): P-side active entry
+     * (phase / generation binding / batch / timestamps / trace ring) + D-side
+     * active entry + both tombstone terminal states (queryable within the
+     * tombstone retention window). Data source is the StateShadowBridge's
+     * StateLedger read-only view.
+     */
+    private Mono<ServerResponse> stateLedgerTrace(ServerRequest request) {
+        long requestId;
+        try {
+            requestId = Long.parseLong(request.pathVariable("requestId"));
+        } catch (NumberFormatException e) {
+            return ServerResponse.status(400)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(Map.of("found", false,
+                            "error", "invalid requestId (expected decimal long): "
+                                    + request.pathVariable("requestId")));
+        }
+        try {
+            StateShadowBridge bridge = stateShadowBridge;
+            if (bridge == null || !bridge.isEnabled()) {
+                return ServerResponse.ok()
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(Map.of("request_id", requestId, "found", false,
+                                "reason", "state ledger disabled (flexlbStateV2ShadowEnabled=false)"));
+            }
+            Optional<LedgerTraceView> trace = bridge.ledger().traceOf(requestId);
+            if (trace.isEmpty()) {
+                // Unknown request or fully expired (no active entry and no tombstone
+                // within the retention window).
+                return ServerResponse.ok()
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(Map.of("request_id", requestId, "found", false));
+            }
+            return ServerResponse.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(buildStateLedgerTraceBody(requestId, trace.get()));
+        } catch (Exception e) {
+            Logger.error("stateLedgerTrace error", e);
+            return ServerResponse.status(500)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(Map.of("found", false, "error", String.valueOf(e.getMessage())));
+        }
+    }
+
+    private Map<String, Object> buildStateLedgerTraceBody(long requestId, LedgerTraceView view) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("request_id", requestId);
+        body.put("found", true);
+        body.put("prefill_active", view.prefillActive().map(this::prefillEntryBody).orElse(null));
+        body.put("decode_active", view.decodeActive().map(this::decodeEntryBody).orElse(null));
+        body.put("prefill_tombstone", view.prefillTombstone().map(this::tombstoneBody).orElse(null));
+        body.put("decode_tombstone", view.decodeTombstone().map(this::tombstoneBody).orElse(null));
+        return body;
+    }
+
+    private Map<String, Object> prefillEntryBody(PrefillRequestStateView entry) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("side", "P");
+        body.put("phase", entry.phaseName());
+        body.put("phase_ordinal", entry.phaseOrdinal());
+        body.put("created_at_ms", entry.createdAtMs());
+        body.put("batch_id", entry.batchId());
+        body.put("binding", bindingBody(entry.binding()));
+        body.put("dispatched_at_ms", entry.dispatchedAtMs());
+        body.put("engine_owned", entry.engineOwned());
+        body.put("kv_tokens_reported", entry.kvTokensReported());
+        body.put("last_seen_round", entry.lastSeenRound());
+        body.put("last_version", entry.lastVersion());
+        body.put("pending_cancel", entry.pendingCancel());
+        body.put("trace", entry.trace());
+        return body;
+    }
+
+    private Map<String, Object> decodeEntryBody(DecodeRequestStateView entry) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("side", "D");
+        body.put("phase", entry.phaseName());
+        body.put("phase_ordinal", entry.phaseOrdinal());
+        body.put("created_at_ms", entry.createdAtMs());
+        body.put("binding", bindingBody(entry.binding()));
+        body.put("reserved_kv", entry.reservedKv());
+        body.put("reserved_expected_kv", entry.reservedExpectedKv());
+        body.put("engine_owned", entry.engineOwned());
+        body.put("kv_tokens_reported", entry.kvTokensReported());
+        body.put("last_seen_round", entry.lastSeenRound());
+        body.put("last_version", entry.lastVersion());
+        body.put("pending_cancel", entry.pendingCancel());
+        body.put("trace", entry.trace());
+        return body;
+    }
+
+    private Map<String, Object> tombstoneBody(LedgerTraceView.TombstoneView tombstone) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("request_id", tombstone.requestId());
+        body.put("state", tombstone.state().name());
+        body.put("reason", tombstone.reason().name());
+        body.put("terminal_at_ms", tombstone.terminalAtMs());
+        body.put("trace", tombstone.entryTrace());
+        return body;
+    }
+
+    private Map<String, Object> bindingBody(GenerationTriple binding) {
+        if (binding == null) {
+            return null;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("endpoint_id", binding.endpointId());
+        body.put("generation", binding.generation());
+        body.put("batch_id", binding.batchId());
+        return body;
     }
 }

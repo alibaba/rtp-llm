@@ -558,6 +558,18 @@ public class FlexlbConfig {
     private long flexlbStateV2JanitorIntervalMs = 10_000L;
 
     /**
+     * FlexLB state v2 phase-transition debug log switch: when enabled, every
+     * CAS-winning phase transition inside the StateLedger emits one debug
+     * line on the syncLogger channel (requestId / side / from / to / version /
+     * reason). <b>Default false — log-volume red line</b>: enable only for live
+     * troubleshooting (the syncLogger appender level must also be lowered to
+     * DEBUG for the lines to become visible). Resolved once at startup,
+     * no runtime hot-toggle. Environment variable:
+     * FLEXLB_STATE_V2_DEBUG_TRANSITION_LOG.
+     */
+    private boolean flexlbStateV2DebugTransitionLog = false;
+
+    /**
      * FlexLB state v2 settlement authority switch — <b>deprecated (legacy
      * inflight path removed)</b>: terminal settlement now always converges on
      * the StateLedger whenever the state ledger is enabled

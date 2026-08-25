@@ -91,9 +91,10 @@ class StateShadowDiffCollectorTest {
     void shouldCountBothDiffs_whenPreemptedHasNoOldCounterpart() {
         StateShadowDiffCollector collector = new StateShadowDiffCollector(null);
 
-        // PREEMPTED 为新语义回边态：state 必 diff（旧无对应）+ reason 必 diff（一律计）
+        // PREEMPTED 为新语义回边态：state 必 diff（旧无对应）+ reason 必 diff（一律计，
+        // 配对 reason 取强制收尾语义值——不在 COMPLETED 等价 reason 集内）
         collector.recordOldTerminal(6L, "COMPLETED");
-        collector.recordNewTerminal(6L, TerminalState.PREEMPTED, TerminalReason.PREEMPTED);
+        collector.recordNewTerminal(6L, TerminalState.PREEMPTED, TerminalReason.HARD_CAP);
 
         assertEquals(1L, collector.diffTerminalState());
         assertEquals(1L, collector.diffTerminalReason());

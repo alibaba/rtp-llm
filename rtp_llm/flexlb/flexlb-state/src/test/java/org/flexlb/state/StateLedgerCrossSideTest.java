@@ -22,7 +22,7 @@ class StateLedgerCrossSideTest {
     private static final TestEndpoints.Endpoint D_EP0 = TestEndpoints.ep(2L, StateRole.DECODE, 0L);
 
     private static TerminalOutcome cancelOutcome() {
-        return new TerminalOutcome(TerminalState.CANCELLED, TerminalReason.CANCELLED_ACK, "");
+        return new TerminalOutcome(TerminalState.CANCELLED, TerminalReason.CANCELLED_IMPLICIT, "");
     }
 
     /** 构造 P 条目并推进到目标引擎观察相位的辅助。 */

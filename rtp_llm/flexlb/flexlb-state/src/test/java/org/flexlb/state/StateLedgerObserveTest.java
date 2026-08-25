@@ -23,9 +23,9 @@ class StateLedgerObserveTest {
     private static final TestEndpoints.Endpoint P_EP0 = TestEndpoints.ep(1L, StateRole.PREFILL, 0L);
     private static final TestEndpoints.Endpoint D_EP0 = TestEndpoints.ep(2L, StateRole.DECODE, 0L);
 
-    /** 终局取消 outcome（CANCELLED_ACK 通道）。 */
+    /** 终局取消 outcome（本地取消推定成立通道）。 */
     private static TerminalOutcome cancelOutcome() {
-        return new TerminalOutcome(TerminalState.CANCELLED, TerminalReason.CANCELLED_ACK, "");
+        return new TerminalOutcome(TerminalState.CANCELLED, TerminalReason.CANCELLED_IMPLICIT, "");
     }
 
     // ---- 1. 正常全生命周期 ----

@@ -39,6 +39,8 @@ public final class DecodeSideStore {
     private volatile DecodeCounterSnapshot publishedSnapshot;
     private final AtomicInteger transitionTick = new AtomicInteger();
     private final LongAdder overtakenEvents = new LongAdder();
+    /** 快路径 settle 胜者计数（引擎 finished / 本地 settle / cancel 双清——超车三分的正常通道胜）。 */
+    private final LongAdder fastPathSettles = new LongAdder();
 
     public DecodeSideStore(TombstoneStore tombstones, int snapshotInterval) {
         this.tombstones = tombstones;
@@ -148,7 +150,8 @@ public final class DecodeSideStore {
         // 并发的迟到 finished/settle 读到“条目不在且墓碑未落”会误记 unknown。
         // 先吸收墓碑可闭合该窗口（absorb 幂等，CAS 守卫保证唯一胜者）：
         // 条目仍在时 CAS 守卫拦截双重结算，条目移除后迟到事件被墓碑吸收。
-        tombstones.absorb(entry.requestId(), outcome, nowMs);
+        // 墓碑携带终局时刻的 trace 环快照（诊断端点故事线，保留期内可查）。
+        tombstones.absorb(entry.requestId(), outcome, nowMs, entry.traceSnapshot());
         entries.remove(entry.requestId(), entry);
         unindexEndpoint(entry);
         synchronized (entry) {
@@ -158,6 +161,7 @@ public final class DecodeSideStore {
                 epCounters.onRemoved(epId, entry);
             }
         }
+        fastPathSettles.increment();
         tickPublish();
         return true;
     }
@@ -402,11 +406,17 @@ public final class DecodeSideStore {
         epCounters.reset();
         transitionTick.set(0);
         overtakenEvents.reset();
+        fastPathSettles.reset();
         publishedSnapshot = counters.recompute(0);
     }
 
     public long overtakenEvents() {
         return overtakenEvents.sum();
+    }
+
+    /** 快路径 settle 胜者计数（观测层超车三分之正常通道胜）。 */
+    public long fastPathSettles() {
+        return fastPathSettles.sum();
     }
 
     public TombstoneStore tombstones() {

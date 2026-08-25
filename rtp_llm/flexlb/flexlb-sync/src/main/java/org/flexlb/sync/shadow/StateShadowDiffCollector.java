@@ -217,7 +217,10 @@ public final class StateShadowDiffCollector {
         };
     }
 
-    /** 调度终态的等价 reason 集（宽松观测口径：同族 reason 不计 diff）。 */
+    /**
+     * 调度终态的等价 reason 集（宽松观测口径：同族 reason 不计 diff）。
+     * CANCELLED_ACK 随观测层里程碑死枚举裁剪移除（历史预留值无产出路径）。
+     */
     static boolean reasonInEquivalentSet(String oldState, String newReason) {
         if (newReason == null) {
             return false;
@@ -225,7 +228,7 @@ public final class StateShadowDiffCollector {
         return switch (oldState) {
             case "COMPLETED" -> Set.of(TerminalReason.SUCCEEDED.name()).contains(newReason);
             case "FAILED" -> Set.of(TerminalReason.ENGINE_FAILED.name()).contains(newReason);
-            case "CANCELLED" -> Set.of(TerminalReason.CANCELLED_ACK.name(), TerminalReason.CANCELLED_IMPLICIT.name(),
+            case "CANCELLED" -> Set.of(TerminalReason.CANCELLED_IMPLICIT.name(),
                     TerminalReason.CANCELLED_NEVER_ARRIVED.name()).contains(newReason);
             case "TIMED_OUT" -> Set.of(TerminalReason.TTL_EXPIRED.name(), TerminalReason.SLO_BUDGET_EXHAUSTED.name(),
                     TerminalReason.VANISHED.name()).contains(newReason);

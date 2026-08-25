@@ -13,6 +13,7 @@ import org.flexlb.state.PrefillEndpointCounters;
 import org.flexlb.state.RegisterResult;
 import org.flexlb.state.SettleReason;
 import org.flexlb.state.StateLedger;
+import org.flexlb.state.StateLedgerConfig;
 import org.flexlb.state.TerminalOutcome;
 import org.flexlb.state.TerminalReason;
 import org.flexlb.state.TerminalState;
@@ -94,8 +95,10 @@ public final class StateShadowBridge {
     private final StateShadowDiffCollector diff;
     /** 清理层（账本开时挂载；关态 null）。 */
     private final LedgerJanitor janitor;
-    /** janitor 维护 tick 调度（autoStart=false 时 null；close 时停）。 */
+    /** janitor 维护 tick 调度（autoStart=false 时 null；close 时停）——兼跑观测采样 tick。 */
     private final ScheduledExecutorService janitorScheduler;
+    /** 观测指标适配器（账本开时挂载；关态 null）。 */
+    private final LedgerMetricsReporter metricsReporter;
 
     // ---- 终态结算与调度读点（旧路径移除后恒开；开关已废弃） ----
 
@@ -124,6 +127,7 @@ public final class StateShadowBridge {
         this.diff = null;
         this.janitor = null;
         this.janitorScheduler = null;
+        this.metricsReporter = null;
         this.terminalMetricHelper = null;
         this.pendingTerminalMetrics = null;
         this.observedEndpoints = null;
@@ -134,6 +138,7 @@ public final class StateShadowBridge {
                               StateShadowDiffCollector diff,
                               LedgerJanitor janitor,
                               ScheduledExecutorService janitorScheduler,
+                              LedgerMetricsReporter metricsReporter,
                               FlexlbMetricHelper terminalMetricHelper) {
         this.enabled = true;
         this.ledger = Objects.requireNonNull(ledger);
@@ -141,6 +146,7 @@ public final class StateShadowBridge {
         this.diff = Objects.requireNonNull(diff);
         this.janitor = janitor;
         this.janitorScheduler = janitorScheduler;
+        this.metricsReporter = metricsReporter;
         this.terminalMetricHelper = terminalMetricHelper;
         this.pendingTerminalMetrics = new ConcurrentHashMap<>();
         this.observedEndpoints = ConcurrentHashMap.newKeySet();
@@ -173,7 +179,8 @@ public final class StateShadowBridge {
                     + "are deprecated (legacy inflight path removed): both are permanently ON "
                     + "while the state ledger is enabled; explicit false values are ignored");
         }
-        StateLedger ledger = new StateLedger();
+        StateLedger ledger = new StateLedger(StateLedgerConfig.defaults()
+                .withDebugTransitionLog(config.isFlexlbStateV2DebugTransitionLog()));
         StateShadowDiffCollector diff = new StateShadowDiffCollector(monitor);
         diff.registerMetrics();
         WorkerStatusObservationTranslator translator = new WorkerStatusObservationTranslator(ledger);
@@ -187,8 +194,14 @@ public final class StateShadowBridge {
                 LedgerJanitorConfig.DEFAULT_SCAN_BUDGET_PER_TICK);
         LedgerJanitor janitor = ledger.createJanitor(janitorConfig);
 
+        // 观测指标适配器（指标出口：state 纯采样 + sync 上报 FlexMonitor）。
+        LedgerMetricsReporter metricsReporter = new LedgerMetricsReporter(ledger.metrics(), monitor);
+        metricsReporter.registerMetrics();
+
         ScheduledExecutorService scheduler = null;
         if (autoStartJanitor) {
+            // 维护调度线程兼跑 janitor 维护 tick 与观测采样 tick（均为低频
+            // 冷路径任务，单线程串行足够；采样间隔独立于 janitor 间隔）。
             scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread t = new Thread(r, "flexlb-state-janitor");
                 t.setDaemon(true);
@@ -199,6 +212,9 @@ public final class StateShadowBridge {
             long intervalMs = config.getFlexlbStateV2JanitorIntervalMs();
             scheduler.scheduleAtFixedRate(janitor::runMaintenanceTick,
                     intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+            scheduler.scheduleAtFixedRate(metricsReporter::tick,
+                    LedgerMetricsReporter.SAMPLE_INTERVAL_MS, LedgerMetricsReporter.SAMPLE_INTERVAL_MS,
+                    TimeUnit.MILLISECONDS);
         }
 
         // 终态 metric 统一出口 helper（与 BATCH 调度器同 path tag，指标口径连续；
@@ -207,7 +223,7 @@ public final class StateShadowBridge {
         terminalMetricHelper.register();
 
         StateShadowBridge bridge = new StateShadowBridge(ledger, translator, diff, janitor, scheduler,
-                terminalMetricHelper);
+                metricsReporter, terminalMetricHelper);
         // janitor 胜者结算 → diff 对账 + 挂起 metric 消费（与引擎 finished 终局同语义）。
         // 首个维护 tick 至少在 intervalMs 之后，listener 同步挂载在前——无竞态。
         janitor.setSettleListener(bridge::onJanitorSettled);
@@ -220,7 +236,9 @@ public final class StateShadowBridge {
                 + " interval=" + config.getFlexlbStateV2JanitorIntervalMs() + "ms"
                 + " staleRounds=" + config.getFlexlbStateV2StaleRounds()
                 + " ttlMs=" + config.getFlexlbStateV2TtlMs()
-                + " hardCapMs=" + config.getFlexlbStateV2HardCapMs() + ");");
+                + " hardCapMs=" + config.getFlexlbStateV2HardCapMs()
+                + " metricsSampleIntervalMs=" + LedgerMetricsReporter.SAMPLE_INTERVAL_MS
+                + " debugTransitionLog=" + config.isFlexlbStateV2DebugTransitionLog() + ");");
         return bridge;
     }
 
@@ -349,8 +367,9 @@ public final class StateShadowBridge {
         try {
             if ("CANCELLED".equals(oldStateName)) {
                 // 本地取消：无引擎 ack 证据，推定取消成立（与 diff 等价集 CANCELLED 族对齐）。
+                // reason 按引擎是否已见分流：已见→隐式取消；从未到达→未达取消。
                 TerminalOutcome outcome = new TerminalOutcome(
-                        TerminalState.CANCELLED, TerminalReason.CANCELLED_IMPLICIT, "shadow:old-path-cancel");
+                        TerminalState.CANCELLED, localCancelReason(requestId), "shadow:old-path-cancel");
                 ledger.prefill().settle(requestId, outcome, SettleReason.LOCAL_CANCEL);
                 ledger.decode().settle(requestId, outcome, SettleReason.LOCAL_CANCEL);
                 recordNewTerminalIfSettled(requestId);
@@ -564,7 +583,8 @@ public final class StateShadowBridge {
         }
     }
 
-    /** 旧路径终态 → ledger 终局结果（受控原因 + detail）。 */
+    /** 旧路径终态 → ledger 终局结果（受控原因 + detail）。CANCELLED 的 reason
+     * 分流见 {@link #localCancelReason(long)}（静态版仅覆盖 FAILED/TIMED_OUT）。 */
     private static TerminalOutcome authoritativeOutcome(String oldStateName) {
         return switch (oldStateName) {
             case "CANCELLED" -> new TerminalOutcome(TerminalState.CANCELLED,
@@ -590,13 +610,30 @@ public final class StateShadowBridge {
     /**
      * 双侧主动结算（幂等：先到者赢，后到侧 absorb no-op）。CANCELLED 经 P 侧
      * propagate 自动双清；FAILED / TIMED_OUT 不传播——显式双调保证双侧收敛。
+     * CANCELLED 的 reason 按引擎已见分流（未达取消 vs 隐式取消）。
      */
     private void settleBothSidesAuthoritatively(long requestId, String oldStateName) {
-        TerminalOutcome outcome = authoritativeOutcome(oldStateName);
+        TerminalOutcome outcome = "CANCELLED".equals(oldStateName)
+                ? new TerminalOutcome(TerminalState.CANCELLED, localCancelReason(requestId),
+                        "settle-authority:old-path-cancel")
+                : authoritativeOutcome(oldStateName);
         SettleReason settleReason = authoritativeSettleReason(oldStateName);
         ledger.prefill().settle(requestId, outcome, settleReason);
         ledger.decode().settle(requestId, outcome, settleReason);
         recordNewTerminalIfSettled(requestId);
+    }
+
+    /**
+     * 本地取消终局 reason 分流：任一侧条目引擎已见（engineOwned）→
+     * CANCELLED_IMPLICIT（已见后取消，无 ack 推定成立）；两侧均未达引擎 →
+     * CANCELLED_NEVER_ARRIVED（未派发/未送达即取消，无需引擎证据）。
+     */
+    private TerminalReason localCancelReason(long requestId) {
+        boolean engineSeen = ledger.prefill().get(requestId)
+                .map(org.flexlb.state.PrefillRequestStateView::engineOwned).orElse(false)
+                || ledger.decode().get(requestId)
+                .map(org.flexlb.state.DecodeRequestStateView::engineOwned).orElse(false);
+        return engineSeen ? TerminalReason.CANCELLED_IMPLICIT : TerminalReason.CANCELLED_NEVER_ARRIVED;
     }
 
     /**
@@ -690,6 +727,19 @@ public final class StateShadowBridge {
     /** 清理层（关态 null；观察/装配测试用）。 */
     public LedgerJanitor janitor() {
         return janitor;
+    }
+
+    /** 观测指标适配器（关态 null；诊断端点/测试用）。 */
+    public LedgerMetricsReporter metricsReporter() {
+        return metricsReporter;
+    }
+
+    /** 手动驱动一观测采样 tick（测试钩子；生产走 flexlb-state-janitor 调度线程）。 */
+    public void runMetricsTickOnce() {
+        LedgerMetricsReporter reporter = metricsReporter;
+        if (reporter != null) {
+            reporter.tick();
+        }
     }
 
     /** 手动驱动一 janitor 维护 tick（测试钩子；生产走 flexlb-state-janitor 调度线程）。 */

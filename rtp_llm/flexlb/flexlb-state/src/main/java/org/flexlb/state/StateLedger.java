@@ -22,6 +22,8 @@ import org.flexlb.state.internal.prefill.PrefillSideStore;
 import org.flexlb.state.spi.EngineObservation;
 import org.flexlb.state.spi.StateEndpointRef;
 import org.flexlb.state.spi.StateRole;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 状态账本门面：P/D 双侧状态核心的唯一组装点与<b>跨侧规则唯一入口</b>。
@@ -52,6 +54,8 @@ import org.flexlb.state.spi.StateRole;
  */
 public final class StateLedger {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger("syncLogger");
+
     private final StateLedgerConfig config;
     private final GenerationTracker generations;
     private final FenceRegistry fences;
@@ -66,8 +70,22 @@ public final class StateLedger {
     /** F1 因果闭包触发计数（janitor 透传观测）。 */
     private final LongAdder causalClosureSettles = new LongAdder();
 
+    // ---- 观测层受控 reason 计数账（终局/转换的产出点记账；观测采样读口经 LedgerMetrics）----
+
+    /** settle 证据通道计数（janitor 三通道 / 引擎 finished / 因果闭包 / 本地 settle 门面）。 */
+    private final EnumMap<SettleReason, LongAdder> settleReasonCounts = new EnumMap<>(SettleReason.class);
+    /** 清理通道计数（janitor 护栏与通道分支 + 引擎 finished 正常终局）。 */
+    private final EnumMap<CleanupReason, LongAdder> cleanupReasonCounts = new EnumMap<>(CleanupReason.class);
+    /** 相位转换驱动力计数（转换 CAS 胜者分支——与超车败者相对）。 */
+    private final EnumMap<TransitionReason, LongAdder> transitionReasonCounts = new EnumMap<>(TransitionReason.class);
+    /** 终局受控原因计数（settle 胜者分支按 outcome.reason() 记账）。 */
+    private final EnumMap<TerminalReason, LongAdder> terminalReasonCounts = new EnumMap<>(TerminalReason.class);
+
     /** 清理层实例（createJanitor 挂载；未创建时 observe 尾部零开销）。 */
     private volatile LedgerJanitor janitor;
+
+    /** 观测层采样器（相位年龄抽样 + 只读 sample 出口；与账本同生命周期）。 */
+    private final LedgerMetrics metrics;
 
     public StateLedger() {
         this(StateLedgerConfig.defaults());
@@ -91,6 +109,19 @@ public final class StateLedger {
         for (PhaseVerdict v : PhaseVerdict.values()) {
             verdictCounts.put(v, new LongAdder());
         }
+        for (SettleReason r : SettleReason.values()) {
+            settleReasonCounts.put(r, new LongAdder());
+        }
+        for (CleanupReason r : CleanupReason.values()) {
+            cleanupReasonCounts.put(r, new LongAdder());
+        }
+        for (TransitionReason r : TransitionReason.values()) {
+            transitionReasonCounts.put(r, new LongAdder());
+        }
+        for (TerminalReason r : TerminalReason.values()) {
+            terminalReasonCounts.put(r, new LongAdder());
+        }
+        this.metrics = new LedgerMetrics(this);
     }
 
     /** P 侧类型化门面。 */
@@ -101,6 +132,18 @@ public final class StateLedger {
     /** D 侧类型化门面。 */
     public DecodeSide decode() {
         return dFacade;
+    }
+
+    /**
+     * 观测层采样器（相位年龄抽样 + 只读 sample 出口）。
+     *
+     * <p>指标出口设计（依赖最干净方案）：flexlb-state 不依赖任何 metric 库——
+     * 本类只暴露纯数据采样接口 {@link LedgerMetrics#sample(long)}，由
+     * flexlb-sync 侧适配器低频拉取并上报（FlexMonitor 通道）；state 侧
+     * 零观测库依赖，观测语义（指标名/类型/上报通道）归属消费侧。</p>
+     */
+    public LedgerMetrics metrics() {
+        return metrics;
     }
 
     /**
@@ -171,6 +214,10 @@ public final class StateLedger {
         verdictCounts.values().forEach(LongAdder::reset);
         unknownRunningEvents.reset();
         unknownFinishedEvents.reset();
+        settleReasonCounts.values().forEach(LongAdder::reset);
+        cleanupReasonCounts.values().forEach(LongAdder::reset);
+        transitionReasonCounts.values().forEach(LongAdder::reset);
+        terminalReasonCounts.values().forEach(LongAdder::reset);
         for (EngineObservation obs : fullHistory) {
             observeInternal(obs, true);
         }
@@ -217,14 +264,17 @@ public final class StateLedger {
      * <p>janitor 的 settle 与外部 settle 走同一 CAS 单出口（本类 settlePrefill/
      * settleDecode 的单侧委托回调）；observe 尾部（完整 tick）回调其缺席扫描。
      * 单例约定：一账本一 janitor，重复调用替换旧实例（旧实例的调度由持有方负责停止）。
-     * 调度（TTL/硬上限定时 tick）由上层驱动（flexlb-sync 账本装配处）。</p>
+     * 调度（TTL/硬上限定时 tick）由上层驱动（flexlb-sync 账本装配处）。
+     * 挂载时注入 CleanupReason 记账回调（janitor 护栏/通道分支 → 本类统一
+     * reason 计数账，观测采样统一出口）。</p>
      */
     public LedgerJanitor createJanitor(LedgerJanitorConfig janitorConfig) {
         Objects.requireNonNull(janitorConfig, "janitorConfig");
         LedgerJanitor created = new LedgerJanitor(janitorConfig, pStore, dStore, fences,
                 causalClosureSettles::sum,
-                (requestId, outcome) -> settlePrefill(requestId, outcome, false),
-                (requestId, outcome) -> settleDecode(requestId, outcome, false));
+                (requestId, outcome, reason) -> settlePrefill(requestId, outcome, reason, false),
+                (requestId, outcome, reason) -> settleDecode(requestId, outcome, reason, false),
+                this::countCleanup);
         this.janitor = created;
         return created;
     }
@@ -248,6 +298,36 @@ public final class StateLedger {
                         "shadow-query@" + t.terminalAtMs()));
     }
 
+    /**
+     * per-request 诊断故事线（只读）：P 侧活跃条目 + D 侧活跃条目 + 两侧墓碑
+     * 终态（含终局时 trace 环快照，墓碑保留期内可查——flexlb-sync 诊断端点
+     * 的数据源）。
+     *
+     * <p>四者均不存在时返回 empty（未知请求/全部过期）。条目字段经
+     * synchronized 快照（与门面 get 同语义）；墓碑为最终事实。</p>
+     */
+    public Optional<LedgerTraceView> traceOf(long requestId) {
+        PrefillRequestState p = pStore.get(requestId);
+        DecodeRequestState d = dStore.get(requestId);
+        TombstoneStore.Tombstone pTomb = pStore.tombstones().get(requestId).orElse(null);
+        TombstoneStore.Tombstone dTomb = dStore.tombstones().get(requestId).orElse(null);
+        if (p == null && d == null && pTomb == null && dTomb == null) {
+            return Optional.empty();
+        }
+        return Optional.of(new LedgerTraceView(
+                p == null ? Optional.empty() : Optional.of(toView(p)),
+                d == null ? Optional.empty() : Optional.of(toView(d)),
+                tombstoneView(pTomb),
+                tombstoneView(dTomb)));
+    }
+
+    private static Optional<LedgerTraceView.TombstoneView> tombstoneView(TombstoneStore.Tombstone tomb) {
+        return tomb == null
+                ? Optional.empty()
+                : Optional.of(new LedgerTraceView.TombstoneView(tomb.requestId(), tomb.state(),
+                        parseReason(tomb.reason()), tomb.terminalAtMs(), tomb.entryTrace()));
+    }
+
     private static TerminalReason parseReason(String name) {
         try {
             return TerminalReason.valueOf(name);
@@ -260,6 +340,40 @@ public final class StateLedger {
     /** fence 仓库（同包测试/门面协作；fence 驱逐断言见 FenceRegistry.canEvict）。 */
     FenceRegistry fences() {
         return fences;
+    }
+
+    // ---- 观测层 package-private 协作句柄（LedgerMetrics 同包采样读点）----
+
+    PrefillSideStore pStoreView() {
+        return pStore;
+    }
+
+    DecodeSideStore dStoreView() {
+        return dStore;
+    }
+
+    Map<SettleReason, Long> settleReasonCountsView() {
+        return copyCounts(settleReasonCounts);
+    }
+
+    Map<CleanupReason, Long> cleanupReasonCountsView() {
+        return copyCounts(cleanupReasonCounts);
+    }
+
+    Map<TransitionReason, Long> transitionReasonCountsView() {
+        return copyCounts(transitionReasonCounts);
+    }
+
+    Map<TerminalReason, Long> terminalReasonCountsView() {
+        return copyCounts(terminalReasonCounts);
+    }
+
+    private static <K extends Enum<K>> Map<K, Long> copyCounts(EnumMap<K, LongAdder> counts) {
+        Map<K, Long> out = new EnumMap<>(counts.keySet().iterator().next().getDeclaringClass());
+        for (Map.Entry<K, LongAdder> e : counts.entrySet()) {
+            out.put(e.getKey(), e.getValue().sum());
+        }
+        return Map.copyOf(out);
     }
 
     // ---- observe 内部分发 ----
@@ -322,7 +436,7 @@ public final class StateLedger {
                 pStore.noteEngineObserved(e, round, r.kvTokens(), r.version());
             }
             if (v == PhaseVerdict.ACCEPT_ADVANCE) {
-                pStore.advance(e, eventPhase, r.version(), nowMs);
+                advancePrefill(e, eventPhase, r.version(), nowMs, TransitionReason.ENGINE_OBSERVATION);
             }
             return;
         }
@@ -356,7 +470,8 @@ public final class StateLedger {
             dStore.noteEngineObserved(e, round, r.kvTokens(), r.version());
         }
         if (v == PhaseVerdict.ACCEPT_ADVANCE) {
-            boolean winner = dStore.advance(e, eventPhase, r.version(), nowMs);
+            boolean winner = advanceDecode(e, eventPhase, r.version(), nowMs,
+                    TransitionReason.ENGINE_OBSERVATION);
             // 跨侧收缩规则：D 确认点即 P 释放点——同 tick 收缩 P 条目（仅 CAS 胜者触发一次）
             if (winner && eventPhase == DecodePhase.D_LOADING) {
                 shrinkPrefillOnDecodeConfirmed(id, nowMs);
@@ -390,7 +505,11 @@ public final class StateLedger {
             }
             if (v == PhaseVerdict.ACCEPT_TERMINAL || v == PhaseVerdict.WARN_FINISH_PRIORITY) {
                 // P 侧 finish 只终局 P 账（P 完成 ≠ 请求完成，D 侧继续）
-                pStore.settleRemove(e, finishedOutcome(success, f.errorCode()), nowMs);
+                TerminalOutcome outcome = finishedOutcome(success, f.errorCode());
+                if (pStore.settleRemove(e, outcome, nowMs)) {
+                    countSettled(SettleReason.ENGINE_FINISHED, CleanupReason.FINISHED_REPORTED,
+                            outcome.reason());
+                }
             }
             return;
         }
@@ -415,16 +534,23 @@ public final class StateLedger {
             return;
         }
         if (v == PhaseVerdict.ACCEPT_TERMINAL || v == PhaseVerdict.WARN_FINISH_PRIORITY) {
-            boolean settled = dStore.settleRemove(e, finishedOutcome(success, f.errorCode()), nowMs);
+            TerminalOutcome outcome = finishedOutcome(success, f.errorCode());
+            boolean settled = dStore.settleRemove(e, outcome, nowMs);
+            if (settled) {
+                countSettled(SettleReason.ENGINE_FINISHED, CleanupReason.FINISHED_REPORTED,
+                        outcome.reason());
+            }
             if (settled && success) {
                 // F1 因果闭包：D 成功完成 ⇒ 整请求完成 ⇒ 同 tick 收缩未终局的 P 条目
                 PrefillRequestState p = pStore.get(id);
                 if (p != null) {
-                    pStore.settleRemove(p,
-                            new TerminalOutcome(TerminalState.COMPLETED, TerminalReason.SUCCEEDED,
-                                    "causal-closure:decode-finished"),
-                            nowMs);
-                    causalClosureSettles.increment(); // F1 通道触发计数（janitor 透传）
+                    TerminalOutcome closure = new TerminalOutcome(TerminalState.COMPLETED,
+                            TerminalReason.SUCCEEDED, "causal-closure:decode-finished");
+                    if (pStore.settleRemove(p, closure, nowMs)) {
+                        countSettled(SettleReason.CAUSAL_CLOSURE, CleanupReason.FINISHED_REPORTED,
+                                TerminalReason.SUCCEEDED);
+                        causalClosureSettles.increment(); // F1 通道触发计数（janitor 透传）
+                    }
                 }
             }
         }
@@ -442,13 +568,62 @@ public final class StateLedger {
         }
         int ord = p.phase().ordinal();
         if (ord >= PrefillPhase.P_RECEIVED.ordinal() && ord <= PrefillPhase.P_WAITING_LOADED.ordinal()) {
-            pStore.advance(p, PrefillPhase.PREFILL_DONE, -1L, nowMs);
+            advancePrefill(p, PrefillPhase.PREFILL_DONE, -1L, nowMs, TransitionReason.LOAD_TRANSFER);
         }
+    }
+
+    // ---- 观测记账与 debug 转换日志（观测层；全部在 CAS 胜者分支之后）----
+
+    /**
+     * P 侧相位推进包装：CAS 胜者记 TransitionReason 账 + 可选 debug 转换日志
+     * （flexlbStateV2DebugTransitionLog 开关，默认关——日志量红线）。
+     */
+    private boolean advancePrefill(PrefillRequestState entry, PrefillPhase target, long version,
+                                   long nowMs, TransitionReason reason) {
+        PrefillPhase from = entry.phase();
+        if (!pStore.advance(entry, target, version, nowMs)) {
+            return false;
+        }
+        transitionReasonCounts.get(reason).increment();
+        if (config.debugTransitionLog()) {
+            LOGGER.debug("[state-ledger] transition requestId={} side=P from={} to={} version={} reason={}",
+                    entry.requestId(), from, target, version, reason);
+        }
+        return true;
+    }
+
+    /** D 侧相位推进包装（与 {@link #advancePrefill} 对称）。 */
+    private boolean advanceDecode(DecodeRequestState entry, DecodePhase target, long version,
+                                  long nowMs, TransitionReason reason) {
+        DecodePhase from = entry.phase();
+        if (!dStore.advance(entry, target, version, nowMs)) {
+            return false;
+        }
+        transitionReasonCounts.get(reason).increment();
+        if (config.debugTransitionLog()) {
+            LOGGER.debug("[state-ledger] transition requestId={} side=D from={} to={} version={} reason={}",
+                    entry.requestId(), from, target, version, reason);
+        }
+        return true;
+    }
+
+    /** 终局三联记账：settle 证据通道 + 清理通道 + 终局受控原因（均为胜者分支）。 */
+    private void countSettled(SettleReason settleReason, CleanupReason cleanupReason,
+                              TerminalReason terminalReason) {
+        settleReasonCounts.get(settleReason).increment();
+        cleanupReasonCounts.get(cleanupReason).increment();
+        terminalReasonCounts.get(terminalReason).increment();
+    }
+
+    /** 清理通道记账（janitor 护栏/通道分支回调入口）。 */
+    private void countCleanup(CleanupReason reason) {
+        cleanupReasonCounts.get(reason).increment();
     }
 
     // ---- settle（CAS 单出口 + cancel 双清）----
 
-    private boolean settlePrefill(long requestId, TerminalOutcome outcome, boolean propagate) {
+    private boolean settlePrefill(long requestId, TerminalOutcome outcome,
+                                   SettleReason reason, boolean propagate) {
         PrefillRequestState e = pStore.get(requestId);
         if (e == null) {
             absorbLateSettlePrefill(requestId, outcome);
@@ -456,17 +631,21 @@ public final class StateLedger {
         }
         long now = System.currentTimeMillis();
         boolean ok = pStore.settleRemove(e, outcome, now);
+        if (ok) {
+            countSettled(reason, outcome.reason());
+        }
         if (ok && propagate && outcome.state() == TerminalState.CANCELLED) {
             // cancel 双清：同 tick 清对侧账（各自计数独立减）
             DecodeRequestState d = dStore.get(requestId);
-            if (d != null) {
-                dStore.settleRemove(d, outcome, now);
+            if (d != null && dStore.settleRemove(d, outcome, now)) {
+                countSettled(reason, outcome.reason());
             }
         }
         return ok;
     }
 
-    private boolean settleDecode(long requestId, TerminalOutcome outcome, boolean propagate) {
+    private boolean settleDecode(long requestId, TerminalOutcome outcome,
+                                  SettleReason reason, boolean propagate) {
         DecodeRequestState e = dStore.get(requestId);
         if (e == null) {
             if (dStore.isTombstoned(requestId)) {
@@ -480,13 +659,22 @@ public final class StateLedger {
         }
         long now = System.currentTimeMillis();
         boolean ok = dStore.settleRemove(e, outcome, now);
+        if (ok) {
+            countSettled(reason, outcome.reason());
+        }
         if (ok && propagate && outcome.state() == TerminalState.CANCELLED) {
             PrefillRequestState p = pStore.get(requestId);
-            if (p != null) {
-                pStore.settleRemove(p, outcome, now);
+            if (p != null && pStore.settleRemove(p, outcome, now)) {
+                countSettled(reason, outcome.reason());
             }
         }
         return ok;
+    }
+
+    /** 终局双联记账（settle 门面路径：证据通道 + 终局受控原因；无 cleanup 维度——清理通道账由 janitor/finished 路径产出）。 */
+    private void countSettled(SettleReason settleReason, TerminalReason terminalReason) {
+        settleReasonCounts.get(settleReason).increment();
+        terminalReasonCounts.get(terminalReason).increment();
     }
 
     private void absorbLateSettlePrefill(long requestId, TerminalOutcome outcome) {
@@ -566,7 +754,8 @@ public final class StateLedger {
         public void onQueued(long requestId) {
             PrefillRequestState e = pStore.get(requestId);
             if (e != null) {
-                pStore.advance(e, PrefillPhase.QUEUED, -1L, System.currentTimeMillis());
+                advancePrefill(e, PrefillPhase.QUEUED, -1L, System.currentTimeMillis(),
+                        TransitionReason.SCHEDULER_DECISION);
             }
         }
 
@@ -577,7 +766,8 @@ public final class StateLedger {
                 return;
             }
             e.setBatchId(batchId);
-            pStore.advance(e, PrefillPhase.DISPATCHING, -1L, System.currentTimeMillis());
+            advancePrefill(e, PrefillPhase.DISPATCHING, -1L, System.currentTimeMillis(),
+                    TransitionReason.SCHEDULER_DECISION);
         }
 
         @Override
@@ -596,14 +786,15 @@ public final class StateLedger {
             }
             // 绑定 + 端点计数簿迁移（首绑入桶/派发前重绑桶间迁移）+ 索引维护（同一临界区）
             pStore.bindEndpoint(e, binding);
-            return pStore.advance(e, PrefillPhase.DISPATCHED, -1L, System.currentTimeMillis());
+            return advancePrefill(e, PrefillPhase.DISPATCHED, -1L, System.currentTimeMillis(),
+                    TransitionReason.SCHEDULER_DECISION);
         }
 
         @Override
         public boolean settle(long requestId, TerminalOutcome outcome, SettleReason reason) {
             Objects.requireNonNull(outcome, "outcome");
             Objects.requireNonNull(reason, "reason");
-            return settlePrefill(requestId, outcome, true);
+            return settlePrefill(requestId, outcome, reason, true);
         }
 
         @Override
@@ -668,14 +859,15 @@ public final class StateLedger {
             }
             // 绑定 + 端点计数簿迁移（首绑入桶/派发前重绑桶间迁移）+ 索引维护（同一临界区）
             dStore.bindEndpoint(e, binding);
-            return dStore.advance(e, DecodePhase.DISPATCHED, -1L, System.currentTimeMillis());
+            return advanceDecode(e, DecodePhase.DISPATCHED, -1L, System.currentTimeMillis(),
+                    TransitionReason.SCHEDULER_DECISION);
         }
 
         @Override
         public boolean settle(long requestId, TerminalOutcome outcome, SettleReason reason) {
             Objects.requireNonNull(outcome, "outcome");
             Objects.requireNonNull(reason, "reason");
-            return settleDecode(requestId, outcome, true);
+            return settleDecode(requestId, outcome, reason, true);
         }
 
         @Override

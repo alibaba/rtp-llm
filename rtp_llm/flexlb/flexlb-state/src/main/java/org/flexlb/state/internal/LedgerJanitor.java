@@ -7,9 +7,12 @@ import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
+import org.flexlb.state.CleanupReason;
 import org.flexlb.state.InternalApi;
 import org.flexlb.state.LedgerJanitorConfig;
+import org.flexlb.state.SettleReason;
 import org.flexlb.state.TerminalOutcome;
 import org.flexlb.state.TerminalReason;
 import org.flexlb.state.TerminalState;
@@ -90,11 +93,14 @@ public final class LedgerJanitor {
     /**
      * settle 通道回调：StateLedger 的 CAS 单出口委托（单侧 settle，不传播 cancel 双清
      * ——janitor 三通道终态均非 CANCELLED）。返回本调用是否终局胜者。
+     *
+     * @param reason 该通道的受控证据通道归类（F2→EVIDENCE_CHANNEL /
+     *               F3→TTL_CHANNEL / F4→FORCE_CHANNEL——settle reason 记账维度）
      */
     @FunctionalInterface
     public interface SettleChannel {
 
-        boolean settle(long requestId, TerminalOutcome outcome);
+        boolean settle(long requestId, TerminalOutcome outcome, SettleReason reason);
     }
 
     /**
@@ -137,6 +143,8 @@ public final class LedgerJanitor {
     private final LongSupplier causalClosureCount;
     private final SettleChannel pSettle;
     private final SettleChannel dSettle;
+    /** 清理通道记账回调（StateLedger 统一持有 CleanupReason 计数账；null = 无记账）。 */
+    private final Consumer<CleanupReason> cleanupCountRecorder;
 
     /** 缺席追踪（精确护栏 2：requestId → 缺席起始完整轮；恢复即清，条目换代即重置）。 */
     private final ConcurrentHashMap<Long, Absent> pAbsentSince = new ConcurrentHashMap<>();
@@ -174,6 +182,18 @@ public final class LedgerJanitor {
                          LongSupplier causalClosureCount,
                          SettleChannel pSettle,
                          SettleChannel dSettle) {
+        this(config, pStore, dStore, fences, causalClosureCount, pSettle, dSettle, null);
+    }
+
+    /** 全参构造（StateLedger.createJanitor 调用：附带 CleanupReason 记账回调）。 */
+    public LedgerJanitor(LedgerJanitorConfig config,
+                         PrefillSideStore pStore,
+                         DecodeSideStore dStore,
+                         FenceRegistry fences,
+                         LongSupplier causalClosureCount,
+                         SettleChannel pSettle,
+                         SettleChannel dSettle,
+                         Consumer<CleanupReason> cleanupCountRecorder) {
         this.config = config;
         this.pStore = pStore;
         this.dStore = dStore;
@@ -181,6 +201,7 @@ public final class LedgerJanitor {
         this.causalClosureCount = causalClosureCount;
         this.pSettle = pSettle;
         this.dSettle = dSettle;
+        this.cleanupCountRecorder = cleanupCountRecorder;
     }
 
     /**
@@ -203,6 +224,7 @@ public final class LedgerJanitor {
         try {
             if (!completeTick) {
                 incompleteTicksSkipped.increment();
+                countCleanup(CleanupReason.TRUNCATED_REPORT_EXCLUDED);
                 return;
             }
             roundEndTicks.increment();
@@ -292,9 +314,10 @@ public final class LedgerJanitor {
         }
         boolean won = settle.settle(requestId, new TerminalOutcome(
                 TerminalState.SLO_TIMEOUT, TerminalReason.VANISHED,
-                "janitor:absent-" + absentRounds + "rounds"));
+                "janitor:absent-" + absentRounds + "rounds"), SettleReason.EVIDENCE_CHANNEL);
         if (won) {
             vanishedSettles.increment();
+            countCleanup(CleanupReason.ABSENT_N_ROUNDS);
             notifySettled(requestId, side);
         } else {
             lostToFastPath.increment(); // 超车（TTL 通道）：快路径已终局——janitor 败者属正常
@@ -386,9 +409,11 @@ public final class LedgerJanitor {
             boolean fenced = fences.isFenced(requestId);
             boolean won = settle.settle(requestId, new TerminalOutcome(
                     TerminalState.FAILED, TerminalReason.HARD_CAP,
-                    "janitor:hard-cap@" + age + "ms" + (fenced ? " (fence-leak)" : "")));
+                    "janitor:hard-cap@" + age + "ms" + (fenced ? " (fence-leak)" : "")),
+                    SettleReason.FORCE_CHANNEL);
             if (won) {
                 hardCapSettles.increment();
+                countCleanup(CleanupReason.HARD_CAP);
                 if (fenced) {
                     hardCapFenceViolations.increment();
                 }
@@ -404,9 +429,10 @@ public final class LedgerJanitor {
             }
             boolean won = settle.settle(requestId, new TerminalOutcome(
                     TerminalState.SLO_TIMEOUT, TerminalReason.TTL_EXPIRED,
-                    "janitor:ttl@" + age + "ms"));
+                    "janitor:ttl@" + age + "ms"), SettleReason.TTL_CHANNEL);
             if (won) {
                 ttlSettles.increment();
+                countCleanup(CleanupReason.TTL);
                 notifySettled(requestId, side);
             } else {
                 lostToFastPath.increment();
@@ -418,12 +444,14 @@ public final class LedgerJanitor {
     private boolean skipForFence(long requestId) {
         if (fences.isFenced(requestId)) {
             fenceHoldSkips.increment();
+            countCleanup(CleanupReason.FENCE_HOLD);
             return true;
         }
         try {
             fences.canEvict(requestId);
         } catch (IllegalStateException fenceHold) {
             fenceHoldSkips.increment();
+            countCleanup(CleanupReason.FENCE_HOLD);
             return true;
         }
         return false;
@@ -476,6 +504,19 @@ public final class LedgerJanitor {
             listener.onJanitorSettled(requestId, side);
         } catch (Throwable t) {
             errors.increment(); // 监听异常不外抛（janitor 铁律）
+        }
+    }
+
+    /** 清理通道记账（回调 null 时 no-op；异常吞入 errors——记账不外抛）。 */
+    private void countCleanup(CleanupReason reason) {
+        Consumer<CleanupReason> recorder = cleanupCountRecorder;
+        if (recorder == null) {
+            return;
+        }
+        try {
+            recorder.accept(reason);
+        } catch (Throwable t) {
+            errors.increment();
         }
     }
 

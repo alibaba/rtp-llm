@@ -40,7 +40,7 @@ class TerminalStateTest {
     /** 终态与终态原因的配对健全性：每个 TerminalReason 都有对应可表达的语义出口。 */
     @Test
     void reasonValueDomain() {
-        assertNotNull(TerminalReason.valueOf("PREEMPTED"));
+        assertNotNull(TerminalReason.valueOf("CANCELLED_NEVER_ARRIVED"));
         assertNotNull(CleanupReason.valueOf("FENCE_HOLD"));
         assertNotNull(SettleReason.valueOf("CAUSAL_CLOSURE"));
         assertNotNull(TransitionReason.valueOf("ENGINE_OBSERVATION"));

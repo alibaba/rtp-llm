@@ -218,6 +218,97 @@ public class MetricConstant {
     /** Shadow ledger reached a terminal state but the old path never did (within the diff window). */
     public static final String SHADOW_DIFF_TERMINAL_MISSING_ON_OLD = "app.flexlb.shadow.diff.terminal.missing.on.old";
 
+    // ========== FlexLB state ledger observability metrics ==========
+    // Reporter: LedgerMetricsReporter (flexlb-sync), 5s sampling tick.
+    // Two-level aggregation (cardinality containment): global untagged metrics below
+    // plus tagged phase/endpoint/reason series — full endpoint x phase matrix is
+    // deliberately NOT published.
+
+    /** P-side active entry count (global level; GAUGE). */
+    public static final String STATE_LEDGER_PREFILL_ACTIVE = "app.flexlb.state.ledger.prefill.active";
+
+    /** D-side active entry count (global level; GAUGE). */
+    public static final String STATE_LEDGER_DECODE_ACTIVE = "app.flexlb.state.ledger.decode.active";
+
+    /** P-side tombstone watermark — retained terminal entries (GAUGE). */
+    public static final String STATE_LEDGER_PREFILL_TOMBSTONES = "app.flexlb.state.ledger.prefill.tombstones";
+
+    /** D-side tombstone watermark — retained terminal entries (GAUGE). */
+    public static final String STATE_LEDGER_DECODE_TOMBSTONES = "app.flexlb.state.ledger.decode.tombstones";
+
+    /** Late engine events absorbed by tombstones after settlement (cumulative QPS). */
+    public static final String STATE_LEDGER_LATE_EVENTS = "app.flexlb.state.ledger.late.events";
+
+    /** Late local cancels absorbed by tombstones after settlement (cumulative QPS). */
+    public static final String STATE_LEDGER_LATE_CANCELS = "app.flexlb.state.ledger.late.cancels";
+
+    /** Unknown-target engine events (running + finished, cumulative QPS) — ledger coverage gap signal. */
+    public static final String STATE_LEDGER_UNKNOWN_EVENTS = "app.flexlb.state.ledger.unknown.events";
+
+    /** Fast-path settle wins (engine finished / local settle / cancel propagation — the "normal channel wins" leg of the overtake tri-split, cumulative QPS). */
+    public static final String STATE_LEDGER_FASTPATH_SETTLES = "app.flexlb.state.ledger.fastpath.settles";
+
+    /** Phase-advance CAS losers (the "overtaken" leg of the overtake tri-split, cumulative QPS). */
+    public static final String STATE_LEDGER_OVERTAKEN = "app.flexlb.state.ledger.overtaken";
+
+    /** Counter drift entries from the last auditAndDrift reconciliation (GAUGE; 0 = clean). */
+    public static final String STATE_LEDGER_DRIFT_ENTRIES = "app.flexlb.state.ledger.drift.entries";
+
+    /** Janitor evidence-channel (F2) absence-presumed-death settlements (cumulative QPS). */
+    public static final String STATE_LEDGER_JANITOR_VANISHED_SETTLES = "app.flexlb.state.ledger.janitor.vanished.settles";
+
+    /** Janitor time-channel (F3) TTL settlements (cumulative QPS). */
+    public static final String STATE_LEDGER_JANITOR_TTL_SETTLES = "app.flexlb.state.ledger.janitor.ttl.settles";
+
+    /** Janitor force-channel (F4) hard-cap settlements (cumulative QPS). */
+    public static final String STATE_LEDGER_JANITOR_HARDCAP_SETTLES = "app.flexlb.state.ledger.janitor.hardcap.settles";
+
+    /** Janitor settle attempts lost to the fast path (the "fallback channel lost" leg of the overtake tri-split, cumulative QPS). */
+    public static final String STATE_LEDGER_JANITOR_LOST_TO_FASTPATH = "app.flexlb.state.ledger.janitor.lost.to.fastpath";
+
+    /** Janitor fence-hold skips (guard-rail 3 exemptions, cumulative QPS). */
+    public static final String STATE_LEDGER_JANITOR_FENCE_HOLDS = "app.flexlb.state.ledger.janitor.fence.holds";
+
+    /** Janitor internal error counter (catch-all; cumulative QPS). */
+    public static final String STATE_LEDGER_JANITOR_ERRORS = "app.flexlb.state.ledger.janitor.errors";
+
+    /** Tracked endpoint count in the ledger endpoint index (GAUGE). */
+    public static final String STATE_LEDGER_ENDPOINT_COUNT = "app.flexlb.state.ledger.endpoint.count";
+
+    /** Per-endpoint active-entry distribution P50 (P+D combined pool aggregate, GAUGE). */
+    public static final String STATE_LEDGER_ENDPOINT_ACTIVE_P50 = "app.flexlb.state.ledger.endpoint.active.p50";
+
+    /** Per-endpoint active-entry distribution P95 (P+D combined pool aggregate, GAUGE). */
+    public static final String STATE_LEDGER_ENDPOINT_ACTIVE_P95 = "app.flexlb.state.ledger.endpoint.active.p95";
+
+    /** Per-endpoint active-entry distribution max (P+D combined pool aggregate, GAUGE). */
+    public static final String STATE_LEDGER_ENDPOINT_ACTIVE_MAX = "app.flexlb.state.ledger.endpoint.active.max";
+
+    /**
+     * Phase population histogram (global level; GAUGE; tags: side=P|D, phase).
+     * Endpoint x phase matrix is intentionally NOT published (cardinality).
+     */
+    public static final String STATE_LEDGER_PHASE_POPULATION = "app.flexlb.state.ledger.phase.population";
+
+    /**
+     * Phase residence age quantile (GAUGE; tags: side, phase, quantile=p50|p95).
+     * Bucket-upper-bound estimate from the cumulative sampling distribution
+     * (conservatively high); right-censored in-residence age.
+     */
+    public static final String STATE_LEDGER_PHASE_AGE_MS = "app.flexlb.state.ledger.phase.age.ms";
+
+    /**
+     * Controlled reason counter (cumulative QPS; tags: kind=settle|cleanup|transition|terminal, reason).
+     * Full enum coverage per kind — dead-enum prevention is asserted by tests.
+     */
+    public static final String STATE_LEDGER_REASON_COUNT = "app.flexlb.state.ledger.reason.count";
+
+    /**
+     * Per-endpoint active entry count (endpoint-fine level; GAUGE; tags: side=P|D, endpoint).
+     * Series count = tracked endpoints (same order as the engine health-check metrics).
+     */
+    public static final String STATE_LEDGER_ENDPOINT_ACTIVE = "app.flexlb.state.ledger.endpoint.active";
+
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
      * in the per-engine WorkerBatcher queue.

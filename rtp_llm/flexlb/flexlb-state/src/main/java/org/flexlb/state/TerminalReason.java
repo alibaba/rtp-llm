@@ -1,21 +1,26 @@
 package org.flexlb.state;
 
 /**
- * 终态受控原因（受控枚举取代自由文本 reason 字符串），值域覆盖五类终局语义
- * （完成/取消/超时/失败/抢占）。
+ * 终态受控原因（受控枚举取代自由文本 reason 字符串），值域覆盖当前已实现
+ * 的终局语义（完成/取消/超时/失败）。
+ *
+ * <p>完备性契约（观测层守护）：每个枚举值必须至少被一处产出路径使用——
+ * {@code ReasonCompletenessTest} 反射遍历断言；新增值时须同步接线产出点，
+ * 无实现路径的预留值不进枚举（历史裁剪：CANCELLED_ACK / STALE_EVICTED /
+ * EP_DRAINED / PREEMPTED 曾为预留值，因无产出路径移除；显式取消 ack、
+ * 世代闭包驱逐、端点排空与抢占回边通道落地时按需恢复并接线）。</p>
  */
 public enum TerminalReason {
 
     /** 正常完成：引擎 finished 且错误码为 0。 */
     SUCCEEDED,
 
-    /** 显式取消被确认：引擎/下游对取消请求给出 ack。 */
-    CANCELLED_ACK,
-
-    /** 隐式取消：取消后未收到显式 ack，按缺席/闭包推定取消成立。 */
+    /**
+     * 隐式取消：取消已派发（引擎可能已见），未收到显式 ack，按推定取消成立。
+     */
     CANCELLED_IMPLICIT,
 
-    /** 取消时请求从未到达引擎（本地取消直接成立，无需引擎证据）。 */
+    /** 取消时请求从未到达引擎（本地取消直接成立，无需引擎证据——未派发即取消）。 */
     CANCELLED_NEVER_ARRIVED,
 
     /** SLO 预算（TTFT/总时长）耗尽，由 SLO 通道判死。 */
@@ -27,18 +32,9 @@ public enum TerminalReason {
     /** 凭空消失：inflight 泄漏/僵尸任务——连续 N 轮观察缺席且无任何终局证据。 */
     VANISHED,
 
-    /** 陈旧驱逐：世代/批次闭包判定该条目属于已被取代的陈旧路径。 */
-    STALE_EVICTED,
-
-    /** 端点排空：端点被运维/缩容排空，其上未终局条目统一收尾。 */
-    EP_DRAINED,
-
     /** TTL 到期：条目存活时间超过受控上限。 */
     TTL_EXPIRED,
 
     /** 硬上限：条目总量/单端点配额触顶，强制收尾最旧条目。 */
-    HARD_CAP,
-
-    /** 被抢占（回边，对应 {@link TerminalState#PREEMPTED}，非吸收）。 */
-    PREEMPTED
+    HARD_CAP
 }

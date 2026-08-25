@@ -125,6 +125,49 @@ class StateShadowBridgeTest {
                 bridge.ledger().terminalOutcomeOf(7L, org.flexlb.state.spi.StateRole.DECODE).get().state());
     }
 
+    /**
+     * 本地取消 reason 分流（reason 完备性 sync 侧闭环）：任一侧条目引擎已见 →
+     * CANCELLED_IMPLICIT（已见后取消，无 ack 推定成立）；两侧均未达引擎 →
+     * CANCELLED_NEVER_ARRIVED（未派发即取消，无需引擎证据）。
+     * 产出点：StateShadowBridge#localCancelReason（onOldTerminal /
+     * settleBothSidesAuthoritatively 共用）。
+     */
+    @Test
+    void cancelledReasonSplitsByEngineSeen() {
+        StateShadowBridge bridge = enabledBridge();
+
+        // 分流一：两侧均未达引擎（无任何引擎上报）→ 未达取消
+        bridge.onPrefillSubmit(60L);
+        bridge.onDecodeReserve(60L, 100L, 200L, RoleType.DECODE, "10.0.0.20:9000");
+        bridge.onOldTerminal(60L, "CANCELLED");
+
+        assertEquals(org.flexlb.state.TerminalReason.CANCELLED_NEVER_ARRIVED,
+                bridge.ledger().terminalOutcomeOf(60L, org.flexlb.state.spi.StateRole.PREFILL)
+                        .orElseThrow().reason(),
+                "从未到达引擎的取消 → CANCELLED_NEVER_ARRIVED");
+        assertEquals(org.flexlb.state.TerminalReason.CANCELLED_NEVER_ARRIVED,
+                bridge.ledger().terminalOutcomeOf(60L, org.flexlb.state.spi.StateRole.DECODE)
+                        .orElseThrow().reason());
+
+        // 分流二：引擎已见（running 上报观察到该请求）→ 隐式取消
+        bridge.onPrefillSubmit(61L);
+        bridge.onDecodeReserve(61L, 100L, 200L, RoleType.DECODE, "10.0.0.21:9000");
+        bridge.observeWorkerStatus(decodeRunningResponse(61L, 1L), RoleType.DECODE, "10.0.0.21:9000");
+        assertTrue(bridge.ledger().decode().get(61L).isPresent()
+                        && bridge.ledger().decode().get(61L).orElseThrow().engineOwned(),
+                "前置：running 上报后 D 条目应 engineOwned");
+        bridge.onOldTerminal(61L, "CANCELLED");
+
+        assertEquals(org.flexlb.state.TerminalReason.CANCELLED_IMPLICIT,
+                bridge.ledger().terminalOutcomeOf(61L, org.flexlb.state.spi.StateRole.DECODE)
+                        .orElseThrow().reason(),
+                "引擎已见的取消 → CANCELLED_IMPLICIT");
+        assertEquals(org.flexlb.state.TerminalReason.CANCELLED_IMPLICIT,
+                bridge.ledger().terminalOutcomeOf(61L, org.flexlb.state.spi.StateRole.PREFILL)
+                        .orElseThrow().reason(),
+                "cancel 双清沿用同一 outcome——两侧 reason 一致");
+    }
+
     @Test
     void shouldRegisterPrefillAndReserveDecode_whenLocalLifecyclePointsCalled() {
         StateShadowBridge bridge = enabledBridge();
@@ -483,7 +526,8 @@ class StateShadowBridgeTest {
                         .orElseThrow().state());
     }
 
-    /** TIMED_OUT：双侧主动 settle 为 SLO_TIMEOUT（存活时间上限）。 */
+    /** TIMED_OUT：双侧主动 settle 为 SLO_TIMEOUT（存活时间上限，reason 完备性 sync 侧闭环——
+     * 产出点 settleBothSidesAuthoritatively 旧路径超时通道）。 */
     @Test
     void timedOutSettlesBothSidesImmediately() {
         StateShadowBridge bridge = authorityBridge();
@@ -495,6 +539,10 @@ class StateShadowBridgeTest {
         assertEquals(TerminalState.SLO_TIMEOUT,
                 bridge.ledger().terminalOutcomeOf(37L, org.flexlb.state.spi.StateRole.PREFILL)
                         .orElseThrow().state());
+        assertEquals(org.flexlb.state.TerminalReason.SLO_BUDGET_EXHAUSTED,
+                bridge.ledger().terminalOutcomeOf(37L, org.flexlb.state.spi.StateRole.PREFILL)
+                        .orElseThrow().reason(),
+                "旧路径 TIMED_OUT → SLO_BUDGET_EXHAUSTED");
     }
 
     /** 引擎事件丢失场景：COMPLETED 挂 pending 后由 janitor TTL 胜者结算消费。 */
@@ -775,6 +823,21 @@ class StateShadowBridgeTest {
         response.setRole(RoleType.DECODE);
         response.setRunningDetailCount(0L);
         response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), finished));
+        return response;
+    }
+
+    /** D 侧 running 报文（单请求，上报完整——引擎已见观察）。 */
+    private static WorkerStatusResponse decodeRunningResponse(long requestId, long statusVersion) {
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(requestId);
+        running.setPhase(TaskPhase.RUNNING);
+        running.setBatchId(-1L);
+        running.setKvTokens(512L);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setStatusVersion(statusVersion);
+        response.setRole(RoleType.DECODE);
+        response.setRunningDetailCount(1L);
+        response.setRunningTaskInfo(Map.of(String.valueOf(requestId), running));
         return response;
     }
 

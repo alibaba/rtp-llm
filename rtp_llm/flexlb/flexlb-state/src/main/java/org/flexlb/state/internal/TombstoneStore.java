@@ -1,5 +1,6 @@
 package org.flexlb.state.internal;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,8 +17,13 @@ import org.flexlb.state.TerminalState;
 @InternalApi
 public final class TombstoneStore {
 
-    /** 单条墓碑（终态记录）。 */
-    public record Tombstone(long requestId, TerminalState state, String reason, long terminalAtMs) {
+    /**
+     * 单条墓碑（终态记录）：含终局时条目 trace 环快照（人类可读相位历史，
+     * 最多 {@value EntryTraceRing#SLOTS} 条——per-request 诊断端点在墓碑保留期内的
+     * 故事线数据源）。
+     */
+    public record Tombstone(long requestId, TerminalState state, String reason,
+                            long terminalAtMs, List<String> entryTrace) {
     }
 
     private final ConcurrentHashMap<Long, Tombstone> tombstones = new ConcurrentHashMap<>();
@@ -38,10 +44,18 @@ public final class TombstoneStore {
         return t != null && !expired(t, now());
     }
 
-    /** 终态吸收（幂等：同 requestId 已有墓碑时保留首条）。 */
+    /** 终态吸收（无 trace 快照的旧签名：幂等，同 requestId 已有墓碑时保留首条）。 */
     public void absorb(long requestId, TerminalOutcome outcome, long nowMs) {
+        absorb(requestId, outcome, nowMs, List.of());
+    }
+
+    /**
+     * 终态吸收（幂等：同 requestId 已有墓碑时保留首条——含首条 trace）。
+     * trace 为终局胜者在 settleRemove 内取的条目 trace 环快照。
+     */
+    public void absorb(long requestId, TerminalOutcome outcome, long nowMs, List<String> entryTrace) {
         tombstones.putIfAbsent(requestId,
-                new Tombstone(requestId, outcome.state(), outcome.reason().name(), nowMs));
+                new Tombstone(requestId, outcome.state(), outcome.reason().name(), nowMs, entryTrace));
     }
 
     /** 迟到事件吸收计数（对已墓碑条目的 running/finished 事件）。 */

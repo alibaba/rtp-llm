@@ -32,6 +32,8 @@ public final class PrefillRequestState {
     // ---- 相位与裁决屏障 ----
     private volatile PrefillPhase phase = PrefillPhase.INIT;
     private volatile long lastVersion = -1L;
+    /** 当前相位进入时刻（观测层相位驻留时长的数据源；transitionTo/finishTransition 胜者分支写入，O(1) 读）。 */
+    private volatile long lastPhaseEnteredAtMs;
 
     // ---- 世代绑定（发送前可重绑=新记录，发送后不可变）----
     private volatile GenerationTriple binding = UNBOUND;
@@ -63,6 +65,7 @@ public final class PrefillRequestState {
         this.requestId = requestId;
         this.batchId = batchId;
         this.createdAtMs = createdAtMs;
+        this.lastPhaseEnteredAtMs = createdAtMs;
         trace.append(PrefillPhase.INIT.ordinal(), 0L);
     }
 
@@ -92,6 +95,7 @@ public final class PrefillRequestState {
             }
         }
         phase = target;
+        lastPhaseEnteredAtMs = nowMs;
         if (version > lastVersion) {
             lastVersion = version;
         }
@@ -112,6 +116,7 @@ public final class PrefillRequestState {
             return false;
         }
         terminalState = state;
+        lastPhaseEnteredAtMs = nowMs;
         trace.append(TERMINAL_TRACE_BASE + state.ordinal(), Math.max(nowMs - createdAtMs, 0L));
         return true;
     }
@@ -178,6 +183,11 @@ public final class PrefillRequestState {
 
     public PrefillPhase phase() {
         return phase;
+    }
+
+    /** 当前相位进入时刻（驻留时长 = now - 本值；观测层低频采样读点）。 */
+    public long lastPhaseEnteredAtMs() {
+        return lastPhaseEnteredAtMs;
     }
 
     public long lastVersion() {
