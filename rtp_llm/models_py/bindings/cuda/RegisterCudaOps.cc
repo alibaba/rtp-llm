@@ -9,27 +9,11 @@
 #endif
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
-#include "rtp_llm/models_py/bindings/cuda/kernels/dspark_persistent_markov.h"
 #include "rtp_llm/models_py/bindings/common/kernels/moe/ep_utils.h"
 
 namespace rtp_llm {
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
-    rtp_ops_m.def("dspark_persistent_markov",
-                  &dsparkPersistentMarkov,
-                  py::arg("output"),
-                  py::arg("anchor"),
-                  py::arg("base_logits"),
-                  py::arg("draft_to_target_id"),
-                  py::arg("markov_w1"),
-                  py::arg("markov_w2"),
-                  py::arg("current_state"),
-                  py::arg("partial_scores"),
-                  py::arg("partial_tokens"),
-                  py::arg("barrier_state"),
-                  py::arg("scale") = 1.0,
-                  py::arg("max_ctas_per_batch_tile") = 78);
-
     rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",

@@ -165,7 +165,6 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
-        "//rtp_llm/models_py/bindings/cuda/kernels:dspark_persistent_markov",
         "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
@@ -228,7 +227,6 @@ cc_library(
         ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base",
-        "//rtp_llm/models_py/bindings/cuda/kernels:dspark_persistent_markov",
     ] + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",

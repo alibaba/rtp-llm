@@ -59,13 +59,13 @@ def graph_captured_greedy_markov_decode(
     markov_w2: torch.Tensor,
     draft_id_to_target_id: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Reference implementation of DSpARK's left-to-right Markov head.
+    """Graph-native implementation of DSpARK's left-to-right Markov head.
 
     The previous sampled target token makes the steps inherently sequential.
-    This straightforward form is kept as a unit-test oracle. Serving uses the
-    full-vocabulary persistent device kernel captured by the proposal graph;
-    TopK pruning is not equivalent because the Markov correction can promote
-    any draft-vocabulary item.
+    The fixed Python loop is unrolled while capturing the proposal CUDA graph,
+    so steady-state replay performs only device work. Full-vocabulary dense
+    projection is intentional: TopK pruning is not equivalent because the
+    Markov correction can promote any draft-vocabulary item.
     """
     if base_logits.ndim != 3:
         raise ValueError("base_logits must have shape [batch, steps, draft_vocab]")

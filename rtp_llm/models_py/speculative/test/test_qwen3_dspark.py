@@ -19,101 +19,62 @@ from rtp_llm.models_py.model_desc.qwen3_dspark_model import Qwen3DSparkModel
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     graph_captured_greedy_markov_decode,
 )
-from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-
 class Qwen3DSparkRegistrationTest(unittest.TestCase):
     @unittest.skipUnless(
-        torch.cuda.is_available()
-        and torch.cuda.get_device_capability()[0] == 9,
-        "DSpARK persistent Markov requires SM90",
+        torch.cuda.is_available(),
+        "DSpARK CUDA graph test requires CUDA",
     )
-    def test_persistent_markov_matches_absolute_d2t_chain_and_graph(self) -> None:
-        # Exercise the online vocabulary and all important graph buckets.  A
-        # one-hot rank dimension defines every dependent transition, making
-        # the expected seven-token chain exact rather than tolerance-based.
+    def test_generic_markov_supports_batch_128_and_graph(self) -> None:
+        # Exercise the production vocabulary and graph buckets without any
+        # SM-specific kernel. One independent rank component per request
+        # defines an exact seven-token chain and catches cross-row state leaks.
         vocab_size = 20_000
-        padded_vocab_size = (vocab_size + 127) // 128 * 128
-        max_selected_token = 32 * 7
         target_state_base = vocab_size
-        target_vocab_size = target_state_base + max_selected_token
+        target_vocab_size = target_state_base + 128
         device = torch.device("cuda")
 
         d2t = torch.arange(vocab_size, dtype=torch.int64, device=device)
-        d2t[:max_selected_token].add_(target_state_base)
+        d2t[:128].add_(target_state_base)
         markov_w1 = torch.zeros(
             (target_vocab_size, 256), dtype=torch.bfloat16, device=device
         )
         markov_w2 = torch.zeros(
-            (padded_vocab_size, 256), dtype=torch.bfloat16, device=device
+            (vocab_size, 256), dtype=torch.bfloat16, device=device
         )
-        for batch_row in range(32):
-            previous = batch_row
-            for step in range(7):
-                token = batch_row * 7 + step
-                rank_column = token
-                markov_w1[previous, rank_column] = 1
-                markov_w2[token, rank_column] = 8
-                previous = target_state_base + token
+        rows = torch.arange(128, device=device)
+        markov_w1[rows, rows] = 1
+        markov_w1[target_state_base + rows, rows] = 1
+        markov_w2[rows, rows] = 8
 
-        for batch_size in (1, 7, 8, 16, 17, 32):
-            query_ids = torch.zeros(
-                (batch_size, 8), dtype=torch.int32, device=device
-            )
-            query_ids[:, 0] = torch.arange(
-                batch_size, dtype=torch.int32, device=device
-            )
+        for batch_size in (1, 2, 4, 8, 16, 24, 32, 64, 128):
+            anchor = torch.arange(batch_size, dtype=torch.int32, device=device)
             base_logits = torch.zeros(
                 (batch_size, 7, vocab_size),
                 dtype=torch.bfloat16,
                 device=device,
             )
-            output = torch.empty(
-                (batch_size, 7), dtype=torch.int32, device=device
+            expected = (
+                torch.arange(batch_size, dtype=torch.int32, device=device)
+                .add(target_state_base)
+                .view(batch_size, 1)
+                .expand(batch_size, 7)
             )
-            workspace_batch = (batch_size + 15) // 16 * 16
-            current_state = torch.empty(
-                (workspace_batch, 256), dtype=torch.bfloat16, device=device
+            eager_output = graph_captured_greedy_markov_decode(
+                base_logits, anchor, markov_w1, markov_w2, d2t
             )
-            partial_scores = torch.empty(
-                (2, 256, 16), dtype=torch.float32, device=device
-            )
-            partial_tokens = torch.empty(
-                (2, 256, 16), dtype=torch.int32, device=device
-            )
-            barrier_state = torch.empty(4, dtype=torch.int32, device=device)
-
-            def run_kernel() -> None:
-                rtp_llm_ops.dspark_persistent_markov(
-                    output,
-                    query_ids[:, 0],
-                    base_logits,
-                    d2t,
-                    markov_w1,
-                    markov_w2,
-                    current_state,
-                    partial_scores,
-                    partial_tokens,
-                    barrier_state,
-                    1.0,
-                    78,
-                )
-
-            run_kernel()
             torch.cuda.synchronize()
-            expected = torch.arange(
-                batch_size * 7, dtype=torch.int32, device=device
-            ).view(batch_size, 7)
-            expected.add_(target_state_base)
-            self.assertTrue(torch.equal(output, expected))
+            self.assertTrue(torch.equal(eager_output, expected))
 
+            base_logits.zero_()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                run_kernel()
-            output.fill_(-1)
+                graph_output = graph_captured_greedy_markov_decode(
+                    base_logits, anchor, markov_w1, markov_w2, d2t
+                )
+            graph_output.fill_(-1)
             graph.replay()
             torch.cuda.synchronize()
-            self.assertTrue(torch.equal(output, expected))
+            self.assertTrue(torch.equal(graph_output, expected))
 
     def test_exact_markov_decode_searches_full_draft_vocab(self) -> None:
         # Base Top-2 contains ids 0 and 1, but the Markov correction promotes

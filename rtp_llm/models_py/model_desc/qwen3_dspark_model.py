@@ -18,13 +18,13 @@ from rtp_llm.models_py.modules.factory.attention.common import (
 )
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
+    graph_captured_greedy_markov_decode,
 )
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     DSparkCallPhase,
     PyModelInputs,
     PyModelOutputs,
-    rtp_llm_ops,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -98,39 +98,21 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         self._dspark_markov_w1 = None
         self._dspark_markov_w2 = None
         self._dspark_d2t = None
-        self._dspark_markov_output = None
-        self._dspark_markov_current_state = None
-        self._dspark_markov_partial_scores = None
-        self._dspark_markov_partial_tokens = None
-        self._dspark_markov_barrier_state = None
         if self._dspark_proposal_driver:
-            if proposal_width != 7:
-                raise ValueError(
-                    "SM90 DSpARK persistent Markov requires proposal width 7"
-                )
-            if max_generate_batch_size > 32:
-                raise ValueError(
-                    "SM90 DSpARK persistent Markov supports max batch size 32"
-                )
-
             self._dspark_markov_w1 = weights.get_global_weight(
                 W.dspark_markov_w1
             ).contiguous()
             raw_markov_w2 = weights.get_global_weight(
                 W.dspark_markov_w2
             ).contiguous()
-            if (
-                self._dspark_markov_w1.dtype != torch.bfloat16
-                or raw_markov_w2.dtype != torch.bfloat16
-                or self._dspark_markov_w1.shape[1] != 256
-                or raw_markov_w2.shape[1] != 256
-            ):
-                raise ValueError(
-                    "SM90 DSpARK persistent Markov requires BF16 rank-256 weights"
-                )
-
             draft_vocab_size = int(config.vocab_size)
             padded_vocab_size = (draft_vocab_size + 127) // 128 * 128
+            if (
+                self._dspark_markov_w1.dim() != 2
+                or raw_markov_w2.dim() != 2
+                or self._dspark_markov_w1.shape[1] != raw_markov_w2.shape[1]
+            ):
+                raise ValueError("DSpARK Markov weights must have the same rank")
             if not draft_vocab_size <= raw_markov_w2.shape[0] <= padded_vocab_size:
                 raise ValueError(
                     "DSpARK Markov W2 rows must cover exactly the draft "
@@ -140,15 +122,10 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
                 raise ValueError(
                     "DSpARK Markov W1 must cover the target/input vocabulary"
                 )
-            if raw_markov_w2.shape[0] == padded_vocab_size:
-                self._dspark_markov_w2 = raw_markov_w2
-            else:
-                self._dspark_markov_w2 = raw_markov_w2.new_zeros(
-                    (padded_vocab_size, 256)
-                )
-                self._dspark_markov_w2[: raw_markov_w2.shape[0]].copy_(
-                    raw_markov_w2
-                )
+            # The generic linear consumes the logical draft vocabulary. A
+            # checkpoint may retain one alignment tile physically; discard it
+            # once at load rather than carrying stride-specific serving logic.
+            self._dspark_markov_w2 = raw_markov_w2[:draft_vocab_size].contiguous()
 
             d2t = weights.get_global_weight_or_none(
                 W.multi_tokens_predict_d2t_map
@@ -168,31 +145,6 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             )
             if self._dspark_d2t.shape != (draft_vocab_size,):
                 raise ValueError("DSpARK d2t must cover the draft vocabulary")
-
-            # The cooperative kernel always operates on 16-request tiles, so
-            # B=17..32 needs a full 32-row state workspace even when the
-            # configured admission limit is not itself tile aligned.
-            workspace_batch = (
-                (int(max_generate_batch_size) + 15) // 16 * 16
-            )
-            device = self._dspark_markov_w1.device
-            self._dspark_markov_output = torch.empty(
-                (max_generate_batch_size, proposal_width),
-                dtype=torch.int32,
-                device=device,
-            )
-            self._dspark_markov_current_state = torch.empty(
-                (workspace_batch, 256), dtype=torch.bfloat16, device=device
-            )
-            self._dspark_markov_partial_scores = torch.empty(
-                (2, 256, 16), dtype=torch.float32, device=device
-            )
-            self._dspark_markov_partial_tokens = torch.empty(
-                (2, 256, 16), dtype=torch.int32, device=device
-            )
-            self._dspark_markov_barrier_state = torch.empty(
-                4, dtype=torch.int32, device=device
-            )
 
         heads = self.attn_configs.head_num
         kv_heads = self.attn_configs.kv_head_num
@@ -255,27 +207,19 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             sample_hidden = shaped_hidden[:, : self._dspark_width]
         else:
             sample_hidden = shaped_hidden[:, 1 : self._dspark_width + 1]
-        # Full-vocabulary LM head plus the one-launch, seven-round persistent
-        # Markov kernel are both captured in the proposal CUDA graph.  The
-        # kernel retains exact dense argmax semantics; no eager or TopK path is
-        # used by serving.
+        # The full-vocabulary LM head and dependent dense Markov chain are
+        # captured together in the proposal CUDA graph. Replay therefore has
+        # no Python scheduling or eager fallback while keeping one portable
+        # implementation for every graph bucket and supported GPU.
         base_logits = torch.nn.functional.linear(
             sample_hidden.contiguous(), self._dspark_lm_head
         )
-        proposal_ids = self._dspark_markov_output[:batch_size]
-        rtp_llm_ops.dspark_persistent_markov(
-            proposal_ids,
-            query_ids[:, 0],
+        proposal_ids = graph_captured_greedy_markov_decode(
             base_logits,
-            self._dspark_d2t,
+            query_ids[:, 0],
             self._dspark_markov_w1,
             self._dspark_markov_w2,
-            self._dspark_markov_current_state,
-            self._dspark_markov_partial_scores,
-            self._dspark_markov_partial_tokens,
-            self._dspark_markov_barrier_state,
-            1.0,
-            78,
+            self._dspark_d2t,
         )
         outputs = PyModelOutputs(head_hidden)
         outputs.speculative_token_ids = proposal_ids
