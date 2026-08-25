@@ -555,7 +555,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         DeviceHostCopyOptions{},
                                                                         config.device_disk_staging_block_count,
-                                                                        config.max_descriptors_per_transfer_batch);
+                                                                        config.max_descriptors_per_transfer_batch,
+                                                                        config.transfer_worker_count);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));

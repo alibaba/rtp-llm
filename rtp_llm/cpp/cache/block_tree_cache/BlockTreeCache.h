@@ -54,6 +54,9 @@ struct BlockTreeCacheConfig {
     // ---- Shared Store/Load/Evict task pool ----
     int task_pool_size{4};
 
+    // ---- Shared per-rank TransferEngine task pool ----
+    size_t transfer_worker_count{16};
+
     // ---- Cross-rank transfer timeout ----
     int host_cache_sync_timeout_ms{10000};
     int disk_cache_sync_timeout_ms{30000};

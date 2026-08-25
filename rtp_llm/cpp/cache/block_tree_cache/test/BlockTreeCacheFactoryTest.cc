@@ -1542,6 +1542,8 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     ASSERT_NE(cache, nullptr);
     EXPECT_FALSE(cache->isHostCacheEnabled());
     EXPECT_TRUE(cache->isDiskCacheEnabled());
+    EXPECT_EQ(cache->config().task_pool_size, 4);
+    EXPECT_EQ(cache->config().transfer_worker_count, 16u);
     EXPECT_EQ(cache->config().device_disk_staging_block_count, 4u);
     EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 64u);
     ASSERT_FALSE(cache->groupSets().empty());

@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -235,25 +236,40 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
         return false;
     }
 
-    std::optional<EvictionTask> task = prepareEvictionLocked(*eviction_desc);
+    auto task = prepareEvictionLocked(*eviction_desc);
     if (!task.has_value()) {
         return false;
     }
-    if (task->needsCopy()) {
-        std::shared_ptr<EvictionTask> task_ptr = std::make_shared<EvictionTask>(std::move(*task));
-        updatePendingReleases(*task_ptr, true);
-        const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(*task_ptr); });
-        if (!submitted) {
-            updatePendingReleases(*task_ptr, false);
-            abortEvictionLocked(*task_ptr);
-            return false;
-        }
+    if (!task->needsCopy()) {
+        metrics_reporter_->reportEvictionTriggered(
+            source_tier, tree_->groupSets()[group_set_id]->groupType(), force_drop);
+        return true;
+    }
+
+    auto task_ptr = std::make_shared<EvictionTask>(std::move(*task));
+    if (!task_pool_->acquireBusinessCredit()) {
+        abortEvictionLocked(*task_ptr);
+        return false;
+    }
+    task_ptr->business_credit_acquired = true;
+    updatePendingReleases(*task_ptr, true);
+    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(*task_ptr); });
+    if (!submitted) {
+        task_pool_->releaseBusinessCredit();
+        updatePendingReleases(*task_ptr, false);
+        abortEvictionLocked(*task_ptr);
+        return false;
     }
     metrics_reporter_->reportEvictionTriggered(source_tier, tree_->groupSets()[group_set_id]->groupType(), force_drop);
     return true;
 }
 
 void BlockTreeEvictor::runEvictionTask(const EvictionTask& task) noexcept {
+    block_tree_cache_detail::ScopeRollback credit_guard([this, &task]() {
+        if (task.business_credit_acquired) {
+            task_pool_->releaseBusinessCredit();
+        }
+    });
     EvictionTaskResult task_result;
     task_result.primary_success = false;
     task_result.cascade_success.assign(task.cascade_descs.size(), false);

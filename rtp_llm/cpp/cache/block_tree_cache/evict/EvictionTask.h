@@ -33,6 +33,7 @@ struct EvictionTask {
     std::vector<TransferDescriptor>     dependent_prune_descs;
     std::vector<EvictionTimingSnapshot> dependent_prune_timings;
     std::vector<TreeNode*>              full_prune_nodes_bottom_up;
+    bool                                business_credit_acquired{false};
 
     bool needsCopy() const {
         return primary_desc.target_tier != Tier::NONE
