@@ -293,7 +293,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         // device-state tensors on the wrong GPU.
         c10::DeviceGuard device_guard(torch::Device(
             torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
-        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
         if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
             RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
@@ -330,11 +330,11 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
             sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
 
-            auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
-            auto accept_len         = torch::ones({1}, cuda_i32);
-            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
-            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
-            propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
+            auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
+            auto accept_len                      = torch::ones({1}, cuda_i32);
+            auto accept_tokens                   = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+            accept_tokens[0][0]                  = sp_output_buffer->tokens[0][0];
+            sp_output_buffer->propose_tokens_gpu = propose_tokens_gpu;
 
             auto next_seq_len = torch::ones({1}, cuda_i32);
             next_seq_len[0]   = generate_stream->seqLength();

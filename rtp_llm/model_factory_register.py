@@ -275,6 +275,10 @@ def _register_builtin_lazy_models() -> None:
         "rtp_llm.models.qwen3_next.qwen3_next_mtp",
         ["Qwen35MoeMTPForCausalLM"],
     )
+    register_lazy_model(
+        "qwen35_dense_mtp",
+        "rtp_llm.models.qwen3_next.qwen3_next_mtp",
+    )
     register_lazy_model("qwen_vl", "rtp_llm.models.qwen_vl", ["QWenMLMHeadModel"])
     register_lazy_model(
         "qwen2_vl",

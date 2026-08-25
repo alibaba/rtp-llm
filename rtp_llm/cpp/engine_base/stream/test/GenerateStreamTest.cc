@@ -114,6 +114,82 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
+    auto builder                                             = GenerateStreamBuilder();
+    auto stream                                              = builder.createContextStream({1, 2, 3});
+    stream->generate_input_->generate_config->max_new_tokens = 10;
+
+    auto sp_output_buffer                = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->tokens             = torch::tensor({7, -1}, torch::kInt32).reshape({1, 2});
+    sp_output_buffer->propose_tokens_gpu = torch::tensor({9}, torch::kInt32).to(torch::kCUDA);
+    stream->setSPOutputBuffer(sp_output_buffer);
+
+    StreamSpecUpdateInfo update_info{
+        .new_tokens          = torch::tensor({{4}}, torch::kInt32),
+        .num_new_tokens      = 1,
+        .draft_token         = -1,
+        .draft_hidden_states = torch::Tensor(),
+        .draft_token_probs   = torch::Tensor(),
+        .draft_token_gpu     = std::nullopt,
+    };
+    stream->specUpdate(update_info);
+
+    ASSERT_TRUE(stream->getSPOutputBuffer()->propose_tokens_gpu.defined());
+    EXPECT_EQ(stream->getSPOutputBuffer()->propose_tokens_gpu.cpu().item<int32_t>(), 9);
+}
+
+TEST_F(GenerateStreamTest, mtpUpdateRefreshesGpuProposalWithMultipleDrafts) {
+    auto builder                                             = GenerateStreamBuilder();
+    auto stream                                              = builder.createContextStream({1, 2, 3});
+    stream->generate_input_->generate_config->max_new_tokens = 10;
+
+    auto sp_output_buffer                = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->tokens             = torch::tensor({7, -1}, torch::kInt32).reshape({1, 2});
+    sp_output_buffer->propose_tokens_gpu = torch::tensor({9}, torch::kInt32).to(torch::kCUDA);
+    stream->setSPOutputBuffer(sp_output_buffer);
+
+    auto                 new_gpu_proposal = torch::tensor({11, 12, 13}, torch::kInt32).reshape({1, 3}).to(torch::kCUDA);
+    StreamSpecUpdateInfo update_info{
+        .new_tokens          = torch::tensor({{4}}, torch::kInt32),
+        .num_new_tokens      = 1,
+        .draft_token         = -1,
+        .draft_hidden_states = torch::Tensor(),
+        .draft_token_probs   = torch::Tensor(),
+        .draft_token_gpu     = new_gpu_proposal,
+    };
+    stream->specUpdate(update_info);
+
+    const auto& actual = stream->getSPOutputBuffer()->propose_tokens_gpu;
+    ASSERT_TRUE(actual.defined());
+    EXPECT_EQ(actual.numel(), 3);
+    EXPECT_EQ(actual.sizes().vec(), (std::vector<int64_t>{1, 3}));
+    EXPECT_TRUE(torch::equal(actual.cpu(), new_gpu_proposal.cpu()));
+}
+
+TEST_F(GenerateStreamTest, mtpCpuProposalClearsStaleGpuMirror) {
+    auto builder                                             = GenerateStreamBuilder();
+    auto stream                                              = builder.createContextStream({1, 2, 3});
+    stream->generate_input_->generate_config->max_new_tokens = 10;
+
+    auto sp_output_buffer                = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->tokens             = torch::tensor({7, -1}, torch::kInt32).reshape({1, 2});
+    sp_output_buffer->propose_tokens_gpu = torch::tensor({9}, torch::kInt32).to(torch::kCUDA);
+    stream->setSPOutputBuffer(sp_output_buffer);
+
+    StreamSpecUpdateInfo update_info{
+        .new_tokens          = torch::tensor({{4}}, torch::kInt32),
+        .num_new_tokens      = 1,
+        .draft_token         = 11,
+        .draft_hidden_states = torch::Tensor(),
+        .draft_token_probs   = torch::Tensor(),
+        .draft_token_gpu     = torch::Tensor(),
+    };
+    stream->specUpdate(update_info);
+
+    EXPECT_FALSE(stream->getSPOutputBuffer()->propose_tokens_gpu.defined());
+    EXPECT_EQ(stream->getSPOutputBuffer()->tokens[0][1].item<int32_t>(), 11);
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
