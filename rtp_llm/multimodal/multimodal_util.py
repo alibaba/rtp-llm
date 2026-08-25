@@ -29,6 +29,7 @@ download_executor = concurrent.futures.ThreadPoolExecutor()
 logger = logging.getLogger(__name__)
 
 REQUEST_GET = None
+CONNECT_TIMEOUT_RETRIES = 2
 
 
 def _default_request_get(url, headers):
@@ -46,7 +47,20 @@ def request_get(url, headers):
             REQUEST_GET = safe_request_get
         except ImportError:
             REQUEST_GET = _default_request_get
-    return REQUEST_GET(url, headers)
+
+    import requests
+
+    for retry_count in range(CONNECT_TIMEOUT_RETRIES + 1):
+        try:
+            return REQUEST_GET(url, headers)
+        except requests.exceptions.ConnectTimeout:
+            if retry_count == CONNECT_TIMEOUT_RETRIES:
+                raise
+            logger.warning(
+                "multimodal download connect timeout; retrying request (%d/%d)",
+                retry_count + 1,
+                CONNECT_TIMEOUT_RETRIES,
+            )
 
 
 def _get_http_heads(download_headers: str = ""):
