@@ -1,22 +1,31 @@
 package org.flexlb.balance.strategy;
 
+import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -29,7 +38,25 @@ import java.util.concurrent.ConcurrentHashMap;
  * description:
  * date: 2025/3/11
  */
+@SuppressWarnings("deprecation")
 class ShortestTTFTStrategyTest {
+
+    private ch.qos.logback.classic.Logger businessLogger;
+    private Level originalLevel;
+
+    @BeforeEach
+    void enableDebugDecisionSnapshots() {
+        clearWorkerStatuses();
+        businessLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+        originalLevel = businessLogger.getLevel();
+        businessLogger.setLevel(Level.DEBUG);
+    }
+
+    @AfterEach
+    void restoreLogLevel() {
+        businessLogger.setLevel(originalLevel);
+        clearWorkerStatuses();
+    }
 
     @Test
     void test() {
@@ -46,13 +73,18 @@ class ShortestTTFTStrategyTest {
         Map<String, TaskInfo> runningTaskList1 = new HashMap<>();
         Map<String, TaskInfo> finishedTaskList1 = new HashMap<>();
         ConcurrentHashMap<String, TaskInfo> localTaskList1 = new ConcurrentHashMap<>();
+        waitingTaskList1.put("waiting-1", createTask("waiting-1", 400, 128));
+        runningTaskList1.put("running-1", createTask("running-1", 600, 256));
+        localTaskList1.put("waiting-1", createTask("waiting-1", 400, 0));
+        localTaskList1.put("running-1", createTask("running-1", 600, 0));
         WorkerStatus workerStatus1 = createWorkerStatus("127.0.0.2", 100, waitingTaskList1, runningTaskList1, finishedTaskList1, localTaskList1);
 
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
         prefillStatusMap.put("127.0.0.2:8080", workerStatus1);
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(12345L);
+        req.setRequestId("request-12345");
+        req.setBlockSize(256);
         List<Long> blockCacheKeys = new ArrayList<>();
         blockCacheKeys.add(1L);
         blockCacheKeys.add(2L);
@@ -66,7 +98,9 @@ class ShortestTTFTStrategyTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any())).thenReturn(new HashMap<>());
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(
+                        Map.of("127.0.0.2:8080", HostCacheMatch.local(3)), CacheMatchSource.KVCM, 123, 256));
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
@@ -80,13 +114,395 @@ class ShortestTTFTStrategyTest {
         }
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
+        Assertions.assertEquals("request-12345", result.getRequestId());
+        Assertions.assertEquals("KVCM", balanceContext.getCacheMatchSource());
+        Assertions.assertEquals(123, balanceContext.getCacheMatchQueryTimeUs());
+        Assertions.assertEquals(1, balanceContext.getCacheMatchQueryCount());
+        Mockito.verify(cacheAwareService).findMatchingEngines(Mockito.argThat(query ->
+                "request-12345".equals(query.requestId())
+                        && blockCacheKeys.equals(query.blockCacheKeys())
+                        && query.blockSize() == 256L
+                        && query.roleType() == RoleType.PREFILL
+                        && query.group() == null));
+        TaskInfo selectedTask = workerStatus1.getLocalTaskMap().get("request-12345");
+        Assertions.assertNotNull(selectedTask);
+        Assertions.assertEquals(768, selectedTask.getPredictedPrefixLength());
+        Assertions.assertEquals("KVCM", selectedTask.getCacheMatchSource());
+        BalanceContext.CacheMatchSelection selection =
+                balanceContext.getCacheMatchSelectionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals("127.0.0.2", selection.selectedIp());
+        Assertions.assertEquals(768, selection.hitCacheTokens());
+
+        var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertNotNull(decision);
+        Assertions.assertEquals(2, decision.workers().size());
+        var selectedDecision = decision.workers().stream()
+                .filter(worker -> worker.selected())
+                .findFirst()
+                .orElseThrow();
+        Assertions.assertEquals("127.0.0.2", selectedDecision.ip());
+        Assertions.assertEquals(768, selectedDecision.requestHitCacheTokens());
+        Assertions.assertEquals(232, selectedDecision.requestPrefillTime());
+        Assertions.assertEquals(100, selectedDecision.queueTime());
+        Assertions.assertEquals(332, selectedDecision.estimatedTtft());
+        Assertions.assertEquals(76.8, selectedDecision.requestHitRatePct(), 0.001);
+        Assertions.assertEquals(232, selectedDecision.requestUncachedTokens());
+        Assertions.assertEquals(768, selectedDecision.requestLocalMatchTokens());
+        Assertions.assertEquals(2, selectedDecision.trackedTaskCount());
+        Assertions.assertEquals(1, selectedDecision.inTransitAndWaitingTaskCount());
+        Assertions.assertEquals(400, selectedDecision.inTransitAndWaitingUncachedTokens());
+        Assertions.assertEquals(1, selectedDecision.trackedRunningTaskCount());
+        Assertions.assertEquals(600, selectedDecision.trackedRunningRemainingPrefillTokens());
+        Assertions.assertEquals(1, selectedDecision.engineWaitingTaskCount());
+        Assertions.assertEquals(272, selectedDecision.engineWaitingUncachedTokens());
+        Assertions.assertEquals(1, selectedDecision.engineRunningTaskCount());
+        Assertions.assertEquals(344, selectedDecision.engineRunningRemainingPrefillTokens());
+        Assertions.assertEquals(1_000, selectedDecision.outstandingUncachedTokens());
+
+        businessLogger.setLevel(Level.INFO);
+        BalanceContext infoContext = new BalanceContext();
+        infoContext.setConfig(new FlexlbConfig());
+        infoContext.setRequest(req);
+        staticCacheLoadBalancer.select(infoContext, RoleType.PREFILL, null);
+        Assertions.assertFalse(infoContext.getShortestTtftDecisionByRole().isEmpty());
+        Assertions.assertEquals(
+                2,
+                infoContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL).workers().size());
+        Assertions.assertEquals(
+                "SHORTEST_TTFT",
+                infoContext.getSelectionReasonByRole().get(RoleType.PREFILL));
+    }
+
+    @Test
+    void prefersCacheLeaderWithTwoBlockLeadWhenTtftIsSimilar() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus cacheLeader = createWorkerStatus("127.0.0.2", 7000, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, cacheLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        cacheLeader.getIpPort(), 17,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "cache-lead-two-blocks");
+
+        Assertions.assertEquals(cacheLeader.getIp(), selection.serverStatus().getServerIp());
+        TaskInfo selectedTask = cacheLeader.getLocalTaskMap().get("cache-lead-two-blocks");
+        Assertions.assertNotNull(selectedTask);
+        Assertions.assertEquals(13824, selectedTask.estimatePrefillTime());
+
+        var decision = selection.balanceContext()
+                .getShortestTtftDecisionByRole()
+                .get(RoleType.PREFILL);
+        Assertions.assertNotNull(decision);
+        Assertions.assertEquals(3616.0, decision.similarTtftThreshold());
+        Assertions.assertEquals(3, decision.workers().stream()
+                .filter(worker -> worker.topCandidate())
+                .count());
+    }
+
+    @Test
+    void prefersCacheLeaderWithOneBlockLeadWhenTtftIsSimilar() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus oneBlockLeader = createWorkerStatus("127.0.0.2", 2500, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        oneBlockLeader.getIpPort(), 16,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "cache-lead-one-block");
+
+        Assertions.assertEquals(oneBlockLeader.getIp(), selection.serverStatus().getServerIp());
+    }
+
+    @Test
+    void keepsSimilarCachePreferenceWithoutAnAdditionalWorkLimit() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus oneBlockLeader = createWorkerStatus("127.0.0.2", 2500, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        oneBlockLeader.getIpPort(), 16,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "shortest-cache-preference");
+
+        Assertions.assertEquals(oneBlockLeader.getIp(), selection.serverStatus().getServerIp());
+    }
+
+    @Test
+    void doesNotPreferCacheLeaderWhenItsQueueMakesTtftTooLong() {
+        FlexlbConfig config = cacheFocusedConfig();
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus busyCacheLeader = createWorkerStatus("127.0.0.2", 20000, 2128);
+        WorkerStatus thirdWorker = createWorkerStatus("127.0.0.3", 1000, 2128);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, busyCacheLeader, thirdWorker),
+                Map.of(
+                        shortestTtftWorker.getIpPort(), 15,
+                        busyCacheLeader.getIpPort(), 20,
+                        thirdWorker.getIpPort(), 15),
+                config,
+                50000,
+                "busy-cache-leader");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selection.serverStatus().getServerIp());
+    }
+
+    @Test
+    void skipsOverThresholdWorkerWithoutRemovingItFromDecisionSnapshot() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000_000L);
+        WorkerStatus overThresholdWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus eligibleWorker = createWorkerStatus("127.0.0.2", 0, 2128);
+        putPendingTask(overThresholdWorker, "existing", 960_000, 0);
+
+        SelectionResult selection = select(
+                List.of(overThresholdWorker, eligibleWorker),
+                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                config,
+                50_000,
+                "outstanding-over-threshold");
+
+        Assertions.assertEquals(eligibleWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertFalse(overThresholdWorker.getLocalTaskMap().containsKey("outstanding-over-threshold"));
+        Assertions.assertTrue(eligibleWorker.getLocalTaskMap().containsKey("outstanding-over-threshold"));
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals(2, decision.totalWorkerCount());
+        Assertions.assertFalse(decision.workers().stream()
+                .filter(worker -> worker.ip().equals(overThresholdWorker.getIp()))
+                .findFirst()
+                .orElseThrow()
+                .outstandingGuardEligible());
+    }
+
+    @Test
+    void usesRegularShortestTtftSelectionWhenAllWorkersExceedThreshold() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000_000L);
+        WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus cachePreferredWorker = createWorkerStatus("127.0.0.2", 0, 2128);
+        putPendingTask(shortestTtftWorker, "shortest-existing", 980_000, 0);
+        putPendingTask(cachePreferredWorker, "cache-existing", 970_000, 0);
+        cachePreferredWorker.getRunningQueueTime().set(990_000);
+
+        SelectionResult selection = select(
+                List.of(shortestTtftWorker, cachePreferredWorker),
+                Map.of(cachePreferredWorker.getIpPort(), 3),
+                config,
+                50_000,
+                "all-outstanding-over-threshold");
+
+        Assertions.assertEquals(cachePreferredWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertTrue(cachePreferredWorker.getLocalTaskMap().containsKey("all-outstanding-over-threshold"));
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals("SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK", decision.selectionReason());
+        Assertions.assertEquals(2, decision.candidateWorkerCount());
+        Assertions.assertTrue(decision.workers().stream().noneMatch(worker -> worker.outstandingGuardEligible()));
+    }
+
+    @Test
+    void recordsWorkersGuardEligibleWhenGuardDoesNotApplyToDecode() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000L);
+        WorkerStatus decodeWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+
+        SelectionResult selection = select(
+                RoleType.DECODE,
+                List.of(decodeWorker),
+                Map.of(),
+                config,
+                50_000,
+                "decode-without-outstanding-guard");
+
+        Assertions.assertTrue(selection.serverStatus().isSuccess());
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.DECODE);
+        Assertions.assertTrue(decision.workers().getFirst().outstandingGuardEligible());
+    }
+
+    @Test
+    void recordsWorkersGuardEligibleWhenGuardDoesNotApplyToVit() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000L);
+        WorkerStatus vitWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+
+        SelectionResult selection = select(
+                RoleType.VIT,
+                List.of(vitWorker),
+                Map.of(),
+                config,
+                50_000,
+                "vit-without-outstanding-guard");
+
+        Assertions.assertTrue(selection.serverStatus().isSuccess());
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.VIT);
+        Assertions.assertTrue(decision.workers().getFirst().outstandingGuardEligible());
+    }
+
+    @Test
+    void legacyCacheAffinityThresholdDoesNotGateShortestTtft() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000L);
+        WorkerStatus overLegacyThresholdWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        putPendingTask(overLegacyThresholdWorker, "existing", 960_000, 0);
+
+        SelectionResult selection = select(
+                List.of(overLegacyThresholdWorker),
+                Map.of(),
+                config,
+                50_000,
+                "legacy-threshold-ignored");
+
+        Assertions.assertEquals(overLegacyThresholdWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertTrue(overLegacyThresholdWorker.getLocalTaskMap().containsKey("legacy-threshold-ignored"));
+        var decision = selection.balanceContext().getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals("SHORTEST_TTFT", decision.selectionReason());
+        Assertions.assertTrue(decision.workers().getFirst().outstandingGuardEligible());
+    }
+
+    @Test
+    void skipsOverThresholdWorkerForPdFusionRole() {
+        FlexlbConfig config = cacheFocusedConfig();
+        config.setOutstandingUncachedTokensThreshold(1_000_000L);
+        WorkerStatus overThresholdWorker = createWorkerStatus("127.0.0.1", 0, 2128);
+        WorkerStatus eligibleWorker = createWorkerStatus("127.0.0.2", 0, 2128);
+        putPendingTask(overThresholdWorker, "existing", 960_000, 0);
+
+        SelectionResult selection = select(
+                RoleType.PDFUSION,
+                List.of(overThresholdWorker, eligibleWorker),
+                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                config,
+                50_000,
+                "pdfusion-outstanding-over-threshold");
+
+        Assertions.assertEquals(eligibleWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertFalse(overThresholdWorker.getLocalTaskMap().containsKey("pdfusion-outstanding-over-threshold"));
+        Assertions.assertTrue(eligibleWorker.getLocalTaskMap().containsKey("pdfusion-outstanding-over-threshold"));
+    }
+
+    private FlexlbConfig cacheFocusedConfig() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setShortestTtftSimilarityThresholdRatio(0.2);
+        return config;
+    }
+
+    private SelectionResult select(
+            List<WorkerStatus> workers,
+            Map<String, Integer> cacheMatches,
+            FlexlbConfig config,
+            long inputTokens,
+            String requestId) {
+        return select(RoleType.PREFILL, workers, cacheMatches, config, inputTokens, requestId);
+    }
+
+    private SelectionResult select(
+            RoleType roleType,
+            List<WorkerStatus> workers,
+            Map<String, Integer> cacheMatches,
+            FlexlbConfig config,
+            long inputTokens,
+            String requestId) {
+        Map<String, WorkerStatus> workerStatusMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
+        for (WorkerStatus worker : workers) {
+            worker.setRole(roleType.getCode());
+            workerStatusMap.put(worker.getIpPort(), worker);
+        }
+
+        Request request = new Request();
+        request.setSeqLen(inputTokens);
+        request.setRequestId(requestId);
+        request.setBlockCacheKeys(List.of(1L));
+        request.setBlockSize(workers.getFirst().getCacheStatus().getBlockSize());
+
+        EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure resourceMeasure =
+                Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(
+                        HostCacheMatch.fromLocalMatches(cacheMatches),
+                        CacheMatchSource.KVCM,
+                        123,
+                        workers.getFirst().getCacheStatus().getBlockSize()));
+
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
+                new EngineWorkerStatus(new ModelMetaConfig()),
+                engineHealthReporter,
+                cacheAwareService,
+                resourceMeasureFactory);
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setConfig(config);
+        balanceContext.setRequest(request);
+        return new SelectionResult(
+                strategy.select(balanceContext, roleType, null), balanceContext);
+    }
+
+    private WorkerStatus createWorkerStatus(String ip, long runningQueueTime, long blockSize) {
+        WorkerStatus workerStatus = createWorkerStatus(
+                ip,
+                runningQueueTime,
+                new HashMap<>(),
+                new HashMap<>(),
+                new HashMap<>(),
+                new ConcurrentHashMap<>());
+        workerStatus.getCacheStatus().setBlockSize(blockSize);
+        return workerStatus;
+    }
+
+    private void clearWorkerStatuses() {
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+    }
+
+    private record SelectionResult(ServerStatus serverStatus, BalanceContext balanceContext) {
+    }
+
+    private TaskInfo createTask(String requestId, long inputLength, long prefixLength) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setInputLength(inputLength);
+        task.setPrefixLength(prefixLength);
+        task.setPredictedPrefixLength(prefixLength);
+        task.updateTaskState(TaskStateEnum.IN_TRANSIT);
+        return task;
+    }
+
+    private void putPendingTask(WorkerStatus worker,
+                                String requestId,
+                                long inputTokens,
+                                long predictedHitTokens) {
+        TaskInfo task = createTask(requestId, inputTokens, predictedHitTokens);
+        worker.putLocalTask(requestId, task);
     }
 
     WorkerStatus createWorkerStatus(String ip,
                                     long runningQueueTime,
                                     Map<String, TaskInfo> waitingTaskInfo,
-                                    Map<String, TaskInfo> finishedTaskList,
                                     Map<String, TaskInfo> runningTaslList,
+                                    Map<String, TaskInfo> finishedTaskList,
                                     ConcurrentHashMap<String, TaskInfo> localTaskList) {
         WorkerStatus workerStatus = new WorkerStatus();
 
@@ -101,6 +517,7 @@ class ShortestTTFTStrategyTest {
         workerStatus.setCacheStatus(cacheStatus);
         workerStatus.getRunningQueueTime().getAndSet(runningQueueTime);
         workerStatus.setWaitingTaskList(waitingTaskInfo);
+        workerStatus.setLocalTaskMap(localTaskList);
         workerStatus.updateTaskStates(waitingTaskInfo, runningTaslList, finishedTaskList);
         workerStatus.setRunningTaskList(runningTaslList);
         return workerStatus;

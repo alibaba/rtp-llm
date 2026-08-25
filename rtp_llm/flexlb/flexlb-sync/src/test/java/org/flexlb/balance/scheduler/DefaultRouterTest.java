@@ -11,6 +11,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,19 +19,21 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.lang.reflect.Field;
+import java.util.EnumMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -61,7 +64,12 @@ class DefaultRouterTest {
     @Mock
     private Request request;
 
+    @Mock
+    private RoutingQueueReporter routingQueueReporter;
+
     private DefaultRouter defaultRouter;
+
+    private final Map<RoleType, LoadBalanceStrategyEnum> roleStrategies = new EnumMap<>(RoleType.class);
 
     @BeforeEach
     void setUp() {
@@ -72,33 +80,25 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
 
         // Mock config service
-        when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        lenient().when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.SHORTEST_TTFT);
-        when(loadBalanceConfig.getStrategyForRoleType(any(RoleType.class))).thenAnswer(inv -> {
-            RoleType roleType = inv.getArgument(0);
-            if (roleType == RoleType.DECODE) {
-                return LoadBalanceStrategyEnum.WEIGHTED_CACHE;
-            }
-            if (roleType == RoleType.PDFUSION) {
-                return LoadBalanceStrategyEnum.RANDOM;
-            }
-            return LoadBalanceStrategyEnum.SHORTEST_TTFT;
-        });
+        lenient().when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
+        roleStrategies.put(RoleType.PREFILL, LoadBalanceStrategyEnum.SHORTEST_TTFT);
+        roleStrategies.put(RoleType.DECODE, LoadBalanceStrategyEnum.WEIGHTED_CACHE);
+        roleStrategies.put(RoleType.PDFUSION, LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST);
+        roleStrategies.put(RoleType.VIT, LoadBalanceStrategyEnum.RANDOM);
+        lenient().when(loadBalanceConfig.getStrategyForRoleType(any(RoleType.class)))
+                .thenAnswer(inv -> roleStrategies.get(inv.getArgument(0)));
 
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, prefillLoadBalancer);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeLoadBalancer);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, vitLoadBalancer);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST, fusionLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, vitLoadBalancer);
 
         // Create scheduler instance
-        defaultRouter = new DefaultRouter(configService);
-
-        // Mock LoadBalanceStrategyFactory to return our mock load balancers
-        mockStaticLoadBalanceStrategyFactory();
+        defaultRouter = new DefaultRouter(configService, routingQueueReporter);
 
         // Mock balance context
         lenient().when(balanceContext.getRequest()).thenReturn(request);
-        lenient().when(balanceContext.getRequestId()).thenReturn(12345L);
+        lenient().when(balanceContext.getRequestId()).thenReturn("request-12345");
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -108,26 +108,6 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
-    }
-
-    // Helper method to mock the static LoadBalanceStrategyFactory
-    private void mockStaticLoadBalanceStrategyFactory() {
-        try {
-            // Use reflection to set the loadBalancerMap in DefaultRouter
-            Field loadBalancerMapField = DefaultRouter.class.getDeclaredField("loadBalancerMap");
-            loadBalancerMapField.setAccessible(true);
-
-            @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(defaultRouter);
-
-            // Put mocked LoadBalancer instances into the map
-            loadBalancerMap.put(RoleType.PREFILL, prefillLoadBalancer);
-            loadBalancerMap.put(RoleType.DECODE, decodeLoadBalancer);
-            loadBalancerMap.put(RoleType.VIT, vitLoadBalancer);
-            loadBalancerMap.put(RoleType.PDFUSION, fusionLoadBalancer);
-        } catch (Exception e) {
-            fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
-        }
     }
 
     @Test
@@ -142,7 +122,25 @@ class DefaultRouterTest {
         assertNotNull(response, "Response should not be null");
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_AVAILABLE_WORKER");
+        verify(routingQueueReporter).reportRouteAttemptExecutionMetric(anyLong());
         // Note: The method logs an error but doesn't fail when status is null
+    }
+
+    @Test
+    void should_report_route_attempt_time_for_each_invocation() {
+        defaultRouter.route(balanceContext);
+        defaultRouter.route(balanceContext);
+
+        verify(routingQueueReporter, times(2)).reportRouteAttemptExecutionMetric(anyLong());
+    }
+
+    @Test
+    void should_report_route_attempt_time_when_route_throws() {
+        when(balanceContext.getRequest()).thenThrow(new IllegalStateException("invalid context"));
+
+        assertThrows(IllegalStateException.class, () -> defaultRouter.route(balanceContext));
+
+        verify(routingQueueReporter).reportRouteAttemptExecutionMetric(anyLong());
     }
 
     @Test
@@ -229,7 +227,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
+        fusionServerStatus.setRequestId("request-54321");
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
@@ -400,7 +398,7 @@ class DefaultRouterTest {
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081"), anyLong());
+        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081"), anyString());
     }
 
     @Test
@@ -466,7 +464,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
+        fusionServerStatus.setRequestId("request-54321");
         when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
@@ -532,5 +530,40 @@ class DefaultRouterTest {
         assertTrue(response.isSuccess(), "Response should be successful");
         assertNotNull(response.getServerStatus(), "Server status list should not be null");
         assertEquals(3, response.getServerStatus().size(), "Should have 3 server statuses");
+    }
+
+    @Test
+    void should_use_new_strategy_on_next_route_when_config_strategy_changes_after_router_creation() {
+        // Setup - add dummy worker to trigger prefill role
+        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyPrefillWorker.setIp("192.168.1.1");
+        dummyPrefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+
+        ServerStatus shortestTtftStatus = new ServerStatus();
+        shortestTtftStatus.setSuccess(true);
+        shortestTtftStatus.setServerIp("192.168.1.1");
+        shortestTtftStatus.setHttpPort(8080);
+        shortestTtftStatus.setRole(RoleType.PREFILL);
+        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(shortestTtftStatus);
+
+        ServerStatus cacheAffinityStatus = new ServerStatus();
+        cacheAffinityStatus.setSuccess(true);
+        cacheAffinityStatus.setServerIp("192.168.1.1");
+        cacheAffinityStatus.setHttpPort(8080);
+        cacheAffinityStatus.setRole(RoleType.PREFILL);
+        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(cacheAffinityStatus);
+
+        // First route uses the initially configured strategy
+        Response firstResponse = defaultRouter.route(balanceContext);
+        assertTrue(firstResponse.isSuccess(), "First route should succeed");
+        verify(prefillLoadBalancer).select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull());
+
+        // Simulate a hot config update switching the prefill strategy
+        roleStrategies.put(RoleType.PREFILL, LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST);
+
+        Response secondResponse = defaultRouter.route(balanceContext);
+        assertTrue(secondResponse.isSuccess(), "Second route should succeed");
+        verify(fusionLoadBalancer).select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull());
     }
 }

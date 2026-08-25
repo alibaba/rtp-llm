@@ -4,13 +4,15 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.config.ConfigService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -25,7 +27,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -38,16 +39,15 @@ import java.util.concurrent.ThreadLocalRandom;
 public class WeightedCacheLoadBalancer implements LoadBalancer {
 
     private final EngineWorkerStatus engineWorkerStatus;
-    private final double decayFactor;
     private final ResourceMeasureFactory resourceMeasureFactory;
+    private final CacheAwareService cacheAwareService;
 
-    public WeightedCacheLoadBalancer(ConfigService configService,
-                                     EngineWorkerStatus engineWorkerStatus,
-                                     ResourceMeasureFactory resourceMeasureFactory) {
+    public WeightedCacheLoadBalancer(EngineWorkerStatus engineWorkerStatus,
+                                     ResourceMeasureFactory resourceMeasureFactory,
+                                     CacheAwareService cacheAwareService) {
         this.engineWorkerStatus = engineWorkerStatus;
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.decayFactor = config.getWeightedCacheDecayFactor();
         this.resourceMeasureFactory = resourceMeasureFactory;
+        this.cacheAwareService = cacheAwareService;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, this);
     }
 
@@ -80,12 +80,34 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
 
         // Implement weighted random selection algorithm
-        WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
+        WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList, config.getWeightedCacheDecayFactor());
 
         if (selectedWorker != null) {
-            long prefixLength = calcPrefixMatchLength(selectedWorker.getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
+            CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
+                    new CacheMatchQuery(
+                            balanceContext.getRequestId(),
+                            request.getBlockCacheKeys(),
+                            request.getBlockSize(),
+                            request.getLocalStandbyBlockCacheKeys(),
+                            request.getLocalStandbyBlockSize(),
+                            roleType,
+                            group));
+            long prefixLength = calcPrefixMatchLength(
+                    selectedWorker, cacheMatchResult, config.getP2pHitDiscount(), seqLen);
+            balanceContext.recordCacheMatch(
+                    cacheMatchResult.source().name(),
+                    cacheMatchResult.queryTimeUs(),
+                    roleType,
+                    selectedWorker.getIp(),
+                    prefixLength);
             // Update local task state
-            return buildServerStatus(selectedWorker, seqLen, prefixLength, roleType, balanceContext.getRequestId());
+            return buildServerStatus(
+                    selectedWorker,
+                    seqLen,
+                    prefixLength,
+                    roleType,
+                    balanceContext.getRequestId(),
+                    cacheMatchResult.source().name());
         }
 
         // Return failure if no suitable worker found
@@ -100,7 +122,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
      * @param requestId Request ID
      */
     @Override
-    public void rollBack(String ipPort, long requestId) {
+    public void rollBack(String ipPort, String requestId) {
 
         Map<String, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
         Logger.debug("Decode rollBack - ip: {}, requestId: {}",
@@ -112,37 +134,32 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
     }
 
-    private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {
-
-        if (cacheStatus == null || promptCacheKeys == null) {
-            return 0;
+    private long calcPrefixMatchLength(
+            WorkerStatus workerStatus,
+            CacheMatchResult cacheMatchResult,
+            double p2pHitDiscount,
+            long inputTokens) {
+        // KVCM returns the host_ip_port reported by Subscriber, while WorkerStatus uses the
+        // service-discovery address. No code-level normalization guarantees they are identical;
+        // the end-to-end integration must keep both values aligned.
+        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getIpPort());
+        if (match == null) {
+            return 0L;
         }
-        long blockSize = cacheStatus.getBlockSize();
-        Set<Long> cachePrefixHash = cacheStatus.getCachedKeys();
-        if (cachePrefixHash == null) {
-            return 0;
-        }
-
-        // Iterate from beginning to find first mismatch position
-        for (int index = 0; index < promptCacheKeys.size(); index++) {
-            long hash = promptCacheKeys.get(index);
-            if (!cachePrefixHash.contains(hash)) {
-                // Return matching prefix length (matched block count * block size)
-                return blockSize * index;
-            }
-        }
-
-        // Return total length if all match
-        return blockSize * promptCacheKeys.size();
+        long p2pAddedMatchBlocks = Math.max(0L, match.p2pTotalMatchBlocks() - match.localMatchBlocks());
+        double effectiveMatchBlocks = match.localMatchBlocks() + p2pAddedMatchBlocks * Math.max(0.0, p2pHitDiscount);
+        return CacheMatchResult.matchedTokens(
+                effectiveMatchBlocks, cacheMatchResult.blockSize(), inputTokens);
     }
 
     /**
      * Weighted random selection algorithm: performs weighted random selection based on normalized cache usage
      *
      * @param candidateWorkers Candidate worker list
+     * @param decayFactor Decay factor applied to normalized cache usage when computing weights
      * @return Selected WorkerStatus, or null if no suitable worker found
      */
-    private WorkerStatus weightedRandomSelection(List<WorkerStatus> candidateWorkers) {
+    private WorkerStatus weightedRandomSelection(List<WorkerStatus> candidateWorkers, double decayFactor) {
         int workerCount = candidateWorkers.size();
         if (workerCount == 0) {
             return null;
@@ -208,7 +225,13 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                 .orElse(null);
     }
 
-    private ServerStatus buildServerStatus(WorkerStatus optimalWorker, long seqLen, long prefixLength, RoleType roleType, long requestId) {
+    private ServerStatus buildServerStatus(
+            WorkerStatus optimalWorker,
+            long seqLen,
+            long prefixLength,
+            RoleType roleType,
+            String requestId,
+            String cacheMatchSource) {
         ServerStatus result = new ServerStatus();
         try {
             TaskInfo taskInfo = new TaskInfo();
@@ -216,6 +239,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
             taskInfo.setWaitingTime(0);
             taskInfo.setInputLength(seqLen);
             taskInfo.setPrefixLength(prefixLength);
+            taskInfo.setPredictedPrefixLength(prefixLength);
+            taskInfo.setCacheMatchSource(cacheMatchSource);
             taskInfo.setRequestId(requestId);
 
             // Update local task state

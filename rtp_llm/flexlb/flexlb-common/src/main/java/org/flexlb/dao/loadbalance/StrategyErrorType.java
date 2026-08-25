@@ -22,7 +22,9 @@ public enum StrategyErrorType {
     // queue error
     QUEUE_FULL(8502, false),
     QUEUE_TIMEOUT(8503, false),
-    REQUEST_CANCELLED(8504, false);
+    REQUEST_CANCELLED(8504, false),
+
+    FALLBACK(8600, false);
 
     private final int errorCode;
     private final String errorMsg;

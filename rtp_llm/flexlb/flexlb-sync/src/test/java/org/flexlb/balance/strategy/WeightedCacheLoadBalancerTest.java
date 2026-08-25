@@ -3,11 +3,18 @@ package org.flexlb.balance.strategy;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -18,16 +25,21 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Slf4j
 class WeightedCacheLoadBalancerTest {
 
     private ConfigService configService;
+    private CacheAwareService cacheAwareService;
 
     @BeforeEach
     void setUp() {
         configService = new ConfigService();
+        cacheAwareService = Mockito.mock(CacheAwareService.class);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -52,11 +64,12 @@ class WeightedCacheLoadBalancerTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -85,13 +98,14 @@ class WeightedCacheLoadBalancerTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -101,6 +115,7 @@ class WeightedCacheLoadBalancerTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
+        Assertions.assertEquals("LOCAL_SYNC", balanceContext.getCacheMatchSource());
     }
 
     @Test
@@ -126,13 +141,14 @@ class WeightedCacheLoadBalancerTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -158,13 +174,14 @@ class WeightedCacheLoadBalancerTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("request-1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -174,6 +191,51 @@ class WeightedCacheLoadBalancerTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
+
+    @Test
+    void should_record_selected_worker_kvcm_hit_capped_at_request_length() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        CacheStatus cacheStatus = new CacheStatus();
+        cacheStatus.setBlockSize(256);
+        worker.setCacheStatus(cacheStatus);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+                .put("127.0.0.1:8080", worker);
+
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(
+                        Map.of("127.0.0.1:8080", HostCacheMatch.local(9)), CacheMatchSource.KVCM, 321, 256));
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        WeightedCacheLoadBalancer loadBalancer = new WeightedCacheLoadBalancer(
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
+
+        Request request = new Request();
+        request.setRequestId("request-kvcm");
+        request.setSeqLen(2048);
+        request.setBlockCacheKeys(List.of(1L));
+        request.setBlockSize(256);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = loadBalancer.select(context, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("KVCM", context.getCacheMatchSource());
+        Assertions.assertEquals(321, context.getCacheMatchQueryTimeUs());
+        TaskInfo selectedTask = worker.getLocalTaskMap().get("request-kvcm");
+        Assertions.assertNotNull(selectedTask);
+        Assertions.assertEquals(2048, selectedTask.getPredictedPrefixLength());
+        Assertions.assertEquals("KVCM", selectedTask.getCacheMatchSource());
+        BalanceContext.CacheMatchSelection selection =
+                context.getCacheMatchSelectionByRole().get(RoleType.DECODE);
+        Assertions.assertEquals("127.0.0.1", selection.selectedIp());
+        Assertions.assertEquals(2048, selection.hitCacheTokens());
     }
 
     @Test
@@ -199,7 +261,8 @@ class WeightedCacheLoadBalancerTest {
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         Mockito.when(decodeResourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(configService, engineWorkerStatus, resourceMeasureFactory);
+        WeightedCacheLoadBalancer weightedCacheLoadBalancer = new WeightedCacheLoadBalancer(
+                engineWorkerStatus, resourceMeasureFactory, cacheAwareService);
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -210,14 +273,15 @@ class WeightedCacheLoadBalancerTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            String requestId = "request-" + (1000L + i);
+            balanceContext.getRequest().setRequestId(requestId);
             ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
                 // Rollback to reset local tasks and cache usage
-                weightedCacheLoadBalancer.rollBack(selectedIp + ":8080", 1000L + i);
+                weightedCacheLoadBalancer.rollBack(selectedIp + ":8080", requestId);
             }
         }
 

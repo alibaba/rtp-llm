@@ -51,7 +51,6 @@ class RandomStrategyTest {
         // Given: No workers registered for the model
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -70,7 +69,6 @@ class RandomStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -94,7 +92,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -121,7 +118,6 @@ class RandomStrategyTest {
         prefillStatusMap.put("127.0.0.3:8080", worker3);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -150,7 +146,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -174,7 +169,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -195,7 +189,6 @@ class RandomStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
 
         Request req = new Request();
-
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -235,7 +228,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -244,7 +236,7 @@ class RandomStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            balanceContext.getRequest().setRequestId("request-" + (1000L + i));
             ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
             if (status.isSuccess()) {
@@ -284,7 +276,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -293,7 +284,7 @@ class RandomStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            balanceContext.getRequest().setRequestId("request-" + (1000L + i));
             ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
             if (status.isSuccess()) {
@@ -346,7 +337,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -363,7 +353,7 @@ class RandomStrategyTest {
         // Given: Rollback is called
         // When: Rollback is called (RandomStrategy has empty implementation)
         // Then: Should not throw any exception
-        randomStrategy.rollBack("127.0.0.1:8080", 0);
+        randomStrategy.rollBack("127.0.0.1:8080", "request-0");
     }
 
     private WorkerStatus createWorkerStatus(String ip) {

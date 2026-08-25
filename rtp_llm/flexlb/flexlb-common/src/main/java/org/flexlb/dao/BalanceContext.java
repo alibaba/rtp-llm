@@ -5,7 +5,12 @@ import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.pv.ShortestTtftDecision;
+import org.flexlb.dao.route.RoleType;
 
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -39,11 +44,53 @@ public class BalanceContext {
 
     private long startTime = System.currentTimeMillis();
 
+    private final long startTimeNs = System.nanoTime();
+
+    private long totalTimeUs;
+
     private long enqueueTime;
 
     private long dequeueTime;
 
+    private long routeEndTime;
+
     private long sequenceId;
+
+    private long requestArrivalDelayMs;
+
+    private long requestBodyReadAndDeserializeTimeUs;
+
+    /**
+     * Number of input IDs in the decoded request. Null means the body was not decoded or
+     * input_ids was not supplied (for example, a block_cache_keys-only request).
+     */
+    private Long inputIdsCount;
+
+    /**
+     * Request body size advertised by the HTTP Content-Length header. Null means that the
+     * request used a body with no declared length, such as chunked transfer encoding.
+     */
+    private Long requestBodyBytes;
+
+    private long blockHashQueueWaitTimeUs;
+
+    private long blockHashExecutionTimeUs;
+
+    private long cacheMatchQueryTimeUs;
+
+    private int cacheMatchQueryCount;
+
+    private String cacheMatchSource;
+
+    private final Map<RoleType, CacheMatchSelection> cacheMatchSelectionByRole = new EnumMap<>(RoleType.class);
+
+    /**
+     * Final routing reason per role. Kept independently from the debug-only
+     * decision snapshot so PV logs retain the selected path at INFO level.
+     */
+    private final Map<RoleType, String> selectionReasonByRole = new EnumMap<>(RoleType.class);
+
+    private Map<RoleType, ShortestTtftDecision> shortestTtftDecisionByRole;
 
     private boolean success = true;
 
@@ -51,8 +98,8 @@ public class BalanceContext {
 
     //===================== Method ===================//
 
-    public long getRequestId() {
-        return request.getRequestId();
+    public String getRequestId() {
+        return request == null ? null : request.getRequestId();
     }
 
     /**
@@ -82,5 +129,54 @@ public class BalanceContext {
      */
     public int getRetryCount() {
         return retryCount.get();
+    }
+
+    public void recordRequestTiming(long requestTimeMs, long bodyReadAndDeserializeTimeUs) {
+        if (requestTimeMs > 0) {
+            this.requestArrivalDelayMs = startTime - requestTimeMs;
+        }
+        this.requestBodyReadAndDeserializeTimeUs = bodyReadAndDeserializeTimeUs;
+    }
+
+    public void finishRequestTiming() {
+        this.totalTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
+    }
+
+    public void recordBlockHashTiming(long queueWaitTimeUs, long executionTimeUs) {
+        this.blockHashQueueWaitTimeUs = queueWaitTimeUs;
+        this.blockHashExecutionTimeUs = executionTimeUs;
+    }
+
+    public void recordCacheMatch(
+            String source,
+            long queryTimeUs,
+            RoleType role,
+            String selectedIp,
+            long hitCacheTokens) {
+        this.cacheMatchSource = source;
+        this.cacheMatchQueryTimeUs += queryTimeUs;
+        this.cacheMatchQueryCount++;
+        this.cacheMatchSelectionByRole.put(
+                role, new CacheMatchSelection(role, selectedIp, hitCacheTokens));
+    }
+
+    public void recordShortestTtftDecision(ShortestTtftDecision decision) {
+        if (this.shortestTtftDecisionByRole == null) {
+            this.shortestTtftDecisionByRole = new EnumMap<>(RoleType.class);
+        }
+        this.shortestTtftDecisionByRole.put(decision.role(), decision);
+    }
+
+    public void recordSelectionReason(RoleType role, String selectionReason) {
+        this.selectionReasonByRole.put(role, selectionReason);
+    }
+
+    public Map<RoleType, ShortestTtftDecision> getShortestTtftDecisionByRole() {
+        return this.shortestTtftDecisionByRole == null
+                ? Collections.emptyMap()
+                : this.shortestTtftDecisionByRole;
+    }
+
+    public record CacheMatchSelection(RoleType role, String selectedIp, long hitCacheTokens) {
     }
 }
