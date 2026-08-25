@@ -228,7 +228,13 @@ public class EngineSyncRunner implements Runnable {
             workerStatus = new WorkerStatus();
             String[] split = workerIpPort.split(":");
             workerStatus.setIp(split[0]);
-            workerStatus.setPort(Integer.parseInt(split[1]));
+            int httpPort = Integer.parseInt(split[1]);
+            workerStatus.setPort(httpPort);
+            // Derive the gRPC port up front: status callbacks (GrpcWorkerStatusRunner)
+            // publish the endpoint to EndpointRegistry before the next sync tick runs
+            // EngineSyncRunner.ensureEndpoint, so a zero grpcPort here would leak into
+            // dispatch (batch_enqueue channel to ip:0) for freshly discovered workers.
+            workerStatus.setGrpcPort(CommonUtils.toGrpcPort(httpPort));
             workerStatus.setRole(roleType);
             workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
             workerStatuses.put(workerIpPort, workerStatus);

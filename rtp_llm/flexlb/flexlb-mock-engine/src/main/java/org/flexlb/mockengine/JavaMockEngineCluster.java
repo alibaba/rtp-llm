@@ -88,8 +88,21 @@ public final class JavaMockEngineCluster {
             startRole(config, performance, serversByPort, bossGroup, workerGroup, services, scheduler, stats,
                     config.nPrefill, config.nDecode, "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE);
             writeDiscoveryFiles(config);
+            // File-based discovery mode (--discovery-file): maintain the dynamic
+            // domain→hosts mapping consumed by FileServiceDiscovery on the master,
+            // kept in sync by /add_engine + /remove_engine at runtime.
+            DiscoveryFileStore discoveryFileStore = config.discoveryFile != null
+                    ? new DiscoveryFileStore(config.discoveryFile, config.prefillDomain, config.decodeDomain)
+                    : null;
+            if (discoveryFileStore != null) {
+                discoveryFileStore.rewrite(services);
+            }
+            DynamicEngineManager engineManager = new DynamicEngineManager(
+                    config, performance, services, serversByPort, bossGroup, workerGroup,
+                    scheduler, stats, discoveryFileStore);
             controlServer = new MockControlServer(
-                    services, serversByPort, bossGroup, workerGroup, config.host, config.baseGrpcPort - 1);
+                    services, serversByPort, bossGroup, workerGroup, config.host, config.baseGrpcPort - 1,
+                    engineManager);
             controlServer.start();
         } catch (Throwable error) {
             scheduler.shutdownNow();
@@ -138,6 +151,10 @@ public final class JavaMockEngineCluster {
                 config.eventLoopThreads, config.performanceFile, config.completionThreads,
                 config.statsIntervalMs);
         System.out.printf("HTTP control server listening on port %d%n", config.baseGrpcPort - 1);
+        if (config.discoveryFile != null) {
+            System.out.printf("File service discovery enabled: %s (add/remove_engine keep it in sync)%n",
+                    config.discoveryFile);
+        }
         new CountDownLatch(1).await();
     }
 
@@ -155,17 +172,55 @@ public final class JavaMockEngineCluster {
                                   EngineRpcService.RoleTypePB roleType) throws IOException {
         for (int i = 0; i < count; i++) {
             int grpcPort = config.baseGrpcPort + portOffset + i;
-            int cacheCapacity = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
-                    ? config.prefillCacheBlocks : config.decodeCacheBlocks;
-            // Declared (advertisement) host: unique 127.x.y.z per engine when
-            // enabled. portOffset + i is the engine's global index (prefill
-            // first, decode after). The gRPC server bind below stays wildcard
-            // (forPort) — only the advertised address changes.
-            FastRpcService service = new FastRpcService(
-                    roleName + "-" + i, declaredHost(config, portOffset + i), roleName, roleType, grpcPort,
-                    services, scheduler, performance, cacheCapacity, stats,
-                    config.totalKvTokens, config.decodeMaxConcurrency);
-            services.put(grpcPort, service);
+            startEngine(config, performance, serversByPort, bossGroup, workerGroup,
+                    services, scheduler, stats, roleName, roleName + "-" + i, grpcPort,
+                    portOffset + i);
+        }
+    }
+
+    /**
+     * Create, register, and start ONE engine gRPC server. Extracted from
+     * {@link #startRole} so dynamic scale-out ({@link DynamicEngineManager}
+     * /add_engine) can create engines at runtime with the same construction
+     * rules: shared scheduler/stats/eventLoopGroups, per-role cache capacity,
+     * SO_REUSEADDR, direct executor.
+     *
+     * <p>Registration is rolled back if the port cannot be bound, so a failed
+     * dynamic add leaves no services-map residue.
+     *
+     * <p>{@code engineIndex} is the engine's GLOBAL index (initial engines:
+     * prefill first, decode after; dynamic engines get freshly allocated
+     * indices from {@link DynamicEngineManager}). It feeds
+     * {@link #declaredHost} so unique advertisement IPs
+     * ({@code --unique-engine-ips}) stay unique across initial and dynamically
+     * added engines — the gRPC server bind below stays wildcard (forPort),
+     * only the advertised address changes.
+     *
+     * @return the started service
+     */
+    static FastRpcService startEngine(Config config,
+                                      MockPerformanceModel performance,
+                                      Map<Integer, Server> serversByPort,
+                                      EventLoopGroup bossGroup,
+                                      EventLoopGroup workerGroup,
+                                      Map<Integer, FastRpcService> services,
+                                      ScheduledExecutorService scheduler,
+                                      ClusterStats stats,
+                                      String roleName,
+                                      String engineName,
+                                      int grpcPort,
+                                      int engineIndex) throws IOException {
+        EngineRpcService.RoleTypePB roleType = "decode".equalsIgnoreCase(roleName)
+                ? EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
+        int cacheCapacity = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                ? config.prefillCacheBlocks : config.decodeCacheBlocks;
+        FastRpcService service = new FastRpcService(
+                engineName, declaredHost(config, engineIndex), roleName, roleType, grpcPort,
+                services, scheduler, performance, cacheCapacity, stats,
+                config.totalKvTokens, config.decodeMaxConcurrency);
+        services.put(grpcPort, service);
+        try {
             Server server = NettyServerBuilder.forPort(grpcPort)
                     .bossEventLoopGroup(bossGroup)
                     .workerEventLoopGroup(workerGroup)
@@ -183,7 +238,11 @@ public final class JavaMockEngineCluster {
                     .build()
                     .start();
             serversByPort.put(grpcPort, server);
+        } catch (IOException e) {
+            services.remove(grpcPort);
+            throw e;
         }
+        return service;
     }
 
     private static void shutdown(Map<Integer, Server> serversByPort,
@@ -2256,6 +2315,7 @@ public final class JavaMockEngineCluster {
         String decodeDomain = "mock.decode.hosts.address";
         String endpointFile;
         String envFile;
+        String discoveryFile;
         String performanceFile;
         String masterConfigFile;
         long totalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
@@ -2298,6 +2358,7 @@ public final class JavaMockEngineCluster {
                     case "--decode-domain" -> config.decodeDomain = value;
                     case "--endpoint-file" -> config.endpointFile = value;
                     case "--env-file" -> config.envFile = value;
+                    case "--discovery-file" -> config.discoveryFile = value;
                     case "--performance" -> config.performanceFile = value;
                     case "--master-config" -> config.masterConfigFile = value;
                     case "--total-kv-tokens" -> config.totalKvTokens = Long.parseLong(value);
