@@ -55,7 +55,7 @@ struct BlockTreeCacheConfig {
     int task_pool_size{4};
 
     // ---- Shared per-rank TransferEngine task pool ----
-    size_t transfer_worker_count{16};
+    size_t transfer_worker_count{4};
 
     // ---- Cross-rank transfer timeout ----
     int host_cache_sync_timeout_ms{10000};
@@ -63,7 +63,9 @@ struct BlockTreeCacheConfig {
 
     // Total Device<->Disk staging blocks per rank, split evenly across two pools.
     size_t device_disk_staging_block_count{4};
-    size_t max_descriptors_per_transfer_batch{64};
+    // Device<->Host uses descriptor batching; all other directions default to singleton batches.
+    size_t max_descriptors_per_transfer_batch{8};
+    size_t max_descriptors_per_non_device_host_transfer_batch{1};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.

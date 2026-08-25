@@ -263,6 +263,16 @@ static bool expectCudaBatchStrategyDone() {
            && (CUDART_VERSION >= 13000) == (runtime_version >= 13000);
 }
 
+TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
+    DeviceHostTransferExecutor executor;
+    EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
+    EXPECT_TRUE(executor.options_.staged_sm_copy_enabled);
+    ASSERT_EQ(executor.strategies_.size(), 3u);
+    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
+    EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+}
+
 // ---- PerRankBlockTransferEngine submit() tests (real CUDA) ----
 
 class PerRankBlockTransferEngineTest: public ::testing::Test {
@@ -529,7 +539,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors)
     device_pool_->decRef(second_device_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksAreSerialized) {
+TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksMayUseSharedWorkers) {
     const BlockIdxType second_device_block = poolMalloc(*device_pool_);
     const BlockIdxType first_host_block     = poolMalloc(*host_pool_);
     const BlockIdxType second_host_block    = poolMalloc(*host_pool_);
@@ -552,7 +562,7 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksAreSerializ
     blocker->release();
     first->waitDone();
     second->waitDone();
-    EXPECT_FALSE(second_started_before_release);
+    EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first->success());
     EXPECT_TRUE(second->success());
 
@@ -562,7 +572,7 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksAreSerializ
     device_pool_->decRef(second_device_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksAreSerialized) {
+TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksMayUseSharedWorkers) {
     const BlockIdxType second_device_block = poolMalloc(*device_pool_);
     const BlockIdxType first_host_block     = poolMalloc(*host_pool_);
     const BlockIdxType second_host_block    = poolMalloc(*host_pool_);
@@ -585,7 +595,7 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksAreSerializ
     blocker->release();
     first->waitDone();
     second->waitDone();
-    EXPECT_FALSE(second_started_before_release);
+    EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first->success());
     EXPECT_TRUE(second->success());
 
@@ -1202,7 +1212,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceFullAndSwaStagingMayOv
     EXPECT_TRUE(swa_context->success());
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceSameLaneTasksAreSerialized) {
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceSameLaneTasksMayUseAvailableStagingAndWorkers) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     for (const CacheGroupType group_type : {CacheGroupType::FULL, CacheGroupType::SWA}) {
         SCOPED_TRACE(group_type == CacheGroupType::FULL ? "FULL" : "SWA");
@@ -1238,7 +1248,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceSameLaneTasksAreSerial
         io->release();
         first->waitDone();
         second->waitDone();
-        EXPECT_FALSE(second_started_before_release);
+        EXPECT_TRUE(second_started_before_release);
         EXPECT_TRUE(first->success());
         EXPECT_TRUE(second->success());
     }
@@ -1359,12 +1369,12 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
         EXPECT_EQ(d1[i], 0x00);
 
     EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].done, 0);
-    EXPECT_EQ(counters[0].not_applicable, 2);
+    EXPECT_EQ(counters[0].done, expect_batch_done ? 2 : 0);
+    EXPECT_EQ(counters[0].not_applicable, expect_batch_done ? 0 : 2);
     EXPECT_EQ(counters[0].failed, 0);
 
-    EXPECT_EQ(counters[1].attempts, 2);
-    EXPECT_EQ(counters[1].done, expect_batch_done ? 2 : 0);
+    EXPECT_EQ(counters[1].attempts, expect_batch_done ? 0 : 2);
+    EXPECT_EQ(counters[1].done, 0);
     EXPECT_EQ(counters[1].not_applicable, expect_batch_done ? 0 : 2);
     EXPECT_EQ(counters[1].failed, 0);
 
@@ -1442,14 +1452,15 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
         EXPECT_EQ(staged_layer1[i], 0x42);
     for (size_t i = 128; i < staged_layer1.size(); ++i)
         EXPECT_EQ(staged_layer1[i], 0x00);
-    EXPECT_EQ(counters[0].done, 2);
-    EXPECT_EQ(counters[1].attempts, 0);
+    EXPECT_EQ(counters[0].not_applicable, 2);
+    EXPECT_EQ(counters[1].done, 2);
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyTakesPrecedenceWhenEligible) {
+TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchTakesPrecedenceWhenBothStrategiesAreEligible) {
+    const bool expect_batch_done = expectCudaBatchStrategyDone();
     DeviceHostCopyOptions options;
     options.staged_sm_copy_enabled                           = true;
     options.staged_sm_min_tile_count                         = 1;
@@ -1466,8 +1477,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyTakesPrecedenceWhen
     expectStatus(per_rank_transfer_engine,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
                  TransferStatus::OK);
-    EXPECT_EQ(counters[0].done, 1);
-    EXPECT_EQ(counters[1].attempts, 0);
+    EXPECT_EQ(counters[0].done, expect_batch_done ? 1 : 0);
+    EXPECT_EQ(counters[0].not_applicable, expect_batch_done ? 0 : 1);
+    EXPECT_EQ(counters[1].attempts, expect_batch_done ? 0 : 1);
+    EXPECT_EQ(counters[1].done, expect_batch_done ? 0 : 1);
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);

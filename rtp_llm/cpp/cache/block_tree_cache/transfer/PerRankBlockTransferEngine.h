@@ -19,8 +19,9 @@ public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                         DeviceHostCopyOptions    device_host_options             = {},
                                         size_t                   device_disk_staging_block_count = 4,
-                                        size_t                   max_descriptors_per_batch       = 64,
-                                        size_t                   transfer_worker_count           = 1);
+                                        size_t                   max_device_host_descriptors_per_batch = 8,
+                                        size_t                   transfer_worker_count                = 4,
+                                        size_t max_non_device_host_descriptors_per_batch              = 1);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
@@ -45,8 +46,9 @@ private:
     std::unique_ptr<DeviceHostTransferExecutor> device_host_executor_;
     std::unique_ptr<HostDiskTransferExecutor>   host_disk_executor_;
     std::unique_ptr<DeviceDiskTransferExecutor> device_disk_executor_;  // nullable; present when a disk pool exists
-    size_t                                      max_descriptors_per_batch_{64};
-    size_t                                      transfer_worker_count_{1};
+    size_t                                      max_device_host_descriptors_per_batch_{8};
+    size_t                                      max_non_device_host_descriptors_per_batch_{1};
+    size_t                                      transfer_worker_count_{4};
 };
 
 using PerRankBlockTransferEnginePtr = std::shared_ptr<PerRankBlockTransferEngine>;

@@ -1543,9 +1543,10 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     EXPECT_FALSE(cache->isHostCacheEnabled());
     EXPECT_TRUE(cache->isDiskCacheEnabled());
     EXPECT_EQ(cache->config().task_pool_size, 4);
-    EXPECT_EQ(cache->config().transfer_worker_count, 16u);
+    EXPECT_EQ(cache->config().transfer_worker_count, 4u);
     EXPECT_EQ(cache->config().device_disk_staging_block_count, 4u);
-    EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 64u);
+    EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 8u);
+    EXPECT_EQ(cache->config().max_descriptors_per_non_device_host_transfer_batch, 1u);
     ASSERT_FALSE(cache->groupSets().empty());
     for (const auto& group_set : cache->groupSets()) {
         ASSERT_NE(group_set, nullptr);
