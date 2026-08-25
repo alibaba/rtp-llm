@@ -135,6 +135,14 @@ def _make_stream_response(
     return resp
 
 
+def _make_dash_error_response(
+    *, error_no: int = 8
+) -> predict_v2_pb2.ModelStreamInferResponse:
+    resp = predict_v2_pb2.ModelStreamInferResponse()
+    resp.infer_response.parameters["error_no"].int64_param = error_no
+    return resp
+
+
 class _FakeContext:
     """Minimal grpc.aio context surface used by ``create`` / ``resolve_status``."""
 
@@ -272,13 +280,64 @@ class ClassifyRpcExceptionTest(TestCase):
 
 
 class ResolveStatusTest(TestCase):
-    """``resolve_status`` precedence: error_message > completed-teardown > exc/code."""
+    """Business/protocol errors take precedence over teardown and transport."""
 
     def test_error_message_frame_routes_to_backend_bucket(self) -> None:
         rec = _make_record(error_message="empty outputs_list from backend")
         rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
         self.assertEqual(rec.status, "BACKEND_EMPTY_OUTPUTS")
         self.assertEqual(rec.status_detail, "empty outputs_list from backend")
+
+    def test_inner_dash_error_routes_to_dash_error_bucket(self) -> None:
+        rec = _make_record()
+        rec.record_response_chunk(_make_dash_error_response(error_no=5))
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertEqual(rec.status, "DASH_ERROR_5")
+        self.assertIsNone(rec.status_detail)
+        self.assertTrue(rec.terminal_seen)
+
+    def test_missing_inner_dash_error_does_not_mutate_success_frame(self) -> None:
+        rec = _make_record()
+        resp = _make_stream_response(generated_ids=[1])
+        self.assertNotIn("error_no", resp.infer_response.parameters)
+
+        rec.record_response_chunk(resp)
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertNotIn("error_no", resp.infer_response.parameters)
+        self.assertEqual(rec.status, "OK")
+
+    def test_zero_inner_dash_error_stays_success(self) -> None:
+        rec = _make_record()
+        rec.record_response_chunk(_make_dash_error_response(error_no=0))
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertEqual(rec.status, "OK")
+
+    def test_outer_error_message_takes_precedence_over_inner_dash_error(self) -> None:
+        rec = _make_record()
+        resp = _make_dash_error_response(error_no=5)
+        resp.error_message = "empty outputs_list from backend"
+
+        rec.record_response_chunk(resp)
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        self.assertEqual(rec.status, "BACKEND_EMPTY_OUTPUTS")
+        self.assertEqual(rec.status_detail, "empty outputs_list from backend")
+
+    def test_inner_dash_error_survives_terminal_teardown_classification(self) -> None:
+        cases = (
+            (_FakeContext(code=grpc.StatusCode.OK), None),
+            (_FakeContext(code=grpc.StatusCode.OK), grpc.RpcError()),
+            (_FakeContext(code=grpc.StatusCode.CANCELLED), None),
+        )
+        for context, exc in cases:
+            with self.subTest(context_code=context.code(), exc=type(exc).__name__):
+                rec = _make_record()
+                rec.record_response_chunk(_make_dash_error_response(error_no=5))
+                rec.resolve_status(context, exc)
+                self.assertEqual(rec.status, "DASH_ERROR_5")
 
     def test_backend_error_code_overrides_error_message(self) -> None:
         rec = _make_record(
@@ -824,6 +883,44 @@ class GrpcMetricsTest(TestCase):
             self._for(AccMetrics.ERROR_QPS_METRIC)[0][2]["error_code"],
             "8400_MASTER_NO_AVAILABLE_WORKER",
         )
+
+    def test_dash_business_error_reports_exact_backend_error_code(self) -> None:
+        rec = _make_record(backend_error_code="8514_BATCH_TOKEN_CAPACITY_EXCEEDED")
+        rec.record_response_chunk(_make_dash_error_response(error_no=5))
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        grpc_metrics.report_frontend_rpc_done(
+            rec,
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            status=rec.status,
+        )
+
+        self.assertEqual(rec.status, "DASH_ERROR_5")
+        self.assertEqual(len(self._for(AccMetrics.SUCCESS_QPS_METRIC)), 0)
+        errors = self._for(AccMetrics.ERROR_QPS_METRIC)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(
+            errors[0][2]["error_code"],
+            "8514_BATCH_TOKEN_CAPACITY_EXCEEDED",
+        )
+
+    def test_dash_business_error_without_backend_code_uses_dash_status(self) -> None:
+        rec = _make_record()
+        rec.record_response_chunk(_make_dash_error_response(error_no=5))
+        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
+
+        grpc_metrics.report_frontend_rpc_done(
+            rec,
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            status=rec.status,
+        )
+
+        self.assertEqual(len(self._for(AccMetrics.SUCCESS_QPS_METRIC)), 0)
+        errors = self._for(AccMetrics.ERROR_QPS_METRIC)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0][2]["error_code"], "DASH_ERROR_5")
 
     def test_done_without_input_len_omits_input_gauge(self) -> None:
         grpc_metrics.report_frontend_rpc_done(
