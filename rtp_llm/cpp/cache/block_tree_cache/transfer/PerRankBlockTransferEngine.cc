@@ -41,14 +41,17 @@ ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                                        DeviceHostCopyOptions    device_host_options,
                                                        size_t                   device_disk_staging_block_count,
-                                                       size_t                   max_descriptors_per_batch,
-                                                       size_t                   transfer_worker_count):
+                                                       size_t max_device_host_descriptors_per_batch,
+                                                       size_t transfer_worker_count,
+                                                       size_t max_non_device_host_descriptors_per_batch):
     group_sets_(std::move(group_sets)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
     host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()),
-    max_descriptors_per_batch_(max_descriptors_per_batch),
+    max_device_host_descriptors_per_batch_(max_device_host_descriptors_per_batch),
+    max_non_device_host_descriptors_per_batch_(max_non_device_host_descriptors_per_batch),
     transfer_worker_count_(transfer_worker_count) {
-    RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
+    RTP_LLM_CHECK(max_device_host_descriptors_per_batch_ > 0);
+    RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
     transfer_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockTransferEngine");
@@ -129,8 +132,12 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
         return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
     }
 
+    const bool device_host_direction =
+        (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
+    const size_t batch_limit = device_host_direction ? max_device_host_descriptors_per_batch_ :
+                                                       max_non_device_host_descriptors_per_batch_;
     auto context = std::make_shared<TransferBatchAsyncContext>();
-    const bool accepted = transfer_task_pool_->submit([this, descriptors, group_sets, hosts, context] {
+    const bool accepted = transfer_task_pool_->submit([this, descriptors, group_sets, hosts, context, batch_limit] {
         try {
             if (descriptors.front().source_tier == Tier::DEVICE
                 && descriptors.front().target_tier == Tier::DISK) {
@@ -139,8 +146,8 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
                 context->complete(transferStatusToErrorInfo(status));
                 return;
             }
-            for (size_t begin = 0; begin < descriptors.size(); begin += max_descriptors_per_batch_) {
-                const size_t end = std::min(begin + max_descriptors_per_batch_, descriptors.size());
+            for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
+                const size_t end = std::min(begin + batch_limit, descriptors.size());
                 const std::vector<HostBufferView> sub_hosts(hosts.begin() + begin, hosts.begin() + end);
                 const std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin,
                                                                       descriptors.begin() + end);

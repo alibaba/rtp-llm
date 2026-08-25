@@ -14,13 +14,25 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool isDeviceHostDirection(Tier source, Tier target) {
+    return (source == Tier::DEVICE && target == Tier::HOST)
+           || (source == Tier::HOST && target == Tier::DEVICE);
+}
+
+}  // namespace
+
 BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                                                  std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine,
-                                                 size_t max_descriptors_per_batch):
+                                                 size_t max_device_host_descriptors_per_batch,
+                                                 size_t max_non_device_host_descriptors_per_batch):
     per_rank_engine_(std::move(per_rank_engine)),
     multi_rank_engine_(std::move(multi_rank_engine)),
-    max_descriptors_per_batch_(max_descriptors_per_batch) {
-    RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
+    max_device_host_descriptors_per_batch_(max_device_host_descriptors_per_batch),
+    max_non_device_host_descriptors_per_batch_(max_non_device_host_descriptors_per_batch) {
+    RTP_LLM_CHECK(max_device_host_descriptors_per_batch_ > 0);
+    RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
 }
 
 std::shared_ptr<AsyncContext>
@@ -78,8 +90,11 @@ void BlockTransferDispatcher::runTransfer(const std::vector<TransferDescriptor>&
 
     auto stage_state = std::make_shared<TransferStageState>(std::move(callback));
     for (const auto& group : groups) {
-        for (size_t begin = 0; begin < group.descriptors.size(); begin += max_descriptors_per_batch_) {
-            const size_t end = std::min(begin + max_descriptors_per_batch_, group.descriptors.size());
+        const size_t batch_limit = isDeviceHostDirection(group.source, group.target) ?
+                                       max_device_host_descriptors_per_batch_ :
+                                       max_non_device_host_descriptors_per_batch_;
+        for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
+            const size_t end = std::min(begin + batch_limit, group.descriptors.size());
             std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin,
                                                    group.descriptors.begin() + end);
             stage_state->addBatch();

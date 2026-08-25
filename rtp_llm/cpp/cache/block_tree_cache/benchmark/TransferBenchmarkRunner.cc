@@ -349,7 +349,8 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                                                 copy_options,
                                                                 options_.device_disk_staging_block_count,
                                                                 max_descriptors_per_task,
-                                                                options_.transfer_worker_count);
+                                                                options_.transfer_worker_count,
+                                                                max_descriptors_per_task);
     installStrategyRecorders(*setup.engine, setup.copy_stats);
     writer_.addResolvedConfigInt("transfer_worker_count", options_.transfer_worker_count);
     writer_.addResolvedConfigInt("shared_transfer_worker_count",
