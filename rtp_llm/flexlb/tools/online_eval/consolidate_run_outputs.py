@@ -3,11 +3,26 @@
 
 Target layout (run root), one JSON + one log per component:
 
-  run_meta.json              flexlb_env.txt contents + startup params snapshot
+  run_meta.json              flexlb_env.txt + client_env.json contents + startup
+                             params snapshot + embedded performance/process-config
+                             JSON (performance_json / process_config_json, null
+                             when the referenced file is missing) + process_usage
+                             per-second CPU/RSS timeline
   mock.json                  java_mock_stats timeline + final cluster snapshot
-                             + endpoints summary
+                             + endpoints summary + per_engine_file pointer /
+                             per_engine_sample_count (the per-engine prometheus
+                             timeline itself is A-split into
+                             mock_per_engine_timeseries.json.gz — at 1250
+                             engines x 120s the embedded key approached 1GB)
+  mock_per_engine_timeseries.json.gz
+                             gzip-streamed G1 per-second per-engine prometheus
+                             timeline ([{ts, metrics: {name{labels}: value}}]
+                             groups); kept in place, referenced from mock.json
   mock.log                   mock_engine.log (verbatim prefix) + gc log appended
   master.json                master counter timeseries + prometheus-after dict
+                             + prometheus_timeseries (per-second filtered
+                             flexlb_app_*/JVM series) + inflight_timeseries
+                             (per-second /rtp_llm/inflight_status JSONL)
                              + master_info before/after + slo batch summary
   master.log                 flexlb_logs/application.log (verbatim prefix) with
                              flexlb.log / sync.log / sync_consistency.log and the
@@ -21,14 +36,17 @@ Target layout (run root), one JSON + one log per component:
                              GZIP_COMPRESS_LEVEL otherwise)
 
 Kept in place (skill / tooling contract):
-  endpoints.json, flexlb_env.txt, flexlb_profile.jfr,
+  endpoints.json, flexlb_env.txt, client_env.json,
+  mock_per_engine_timeseries.json.gz (A-split target),
   load_client/summary.json (flexlb-online-eval skill do_result reads it),
   load_client/server_latency.json (the skill's fetch_server_latency reads it),
   load_client/report.md, flexlb_logs/pv.log (only produced with FLEXLB_PV_LOG=on).
 
 Deleted after being merged: mock_engine.log, mock_engine_gc.log*,
 master_info_before.json, master_info_after.json, master_prometheus_after.prom,
-master_counters_timeseries.txt, client_shard_*.stdout, client.stdout,
+master_counters_timeseries.txt, mock_metrics_per_engine.prom,
+master_prometheus_timeseries.prom, master_inflight_timeseries.jsonl,
+process_usage_timeseries.txt, client_shard_*.stdout, client.stdout,
 flexlb.log (run root), flexlb_logs/ (minus pv.log), load_client/shard_*/,
 load_client/per_request.jsonl, slo_batch_analysis.stdout.
 load_client/slo_batch_analysis.json is deleted only once its content is
@@ -75,6 +93,15 @@ ENV_FILE_LINE_RE = re.compile(r"^\s*'?([^=']+=[^']*)'?\s*\\?\s*$")
 # Pass-1 per-request scan: extract send_start_epoch_ms without json.loads so
 # the streaming aggregation can anchor its second buckets on the true minimum.
 SEND_START_RE = re.compile(r'"send_start_epoch_ms"\s*:\s*(-?\d+)')
+# Separator comment the per-second pollers prefix each sample with.
+PROM_GROUP_TS_RE = re.compile(r"^#\s*ts=(\d+)\s*$")
+# process_usage_timeseries.txt lines look like:
+#   'ts_epoch_ms=1756... label=mock pid=123 cpu_pct=12.5 rss_kb=345600 etime=03:45'
+PROCESS_USAGE_LINE_RE = re.compile(
+    r"^ts_epoch_ms=(?P<ts>\d+)\s+label=(?P<label>\S+)\s+pid=(?P<pid>\d+)\s+"
+    r"cpu_pct=(?P<cpu>[-+]?\d+(?:\.\d+)?)\s+rss_kb=(?P<rss>[-+]?\d+)\s+"
+    r"etime=(?P<etime>\S+)\s*$"
+)
 
 # Below this total size the merged per-request stream stays plain text (the
 # uniform-mode runs are small; gzip would only add an unpack step for readers).
@@ -107,6 +134,18 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     tmp.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    os.replace(tmp, path)
+
+
+def write_gzip_json_atomic(path: Path, payload: list) -> None:
+    """A-split companion: stream the big per-engine timeline into a gzip JSON
+    file (json.dump writes incrementally — no multi-hundred-MB string is ever
+    materialized in memory)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with gzip.open(
+        tmp, "wt", encoding="utf-8", compresslevel=GZIP_COMPRESS_LEVEL
+    ) as sink:
+        json.dump(payload, sink, ensure_ascii=False, separators=(",", ":"))
     os.replace(tmp, path)
 
 
@@ -197,6 +236,110 @@ def parse_env_file(path: Path) -> dict[str, str]:
             if sep:
                 env[key] = value
     return env
+
+
+def parse_grouped_prometheus_timeseries(path: Path) -> list[dict]:
+    """Grouped prom text (``# ts=<epoch_ms>`` separators) -> [{ts, metrics}].
+
+    The per-second pollers (run_online_eval.sh) append each HTTP sample after
+    a ``# ts=`` comment line. Samples inside a group are parsed with
+    PROMETHEUS_SAMPLE_RE into a flat ``{name{labels}: value}`` dict (later
+    lines win on key collision, same rule as parse_prometheus_file); HELP/
+    TYPE comments and lines before the first ``# ts=`` marker are skipped
+    (a torn trailing sample simply never lands in a group).
+    """
+    if not path.is_file():
+        return []
+    groups: list[dict] = []
+    current: dict | None = None
+    with path.open("r", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            line = line.strip()
+            match = PROM_GROUP_TS_RE.match(line)
+            if match:
+                current = {"ts": int(match.group(1)), "metrics": {}}
+                groups.append(current)
+                continue
+            if current is None or not line or line.startswith("#"):
+                continue
+            sample = PROMETHEUS_SAMPLE_RE.match(line)
+            if not sample:
+                continue
+            try:
+                value = float(sample.group("value"))
+            except ValueError:
+                continue
+            key = sample.group("name") + (sample.group("labels") or "")
+            current["metrics"][key] = value
+    return groups
+
+
+def parse_jsonl_timeseries(path: Path) -> list[dict]:
+    """JSONL file with one JSON object per line -> list of objects.
+
+    Each line is json.loads'd independently: a torn trailing line (the
+    poller was killed mid-write) is dropped instead of failing the merge.
+    """
+    if not path.is_file():
+        return []
+    rows: list[dict] = []
+    with path.open("r", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def parse_process_usage_file(path: Path) -> list[dict]:
+    """process_usage_timeseries.txt -> [{ts_epoch_ms, label, pid, ...}].
+
+    One kv line per (sample, pid) as written by the process usage poller;
+    unparseable lines (e.g. a partially written last line) are skipped.
+    """
+    if not path.is_file():
+        return []
+    rows: list[dict] = []
+    with path.open("r", encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            match = PROCESS_USAGE_LINE_RE.match(line.strip())
+            if not match:
+                continue
+            rows.append(
+                {
+                    "ts_epoch_ms": int(match.group("ts")),
+                    "label": match.group("label"),
+                    "pid": int(match.group("pid")),
+                    "cpu_pct": float(match.group("cpu")),
+                    "rss_kb": int(match.group("rss")),
+                    "etime": match.group("etime"),
+                }
+            )
+    return rows
+
+
+def load_param_json_file(path_str: str | None) -> dict | list | None:
+    """Read a JSON config file referenced by a run_meta params path entry.
+
+    Returns None when the path is empty, the file is missing, or the content
+    is not valid JSON — run_meta.json then records null for that key.
+    """
+    if not path_str:
+        return None
+    path = Path(path_str)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, (dict, list)) else None
 
 
 def fetch_final_snapshot(http_port: int | None) -> dict | None:
@@ -427,18 +570,55 @@ def consolidate(
     load_client = run_dir / "load_client"
     flexlb_logs = run_dir / "flexlb_logs"
     deleted: list[Path] = []
+    # m7: sweep stale *.tmp siblings left behind by an interrupted earlier
+    # consolidation (atomic writes os.replace() the tmp away on success; only
+    # a killed process leaves one behind). A stale tmp is never a valid input.
+    for stale in sorted(run_dir.glob("*.tmp")):
+        try:
+            stale.unlink()
+            report["deleted"].append(str(stale.relative_to(run_dir)))
+        except OSError:
+            pass
 
     # ---- run_meta.json -----------------------------------------------------
     endpoints = load_json(run_dir / "endpoints.json")
     existing_meta = load_json(run_dir / "run_meta.json")
+    effective_params = params or existing_meta.get("params", {})
+    # Config archive (G7): embed the full performance / process-config JSON
+    # referenced by the params snapshot. Files live outside the run dir, so a
+    # re-run re-reads them; when they have since disappeared the previously
+    # embedded value is kept (same preservation rule as flexlb_env/params —
+    # a re-run must never blank one-shot data).
+    performance_json = load_param_json_file(effective_params.get("performance_file"))
+    if performance_json is None:
+        performance_json = existing_meta.get("performance_json")
+    process_config_json = load_param_json_file(
+        effective_params.get("process_config_file")
+    )
+    if process_config_json is None:
+        process_config_json = existing_meta.get("process_config_json")
+    # G5: per-second CPU/RSS timeline of the mock / master / client JVMs.
+    # process_usage_timeseries.txt is a one-shot source (deleted below once
+    # merged), so a re-run falls back to the previously embedded rows.
+    process_usage = parse_process_usage_file(
+        run_dir / "process_usage_timeseries.txt"
+    ) or existing_meta.get("process_usage", [])
     run_meta = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         # Preserve the previous snapshot when re-run without --param values
         # (otherwise the rewrite would blank the params the run started with).
-        "params": params or existing_meta.get("params", {}),
+        "params": effective_params,
         "flexlb_env": parse_env_file(run_dir / "flexlb_env.txt")
         or existing_meta.get("flexlb_env", {}),
+        # M9: the JavaLoadClient env effective values (36 vars) snapshotted
+        # at client launch; same status as flexlb_env — the source file stays
+        # in place and the value is re-read on re-runs.
+        "client_env": load_json(run_dir / "client_env.json")
+        or existing_meta.get("client_env", {}),
         "endpoints": endpoints_summary(endpoints) or existing_meta.get("endpoints", {}),
+        "performance_json": performance_json,
+        "process_config_json": process_config_json,
+        "process_usage": process_usage,
     }
     write_json_atomic(run_dir / "run_meta.json", run_meta)
     report["created"].append("run_meta.json")
@@ -446,9 +626,15 @@ def consolidate(
     # ---- mock.json / mock.log ---------------------------------------------
     mock_log_path = run_dir / "mock_engine.log"
     mock_json_path = run_dir / "mock.json"
+    mock_per_engine_path = run_dir / "mock_metrics_per_engine.prom"
+    per_engine_gz_path = run_dir / "mock_per_engine_timeseries.json.gz"
     # Idempotency: when the source log is gone but mock.json already exists,
     # keep the existing file instead of overwriting it with an empty timeline.
-    if mock_log_path.is_file() or not mock_json_path.is_file():
+    if (
+        mock_log_path.is_file()
+        or mock_per_engine_path.is_file()
+        or not mock_json_path.is_file()
+    ):
         stats = parse_mock_stats_file(mock_log_path)
         # Keep the previously captured snapshot when the control plane is
         # unreachable (re-run after the mock cluster exited): the old value is
@@ -456,11 +642,36 @@ def consolidate(
         final_snapshot = fetch_final_snapshot(mock_http_port)
         if final_snapshot is None:
             final_snapshot = load_json(mock_json_path).get("final_snapshot")
+        # A-split: the per-engine timeline leaves mock.json and becomes its
+        # own gzip file — at scale (1250 engines x 120s) the embedded
+        # per_engine_timeseries key alone approaches 1GB of pretty-printed
+        # JSON. mock.json keeps a pointer (per_engine_file) + sample count.
+        existing_mock = load_json(mock_json_path)
+        per_engine_ts = parse_grouped_prometheus_timeseries(mock_per_engine_path)
+        if not per_engine_ts and not per_engine_gz_path.is_file():
+            # One-shot .prom already merged away (re-run path), no split file
+            # yet: migrate the legacy embedded key when present so even an
+            # old fat mock.json gets slimmed on the next consolidation.
+            legacy = existing_mock.get("per_engine_timeseries")
+            if isinstance(legacy, list) and legacy:
+                per_engine_ts = legacy
+        per_engine_count = len(per_engine_ts) if per_engine_ts else None
+        if per_engine_ts:
+            write_gzip_json_atomic(per_engine_gz_path, per_engine_ts)
+            report["created"].append(per_engine_gz_path.name)
+        elif per_engine_gz_path.is_file() and per_engine_count is None:
+            per_engine_count = existing_mock.get("per_engine_sample_count")
         mock_payload = {
             "stats_sample_count": len(stats),
             "stats": stats,
             "final_snapshot": final_snapshot,
             "endpoints_summary": endpoints_summary(endpoints),
+            # G1 per-second per-engine prometheus timeline, A-split into its
+            # own gzip file ([{ts, metrics: {name{labels}: value}}] groups).
+            "per_engine_file": (
+                per_engine_gz_path.name if per_engine_gz_path.is_file() else None
+            ),
+            "per_engine_sample_count": per_engine_count,
         }
         write_json_atomic(mock_json_path, mock_payload)
         report["created"].append("mock.json")
@@ -496,6 +707,8 @@ def consolidate(
         run_dir / "master_prometheus_after.prom",
         run_dir / "master_info_before.json",
         run_dir / "master_info_after.json",
+        run_dir / "master_prometheus_timeseries.prom",
+        run_dir / "master_inflight_timeseries.jsonl",
     ]
     if (
         any(path.is_file() for path in master_one_shot_sources)
@@ -504,6 +717,16 @@ def consolidate(
         master_payload = {
             "counters_timeseries": parse_counter_timeseries(
                 run_dir / "master_counters_timeseries.txt"
+            ),
+            # G3: per-second filtered flexlb_app_*/JVM prometheus timeline
+            # (same grouped layout as mock per_engine_timeseries).
+            "prometheus_timeseries": parse_grouped_prometheus_timeseries(
+                run_dir / "master_prometheus_timeseries.prom"
+            ),
+            # G4: per-second inflight snapshots (one JSON object per line,
+            # {"ts_epoch_ms": ..., "inflight": {...}}).
+            "inflight_timeseries": parse_jsonl_timeseries(
+                run_dir / "master_inflight_timeseries.jsonl"
             ),
             "prometheus_after": parse_prometheus_file(
                 run_dir / "master_prometheus_after.prom"
@@ -698,6 +921,10 @@ def consolidate(
         "master_info_after.json",
         "master_prometheus_after.prom",
         "master_counters_timeseries.txt",
+        "master_prometheus_timeseries.prom",
+        "master_inflight_timeseries.jsonl",
+        "mock_metrics_per_engine.prom",
+        "process_usage_timeseries.txt",
     ):
         path = run_dir / name
         if path.is_file():
@@ -726,6 +953,8 @@ def consolidate(
         [
             "endpoints.json",
             "flexlb_env.txt",
+            "client_env.json",
+            "mock_per_engine_timeseries.json.gz",
             "load_client/summary.json",
             "load_client/server_latency.json",
             "load_client/report.md",

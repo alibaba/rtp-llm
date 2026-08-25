@@ -22,6 +22,13 @@ rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 ```
 
 The run directory defaults to `rtp_llm/flexlb/tools/online_eval/run/<timestamp>/`.
+During the load window the script also runs four per-second collectors (see
+**Second-by-second collectors** below): mock per-engine Prometheus metrics,
+master Prometheus business metrics, master inflight snapshots, and CPU/RSS
+sampling of the three JVM groups. `JAVA_MOCK_STATS_INTERVAL_MS` defaults to
+`1000` (1s mock stats cadence; was 5000) for fine-grained timelines, and
+`FLEXLB_MONITOR_MODE` defaults to `all` so the master exposes the full
+business metric surface (see the note under **Run output layout**).
 After completion, the important outputs are (see the **Run output layout**
 section below for the full table):
 
@@ -77,14 +84,66 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 
 | File | Content |
 |---|---|
-| `run_meta.json` | `flexlb_env.txt` contents, endpoints summary, and the startup parameter snapshot (`--param` values incl. `FLEXLB_CONFIG`) |
-| `mock.json` | `java_mock_stats` timeline (`stats` array, source field names `ts_epoch_ms` / `prefill_waiting` / ...). Note the parsers capture 26 of the 28 fields — `decode_exec_p50` / `decode_exec_p95` carry digits in the key and are skipped; the verbatim lines stay in `mock.log`. Also holds the final cluster `/snapshot` from the control plane (when reachable) and the endpoints summary |
+| `run_meta.json` | `flexlb_env.txt` + `client_env.json` contents (the 36 JavaLoadClient env effective values snapshotted at client launch), endpoints summary, and the startup parameter snapshot (`--param` values incl. `FLEXLB_CONFIG`, JVM sizing, cache blocks, timeouts, `FLEXLB_MONITOR_MODE`, and the trace file's sha256 + line count). Also embeds the full config inputs (`performance_json` / `process_config_json` — the contents of the `performance_file` / `process_config_file` params; `null` when the file is missing) and the `process_usage` per-second CPU/RSS timeline of the mock / master / client JVMs |
+| `mock.json` | `java_mock_stats` timeline (`stats` array, source field names `ts_epoch_ms` / `prefill_waiting` / ...). Note the parsers capture 26 of the 28 fields — `decode_exec_p50` / `decode_exec_p95` carry digits in the key and are skipped; the verbatim lines stay in `mock.log`. Also holds the final cluster `/snapshot` from the control plane (when reachable), the endpoints summary, and the A-split pointer `per_engine_file` + `per_engine_sample_count` — the per-second per-engine Prometheus timeline itself lives in `mock_per_engine_timeseries.json.gz` |
+| `mock_per_engine_timeseries.json.gz` | the A-split target: the G1 per-second per-engine Prometheus timeline as gzip-streamed `[{ts, metrics: {"name{labels}": value}}]` groups (engine series like `mock_engine_running{engine_name="prefill-0",...}`). Splitting it out of `mock.json` keeps the main file lightweight — at 1250 engines × 120s the embedded key used to approach **~1GB** of pretty-printed JSON (the raw per-sample text is ~2.2KB × N_engines; the JSON-ified embedded form inflates ~2.5-3×). After the split + the G1 whitelist the same run writes a ~65MB `.json.gz` and `mock.json` stays in the KB range |
 | `mock.log` | The original `mock_engine.log` verbatim (tail-friendly) with the JVM GC log appended under a `=====` separator |
-| `master.json` | `master_counters_timeseries.txt` as a timeline array, `master_prometheus_after.prom` as a flat `{"name{labels}": value}` dict (HELP/TYPE skipped), `master_info_before/after.json` payloads, SLO batch summary fields |
+| `master.json` | `master_counters_timeseries.txt` as a timeline array, `master_prometheus_after.prom` as a flat `{"name{labels}": value}` dict (HELP/TYPE skipped), `prometheus_timeseries` — the per-second master Prometheus timeline (same `[{ts, metrics}]` grouped shape; whitelisted to the analyzer-consumed series: `flexlb_app_cache_*` / batcher + routing queue gauges / inflight max age / dispatch reason counters, plus `jvm_memory_used` / `jvm_gc_pause` / `process_cpu` / `system_cpu`), `inflight_timeseries` — per-second `/rtp_llm/inflight_status` snapshots (`[{"ts_epoch_ms", "inflight": {...}}]` JSONL rows), `master_info_before/after.json` payloads, SLO batch summary fields |
 | `master.log` | `flexlb_logs/application.log` verbatim prefix with `flexlb.log` (structured dispatch/complete lines), `sync.log`, `sync_consistency.log` and the run-root `flexlb.log` (master stdout) appended |
 | `client.json` | `load_client/summary.json` base merged with `server_latency.json`, the full `slo_batch_analysis.json`, and a per-second aggregated timeline (`per_second`, same shape as the canvas aggregation) |
 | `client.log` | All `client_shard_*.stdout` merged with `===== client_shard_N =====` separators (single-worker runs rename `client.stdout` directly) |
 | `per_request.jsonl` / `.gz` | Merged per-request streams. Under 10 MB total the merge stays plain `per_request.jsonl` (uniform-mode runs — no unpack step needed); larger runs gzip into `per_request.jsonl.gz` (~10x smaller) |
+
+### Second-by-second collectors
+
+`run_online_eval.sh` starts four 1s pollers next to the master counter
+poller right before the load clients launch, and stops them at the same point
+(right after all clients finish); consolidation merges the files afterwards.
+All of them are best-effort — a failed sample or a missing dependency (e.g.
+no `ps` binary) only logs a WARNING and never blocks the load test. None of
+them needs `curl`; they use Python's urllib. Their output files are one-shot
+sources: merged into the component JSON and then deleted, same treatment as
+`master_counters_timeseries.txt`.
+
+| File (pre-consolidation) | Source | Lands in |
+|---|---|---|
+| `mock_metrics_per_engine.prom` | mock control port (`MOCK_BASE_GRPC_PORT-1`) `/metrics?per_engine=true`; the poller keeps only the six analyzer-consumed series per engine (`mock_engine_running` / `waiting` / `active_kv_tokens` / `available_kv_tokens` / `accepted_total` / `completed_total`, C whitelist ≈ ÷4 bytes vs the full ~22-series surface), each sample appended after a `# ts=<epoch_ms>` separator (~2.2KB × N_engines per sample) | `mock_per_engine_timeseries.json.gz` (A-split) |
+| `master_prometheus_timeseries.prom` | management port `/actuator/prometheus` (fallback `/prometheus`), whitelisted to the analyzer-consumed series (`flexlb_app_cache_*`, `flexlb_app_flexlb_batcher_queue_size`, `flexlb_app_routing_queue_length`, `flexlb_app_flexlb_inflight_max_age_ms`, `flexlb_app_engine_balancing_master_dispatch_reason_total`, `jvm_memory_used` / `jvm_gc_pause` / `process_cpu` / `system_cpu`), same `# ts=` grouping | `master.json` `prometheus_timeseries` |
+| `master_inflight_timeseries.jsonl` | master HTTP port `/rtp_llm/inflight_status`, one JSON line `{"ts_epoch_ms", "inflight"}` per second | `master.json` `inflight_timeseries` |
+| `process_usage_timeseries.txt` | `ps -o pid,%cpu,rss,etime` over the mock / master / load-client JVM pids (`ts_epoch_ms=... label=... pid=... cpu_pct=... rss_kb=... etime=...` kv lines; exited pids tolerated) | `run_meta.json` `process_usage` |
+
+Volume sizing (M5, formula instead of the old flat "~5MB"): the three
+non-per-engine files stay in the KB-per-second range; the dominant term is
+G1 — raw text ≈ **~2.2KB × N_engines per sample** at 1s cadence, i.e.
+`2.2KB × N_engines × duration_s` total, which the A-split gzip then
+compresses ~4x (the 998MB anchor: 1250 engines × 120s × 1s cadence used to
+produce a ~998MB embedded `per_engine_timeseries` in `mock.json`; the same
+run now writes a ~65MB `mock_per_engine_timeseries.json.gz`). `MOCK_PER_ENGINE_POLL_INTERVAL_S`
+(default 1) scales the per-engine timeline volume without touching the other
+collectors; `SECONDARY_POLL_INTERVAL_S` (default 1) retunes all of them. Set
+`FLEXLB_SECONDARY_POLLERS_ENABLED=0` to disable all four pollers entirely —
+zero observation overhead for A/B comparisons; `run_stability_test.sh` and
+`run_burst_test.sh` pin this to 0 so their historical baselines stay
+comparable (their observation channel is `stability_monitor.py`).
+
+### FLEXLB_MONITOR_MODE
+
+The script defaults to `FLEXLB_MONITOR_MODE=all`: the critical-only mode
+filters the master's Prometheus exposition down to ~6 `flexlb_*` series,
+which drops exactly the KV / inflight / batcher / cache-hit business metrics
+the per-second master collector exists for. Explicitly set
+`FLEXLB_MONITOR_MODE=critical-only` to restore the trimmed metric set.
+
+Skill-driven runs are **not** affected by this default change: the
+flexlb-online-eval skill exports `FLEXLB_MONITOR_MODE=full` unconditionally
+(`MONITOR_MODE="${MONITOR_MODE:-full}"` in its launcher), and the Java side
+treats any value other than `critical-only` as the full metric surface —
+`full` and `all` are equivalent. So skill runs have always collected the
+full business metric surface; the `all` default here only matters for
+direct invocations of `run_online_eval.sh` that do not set the variable.
+`JAVA_MOCK_STATS_INTERVAL_MS` likewise defaults to `1000` (was `5000`) so
+`java_mock_stats` lines land at 1s granularity; the mock JVM startup
+argument is the only thing that changes.
 
 Kept in place after consolidation:
 
@@ -111,7 +170,11 @@ export whitelist before it takes effect there.
 `consolidate_run_outputs.py` is idempotent and retro-runnable — it can be
 re-run on an already consolidated directory (no-op; a regenerated
 `slo_batch_analysis.json` only refreshes the `slo_batch_summary` keys) or
-applied to a legacy run directory to produce the same layout. The
+applied to a legacy run directory to produce the same layout. Legacy fat
+`mock.json` files (embedded `per_engine_timeseries`) are migrated by the
+A-split on the next consolidation that rewrites `mock.json`; the unified
+analyzer reads both layouts (`.json.gz` first, embedded key, then the raw
+`.prom`), so old runs stay fully analyzable. The
 consumers (`analyze_slo_batch.py`, `aggregate_canvas_run.py`,
 `analyze_burst_results.py`, `generate_stability_report.py`) read the
 **legacy source files first** and fall back to the consolidated ones —

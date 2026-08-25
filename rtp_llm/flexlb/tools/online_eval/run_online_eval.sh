@@ -54,9 +54,11 @@ JAVA_LOAD_CLIENT_HEAP_SIZE="${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
 JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
 # java_mock_stats sampling interval, passed straight to --stats-interval-ms
-# (single env, no renaming). Default matches the historical 5s cadence; lower
-# to 1000 for fine-grained pressure-test timelines.
-JAVA_MOCK_STATS_INTERVAL_MS="${JAVA_MOCK_STATS_INTERVAL_MS:-5000}"
+# (single env, no renaming). Default 1000ms: the unified analysis needs a
+# 1s-granularity mock timeline across the pressure window (the historical
+# default was 5000). Set JAVA_MOCK_STATS_INTERVAL_MS=5000 to restore the
+# coarse cadence.
+JAVA_MOCK_STATS_INTERVAL_MS="${JAVA_MOCK_STATS_INTERVAL_MS:-1000}"
 # Passed straight to --decode-max-concurrency (single env, no renaming).
 # Default matches the mock engine's DEFAULT_DECODE_MAX_CONCURRENCY (132);
 # lower it to trip the opt-in hard admission gate (decode.max_pending_requests)
@@ -117,7 +119,12 @@ FLEXLB_PV_LOG="${FLEXLB_PV_LOG:-off}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
 FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
-FLEXLB_MONITOR_MODE="${FLEXLB_MONITOR_MODE:-critical-only}"
+# Default "all": the unified analysis needs the full flexlb business metric
+# surface (KV usage, inflight, batcher, cache-hit, dispatch reasons...) that
+# critical-only filters down to ~6 flexlb_* series. Set
+# FLEXLB_MONITOR_MODE=critical-only explicitly to restore the trimmed metric
+# set (the master's prometheus endpoint then emits ~50-100 fewer lines/s).
+FLEXLB_MONITOR_MODE="${FLEXLB_MONITOR_MODE:-all}"
 HIPPO_ROLE="${HIPPO_ROLE:-test}"
 
 DEFAULT_FLEXLB_CONFIG='{
@@ -184,6 +191,12 @@ export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
 MOCK_PID=""
 FLEXLB_PID=""
 MASTER_COUNTER_POLLER_PID=""
+# Secondary 1s collectors (see start_secondary_pollers below): mock per-engine
+# prometheus, master prometheus/inflight time series, process CPU/RSS sampling.
+MOCK_PER_ENGINE_POLLER_PID=""
+MASTER_PROMETHEUS_POLLER_PID=""
+MASTER_INFLIGHT_POLLER_PID=""
+PROCESS_USAGE_POLLER_PID=""
 CLIENT_PIDS=()
 JAVA_MODULE_OPTS=(
   --add-modules ALL-SYSTEM
@@ -211,6 +224,7 @@ fi
 
 cleanup() {
   stop_master_counter_poller
+  stop_secondary_pollers
   for pid in "${CLIENT_PIDS[@]}"; do
     kill "${pid}" >/dev/null 2>&1 || true
   done
@@ -240,11 +254,49 @@ trap cleanup EXIT
 # happy path (after the artifact echo, before the test_valid verdict).
 # Startup failures that never reach the load client do not consolidate.
 CONSOLIDATED=0
+
+# sha256 of a file (Linux sha256sum), with shasum -a 256 (macOS local smoke
+# runs) and md5 fallbacks; empty string when the file is missing or no digest
+# tool exists. The prefix on the md5 fallbacks keeps the algorithm auditable
+# in run_meta.json.
+compute_file_digest() {
+  local file="$1"
+  if [[ ! -f "${file}" ]]; then
+    echo ""
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${file}" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${file}" | awk '{print $1}'
+  elif command -v md5sum >/dev/null 2>&1; then
+    echo "md5:$(md5sum "${file}" | awk '{print $1}')"
+  elif command -v md5 >/dev/null 2>&1; then
+    echo "md5:$(md5 -q "${file}")"
+  else
+    echo ""
+  fi
+}
+
+count_file_lines() {
+  local file="$1"
+  if [[ ! -f "${file}" ]]; then
+    echo ""
+    return 0
+  fi
+  wc -l <"${file}" | tr -d '[:space:]'
+}
+
 consolidate_run_outputs_now() {
   if [[ "${CONSOLIDATED}" == "1" ]]; then
     return 0
   fi
   CONSOLIDATED=1
+  # Stop the secondary pollers first: consolidation merges their one-shot
+  # output files and deletes them, so no writer may still be appending (a
+  # writer holding an unlinked fd would keep writing into the void). The
+  # stop is idempotent — also called at the load-client stop point / cleanup.
+  stop_secondary_pollers
   local consolidate_mock_port_args=()
   if [[ "${START_MOCK}" == "1" ]]; then
     consolidate_mock_port_args+=(--mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))")
@@ -258,6 +310,9 @@ consolidate_run_outputs_now() {
   # load_client/summary.json (the flexlb-online-eval skill reads that exact
   # path), load_client/server_latency.json (skill fetch_server_latency) and
   # load_client/report.md.
+  local trace_file_sha256 trace_file_lines
+  trace_file_sha256="$(compute_file_digest "${TRACE_FILE}")"
+  trace_file_lines="$(count_file_lines "${TRACE_FILE}")"
   python3 "${SCRIPT_DIR}/consolidate_run_outputs.py" \
     --run-dir "${RUN_DIR}" \
     ${consolidate_mock_port_args[@]+"${consolidate_mock_port_args[@]}"} \
@@ -281,8 +336,19 @@ consolidate_run_outputs_now() {
     --param "loop=${LOOP}" \
     --param "gradient=${GRADIENT}" \
     --param "trace_file=${TRACE_FILE}" \
+    --param "trace_file_sha256=${trace_file_sha256}" \
+    --param "trace_file_lines=${trace_file_lines}" \
     --param "performance_file=${PERFORMANCE_FILE}" \
     --param "process_config_file=${PROCESS_CONFIG_FILE}" \
+    --param "java_mock_jvm_xms=${JAVA_MOCK_JVM_XMS}" \
+    --param "java_mock_jvm_xmx=${JAVA_MOCK_JVM_XMX}" \
+    --param "java_mock_event_loop_threads=${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+    --param "java_mock_completion_threads=${JAVA_MOCK_COMPLETION_THREADS}" \
+    --param "prefill_cache_blocks=${PREFILL_CACHE_BLOCKS}" \
+    --param "decode_cache_blocks=${DECODE_CACHE_BLOCKS}" \
+    --param "timeout_ms=${TIMEOUT_MS}" \
+    --param "response_timeout=${RESPONSE_TIMEOUT:-}" \
+    --param "flexlb_monitor_mode=${FLEXLB_MONITOR_MODE}" \
     --param "java_mock_stats_interval_ms=${JAVA_MOCK_STATS_INTERVAL_MS}" \
     --param "java_mock_decode_max_concurrency=${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
     --param "flexlb_pv_log=${FLEXLB_PV_LOG}" \
@@ -485,6 +551,275 @@ stop_master_counter_poller() {
     kill "${MASTER_COUNTER_POLLER_PID}" >/dev/null 2>&1 || true
     MASTER_COUNTER_POLLER_PID=""
   fi
+}
+
+# ---- Secondary 1s collectors (unified-analysis data audit G1/G3/G4/G5) ----
+# All four pollers follow the master counter poller pattern: a python3
+# background heredoc that appends to a one-shot file under RUN_DIR, a *POLLER_PID
+# bookkeeping variable, best-effort semantics (a failed sample or a missing
+# dependency — e.g. no `ps` binary — is a WARNING, never a load-test blocker),
+# and a stop path wired into the load-client stop point, consolidate_run_outputs_now
+# and the EXIT trap. None of them needs curl: urllib covers both HTTP planes.
+# Consolidation later merges each file into its component JSON and deletes it
+# (same one-shot-source treatment as master_counters_timeseries.txt).
+
+MOCK_PER_ENGINE_METRICS_FILE="${RUN_DIR}/mock_metrics_per_engine.prom"
+MASTER_PROMETHEUS_TS_FILE="${RUN_DIR}/master_prometheus_timeseries.prom"
+MASTER_INFLIGHT_TS_FILE="${RUN_DIR}/master_inflight_timeseries.jsonl"
+PROCESS_USAGE_TS_FILE="${RUN_DIR}/process_usage_timeseries.txt"
+# "<pid> <label>" per line; re-read by the process poller every round so
+# CLIENT_PIDS can be appended after the workers fork. Removed on stop.
+PROCESS_POLL_PID_FILE="${RUN_DIR}/process_poll_pids.txt"
+SECONDARY_POLL_INTERVAL_S="${SECONDARY_POLL_INTERVAL_S:-1}"
+# M7: A/B switch for the four secondary pollers. Default 1 (full per-second
+# collection for the unified analyzer); set FLEXLB_SECONDARY_POLLERS_ENABLED=0
+# to skip all of them entirely (zero observation overhead — the
+# stability/burst baselines pin this to keep historical numbers comparable).
+FLEXLB_SECONDARY_POLLERS_ENABLED="${FLEXLB_SECONDARY_POLLERS_ENABLED:-1}"
+# M7: the G1 per-engine poller is the volume driver (~2.2KB x N_engines per
+# sample even after the C whitelist below); a larger interval trades timeline
+# granularity for disk (e.g. 1250 engines x 120s: 1s -> ~260MB text, 5s ->
+# ~52MB) without touching the other 1s pollers.
+MOCK_PER_ENGINE_POLL_INTERVAL_S="${MOCK_PER_ENGINE_POLL_INTERVAL_S:-1}"
+
+# G1: per-second mock per-engine Prometheus time series. The mock control
+# plane (MOCK_BASE_GRPC_PORT-1) already serves /metrics?per_engine=true
+# (~22 series per engine, engine names prefill-N/decode-N); the poller keeps
+# only the six series the analyzer consumes (C whitelist: running / waiting /
+# active_kv_tokens / available_kv_tokens / accepted_total / completed_total),
+# cutting the on-disk footprint to ~1/4 (~2.2KB x N_engines per sample;
+# 1250 engines x 120s x 1s interval ≈ 260MB raw text -> ~65MB gzipped in the
+# A-split file) — the server-side scrape cost is unchanged. Each sample is
+# appended after a "# ts=<epoch_ms>" separator comment so
+# consolidate_run_outputs.py can regroup the flat file into a [{ts, metrics}]
+# timeline.
+start_mock_per_engine_poller() {
+  if [[ "${START_MOCK}" != "1" ]]; then
+    return 0
+  fi
+  python3 - "$((MOCK_BASE_GRPC_PORT - 1))" "${MOCK_PER_ENGINE_METRICS_FILE}" \
+    "${MOCK_PER_ENGINE_POLL_INTERVAL_S}" <<'PY' &
+import sys
+import time
+import urllib.request
+
+port, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+keep = {
+    "mock_engine_running", "mock_engine_waiting",
+    "mock_engine_active_kv_tokens", "mock_engine_available_kv_tokens",
+    "mock_engine_accepted_total", "mock_engine_completed_total",
+}
+url = f"http://127.0.0.1:{port}/metrics?per_engine=true"
+with open(out_path, "a", encoding="utf-8") as out:
+    while True:
+        started = time.time()
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                body = response.read().decode("utf-8", "replace")
+            # C: keep only the six analyzer-consumed series — the raw
+            # endpoint still emits the full ~22-per-engine surface (server
+            # cost unchanged), but the appended bytes drop to ~1/4.
+            kept = [
+                line for line in body.splitlines()
+                if not line.startswith("#")
+                and line.split("{", 1)[0].split(" ", 1)[0] in keep
+            ]
+            if kept:
+                out.write(f"# ts={int(started * 1000)}\n")
+                out.write("\n".join(kept) + "\n")
+                out.flush()
+        except Exception:
+            pass  # control plane briefly unavailable; skip this sample
+        time.sleep(max(0.0, interval_s - (time.time() - started)))
+PY
+  MOCK_PER_ENGINE_POLLER_PID="$!"
+}
+
+# G3: per-second master business-metric time series. /actuator/prometheus on
+# the management port is whitelisted down to exactly the series the unified
+# analyzer consumes (C: flexlb_app_cache_* KV / hit-ratio family, the batcher
+# and routing queue gauges, inflight max age, dispatch reason counters, plus
+# the JVM/system health quartet) before appending — a strict subset of the
+# old flexlb_app_* prefix filter, so previously collected (fatter) runs stay
+# analyzable. FLEXLB_MONITOR_MODE=all is still required upstream:
+# critical-only trims the master's own exposition to ~6 flexlb_* series and
+# the whitelist below would match almost nothing. Same "# ts=" grouped layout
+# as G1.
+start_master_prometheus_poller() {
+  if [[ "${START_FLEXLB}" != "1" ]]; then
+    return 0
+  fi
+  python3 - "${FLEXLB_MANAGEMENT_PORT}" "${MASTER_PROMETHEUS_TS_FILE}" \
+    "${SECONDARY_POLL_INTERVAL_S}" <<'PY' &
+import sys
+import time
+import urllib.request
+
+port, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+urls = [f"http://127.0.0.1:{port}/{path}" for path in ("actuator/prometheus", "prometheus")]
+# C whitelist — every entry is a consumer-backed series (B3 queue curves,
+# M3/S7 inflight age, S7 hit-ratio curves, dispatch reasons, cpu/mem):
+prefixes = (
+    "flexlb_app_cache_",
+    "flexlb_app_flexlb_batcher_queue_size",
+    "flexlb_app_routing_queue_length",
+    "flexlb_app_flexlb_inflight_max_age_ms",
+    "flexlb_app_engine_balancing_master_dispatch_reason_total",
+    "jvm_memory_used",
+    "jvm_gc_pause",
+    "process_cpu",
+    "system_cpu",
+)
+with open(out_path, "a", encoding="utf-8") as out:
+    while True:
+        started = time.time()
+        for url in urls:
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    body = response.read().decode("utf-8", "replace")
+            except Exception:
+                continue  # try the next path / skip this sample
+            kept = [line for line in body.splitlines() if line.startswith(prefixes)]
+            if kept:
+                out.write(f"# ts={int(started * 1000)}\n")
+                out.write("\n".join(kept) + "\n")
+                out.flush()
+            break
+        time.sleep(max(0.0, interval_s - (time.time() - started)))
+PY
+  MASTER_PROMETHEUS_POLLER_PID="$!"
+}
+
+# G4: per-second inflight snapshot. GET /rtp_llm/inflight_status on the
+# master HTTP port returns a JSON object; each sample is appended as one
+# JSONL line {"ts_epoch_ms": ..., "inflight": {...}} so consolidation can
+# json.loads each line independently (tolerating a torn trailing line).
+start_master_inflight_poller() {
+  if [[ "${START_FLEXLB}" != "1" ]]; then
+    return 0
+  fi
+  python3 - "${FLEXLB_HTTP_ADDR}" "${MASTER_INFLIGHT_TS_FILE}" \
+    "${SECONDARY_POLL_INTERVAL_S}" <<'PY' &
+import json
+import sys
+import time
+import urllib.request
+
+addr, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+url = f"http://{addr}/rtp_llm/inflight_status"
+with open(out_path, "a", encoding="utf-8") as out:
+    while True:
+        started = time.time()
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                payload = json.load(response)
+            out.write(json.dumps({"ts_epoch_ms": int(started * 1000), "inflight": payload}) + "\n")
+            out.flush()
+        except Exception:
+            pass  # master briefly unavailable; skip this sample
+        time.sleep(max(0.0, interval_s - (time.time() - started)))
+PY
+  MASTER_INFLIGHT_POLLER_PID="$!"
+}
+
+# G5: per-second CPU/RSS sampling of the three JVM groups (mock cluster,
+# flexlb master, load client workers). The pid list lives in
+# PROCESS_POLL_PID_FILE because CLIENT_PIDS is filled in only after the
+# workers fork; the poller re-reads the list every round. Exited pids are
+# tolerated (ps just omits them; a wholly dead pidlist makes ps exit non-zero
+# and the round is skipped).
+start_process_usage_poller() {
+  if ! command -v ps >/dev/null 2>&1; then
+    echo "WARNING: ps not found; process CPU/RSS sampling disabled" >&2
+    return 0
+  fi
+  python3 - "${PROCESS_POLL_PID_FILE}" "${PROCESS_USAGE_TS_FILE}" \
+    "${SECONDARY_POLL_INTERVAL_S}" <<'PY' &
+import subprocess
+import sys
+import time
+
+pid_file, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+with open(out_path, "a", encoding="utf-8") as out:
+    while True:
+        started = time.time()
+        try:
+            entries = []
+            with open(pid_file, "r", encoding="utf-8") as pids:
+                for line in pids:
+                    parts = line.split()
+                    if len(parts) == 2 and parts[0].isdigit():
+                        entries.append((parts[0], parts[1]))
+            if entries:
+                result = subprocess.run(
+                    ["ps", "-o", "pid,%cpu,rss,etime", "-p",
+                     ",".join(pid for pid, _ in entries)],
+                    capture_output=True, text=True, timeout=2)
+                if result.returncode == 0:
+                    rows = {}
+                    for line in result.stdout.splitlines()[1:]:
+                        cols = line.split(None, 3)
+                        if len(cols) == 4:
+                            rows[cols[0]] = cols
+                    for pid, label in entries:
+                        cols = rows.get(pid)
+                        if cols:
+                            out.write(
+                                f"ts_epoch_ms={int(started * 1000)} label={label} "
+                                f"pid={pid} cpu_pct={cols[1]} rss_kb={cols[2]} "
+                                f"etime={cols[3]}\n")
+                    out.flush()
+        except Exception:
+            pass  # best-effort sampling; skip this round
+        time.sleep(max(0.0, interval_s - (time.time() - started)))
+PY
+  PROCESS_USAGE_POLLER_PID="$!"
+}
+
+# Seed the poller pid list with the processes started so far; load client
+# workers are appended by the multi-worker launch loop below.
+write_process_poll_pids() {
+  : >"${PROCESS_POLL_PID_FILE}"
+  if [[ -n "${MOCK_PID}" ]]; then
+    echo "${MOCK_PID} mock" >>"${PROCESS_POLL_PID_FILE}"
+  fi
+  if [[ -n "${FLEXLB_PID}" ]]; then
+    echo "${FLEXLB_PID} master" >>"${PROCESS_POLL_PID_FILE}"
+  fi
+}
+
+append_process_poll_pid() {
+  echo "$1 $2" >>"${PROCESS_POLL_PID_FILE}"
+}
+
+start_secondary_pollers() {
+  # M7: FLEXLB_SECONDARY_POLLERS_ENABLED=0 skips all four pollers — zero
+  # observation overhead for A/B comparisons and the pinned historical
+  # baselines (run_stability_test.sh / run_burst_test.sh export 0).
+  if [[ "${FLEXLB_SECONDARY_POLLERS_ENABLED}" != "1" ]]; then
+    echo "Secondary pollers disabled (FLEXLB_SECONDARY_POLLERS_ENABLED=${FLEXLB_SECONDARY_POLLERS_ENABLED})"
+    return 0
+  fi
+  write_process_poll_pids
+  start_mock_per_engine_poller
+  start_master_prometheus_poller
+  start_master_inflight_poller
+  start_process_usage_poller
+}
+
+stop_secondary_pollers() {
+  local pid
+  for pid in "${MOCK_PER_ENGINE_POLLER_PID}" "${MASTER_PROMETHEUS_POLLER_PID}" \
+    "${MASTER_INFLIGHT_POLLER_PID}" "${PROCESS_USAGE_POLLER_PID}"; do
+    if [[ -n "${pid}" ]]; then
+      kill "${pid}" >/dev/null 2>&1 || true
+    fi
+  done
+  MOCK_PER_ENGINE_POLLER_PID=""
+  MASTER_PROMETHEUS_POLLER_PID=""
+  MASTER_INFLIGHT_POLLER_PID=""
+  PROCESS_USAGE_POLLER_PID=""
+  rm -f "${PROCESS_POLL_PID_FILE}"
 }
 
 assert_mock_engine_healthy() {
@@ -753,6 +1088,12 @@ echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
 # window (stopped right after all clients finish; also killed by cleanup).
 start_master_counter_poller
 
+# Secondary 1s collectors (mock per-engine prometheus, master prometheus /
+# inflight time series, process CPU/RSS) run over the same load window and
+# stop at the same point as the counter poller above; consolidation merges
+# their files afterwards.
+start_secondary_pollers
+
 # JavaLoadClient reads its configuration exclusively from environment
 # variables (no CLI flags); lib_load_client.sh's run_java_load_client is
 # the single source of truth for that mapping — every JavaLoadClient env
@@ -760,12 +1101,75 @@ start_master_counter_poller
 # environment can leak in. PRIORITY is deliberately not passed: priority
 # comes from the trace records only, and records without one stay unset on
 # the wire (no default 50); the lib blanks ambient PRIORITY for us.
+# M9: archive the JavaLoadClient env effective values at the client launch
+# point. Receives the exact KEY=VALUE argv launch_java_load_client forwards
+# (PRIORITY is recorded empty — this script deliberately never passes it);
+# writes run_root/client_env.json once (first shard wins: the values are
+# identical across shards except OUTPUT_DIR / SHARD_INDEX /
+# SKIP_SERVER_LATENCY, and the worker layout itself is captured by
+# LOAD_CLIENT_WORKERS). consolidate_run_outputs.py embeds it into
+# run_meta.json as client_env, sibling of flexlb_env.
+write_client_env_snapshot() {
+  python3 - "${RUN_DIR}/client_env.json" "PRIORITY=" "$@" <<'PY'
+import json
+import sys
+
+out_path, items = sys.argv[1], sys.argv[2:]
+payload = {}
+for item in items:
+    key, _, value = item.partition("=")
+    payload[key] = value
+with open(out_path, "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+}
+
 launch_java_load_client() {
   local output_dir="$1"
   local num_shards="$2"
   local shard_index="$3"
   local max_concurrency="$4"
   local skip_server_latency="$5"
+  # M9: one client_env.json per run, written at the first launch.
+  if [[ ! -f "${RUN_DIR}/client_env.json" ]]; then
+    write_client_env_snapshot \
+      "TRACE_FILE=${TRACE_FILE}" \
+      "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
+      "GRPC_TARGET=${GRPC_TARGET:-}" \
+      "DURATION_S=${DURATION_S}" \
+      "MAX_CONCURRENCY=${max_concurrency}" \
+      "REPLAY_SPEED=${REPLAY_SPEED}" \
+      "LOAD_CLIENT_WORKERS=${LOAD_CLIENT_WORKERS}" \
+      "OUTPUT_DIR=${output_dir}" \
+      "NUM_SHARDS=${num_shards}" \
+      "SHARD_INDEX=${shard_index}" \
+      "LIMIT=${LIMIT}" \
+      "TIMEOUT_MS=${TIMEOUT_MS}" \
+      "SLA_TTFT_MS=${SLA_TTFT_MS}" \
+      "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
+      "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
+      "LOOP=${LOOP}" \
+      "SEND_MODE=${SEND_MODE}" \
+      "SEND_MODE_QPS=${SEND_MODE_QPS}" \
+      "N_CHANNELS=${N_CHANNELS:-}" \
+      "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
+      "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
+      "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-}" \
+      "SKIP_SERVER_LATENCY=${skip_server_latency}" \
+      "MODEL=${MODEL:-}" \
+      "API_KEY=${API_KEY:-}" \
+      "FLEXLB_EXPECT_FETCH_RESPONSE=${FLEXLB_EXPECT_FETCH_RESPONSE:-}" \
+      "GRADIENT=${GRADIENT}" \
+      "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
+      "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
+      "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
+      "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
+      "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
+      "ENABLE_FALLBACK=${ENABLE_FALLBACK:-0}" \
+      "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
+      "DRY_RUN=${DRY_RUN:-0}"
+  fi
   run_java_load_client \
     "TRACE_FILE=${TRACE_FILE}" \
     "TARGET_ADDR=${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
@@ -817,6 +1221,7 @@ else
       "${SHARD_MAX_CONCURRENCY}" 1 \
       >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
     CLIENT_PIDS+=("$!")
+    append_process_poll_pid "$!" "client_${shard}"
   done
 
   CLIENT_EXIT=0
@@ -1001,6 +1406,7 @@ PY
 fi
 
 stop_master_counter_poller
+stop_secondary_pollers
 assert_mock_engine_healthy
 
 if [[ "${SLO_BATCH_DRAIN_SECONDS}" -gt 0 ]]; then
