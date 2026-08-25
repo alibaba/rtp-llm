@@ -6,18 +6,24 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.StrategySelectionReason;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -33,9 +39,9 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 
 class ShortestTtftCacheAffinityTest {
 
@@ -65,8 +71,8 @@ class ShortestTtftCacheAffinityTest {
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(prefillResourceMeasure);
         Mockito.when(prefillResourceMeasure.isResourceAvailable(any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(new HashMap<>());
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
 
         strategy = new ShortestTTFTStrategy(
                 engineWorkerStatus,
@@ -234,6 +240,69 @@ class ShortestTtftCacheAffinityTest {
     }
 
     @Test
+    void discountsP2pOnlyMatchesAndRecordsKvcmDecisionAndTaskMetadata() {
+        FlexlbConfig config = cacheAffinityConfig(1000, 0);
+        config.getRouter().getRoles().getPrefill().getCacheAffinity()
+                .setP2pHitDiscount(0.25);
+        WorkerStatus coldWorker = addWorker("10.0.0.1", 0);
+        WorkerStatus p2pWorker = addWorker("10.0.0.2", 100);
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(
+                        Map.of(p2pWorker.getIpPort(), new HostCacheMatch(0, 4, 4)),
+                        CacheMatchSource.KVCM,
+                        25L,
+                        256L));
+
+        BalanceContext context = buildContext(1000, 71L, config);
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(p2pWorker.getIp(), result.getServerIp());
+        assertEquals(256L, result.getDebugInfo().getHitCacheLen(),
+                "four P2P-only blocks receive 25% routing credit");
+        var decision = context.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        assertEquals(0.25, decision.p2pHitDiscount());
+        var workerDecision = decision.workers().stream()
+                .filter(worker -> worker.ip().equals(p2pWorker.getIp()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(0L, workerDecision.requestLocalMatchTokens());
+        assertEquals(1000L, workerDecision.requestP2pTotalMatchTokens());
+        assertTrue(workerDecision.selected());
+        TaskInfo task = p2pWorker.getLocalTaskMap().get("71");
+        assertTrue(task.isKvcmMatchAvailable());
+        assertEquals(1000L, task.getKvcmP2pTotalMatchTokens());
+        assertFalse(coldWorker.getLocalTaskMap().containsKey("71"));
+    }
+
+    @Test
+    void outstandingGuardSkipsCacheLeaderAndRecordsReason() {
+        FlexlbConfig config = cacheAffinityConfig(1000, 0);
+        config.getRouter().getRoles().getPrefill().getCacheAffinity()
+                .setMaxOutstandingUncachedTokens(1000L);
+        WorkerStatus cacheLeader = addWorker("10.0.0.1", 0);
+        WorkerStatus eligibleWorker = addWorker("10.0.0.2", 0);
+        TaskInfo existing = new TaskInfo();
+        existing.setRequestId(700L);
+        existing.setInputLength(800L);
+        existing.setPrefixLength(0L);
+        cacheLeader.putLocalTask("700", existing);
+        stubCacheMatches(Map.of(cacheLeader.getIpPort(), 3));
+
+        BalanceContext context = buildContext(1000, 72L, config);
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(eligibleWorker.getIp(), result.getServerIp());
+        assertEquals(StrategySelectionReason.SHORTEST_TTFT_OUTSTANDING_GUARD.name(),
+                context.getSelectionReasonByRole().get(RoleType.PREFILL));
+        var decision = context.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        assertFalse(decision.cacheAffinityDecision().cacheLeaderOutstandingEligible());
+        assertFalse(cacheLeader.getLocalTaskMap().containsKey("72"));
+        assertTrue(eligibleWorker.getLocalTaskMap().containsKey("72"));
+    }
+
+    @Test
     void concurrentCacheLeaderClaimFallsBackToAnotherAffinityCandidate() {
         FlexlbConfig config = cacheAffinityConfig(250, 5);
         addWorker("10.0.0.1", 0);
@@ -373,14 +442,24 @@ class ShortestTtftCacheAffinityTest {
     }
 
     private void stubCacheMatches(Map<String, Integer> matches) {
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(matches);
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenAnswer(invocation -> {
+                    CacheMatchQuery query = invocation.getArgument(0);
+                    long blockSize = query.blockSize() > 0L ? query.blockSize() : 256L;
+                    return new CacheMatchResult(
+                            org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                            CacheMatchSource.LOCAL_SYNC,
+                            0L,
+                            blockSize);
+                });
     }
 
-    private void addWorker(String ip, long estimatedWaitMs) {
+    private WorkerStatus addWorker(String ip, long estimatedWaitMs) {
+        WorkerStatus worker = createWorker(ip, estimatedWaitMs);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
                 .getPrefillStatusMap()
-                .put(ip + ":8080", createWorker(ip, estimatedWaitMs));
+                .put(ip + ":8080", worker);
+        return worker;
     }
 
     private WorkerStatus createWorker(String ip, long estimatedWaitMs) {

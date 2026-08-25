@@ -24,9 +24,7 @@ import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.EnumMap;
 import java.util.List;
-import java.util.Map;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
@@ -39,23 +37,15 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 })
 public class DefaultRouter implements Router {
 
-    private final Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap;
+    private final ConfigService configService;
     private final GroupRoutingPolicy groupRoutingPolicy;
     private final EndpointRegistry endpointRegistry;
 
     public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy,
                          EndpointRegistry endpointRegistry) {
+        this.configService = configService;
         this.groupRoutingPolicy = groupRoutingPolicy;
         this.endpointRegistry = endpointRegistry;
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.loadBalanceStrategyMap = new EnumMap<>(RoleType.class);
-
-        for (RoleType roleType : RoleType.values()) {
-            LoadBalanceStrategyEnum strategy = config.strategyFor(roleType);
-            if (strategy != null) {
-                loadBalanceStrategyMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalanceStrategy(strategy));
-            }
-        }
     }
 
     /**
@@ -133,7 +123,8 @@ public class DefaultRouter implements Router {
         }
 
         for (RoleType roleType : roleTypeList) {
-            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(roleType);
+            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(
+                    roleType, balanceContext.getConfig());
             ServerStatus serverStatus = loadBalanceStrategy.select(balanceContext, roleType, group);
 
             if (!serverStatus.isSuccess()) {
@@ -157,8 +148,14 @@ public class DefaultRouter implements Router {
     /**
      * Get LoadBalanceStrategy based on role type
      */
-    private LoadBalanceStrategy getLoadBalanceStrategy(RoleType roleType) {
-        return loadBalanceStrategyMap.get(roleType);
+    private LoadBalanceStrategy getLoadBalanceStrategy(RoleType roleType, FlexlbConfig requestConfig) {
+        FlexlbConfig config = requestConfig != null
+                ? requestConfig
+                : configService.loadBalanceConfig();
+        LoadBalanceStrategyEnum strategy = config.strategyFor(roleType);
+        return strategy == null
+                ? null
+                : LoadBalanceStrategyFactory.getLoadBalanceStrategy(strategy);
     }
 
     /**
@@ -182,7 +179,8 @@ public class DefaultRouter implements Router {
                 continue;
             }
 
-            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(role);
+            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(
+                    role, balanceContext.getConfig());
             loadBalanceStrategy.rollBack(ep, requestId);
         }
     }

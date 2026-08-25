@@ -5,7 +5,12 @@ import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.pv.ShortestTtftDecision;
+import org.flexlb.dao.route.RoleType;
 
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -38,6 +43,36 @@ public class BalanceContext {
 
     /** Monotonic timestamp captured when server-side request processing starts. */
     private long serviceStartNanos = System.nanoTime();
+
+    private long totalTimeUs;
+
+    private long requestArrivalDelayMs;
+
+    private long requestBodyReadAndDeserializeTimeUs;
+
+    /** Null when the HTTP body has not been decoded or omitted input_ids. */
+    private Long inputIdsCount;
+
+    /** Null when the request body did not declare a Content-Length. */
+    private Long requestBodyBytes;
+
+    private long blockHashQueueWaitTimeUs;
+
+    private long blockHashExecutionTimeUs;
+
+    private long cacheMatchQueryTimeUs;
+
+    private int cacheMatchQueryCount;
+
+    private String cacheMatchSource;
+
+    private final Map<RoleType, CacheMatchSelection> cacheMatchSelectionByRole =
+            new EnumMap<>(RoleType.class);
+
+    private final Map<RoleType, String> selectionReasonByRole =
+            new EnumMap<>(RoleType.class);
+
+    private Map<RoleType, ShortestTtftDecision> shortestTtftDecisionByRole;
 
     /**
      * Timestamp (ms) when the request entered the gRPC server pipeline,
@@ -154,6 +189,55 @@ public class BalanceContext {
     /** Direct accessor for immutable scheduling metadata. */
     public SchedulingMetadata schedulingMetadata() {
         return schedulingMetadata;
+    }
+
+    public void recordRequestTiming(long requestTimeMs, long bodyReadAndDeserializeTimeUs) {
+        if (requestTimeMs > 0) {
+            this.requestArrivalDelayMs = startTime - requestTimeMs;
+        }
+        this.requestBodyReadAndDeserializeTimeUs = bodyReadAndDeserializeTimeUs;
+    }
+
+    public void finishRequestTiming() {
+        this.totalTimeUs = (System.nanoTime() - serviceStartNanos) / 1_000;
+    }
+
+    public void recordBlockHashTiming(long queueWaitTimeUs, long executionTimeUs) {
+        this.blockHashQueueWaitTimeUs = queueWaitTimeUs;
+        this.blockHashExecutionTimeUs = executionTimeUs;
+    }
+
+    public void recordCacheMatch(
+            String source,
+            long queryTimeUs,
+            RoleType role,
+            String selectedIp,
+            long hitCacheTokens) {
+        this.cacheMatchSource = source;
+        this.cacheMatchQueryTimeUs += queryTimeUs;
+        this.cacheMatchQueryCount++;
+        this.cacheMatchSelectionByRole.put(
+                role, new CacheMatchSelection(role, selectedIp, hitCacheTokens));
+    }
+
+    public void recordShortestTtftDecision(ShortestTtftDecision decision) {
+        if (this.shortestTtftDecisionByRole == null) {
+            this.shortestTtftDecisionByRole = new EnumMap<>(RoleType.class);
+        }
+        this.shortestTtftDecisionByRole.put(decision.role(), decision);
+    }
+
+    public void recordSelectionReason(RoleType role, String selectionReason) {
+        this.selectionReasonByRole.put(role, selectionReason);
+    }
+
+    public Map<RoleType, ShortestTtftDecision> getShortestTtftDecisionByRole() {
+        return this.shortestTtftDecisionByRole == null
+                ? Collections.emptyMap()
+                : Collections.unmodifiableMap(this.shortestTtftDecisionByRole);
+    }
+
+    public record CacheMatchSelection(RoleType role, String selectedIp, long hitCacheTokens) {
     }
 
 }

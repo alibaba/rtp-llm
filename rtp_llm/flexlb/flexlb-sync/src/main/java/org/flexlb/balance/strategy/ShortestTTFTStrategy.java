@@ -6,17 +6,28 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.ShortestTtftDecision;
+import org.flexlb.dao.pv.ShortestTtftDecision.CacheAffinityDecision;
+import org.flexlb.dao.pv.ShortestTtftDecision.WorkerDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.StrategySelectionReason;
+import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -26,8 +37,10 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Load balancing strategy based on shortest Time-To-First-Token (TTFT).
@@ -54,6 +67,8 @@ import java.util.Map;
  */
 @Component("shortestTtftStrategy")
 public class ShortestTTFTStrategy implements LoadBalanceStrategy {
+
+    private static final int DECISION_SNAPSHOT_WORKER_LIMIT = 5;
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final CacheAwareService cacheAwareService;
@@ -87,6 +102,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         // Batch path inflight is managed by PriorityScheduler — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
             pe.releaseBatch(requestId);
+            pe.getStatus().removeLocalTask(String.valueOf(requestId));
         }
     }
 
@@ -95,7 +111,19 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                                     long ttft,
                                     long hitCache,
                                     long prefillMs,
-                                    long lastSelectedTime) {}
+                                    long lastSelectedTime,
+                                    long localMatchTokens,
+                                    long p2pFetchTokens,
+                                    long p2pTotalMatchTokens) {
+
+        protected ScoredEndpoint(PrefillEndpoint ep,
+                                 long ttft,
+                                 long hitCache,
+                                 long prefillMs,
+                                 long lastSelectedTime) {
+            this(ep, ttft, hitCache, prefillMs, lastSelectedTime, 0, 0, 0);
+        }
+    }
 
     // ==================== Core Selection ====================
 
@@ -114,18 +142,17 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
+        CacheMatchResult cacheMatchResult = getCacheMatchResult(balanceContext, roleType, group);
 
         // Score all eligible endpoints by TTFT
         List<ScoredEndpoint> scoredEndpoints = scoreEndpoints(
-                eligible, cacheMatchResults, balanceContext);
+                eligible, cacheMatchResult, balanceContext);
         if (scoredEndpoints.isEmpty()) {
             Logger.debug("ShortestTTFT select failed: no scored endpoints, request_id={}", requestId);
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
         long candidateMaxHitTokens = scoredEndpoints.stream()
-                .mapToLong(scored -> calculateRoutingCacheMatchTokens(
-                        scored.ep(), cacheMatchResults, balanceContext.getRequest()))
+                .mapToLong(ScoredEndpoint::hitCache)
                 .max()
                 .orElse(0L);
 
@@ -146,15 +173,22 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 selected.ep().getIp(), selected.ep().getHttpPort(),
                 selected.ttft(), selected.hitCache());
 
+        balanceContext.recordCacheMatch(
+                cacheMatchResult.source().name(),
+                cacheMatchResult.queryTimeUs(),
+                roleType,
+                selected.ep().getIp(),
+                selected.hitCache());
+
         reportCacheHitMetrics(roleType, selected.hitCache(), seqLen);
         reportRoutingCacheMatchMetrics(
                 roleType,
-                calculateRoutingCacheMatchTokens(
-                        selected.ep(), cacheMatchResults, balanceContext.getRequest()),
+                selected.hitCache(),
                 candidateMaxHitTokens,
                 seqLen);
 
-        return buildServerStatus(selected, roleType, requestId, balanceContext);
+        return buildServerStatus(
+                selected, roleType, requestId, balanceContext, cacheMatchResult);
     }
 
     /**
@@ -168,66 +202,140 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                                                 String group,
                                                 long seqLen,
                                                 FlexlbConfig config) {
+        long outstandingThreshold = configuredOutstandingUncachedTokensThreshold(config);
+        List<ScoredEndpoint> outstandingEligible = filterByOutstandingUncachedTokens(
+                scoredEndpoints, roleType, seqLen, outstandingThreshold);
+        boolean outstandingGuardFallback = outstandingEligible.isEmpty()
+                && outstandingGuardEnabled(roleType, outstandingThreshold);
+        List<ScoredEndpoint> selectionPool = outstandingGuardFallback
+                ? scoredEndpoints
+                : outstandingEligible;
+
         RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
                 .getPrefill().getCacheAffinity();
-        if (cacheAffinity == null) {
-            return selectBaselineEndpoint(scoredEndpoints, config);
-        }
-
-        long minTtftMs = scoredEndpoints.getFirst().ttft();
-        long referenceHitTokens = scoredEndpoints.stream()
-                .filter(candidate -> candidate.ttft() == minTtftMs)
-                .mapToLong(ScoredEndpoint::hitCache)
-                .max()
-                .orElse(0L);
-        CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
-                scoredEndpoints.size(),
-                index -> scoredEndpoints.get(index).ttft(),
-                index -> scoredEndpoints.get(index).hitCache(),
-                minTtftMs,
-                referenceHitTokens,
-                seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
-                cacheAffinity.getMinPrefixHitPercent());
-
         ScoredEndpoint selected;
         String reason;
-        if (affinity.hasPreference()) {
-            List<ScoredEndpoint> preferenceOrder = new ArrayList<>(affinity.preferredCount());
-            for (int i = 0; i < affinity.preferredCount(); i++) {
-                preferenceOrder.add(scoredEndpoints.get(affinity.preferredIndex(i)));
-            }
-            selected = selectFirstWithoutConcurrentConflict(preferenceOrder);
-            if (selected == null) {
-                selected = selectBaselineEndpoint(
-                        refreshSelectionSnapshots(scoredEndpoints), config);
-                reason = "CACHE_AFFINITY_FALLBACK";
-            } else {
-                reason = selected.equals(preferenceOrder.getFirst())
-                        ? CacheAffinityPolicy.Reason.CACHE_LEADER.name()
-                        : "CACHE_AFFINITY_FALLBACK";
-            }
+        CacheAffinityDecision cacheAffinityDecision = null;
+        if (cacheAffinity == null) {
+            selected = selectBaselineEndpoint(selectionPool, config);
+            reason = outstandingGuardFallback
+                    ? StrategySelectionReason.SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK.name()
+                    : StrategySelectionReason.SHORTEST_TTFT.name();
         } else {
-            selected = selectBaselineEndpoint(scoredEndpoints, config);
-            reason = affinity.reason().name();
+            long minTtftMs = selectionPool.getFirst().ttft();
+            long referenceHitTokens = selectionPool.stream()
+                    .filter(candidate -> candidate.ttft() == minTtftMs)
+                    .mapToLong(ScoredEndpoint::hitCache)
+                    .max()
+                    .orElse(0L);
+            CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
+                    selectionPool.size(),
+                    index -> selectionPool.get(index).ttft(),
+                    index -> selectionPool.get(index).hitCache(),
+                    minTtftMs,
+                    referenceHitTokens,
+                    seqLen,
+                    cacheAffinity.getMaxExtraTtftMs(),
+                    cacheAffinity.getMinPrefixHitPercent());
+
+            if (affinity.hasPreference()) {
+                List<ScoredEndpoint> preferenceOrder = new ArrayList<>(affinity.preferredCount());
+                for (int i = 0; i < affinity.preferredCount(); i++) {
+                    preferenceOrder.add(selectionPool.get(affinity.preferredIndex(i)));
+                }
+                selected = selectFirstWithoutConcurrentConflict(preferenceOrder);
+                if (selected == null) {
+                    selected = selectBaselineEndpoint(
+                            refreshSelectionSnapshots(selectionPool), config);
+                    reason = StrategySelectionReason.CACHE_AFFINITY_FALLBACK.name();
+                } else {
+                    reason = selected.equals(preferenceOrder.getFirst())
+                            ? StrategySelectionReason.CACHE_LEADER.name()
+                            : StrategySelectionReason.CACHE_AFFINITY_FALLBACK.name();
+                }
+            } else {
+                selected = selectBaselineEndpoint(selectionPool, config);
+                reason = switch (affinity.reason()) {
+                    case LOW_CACHE_HIT -> StrategySelectionReason.SHORTEST_TTFT_LOW_CACHE_HIT.name();
+                    case CACHE_LEADER -> StrategySelectionReason.CACHE_LEADER.name();
+                    default -> StrategySelectionReason.SHORTEST_TTFT.name();
+                };
+            }
+
+            ScoredEndpoint shortest = scoredEndpoints.getFirst();
+            ScoredEndpoint cacheLeader = scoredEndpoints.stream()
+                    .min(Comparator.comparingLong(ScoredEndpoint::hitCache).reversed()
+                            .thenComparingLong(ScoredEndpoint::ttft)
+                            .thenComparingLong(ScoredEndpoint::lastSelectedTime))
+                    .orElse(shortest);
+            if (!outstandingGuardFallback && !selectionPool.contains(cacheLeader)) {
+                reason = StrategySelectionReason.SHORTEST_TTFT_OUTSTANDING_GUARD.name();
+            } else if (outstandingGuardFallback) {
+                reason = StrategySelectionReason.SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK.name();
+            }
+            cacheAffinityDecision = new CacheAffinityDecision(
+                    cacheLeader.ep().ipPort(),
+                    shortest.ep().ipPort(),
+                    Math.max(0L, cacheLeader.hitCache() - shortest.hitCache()),
+                    cacheLeader.ttft() - shortest.ttft(),
+                    cacheAffinity.getMaxExtraTtftMs(),
+                    outstandingThreshold,
+                    selectionPool.contains(cacheLeader));
         }
 
         if (selected != null) {
+            balanceContext.recordSelectionReason(roleType, reason);
+            recordDecisionSnapshot(
+                    balanceContext,
+                    selected,
+                    scoredEndpoints,
+                    selectionPool,
+                    roleType,
+                    group,
+                    seqLen,
+                    reason,
+                    cacheAffinityDecision,
+                    outstandingThreshold,
+                    config);
             reportCacheAffinityDecision(roleType, selected.ep().getIp(), reason);
             Logger.debug(
-                    "ShortestTtft cache-affinity decision - role: {}, group: {}, "
-                            + "selected: {}, minTtftMs: {}, selectedTtftMs: {}, "
-                            + "ttftCutoffMs: {}, hitTokens: {}, reason: {}",
+                    "ShortestTtft decision - role: {}, group: {}, selected: {}, "
+                            + "selectedTtftMs: {}, hitTokens: {}, reason: {}",
                     roleType,
                     group,
                     selected.ep().ipPort(),
-                    affinity.minScoreMs(),
                     selected.ttft(),
-                    affinity.scoreCutoffMs(),
                     selected.hitCache(),
                     reason);
         }
         return selected;
+    }
+
+    private List<ScoredEndpoint> filterByOutstandingUncachedTokens(
+            List<ScoredEndpoint> scoredEndpoints,
+            RoleType roleType,
+            long seqLen,
+            long threshold) {
+        if (!outstandingGuardEnabled(roleType, threshold)) {
+            return scoredEndpoints;
+        }
+        return scoredEndpoints.stream()
+                .filter(scored -> scored.ep().getStatus().getOutstandingUncachedTokens()
+                        + Math.max(0L, seqLen - scored.hitCache()) <= threshold)
+                .toList();
+    }
+
+    private boolean outstandingGuardEnabled(RoleType roleType, long threshold) {
+        return (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION)
+                && threshold > 0L;
+    }
+
+    private long configuredOutstandingUncachedTokensThreshold(FlexlbConfig config) {
+        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        return cacheAffinity == null
+                ? 0L
+                : Math.max(0L, cacheAffinity.getMaxOutstandingUncachedTokens());
     }
 
     /** Refresh CAS snapshots after an affinity claim loses to concurrent schedulers. */
@@ -240,7 +348,10 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                     scored.ttft(),
                     scored.hitCache(),
                     scored.prefillMs(),
-                    scored.ep().getLastSelectedTime().get()));
+                    scored.ep().getLastSelectedTime().get(),
+                    scored.localMatchTokens(),
+                    scored.p2pFetchTokens(),
+                    scored.p2pTotalMatchTokens()));
         }
         refreshed.sort(Comparator.comparingLong(ScoredEndpoint::ttft)
                 .thenComparingLong(ScoredEndpoint::lastSelectedTime));
@@ -311,6 +422,220 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         engineHealthReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
     }
 
+    private void recordDecisionSnapshot(
+            BalanceContext balanceContext,
+            ScoredEndpoint selected,
+            List<ScoredEndpoint> sortedEndpoints,
+            List<ScoredEndpoint> selectionPool,
+            RoleType roleType,
+            String group,
+            long seqLen,
+            String selectionReason,
+            CacheAffinityDecision cacheAffinityDecision,
+            long outstandingThreshold,
+            FlexlbConfig config) {
+        int candidateCount = config.shortestTtftCandidateCount(selectionPool.size());
+        List<ScoredEndpoint> candidates = selectionPool.subList(
+                0, Math.min(candidateCount, selectionPool.size()));
+        long nowUs = System.nanoTime() / 1_000;
+        List<ScoredEndpoint> snapshotEndpoints = selectSnapshotEndpoints(
+                selected, sortedEndpoints, cacheAffinityDecision);
+        List<WorkerDecision> workers = snapshotEndpoints.stream()
+                .map(scored -> buildWorkerDecision(
+                        scored,
+                        sortedEndpoints.indexOf(scored) + 1,
+                        selected,
+                        candidates,
+                        seqLen,
+                        nowUs,
+                        cacheAffinityDecision,
+                        outstandingThreshold))
+                .toList();
+        RoutingConfig.CacheAffinityConfig affinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        double p2pDiscount = affinity == null
+                ? 0.2
+                : Math.max(0.0, affinity.getP2pHitDiscount());
+        double toleranceMs = affinity == null
+                ? 0.0
+                : Math.max(0L, affinity.getMaxExtraTtftMs());
+        balanceContext.recordShortestTtftDecision(new ShortestTtftDecision(
+                roleType,
+                group,
+                LoadBalanceStrategyEnum.SHORTEST_TTFT.getName(),
+                selectionReason,
+                System.currentTimeMillis(),
+                Math.max(1, balanceContext.getScheduleAttempt()),
+                p2pDiscount,
+                seqLen,
+                sortedEndpoints.getFirst().ttft(),
+                toleranceMs,
+                sortedEndpoints.size(),
+                candidates.size(),
+                candidates.size(),
+                DECISION_SNAPSHOT_WORKER_LIMIT,
+                workers.size() < sortedEndpoints.size(),
+                workers.stream().mapToLong(WorkerDecision::outstandingUncachedTokens).sum(),
+                workers,
+                cacheAffinityDecision));
+    }
+
+    private List<ScoredEndpoint> selectSnapshotEndpoints(
+            ScoredEndpoint selected,
+            List<ScoredEndpoint> sortedEndpoints,
+            CacheAffinityDecision cacheAffinityDecision) {
+        LinkedHashMap<String, ScoredEndpoint> prioritized = new LinkedHashMap<>();
+        prioritized.put(selected.ep().ipPort(), selected);
+        if (cacheAffinityDecision != null) {
+            addSnapshotEndpoint(
+                    prioritized,
+                    sortedEndpoints,
+                    cacheAffinityDecision.shortestTtftWorkerIpPort());
+            addSnapshotEndpoint(
+                    prioritized,
+                    sortedEndpoints,
+                    cacheAffinityDecision.cacheLeaderIpPort());
+        }
+        sortedEndpoints.forEach(scored -> prioritized.putIfAbsent(
+                scored.ep().ipPort(), scored));
+        return prioritized.values().stream()
+                .limit(DECISION_SNAPSHOT_WORKER_LIMIT)
+                .sorted(Comparator.comparingInt(sortedEndpoints::indexOf))
+                .toList();
+    }
+
+    private void addSnapshotEndpoint(
+            Map<String, ScoredEndpoint> prioritized,
+            List<ScoredEndpoint> sortedEndpoints,
+            String ipPort) {
+        sortedEndpoints.stream()
+                .filter(scored -> scored.ep().ipPort().equals(ipPort))
+                .findFirst()
+                .ifPresent(scored -> prioritized.putIfAbsent(ipPort, scored));
+    }
+
+    private WorkerDecision buildWorkerDecision(
+            ScoredEndpoint scored,
+            int estimatedTtftRank,
+            ScoredEndpoint selected,
+            List<ScoredEndpoint> candidates,
+            long seqLen,
+            long decisionTimeUs,
+            CacheAffinityDecision cacheAffinityDecision,
+            long outstandingThreshold) {
+        WorkerStatus worker = scored.ep().getStatus();
+        long requestUncachedTokens = Math.max(0L, seqLen - scored.hitCache());
+        double requestHitRatePct = seqLen > 0L
+                ? scored.hitCache() * 100.0 / seqLen
+                : 0.0;
+        long outstandingUncachedTokens = worker.getOutstandingUncachedTokens();
+        Map<String, TaskInfo> trackedTasks = worker.getLocalTaskMap();
+        Map<String, TaskInfo> waitingTasks = worker.getWaitingTaskList();
+        Map<String, TaskInfo> runningTasks = worker.getRunningTaskList();
+        long blockSize = worker.getCacheStatus() == null
+                ? 0L
+                : worker.getCacheStatus().getBlockSize();
+        String cacheLeader = cacheAffinityDecision == null
+                ? null
+                : cacheAffinityDecision.cacheLeaderIpPort();
+        String shortest = cacheAffinityDecision == null
+                ? candidates.isEmpty() ? null : candidates.getFirst().ep().ipPort()
+                : cacheAffinityDecision.shortestTtftWorkerIpPort();
+
+        return new WorkerDecision(
+                estimatedTtftRank,
+                worker.getIp(),
+                worker.getPort(),
+                candidates.contains(scored),
+                candidates.contains(scored),
+                selected.equals(scored),
+                worker.getIpPort().equals(cacheLeader),
+                worker.getIpPort().equals(shortest),
+                outstandingThreshold <= 0L
+                        || outstandingUncachedTokens + requestUncachedTokens
+                                <= outstandingThreshold,
+                blockSize,
+                scored.hitCache(),
+                requestHitRatePct,
+                requestUncachedTokens,
+                scored.localMatchTokens(),
+                scored.p2pFetchTokens(),
+                scored.p2pTotalMatchTokens(),
+                Math.max(0L, scored.p2pTotalMatchTokens() - scored.localMatchTokens()),
+                scored.prefillMs(),
+                Math.max(0L, scored.ttft() - scored.prefillMs()),
+                scored.ttft(),
+                outstandingUncachedTokens,
+                outstandingUncachedTokens + requestUncachedTokens,
+                scored.lastSelectedTime(),
+                countTasks(trackedTasks),
+                worker.getInTransitAndWaitingTaskCount(),
+                worker.getInTransitAndWaitingUncachedTokens(),
+                countTrackedRunningTasks(trackedTasks),
+                worker.getRunningRemainingPrefillTokens(),
+                countTasks(waitingTasks),
+                sumUncachedTokens(waitingTasks),
+                countTasks(runningTasks),
+                sumRunningRemainingPrefillTokens(runningTasks),
+                worker.isAlive(),
+                worker.getResourceAvailable().get(),
+                worker.getAvailableConcurrency(),
+                worker.getAvailableKvCacheTokens().get(),
+                worker.getUsedKvCacheTokens().get(),
+                worker.getStatusVersion().get(),
+                elapsedUs(decisionTimeUs, worker.getStatusLastUpdateTime().get()),
+                worker.getStatusUpdateIntervalUs().get(),
+                elapsedUs(decisionTimeUs, worker.getCacheLastUpdateTime().get()));
+    }
+
+    private int countTasks(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0
+                : (int) tasks.values().stream().filter(Objects::nonNull).count();
+    }
+
+    private int countTrackedRunningTasks(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0
+                : (int) tasks.values().stream()
+                        .filter(task -> task != null
+                                && task.getTaskState() == TaskStateEnum.RUNNING)
+                        .count();
+    }
+
+    private long sumUncachedTokens(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0L
+                : tasks.values().stream()
+                        .filter(Objects::nonNull)
+                        .mapToLong(this::uncachedTokens)
+                        .sum();
+    }
+
+    private long sumRunningRemainingPrefillTokens(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0L
+                : tasks.values().stream()
+                        .filter(Objects::nonNull)
+                        .mapToLong(task -> task.getRemainingPrefillTokens() >= 0L
+                                ? task.getRemainingPrefillTokens()
+                                : uncachedTokens(task))
+                        .sum();
+    }
+
+    private long uncachedTokens(TaskInfo task) {
+        long inputTokens = Math.max(0L, task.getInputLength());
+        long hitTokens = task.isPrefixLengthValid()
+                ? task.getPrefixLength()
+                : task.getPredictedPrefixLength();
+        return Math.max(0L,
+                inputTokens - Math.max(0L, Math.min(inputTokens, hitTokens)));
+    }
+
+    private long elapsedUs(long nowUs, long timestampUs) {
+        return timestampUs > 0L ? Math.max(0L, nowUs - timestampUs) : -1L;
+    }
+
     // ==================== Scoring ====================
 
     /**
@@ -320,15 +645,20 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
      * Endpoints without a predictor are skipped.
      *
      * @param endpoints eligible endpoint list
-     * @param cacheMatchResults cache match results from {@link CacheAwareService}
+     * @param cacheMatchResult cache match results from {@link CacheAwareService}
      * @param balanceContext request and scheduling context
      * @return list of scored endpoints
      */
     private List<ScoredEndpoint> scoreEndpoints(List<PrefillEndpoint> endpoints,
-                                                Map<String, Integer> cacheMatchResults,
+                                                CacheMatchResult cacheMatchResult,
                                                 BalanceContext balanceContext) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
+        RoutingConfig.CacheAffinityConfig affinityConfig = balanceContext.getConfig()
+                .getRouter().getRoles().getPrefill().getCacheAffinity();
+        double p2pHitDiscount = affinityConfig == null
+                ? 0.2
+                : Math.max(0.0, affinityConfig.getP2pHitDiscount());
         List<ScoredEndpoint> result = new ArrayList<>(endpoints.size());
         for (PrefillEndpoint ep : endpoints) {
             PrefillTimePredictor predictor = ep.getPredictor();
@@ -336,7 +666,22 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 Logger.debug("ShortestTTFT: skipping endpoint without predictor, ip={}", ep.getIp());
                 continue;
             }
-            long cacheHit = calculateCacheHit(ep, cacheMatchResults, request);
+            HostCacheMatch match = cacheMatchResult.hostMatch(ep.ipPort());
+            long localMatchBlocks = match == null ? 0L : match.localMatchBlocks();
+            long p2pFetchBlocks = match == null ? 0L : match.p2pFetchBlocks();
+            long p2pTotalMatchBlocks = match == null ? 0L : match.p2pTotalMatchBlocks();
+            long p2pAddedMatchBlocks = Math.max(
+                    0L, p2pTotalMatchBlocks - localMatchBlocks);
+            double effectiveMatchBlocks = localMatchBlocks
+                    + p2pAddedMatchBlocks * p2pHitDiscount;
+            long cacheHit = CacheMatchResult.matchedTokens(
+                    effectiveMatchBlocks, cacheMatchResult.blockSize(), seqLen);
+            long localMatchTokens = CacheMatchResult.matchedTokens(
+                    localMatchBlocks, cacheMatchResult.blockSize(), seqLen);
+            long p2pFetchTokens = CacheMatchResult.matchedTokens(
+                    p2pFetchBlocks, cacheMatchResult.blockSize(), seqLen);
+            long p2pTotalMatchTokens = CacheMatchResult.matchedTokens(
+                    p2pTotalMatchBlocks, cacheMatchResult.blockSize(), seqLen);
             long prefillMs = Math.max(0L, predictor.estimateMs(seqLen, cacheHit));
             long queueMs = estimatedQueueWaitMs(ep, balanceContext);
             if (queueMs == Long.MAX_VALUE) {
@@ -348,7 +693,14 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
                     ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
             result.add(new ScoredEndpoint(
-                    ep, ttft, cacheHit, prefillMs, ep.getLastSelectedTime().get()));
+                    ep,
+                    ttft,
+                    cacheHit,
+                    prefillMs,
+                    ep.getLastSelectedTime().get(),
+                    localMatchTokens,
+                    p2pFetchTokens,
+                    p2pTotalMatchTokens));
         }
         return result;
     }
@@ -426,71 +778,20 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         return result;
     }
 
-    private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
-    }
-
-    private long calculateCacheHit(PrefillEndpoint ep,
-                                   Map<String, Integer> cacheMatchResults,
-                                   Request request) {
-        if (cacheMatchResults == null || request == null) {
-            return 0L;
-        }
-        long seqLen = request.getSeqLen();
-        if (seqLen <= 0L) {
-            return 0L;
-        }
-        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
-        if (prefixMatchLength == null || prefixMatchLength <= 0) {
-            return 0L;
-        }
-        long blockSize = request.getCacheKeyBlockSize();
-        if (blockSize <= 0L && ep.getStatus().getCacheStatus() != null) {
-            blockSize = ep.getStatus().getCacheStatus().getBlockSize();
-        }
-        if (blockSize <= 0L) {
-            return 0L;
-        }
-        long rawHit;
-        try {
-            rawHit = Math.multiplyExact(blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            rawHit = seqLen;
-        }
-        if (rawHit >= seqLen) {
-            return Math.max(0L, seqLen - blockSize);
-        }
-        return Math.max(0L, rawHit);
-    }
-
-    private long calculateRoutingCacheMatchTokens(PrefillEndpoint ep,
-                                                  Map<String, Integer> cacheMatchResults,
-                                                  Request request) {
-        if (ep == null || cacheMatchResults == null || request == null || request.getSeqLen() <= 0L) {
-            return 0L;
-        }
-
-        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
-        if (prefixMatchLength == null || prefixMatchLength <= 0) {
-            return 0L;
-        }
-
-        long blockSize = request.getCacheKeyBlockSize();
-        if (blockSize <= 0L && ep.getStatus().getCacheStatus() != null) {
-            blockSize = ep.getStatus().getCacheStatus().getBlockSize();
-        }
-        if (blockSize <= 0L) {
-            return 0L;
-        }
-
-        long hitTokens;
-        try {
-            hitTokens = Math.multiplyExact(blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            return request.getSeqLen();
-        }
-        return Math.min(request.getSeqLen(), hitTokens);
+    private CacheMatchResult getCacheMatchResult(
+            BalanceContext balanceContext, RoleType roleType, String group) {
+        Request request = balanceContext.getRequest();
+        long blockSize = request.getBlockSize() > 0L
+                ? request.getBlockSize()
+                : request.getCacheKeyBlockSize();
+        return cacheAwareService.findMatchingEngines(new CacheMatchQuery(
+                String.valueOf(balanceContext.getRequestId()),
+                request.getBlockCacheKeys(),
+                blockSize,
+                request.getLocalStandbyBlockCacheKeys(),
+                request.getLocalStandbyBlockSize(),
+                roleType,
+                group));
     }
 
     // ==================== Metrics & ServerStatus (mirrors CostBasedPrefillStrategy) ====================
@@ -513,7 +814,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     private ServerStatus buildServerStatus(ScoredEndpoint selected,
                                            RoleType roleType,
                                            long requestId,
-                                           BalanceContext balanceContext) {
+                                           BalanceContext balanceContext,
+                                           CacheMatchResult cacheMatchResult) {
         PrefillEndpoint ep = selected.ep();
         long ttft = selected.ttft();
         long bestCacheHit = selected.hitCache();
@@ -521,6 +823,22 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
         if (strategyOwnsInflightTracking(balanceContext)) {
             ep.commitBatch(requestId, selected.prefillMs(), Collections.emptyList());
+        }
+
+        String lifecycleRequestId = String.valueOf(requestId);
+        WorkerStatus workerStatus = ep.getStatus();
+        if (!workerStatus.getLocalTaskMap().containsKey(lifecycleRequestId)) {
+            TaskInfo task = createTaskInfo(
+                    requestId,
+                    balanceContext.getRequest().getSeqLen(),
+                    bestCacheHit,
+                    cacheMatchResult.source().name());
+            recordKvcmMatch(
+                    task,
+                    cacheMatchResult,
+                    cacheMatchResult.hostMatch(ep.ipPort()),
+                    balanceContext.getRequest().getSeqLen());
+            workerStatus.putLocalTask(lifecycleRequestId, task);
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
@@ -539,6 +857,36 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         result.setDpRank(ep.getStatus().getDpRank());
         result.setDebugInfo(debugInfo);
         return result;
+    }
+
+    private TaskInfo createTaskInfo(
+            long requestId, long inputLength, long prefixLength, String cacheMatchSource) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setInputLength(inputLength);
+        task.setPrefixLength(prefixLength);
+        task.setPredictedPrefixLength(prefixLength);
+        task.setCacheMatchSource(cacheMatchSource);
+        return task;
+    }
+
+    private void recordKvcmMatch(
+            TaskInfo task,
+            CacheMatchResult cacheMatchResult,
+            HostCacheMatch match,
+            long inputTokens) {
+        if (cacheMatchResult.source() != CacheMatchSource.KVCM
+                || match == null
+                || cacheMatchResult.blockSize() <= 0L) {
+            return;
+        }
+        task.setKvcmMatchAvailable(true);
+        task.setKvcmLocalMatchTokens(CacheMatchResult.matchedTokens(
+                match.localMatchBlocks(), cacheMatchResult.blockSize(), inputTokens));
+        task.setKvcmP2pFetchTokens(CacheMatchResult.matchedTokens(
+                match.p2pFetchBlocks(), cacheMatchResult.blockSize(), inputTokens));
+        task.setKvcmP2pTotalMatchTokens(CacheMatchResult.matchedTokens(
+                match.p2pTotalMatchBlocks(), cacheMatchResult.blockSize(), inputTokens));
     }
 
     /** Whether this request is owned by the common queue/batch scheduler. */
