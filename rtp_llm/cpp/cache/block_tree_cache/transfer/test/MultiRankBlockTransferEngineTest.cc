@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <future>
 #include <mutex>
 #include <sys/resource.h>
 #include <thread>
@@ -274,6 +275,28 @@ TEST_F(MultiRankBlockTransferEngineTest, PollingDoneSettlesSuccessAndErrorState)
         EXPECT_EQ(context->success(), response_code == MemoryOperationResponsePB::OK);
         EXPECT_EQ(context->errorInfo().ok(), response_code == MemoryOperationResponsePB::OK);
     }
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, CallbackCompletesWithoutCallingWaitDone) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    auto cache = makeBroadcastCache(broadcast_manager);
+    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+        makeBroadcastDescriptors(), /*timeout_ms=*/1000);
+
+    std::promise<ErrorInfo> done;
+    auto                    future = done.get_future();
+    context->onDone([&](ErrorInfo error) { done.set_value(std::move(error)); });
+
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_TRUE(future.get().ok());
+    EXPECT_TRUE(context->done());
+    EXPECT_TRUE(context->success());
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWithoutDispatchOnInvalidBatch) {

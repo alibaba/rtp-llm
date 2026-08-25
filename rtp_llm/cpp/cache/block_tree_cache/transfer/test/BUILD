@@ -107,3 +107,10 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
 )
+
+cc_test(
+    name = "transfer_stage_state_test",
+    srcs = ["TransferStageStateTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)

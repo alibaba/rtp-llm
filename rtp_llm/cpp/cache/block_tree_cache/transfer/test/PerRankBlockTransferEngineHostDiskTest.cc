@@ -19,6 +19,16 @@
 namespace rtp_llm {
 namespace {
 
+TEST(PerRankBlockTransferEngineConfigTest, PreservesLegacyConstructorDefault) {
+    PerRankBlockTransferEngine engine(std::vector<GroupSetPtr>{});
+    EXPECT_EQ(engine.transferWorkerCount(), 1u);
+}
+
+TEST(PerRankBlockTransferEngineConfigTest, PreservesExplicitWorkerOverride) {
+    PerRankBlockTransferEngine engine({}, {}, 4, 64, 7);
+    EXPECT_EQ(engine.transferWorkerCount(), 7u);
+}
+
 using block_transfer_engine_test::TempDirGuard;
 using block_transfer_engine_test::DirectAlignmentDiskBlockIO;
 using block_transfer_engine_test::StatusDiskBlockIO;

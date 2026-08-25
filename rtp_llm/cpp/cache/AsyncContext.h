@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -9,11 +10,14 @@ namespace rtp_llm {
 
 class AsyncContext {
 public:
+    using DoneCallback = std::function<void(ErrorInfo)>;
+
     AsyncContext()          = default;
     virtual ~AsyncContext() = default;
 
 public:
     virtual void      waitDone()      = 0;
+    virtual void      onDone(DoneCallback callback) = 0;
     virtual bool      done() const    = 0;
     virtual bool      success() const = 0;
     virtual ErrorInfo errorInfo() const {
@@ -28,6 +32,7 @@ public:
     ~CompletedAsyncContext() override = default;
 
     void      waitDone() override;
+    void      onDone(DoneCallback callback) override;
     bool      done() const override;
     bool      success() const override;
     ErrorInfo errorInfo() const override;
@@ -43,6 +48,7 @@ public:
 
 public:
     void      waitDone() override;
+    void      onDone(DoneCallback callback) override;
     bool      done() const override;
     bool      success() const override;
     ErrorInfo errorInfo() const override;
