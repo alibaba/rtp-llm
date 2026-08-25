@@ -420,10 +420,7 @@ class V4Transformer(nn.Module):
         self._kv_cache_sharded = bool(kv_cache_sharded)
 
     def _propagate_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
-        cache_setters = os.environ.get(
-            "DSV4_CP_PREPARE_TRITON", "1"
-        ).strip().lower() not in ("0", "false", "off", "no")
-        setters = getattr(self, "_cp_ctx_setters", None) if cache_setters else None
+        setters = getattr(self, "_cp_ctx_setters", None)
         if setters is None:
             collected = []
             for layer in self.layers:
@@ -441,8 +438,7 @@ class V4Transformer(nn.Module):
                     if indexer_compressor is not None:
                         collected.append(indexer_compressor.set_cp_ctx)
             setters = tuple(collected)
-            if cache_setters:
-                self._cp_ctx_setters = setters
+            self._cp_ctx_setters = setters
         for setter in setters:
             setter(cp_ctx)
 

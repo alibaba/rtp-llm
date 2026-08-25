@@ -1,4 +1,3 @@
-import os
 import unittest
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
@@ -125,16 +124,16 @@ class PrefillFastPathTest(unittest.TestCase):
             v4._cp_info = object()
             v4._cp_size = 2
 
-        def fake_forward_layers(_v4, _kv_cache, _input_ids, positions, *_args, **_kwargs):
+        def fake_forward_layers(
+            _v4, _kv_cache, _input_ids, positions, *_args, **_kwargs
+        ):
             captured["positions"] = positions
             return torch.empty((4, 1))
 
-        with patch.dict(
-            prefill_forward.os.environ,
-            {"DSV4_CP_PREPARE_TRITON": "1"},
-            clear=False,
-        ), patch.object(
+        with patch.object(
             prefill_forward, "set_cp_info", fake_set_cp_info
+        ), patch.object(
+            prefill_forward, "_cp_prepare_fusion_supported", return_value=True
         ), patch.object(
             prefill_forward, "build_block_tables_batched", return_value={}
         ), patch.object(
@@ -155,7 +154,7 @@ class PrefillFastPathTest(unittest.TestCase):
         self.assertEqual(captured["positions"].numel(), 0)
         self.assertEqual(tuple(output.shape), (4, 1))
 
-    def test_cp_context_setters_are_cached_only_when_prepare_enabled(self):
+    def test_cp_context_setters_are_cached(self):
         class Sink:
             def __init__(self):
                 self.values = []
@@ -168,9 +167,7 @@ class PrefillFastPathTest(unittest.TestCase):
             attn.compressor = Sink()
             attn.indexer = Sink()
             attn.indexer.compressor = Sink()
-            return SimpleNamespace(
-                layers=[SimpleNamespace(attn=attn)]
-            ), (
+            return SimpleNamespace(layers=[SimpleNamespace(attn=attn)]), (
                 attn,
                 attn.compressor,
                 attn.indexer,
@@ -178,24 +175,12 @@ class PrefillFastPathTest(unittest.TestCase):
             )
 
         transformer, sinks = make_transformer()
-        with patch.dict(
-            os.environ, {"DSV4_CP_PREPARE_TRITON": "1"}, clear=False
-        ):
-            V4Transformer._propagate_cp_ctx(transformer, "first")
-            setters = transformer._cp_ctx_setters
-            V4Transformer._propagate_cp_ctx(transformer, "second")
+        V4Transformer._propagate_cp_ctx(transformer, "first")
+        setters = transformer._cp_ctx_setters
+        V4Transformer._propagate_cp_ctx(transformer, "second")
         self.assertIs(setters, transformer._cp_ctx_setters)
         for sink in sinks:
             self.assertEqual(sink.values, ["first", "second"])
-
-        fallback_transformer, fallback_sinks = make_transformer()
-        with patch.dict(
-            os.environ, {"DSV4_CP_PREPARE_TRITON": "0"}, clear=False
-        ):
-            V4Transformer._propagate_cp_ctx(fallback_transformer, "fallback")
-        self.assertFalse(hasattr(fallback_transformer, "_cp_ctx_setters"))
-        for sink in fallback_sinks:
-            self.assertEqual(sink.values, ["fallback"])
 
     def test_disable_record_function_ranges_is_scoped(self):
         calls = []
@@ -449,9 +434,7 @@ class PrefillFastPathTest(unittest.TestCase):
             original = layer.forward_prefill_fast
 
             def wrapped(*args, _original=original, **kwargs):
-                nested_range_enabled.append(
-                    _profiler.record_function_ranges_enabled()
-                )
+                nested_range_enabled.append(_profiler.record_function_ranges_enabled())
                 return _original(*args, **kwargs)
 
             layer.forward_prefill_fast = wrapped

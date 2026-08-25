@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import random
 import unittest
 from types import SimpleNamespace
@@ -13,8 +12,8 @@ from torch.profiler import ProfilerActivity, profile
 
 from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
 from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
-    try_build_cp_full_prefill_positions,
     try_build_cp_forward_metadata,
+    try_build_cp_full_prefill_positions,
     try_build_cp_restore_indices,
 )
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -40,8 +39,7 @@ def _random_varlen_case(batch_size: int, seed: int) -> tuple[list[int], list[int
 
 def _restore_reference(lengths: list[int], cp_size: int, block_size: int) -> list[int]:
     local_lens = [
-        ((length + cp_size * block_size - 1) // (cp_size * block_size))
-        * block_size
+        ((length + cp_size * block_size - 1) // (cp_size * block_size)) * block_size
         for length in lengths
     ]
     total_local = sum(local_lens)
@@ -97,9 +95,7 @@ def _cp_forward_inputs(
         "prefixes": torch.tensor(prefixes, dtype=torch.int32, device="cuda"),
         "padding": padding.cuda(),
         "restore": restore.cuda(),
-        "shuffle": torch.tensor(
-            shuffle_for_rank, dtype=torch.int32, device="cuda"
-        ),
+        "shuffle": torch.tensor(shuffle_for_rank, dtype=torch.int32, device="cuda"),
         "chunk_length": total_chunk,
         "seq_len_full": sum(lengths),
         "cp_size": cp_size,
@@ -127,9 +123,7 @@ def _cp_forward_reference(
         relative_parts.append(request_shuffle + padded_offset)
         global_parts.append(request_shuffle.clamp_max(max(length - 1, 0)) + prefix)
         request_parts.append(
-            torch.full(
-                (chunk,), request_id, dtype=torch.int32, device="cuda"
-            )
+            torch.full((chunk,), request_id, dtype=torch.int32, device="cuda")
         )
         padded_offset += chunk * int(inputs["cp_size"])
         local_offset += chunk
@@ -158,9 +152,7 @@ class CPMetadataTritonTest(unittest.TestCase):
     ) -> None:
         self.assertEqual(len(actual), len(expected))
         for actual_tensor, expected_tensor in zip(actual, expected):
-            torch.testing.assert_close(
-                actual_tensor, expected_tensor, rtol=0, atol=0
-            )
+            torch.testing.assert_close(actual_tensor, expected_tensor, rtol=0, atol=0)
             self.assertEqual(actual_tensor.dtype, expected_tensor.dtype)
             self.assertTrue(actual_tensor.is_contiguous())
 
@@ -176,12 +168,8 @@ class CPMetadataTritonTest(unittest.TestCase):
         )
         for lengths, prefixes, cp_size in cases:
             for cp_rank in range(cp_size):
-                with self.subTest(
-                    lengths=lengths, cp_size=cp_size, cp_rank=cp_rank
-                ):
-                    inputs = _cp_forward_inputs(
-                        lengths, prefixes, cp_size, cp_rank
-                    )
+                with self.subTest(lengths=lengths, cp_size=cp_size, cp_rank=cp_rank):
+                    inputs = _cp_forward_inputs(lengths, prefixes, cp_size, cp_rank)
                     actual = try_build_cp_forward_metadata(
                         inputs["lengths"],
                         inputs["chunks"],
@@ -224,7 +212,7 @@ class CPMetadataTritonTest(unittest.TestCase):
                         actual, _cp_forward_reference(inputs)
                     )
 
-    def test_forward_metadata_gate_and_shape_validation_use_fallback(self):
+    def test_forward_metadata_shape_validation_uses_fallback(self):
         inputs = _cp_forward_inputs([9, 14], [0, 100], 2, 0)
         kwargs = dict(
             cp_size=2,
@@ -240,12 +228,8 @@ class CPMetadataTritonTest(unittest.TestCase):
             inputs["restore"],
             inputs["shuffle"],
         )
-        with patch.dict(os.environ, {"DSV4_CP_PREPARE_TRITON": "0"}):
-            self.assertIsNone(try_build_cp_forward_metadata(*args, **kwargs))
         self.assertIsNone(
-            try_build_cp_forward_metadata(
-                *args[:-1], args[-1][:-1], **kwargs
-            )
+            try_build_cp_forward_metadata(*args[:-1], args[-1][:-1], **kwargs)
         )
 
     def test_forward_metadata_hot_path_is_one_kernel(self):
@@ -276,7 +260,9 @@ class CPMetadataTritonTest(unittest.TestCase):
         self.assertIsNotNone(actual)
         self.assert_forward_metadata_equal(actual, _cp_forward_reference(inputs))
         events = list(prof.key_averages())
-        fused = [event for event in events if "_cp_forward_metadata_kernel" in event.key]
+        fused = [
+            event for event in events if "_cp_forward_metadata_kernel" in event.key
+        ]
         self.assertEqual(sum(event.count for event in fused), 1)
         keys = {event.key for event in events}
         for forbidden in (
@@ -289,7 +275,7 @@ class CPMetadataTritonTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, keys)
 
-    def test_build_cp_context_b64_fused_matches_torch_fallback(self):
+    def test_build_cp_context_b64_fused_for_both_cache_topologies(self):
         lengths, prefixes = _random_varlen_case(64, seed=2026082264)
         cp_size = 4
         cp_rank = 3
@@ -297,68 +283,75 @@ class CPMetadataTritonTest(unittest.TestCase):
         cp_info = SimpleNamespace(
             prefill_qkv_padding_mask=inputs["padding"],
             prefill_qkv_restore_indice=inputs["restore"],
-            prefill_actual_input_lengths_cpu=torch.tensor(
-                lengths, dtype=torch.int32
-            ),
+            prefill_actual_input_lengths_cpu=torch.tensor(lengths, dtype=torch.int32),
             prefill_cp_chunk_lengths=inputs["chunks"],
             prefill_shuffle_indices=inputs["shuffle"],
         )
-        kwargs = dict(
-            cp_info=cp_info,
-            cp_size=cp_size,
-            cp_rank=cp_rank,
-            chunk_length=inputs["chunk_length"],
-            device=torch.device("cuda"),
-            position_offset=inputs["prefixes"],
-            position_offset_host=torch.tensor(prefixes, dtype=torch.int32),
-            chunk_lengths_device=inputs["chunks"],
-            kv_cache_sharded=True,
-        )
-        with patch.dict(os.environ, {"DSV4_CP_PREPARE_TRITON": "0"}):
-            expected = build_cp_context(**kwargs)
-        with patch.dict(os.environ, {"DSV4_CP_PREPARE_TRITON": "1"}):
-            for _ in range(2):
-                actual = build_cp_context(**kwargs)
-            torch.cuda.synchronize()
-            with profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
-            ) as prof:
-                actual = build_cp_context(**kwargs)
-            torch.cuda.synchronize()
+        for kv_cache_sharded in (False, True):
+            with self.subTest(kv_cache_sharded=kv_cache_sharded):
+                kwargs = dict(
+                    cp_info=cp_info,
+                    cp_size=cp_size,
+                    cp_rank=cp_rank,
+                    chunk_length=inputs["chunk_length"],
+                    device=torch.device("cuda"),
+                    position_offset=inputs["prefixes"],
+                    position_offset_host=torch.tensor(prefixes, dtype=torch.int32),
+                    chunk_lengths_device=inputs["chunks"],
+                    kv_cache_sharded=kv_cache_sharded,
+                )
+                with patch.object(
+                    _cp_metadata_triton,
+                    "try_build_cp_forward_metadata",
+                    return_value=None,
+                ) as fallback_builder:
+                    expected = build_cp_context(**kwargs)
+                fallback_builder.assert_called_once()
+                for _ in range(2):
+                    actual = build_cp_context(**kwargs)
+                torch.cuda.synchronize()
+                with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
+                ) as prof:
+                    actual = build_cp_context(**kwargs)
+                torch.cuda.synchronize()
 
-        for field in (
-            "relative_positions",
-            "global_positions",
-            "req_id_per_token",
-            "prefix_lengths",
-            "local_is_real",
-            "unpad_restore",
-            "input_lengths_global",
-            "cu_seqlens_global",
-        ):
-            torch.testing.assert_close(
-                getattr(actual, field), getattr(expected, field), rtol=0, atol=0
-            )
-        for field in (
-            "cp_size",
-            "cp_rank",
-            "chunk_length",
-            "padded_seq_len",
-            "seq_len_full",
-            "prefix_length",
-            "seq_len_total",
-            "chunk_lengths_per_req",
-            "kv_cache_sharded",
-            "input_lengths_global_host",
-            "prefix_lengths_host",
-        ):
-            self.assertEqual(getattr(actual, field), getattr(expected, field))
-        fused = [
-            event
-            for event in prof.key_averages()
-            if "_cp_forward_metadata_kernel" in event.key
-        ]
-        self.assertEqual(sum(event.count for event in fused), 1)
+                for field in (
+                    "relative_positions",
+                    "global_positions",
+                    "req_id_per_token",
+                    "prefix_lengths",
+                    "local_is_real",
+                    "unpad_restore",
+                    "input_lengths_global",
+                    "cu_seqlens_global",
+                ):
+                    torch.testing.assert_close(
+                        getattr(actual, field),
+                        getattr(expected, field),
+                        rtol=0,
+                        atol=0,
+                    )
+                for field in (
+                    "cp_size",
+                    "cp_rank",
+                    "chunk_length",
+                    "padded_seq_len",
+                    "seq_len_full",
+                    "prefix_length",
+                    "seq_len_total",
+                    "chunk_lengths_per_req",
+                    "kv_cache_sharded",
+                    "input_lengths_global_host",
+                    "prefix_lengths_host",
+                ):
+                    self.assertEqual(getattr(actual, field), getattr(expected, field))
+                fused = [
+                    event
+                    for event in prof.key_averages()
+                    if "_cp_forward_metadata_kernel" in event.key
+                ]
+                self.assertEqual(sum(event.count for event in fused), 1)
 
     def test_restore_indices_exact_for_shape_matrix(self):
         lengths_b32, _ = _random_varlen_case(32, seed=2026082232)
@@ -415,9 +408,7 @@ class CPMetadataTritonTest(unittest.TestCase):
         ):
             with self.subTest(lengths=lengths_host, prefixes=prefixes_host):
                 lengths = torch.tensor(lengths_host, dtype=torch.int64, device="cuda")
-                prefixes = torch.tensor(
-                    prefixes_host, dtype=torch.int64, device="cuda"
-                )
+                prefixes = torch.tensor(prefixes_host, dtype=torch.int64, device="cuda")
                 actual = try_build_cp_full_prefill_positions(
                     lengths, prefixes, total_tokens=sum(lengths_host)
                 )
@@ -432,9 +423,7 @@ class CPMetadataTritonTest(unittest.TestCase):
                     expected_request_ids.extend([req_id] * length)
                 torch.testing.assert_close(
                     positions,
-                    torch.tensor(
-                        expected_positions, dtype=torch.int64, device="cuda"
-                    ),
+                    torch.tensor(expected_positions, dtype=torch.int64, device="cuda"),
                     rtol=0,
                     atol=0,
                 )
@@ -464,16 +453,11 @@ class CPMetadataTritonTest(unittest.TestCase):
             lengths_host, prefixes_host = _random_varlen_case(
                 batch_size, seed=2026082200 + batch_size
             )
-            lengths = torch.tensor(
-                lengths_host, dtype=torch.int64, device="cuda"
-            )
-            prefixes = torch.tensor(
-                prefixes_host, dtype=torch.int64, device="cuda"
-            )
+            lengths = torch.tensor(lengths_host, dtype=torch.int64, device="cuda")
+            prefixes = torch.tensor(prefixes_host, dtype=torch.int64, device="cuda")
             total_tokens = sum(lengths_host)
             total_local = sum(
-                cp_padded_local_kv_len(length, 4, 4)
-                for length in lengths_host
+                cp_padded_local_kv_len(length, 4, 4) for length in lengths_host
             )
             self.assertIsNotNone(
                 try_build_cp_restore_indices(
@@ -534,18 +518,7 @@ class CPMetadataTritonTest(unittest.TestCase):
                     cache_after_warmup,
                 )
 
-    def test_feature_gate_and_batch_bound_use_fallback(self):
-        lengths = torch.ones(1, dtype=torch.int64, device="cuda")
-        with patch.dict(os.environ, {"DSV4_CP_METADATA_TRITON": "0"}):
-            self.assertIsNone(
-                try_build_cp_restore_indices(
-                    lengths,
-                    cp_size=2,
-                    owner_block_size=4,
-                    total_tokens=1,
-                    total_local_kv=4,
-                )
-            )
+    def test_batch_bound_uses_fallback(self):
         too_many = torch.ones(65, dtype=torch.int64, device="cuda")
         self.assertIsNone(
             try_build_cp_restore_indices(
@@ -572,17 +545,19 @@ class CPMetadataTritonTest(unittest.TestCase):
             total_kv_len=total_tokens,
             total_local_kv=total_local,
         )
-        with patch.dict(os.environ, {"DSV4_CP_METADATA_TRITON": "0"}):
+        with patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_restore_indices",
+            return_value=None,
+        ) as fallback_builder:
             expected = build_kv_allgather_restore_indices(**kwargs)
-        with patch.dict(os.environ, {"DSV4_CP_METADATA_TRITON": "1"}):
-            for _ in range(2):
-                actual = build_kv_allgather_restore_indices(**kwargs)
-            torch.cuda.synchronize()
-            with profile(
-                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
-            ) as prof:
-                actual = build_kv_allgather_restore_indices(**kwargs)
-            torch.cuda.synchronize()
+        fallback_builder.assert_called_once()
+        for _ in range(2):
+            actual = build_kv_allgather_restore_indices(**kwargs)
+        torch.cuda.synchronize()
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            actual = build_kv_allgather_restore_indices(**kwargs)
+        torch.cuda.synchronize()
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         key_averages = list(prof.key_averages())
         keys = [event.key for event in key_averages]

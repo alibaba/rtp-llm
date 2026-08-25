@@ -26,7 +26,6 @@ Run:
 from __future__ import annotations
 
 import math
-import os
 import unittest
 from unittest import mock
 
@@ -222,8 +221,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         data_blocks = (num_tokens + block_size - 1) // block_size
         k_cache = self._alloc_cache(data_blocks + 1, block_size)
         slot_mapping = (
-            torch.arange(num_tokens, dtype=torch.int64, device=self.device)
-            + block_size
+            torch.arange(num_tokens, dtype=torch.int64, device=self.device) + block_size
         )
         quantize_and_insert_k_cache(values, k_cache, slot_mapping)
 
@@ -234,9 +232,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
             dtype=torch.uint8,
             device=self.device,
         )
-        seq_lens = torch.tensor(
-            [num_tokens], dtype=torch.int32, device=self.device
-        )
+        seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=self.device)
         block_table = torch.arange(
             1, data_blocks + 1, dtype=torch.int32, device=self.device
         ).unsqueeze(0)
@@ -367,9 +363,9 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 )
                 start = 0
                 for request_id, length in enumerate(lengths):
-                    expected[
-                        request_id, offset : offset + length
-                    ].copy_(restored[start : start + length])
+                    expected[request_id, offset : offset + length].copy_(
+                        restored[start : start + length]
+                    )
                     start += length
 
                 actual = torch.full_like(expected, -123)
@@ -390,7 +386,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                     torch.equal(actual.view(torch.int16), expected.view(torch.int16))
                 )
 
-    def test_fused_restore_dequant_scatter_side_stream_and_gate(self):
+    def test_fused_restore_dequant_scatter_side_stream_and_unsupported_input(self):
         lengths = [0, 3, 1, 4]
         total = sum(lengths)
         packed = self._pack_rows(
@@ -438,17 +434,6 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
             torch.equal(actual.view(torch.int16), expected.view(torch.int16))
         )
 
-        disabled_out = torch.full_like(expected, -17)
-        with mock.patch.dict(
-            os.environ, {"DSV4_CP_POOL_RESTORE_TRITON": "0"}
-        ):
-            self.assertFalse(
-                try_restore_dequantize_scatter_packed_k_cache_flat(
-                    disabled_out, packed, restore_indices, seq_lens, 1
-                )
-            )
-        self.assertTrue(torch.all(disabled_out == -17))
-
         int64_out = torch.full_like(expected, -17)
         self.assertFalse(
             try_restore_dequantize_scatter_packed_k_cache_flat(
@@ -472,9 +457,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
             [5, 1, 9, 0, 3, 7, 2, 10], dtype=torch.int64, device=self.device
         )
         seq_lens = torch.tensor(lengths, dtype=torch.int32, device=self.device)
-        out = torch.full(
-            (4, 6, HEAD_DIM), -9, dtype=torch.bfloat16, device=self.device
-        )
+        out = torch.full((4, 6, HEAD_DIM), -9, dtype=torch.bfloat16, device=self.device)
 
         def run() -> None:
             self.assertTrue(
@@ -498,8 +481,7 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
         fused = [
             event
             for event in events
-            if "_restore_dequantize_scatter_packed_k_cache_flat_kernel"
-            in event.key
+            if "_restore_dequantize_scatter_packed_k_cache_flat_kernel" in event.key
         ]
         self.assertEqual(sum(event.count for event in fused), 1)
         keys = {event.key for event in events}

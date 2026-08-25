@@ -20,8 +20,6 @@ Used by the FP8 prefill path in ``Indexer.forward`` to feed
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -120,9 +118,9 @@ def _cp_gather_indexer_k_to_padded_kernel(
 
     batch_offsets = tl.arange(0, BATCH_BLOCK)
     batch_mask = batch_offsets < batch_size
-    padded_lens = tl.load(
-        padded_lens_ptr + batch_offsets, mask=batch_mask, other=0
-    ).to(tl.int64)
+    padded_lens = tl.load(padded_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+        tl.int64
+    )
     padded_ends = tl.cumsum(padded_lens, axis=0)
     batch_idx = tl.sum((token_idx >= padded_ends).to(tl.int32), axis=0)
     padded_start = tl.sum(
@@ -166,9 +164,7 @@ def _cp_gather_indexer_k_to_padded_kernel(
         tl.pointer_type(tl.uint8)
     )
     k_bytes = tl.load(cache_k_ptr, mask=valid_cache_block, other=0)
-    out_k_row = (out_k_ptr + token_idx * D + d_offsets).to(
-        tl.pointer_type(tl.uint8)
-    )
+    out_k_row = (out_k_ptr + token_idx * D + d_offsets).to(tl.pointer_type(tl.uint8))
     tl.store(out_k_row, k_bytes)
 
     cache_scale_ptr = (
@@ -179,11 +175,6 @@ def _cp_gather_indexer_k_to_padded_kernel(
         tl.pointer_type(tl.float32)
     )
     tl.store(out_scale_row, scale)
-
-
-def cp_indexer_padded_gather_enabled() -> bool:
-    value = os.environ.get("DSV4_CP_INDEXER_GATHER_TRITON", "1").strip().lower()
-    return value not in ("0", "false", "off", "no")
 
 
 def try_gather_indexer_k_to_padded(
@@ -202,9 +193,6 @@ def try_gather_indexer_k_to_padded(
     NCCL all-gathers. Unsupported layouts return ``False`` for the C++/PyTorch
     fallback in :class:`IndexerFP8`.
     """
-    if not cp_indexer_padded_gather_enabled():
-        return False
-
     batch_size = int(per_req_padded_lens.numel())
     total_local_tokens = int(out_k_quant.shape[0]) if out_k_quant.dim() == 2 else -1
     total_actual_tokens = int(total_actual_tokens)
