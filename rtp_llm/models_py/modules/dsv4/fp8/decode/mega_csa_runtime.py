@@ -1,4 +1,4 @@
-"""Model-wide graph-stable storage for the TP1 CSA megakernel path."""
+"""Model-wide graph-stable storage for the TP1 DSV4 Mega CSA/HCA paths."""
 
 from __future__ import annotations
 
@@ -9,16 +9,12 @@ import torch
 
 from .mega_csa_weights import (
     DIM,
-    FRONT_OUT_DIM,
     HC,
     HC_MIX,
     HEAD_DIM,
     INDEX_HEADS,
-    MAIN_HEADS,
     MQA_SPLIT_KV,
-    O_GROUPS,
     PRO_GEOMETRY,
-    Q_LORA_RANK,
     CSAGeometry,
 )
 
@@ -79,19 +75,21 @@ class MegaHCASlotMappings:
 
 
 class MegaCSARuntime:
-    """Storage shared by all CSA layers in one transformer instance."""
+    """Storage shared by all Mega CSA/HCA layers in one transformer instance."""
 
     def __init__(self) -> None:
         self._step = 0
         self._metadata_id: Optional[int] = None
         self._active_is_cuda_graph = False
-        self._layer_workspaces: Dict[Tuple[str, int, int], MegaCSALayerWorkspace] = {}
+        self._layer_workspaces: Dict[
+            Tuple[str, int, int, int], MegaCSALayerWorkspace
+        ] = {}
         self._hca_layer_workspaces: Dict[
-            Tuple[str, int, int], MegaHCALayerWorkspace
+            Tuple[str, int, int, int], MegaHCALayerWorkspace
         ] = {}
         self._logits: Dict[Tuple[str, int, int], torch.Tensor] = {}
         self._schedule_step = -1
-        self._schedule_key: Optional[Tuple[str, int, int]] = None
+        self._schedule_key: Optional[Tuple[str, int, int, int]] = None
         self._schedule: Optional[torch.Tensor] = None
         self._graph_schedule_history: list[torch.Tensor] = []
         self._rope_cache: Dict[
@@ -242,14 +240,21 @@ class MegaCSARuntime:
     def mqa_schedule(
         self, context_lens: torch.Tensor, entries_per_block: int
     ) -> torch.Tensor:
-        key = (str(context_lens.device), int(context_lens.numel()), entries_per_block)
+        if context_lens.dim() != 2:
+            raise ValueError("DSV4 mega MQA context lengths must be [B,S]")
+        context_2d = context_lens.contiguous()
+        key = (
+            str(context_lens.device),
+            int(context_2d.shape[0]),
+            int(context_2d.shape[1]),
+            entries_per_block,
+        )
         if self._schedule_step == self._step and self._schedule_key == key:
             assert self._schedule is not None
             return self._schedule
 
         import deep_gemm
 
-        context_2d = context_lens.view(-1, 1).contiguous()
         schedule = deep_gemm.get_paged_mqa_logits_metadata(
             context_2d, entries_per_block, deep_gemm.get_num_sms()
         )

@@ -1,6 +1,6 @@
 # DSV4 Mega CSA/HCA TP1 接入状态与后续方案
 
-更新日期：2026-08-25
+更新日期：2026-08-26
 
 ## 1. 当前结论
 
@@ -25,11 +25,16 @@ HCA_KV 和 window 写 SWA_KV；query RMSNorm+RoPE 使用 extension CUDA 算子
 `topk_total_by_ratio[128]`。CSA+HCA 同开时
 Mega 覆盖 DSV4-Pro 全部 61 个 attention 层（30 CSA + 31 HCA）。
 
+2026-08-26 起，CSA/HCA Mega 也支持 MTP target verify 的多 token query。框架保持请求维
+`B`、每请求 query 维 `S` 和展平 token 维 `T=B*S` 的区别；当 `T<=128` 时进入 Mega，
+超出后完整回退源 attention sublayer。MTP draft model 当前 `compress_ratio == 0`，不会挂
+CSA/HCA adapter，本次适配对象是 target model 的 verify 阶段。
+
 当前实现遵循“完整 attention sublayer 单独选路”，没有逐个替换普通算子：
 
 ```text
 Block.forward_decode
-  ├─ CSA Mega: adapter 已挂载 && q_len == 1
+  ├─ CSA Mega: adapter 已挂载 && B>=1 && S>=1 && B*S<=128
   │    mHC pre + attention RMSNorm
   │    -> front mixed GEMM
   │    -> WQ-B + indexer compressor + SWA write
@@ -39,7 +44,7 @@ Block.forward_decode
   │    -> CUDA inverse-RoPE + FP8 quant
   │    -> 现有 wo_a / wo_b output projection
   │    -> mHC post
-  ├─ HCA Mega: adapter 已挂载 && q_len == 1
+  ├─ HCA Mega: adapter 已挂载 && B>=1 && S>=1 && B*S<=128
   │    mHC pre + attention RMSNorm
   │    -> front mixed GEMM（FRONT-EMIT 写 kv|gate state 环 + mHC post/comb tail）
   │    -> WQ-B + 边界 compressor 写 HCA_KV + window 写 SWA_KV
@@ -65,12 +70,13 @@ FFN sublayer、FFN mHC、model head mHC 不在 Mega 替换范围内。
 | KV cache | FP8 | 非 FP8 初始化失败 |
 | 层类型 | `compress_ratio == 4` 的 CSA 层（`DSV4_MEGA_CSA`）；`compress_ratio == 128` 的 HCA 层（`DSV4_MEGA_HCA`） | 按 ratio 分别挂 adapter |
 | 模型几何 | DSV4-Pro（dim 7168）与 DSV4-Flash（dim 4096） | `GEOMETRY_BY_DIM` 按 `attn.dim` 选 profile，其他 dim 初始化失败 |
-| 请求形态 | decode、`q_len == 1`、batch 1..128 | 其余形态走现有路径 |
+| 请求形态 | decode/target verify，`B>=1`、`S>=1`、`B*S<=128` | 超出展平 token 上限时走现有路径 |
 | 进程角色 | `DECODE` 和单卡 `PDFUSION` | 由 `forward_decode` 限制实际执行 |
 | 开关 | `DSV4_MEGA_CSA=1` / `DSV4_MEGA_HCA=1` | 各自默认关闭，模型构造期固定，共享一个模型级 runtime |
 
-下列场景保持现有实现：prefill、SWA-only、target verify (`q_len > 1`)、MTP、TP2/DP2。
-MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
+下列场景保持现有实现：prefill、SWA-only、`B*S>128`、TP2/DP2。MTP draft model 当前
+`compress_ratio == 0`，不会挂载 CSA/HCA adapter；target model verify 可在上述边界内进入
+Mega。
 
 `is_decode_role=False` 同时覆盖 `PDFUSION` 和专用 PREFILL，框架目前没有更细的构造参数。
 因此两个 Mega 开关都只应配置在 `DECODE/PDFUSION` 进程；误配到专用 PREFILL
@@ -443,15 +449,38 @@ MoE 耗时按 batch 归一化，取 4 个 context、baseline/Mega 以及 CSA/HCA
 | 128 | 64K | 253.6 / 186.0 | 1.363x | 147.8 / 107.2 | 1.379x | 177.4 |
 | 128 | 128K | 313.7 / 230.4 | 1.361x | 160.9 / 114.9 | 1.400x | 177.4 |
 
+### 2026-08-26：MTP target verify 适配（`B*S<=128`）
+
+MTP target verify 的输入按 request-major 排列：`hidden[B,S,HC,D]`，其中 `S` 是每个请求
+本轮验证的 query 数，`T=B*S` 是逐 token GEMM 的 M。pool block table 始终保持请求级
+`[B,max_blocks]`；position、slot mapping、workspace 和 query/output 行按 `T` 处理；
+compressed length、TopK 和 FlashMLA index 保持 `[B,S,...]`，不能把同一请求的多个 query
+误当成 `T` 个独立请求。
+
+本轮分两侧完成：
+
+1. `cuda_extension` 的 FP8/FP4 score MQA 补齐 `B/S/T` 语义，同请求 query 共享 block-table
+   行；FP8 保留静态 `S=1` 快路径，`S>1` 使用 runtime-S scheduler。FlashMLA 原生支持
+   `[B,S,...]`，无需修改。
+2. RTP 的 `mega_csa_adapter.py`、`mega_hca_adapter.py` 和 `mega_csa_runtime.py` 按上述维度
+   绑定 metadata、workspace 与 schedule；`T>128` 在 adapter 入口回退源路径，`S=1`
+   调用链不变。
+
+验证覆盖：FP8/FP4 MQA 的 `S={1,2,3,5,6}` 正确性与 `S=1` 冷测回归；真实 RTP attention
+子层 `B=2,S=3` 跨 CSA ratio-4 和 HCA ratio-128 压缩边界对拍；全接受 target-verify
+perf runner 在 8 卡、`S=4`、32K context、500 输出 token 下覆盖 `T={32,64,128}`，Mega
+相对源路径吞吐加速分别为 `1.185x/1.174x/1.177x`。当前仍只支持同一 batch 内统一 `S`
+和 `T<=128`；真实 draft 权重的接受/拒绝回写需在 checkpoint loader 命名对齐后继续验证。
+
 ## 6. 端到端剩余缺口
 
 按阻塞顺序还需要：
 
-1. 发布 `2d6261a` 对应的 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
+1. 发布 `0134871` 对应的 CUDA13 x86_64 wheel，更新开源/内源实际使用的依赖入口和 lock；
 2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool
    fixture（本地 serving e2e 已实际走真实 allocator，但缺 bazel 内可回归的形式）；
-3. ~~校验 normal prefill -> Mega decode~~ 已在裁层 Pro 与全量 Flash serving 中覆盖
-   （target verify / MTP 场景仍未覆盖）；
+3. ~~校验 normal prefill -> Mega decode~~ 已在裁层 Pro 与全量 Flash serving 中覆盖；
+   target verify 的全接受路径已于 2026-08-26 覆盖，真实 draft 权重接受/拒绝流程仍待验证；
 4. 整模型正确性收口：为 Mega 配置生成 per-配置 golden（框架 smoke 惯例），并在健康模型
    上完成 logits 级对照（Flash 对照排队中）；建议同时把 4 层 Pro 裁层 checkpoint 上传 NAS
    并新增 `v4_pro_4layer_tp1` / `..._mega` smoke case。
