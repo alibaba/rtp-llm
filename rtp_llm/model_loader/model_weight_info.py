@@ -700,6 +700,102 @@ class ModelDeployWeightInfo:
                 return True
         return False
 
+    _FT_STYLE_SHARDING_AXES = (
+        "attn_tp_size",
+        "ffn_tp_size",
+        "dp_size",
+        "ep_size",
+        "lm_head_tp_size",
+    )
+
+    # A draft model numbers its own layers from 0, so its ft_style keys would be
+    # indistinguishable from the target's without a namespace. Prefixing them lets
+    # one dump hold both models, which is what lets prefill and decode share a
+    # single checkpoint.
+    FT_STYLE_MTP_SCOPE = "mtp."
+
+    @property
+    def ft_style_scope(self) -> str:
+        return (
+            self.FT_STYLE_MTP_SCOPE
+            if getattr(self.model_config, "is_mtp", False)
+            else ""
+        )
+
+    def _check_ft_style_parallelism(
+        self, database: BaseDatabase, phy2log: Optional[List[List[int]]] = None
+    ) -> bool:
+        """Check ft_style weights against this runtime; True if the dump is unsharded."""
+        if not database.is_ft_style:
+            return False
+        sharding = database.ft_weight_sharding
+        params = database.ft_weight_params
+        if not sharding and not params:
+            return False
+
+        current = {
+            "attn_tp_size": self.tp_size,
+            "ffn_tp_size": self.ffn_tp_size,
+            "dp_size": self.dp_size,
+            "ep_size": self.ep_size,
+            "lm_head_tp_size": self.lm_head_tp_size,
+        }
+        if sharding:
+            recorded = {
+                axis: int(sharding.get(axis, 0))
+                for axis in self._FT_STYLE_SHARDING_AXES
+            }
+            unsharded = all(size == 1 for size in recorded.values())
+            dump = {axis: size or current[axis] for axis, size in recorded.items()}
+        else:
+            raw_tp_size = int(params.get("TP_SIZE", current["attn_tp_size"]))
+            unsharded = False
+            dump = dict(current)
+            dump["attn_tp_size"] = raw_tp_size
+            dump["lm_head_tp_size"] = raw_tp_size
+            dump["dp_size"] = int(params.get("DP_SIZE", current["dp_size"]))
+            dump["ep_size"] = int(params.get("EP_SIZE", current["ep_size"]))
+
+        if unsharded:
+            if self.tp_size > 1 or self.ffn_tp_size > 1:
+                raise ValueError(
+                    "ft_style weights are unsharded, but load-time slicing only supports"
+                    f" the EP and lm_head axes, got attn_tp_size: {self.tp_size},"
+                    f" ffn_tp_size: {self.ffn_tp_size}."
+                    " Convert a dump at this exact parallelism instead."
+                )
+            # Slicing takes the ep_rank'th contiguous block of experts, whereas
+            # get_selected_experts() indexes through phy2log. phy2log is filled in even
+            # without EPLB, where it is the identity mapping and the two agree; a real
+            # permutation or redundant experts (which make it longer than the expert count)
+            # do not, so refuse rather than load the wrong experts silently.
+            if phy2log and any(
+                mapping != list(range(len(mapping))) for mapping in phy2log
+            ):
+                raise ValueError(
+                    "ft_style weights are unsharded, which cannot be combined with EPLB or"
+                    " redundant experts: load-time slicing cannot reproduce the phy2log"
+                    " expert mapping. Convert a dump at this exact parallelism instead."
+                )
+            return True
+
+        mismatch = {
+            axis: (size, current[axis])
+            for axis, size in dump.items()
+            if size != current[axis]
+        }
+        if mismatch:
+            raise ValueError(
+                "ft_style parallelism is not match weight's parallelism: "
+                + ", ".join(
+                    f"{axis} {weights} vs {runtime}"
+                    for axis, (weights, runtime) in mismatch.items()
+                )
+                + ". Convert with TP_SIZE=DP_SIZE=EP_SIZE=1 to get a dump any topology"
+                + " can load."
+            )
+        return False
+
     def create_load_config(
         self,
         compute_dtype: torch.dtype,
@@ -718,20 +814,7 @@ class ModelDeployWeightInfo:
                 f"current weights_info: {self.__class__} not support lora, but database has lora"
             )
 
-        if database.is_ft_style and database.ft_weight_params:
-            # check ft_style ParallelInfo is match weight's ParallelInfo
-            src_tp_size = int(database.ft_weight_params.get("TP_SIZE", self.tp_size))
-            src_dp_size = int(database.ft_weight_params.get("DP_SIZE", self.dp_size))
-            src_ep_size = int(database.ft_weight_params.get("EP_SIZE", self.ep_size))
-            if (
-                src_tp_size != self.tp_size
-                or src_dp_size != self.dp_size
-                or src_ep_size != self.ep_size
-            ):
-                raise ValueError(
-                    f"ft_style parallelism is not match weight's parallelism,"
-                    + f"tp_size: {src_tp_size} vs {self.tp_size}, dp_size: {src_dp_size} vs {self.dp_size}, ep_size: {src_ep_size} vs {self.ep_size}"
-                )
+        dump_unsharded = self._check_ft_style_parallelism(database, phy2log)
 
         load_config = LoadConfig(
             database=database,
@@ -764,6 +847,8 @@ class ModelDeployWeightInfo:
             quant_algo=self._quant_algo,
             bit=self._quant_algo.getWeightBits(),
             is_ft_style_weight=database.is_ft_style,
+            ft_style_dump_unsharded=dump_unsharded,
+            ft_style_scope=self.ft_style_scope,
             phy2log=phy2log,  # phy2log should be set before create_load_config is called
             exported_device=exported_device,
             use_swizzleA=self._use_swizzleA,
@@ -862,12 +947,12 @@ class ModelWeights:
         return self._dtype
 
     @staticmethod
-    def layer_weight_prefix(tp_rank: int, dp_rank: int, ep_rank: int):
-        return f"rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.layers."
+    def layer_weight_prefix(tp_rank: int, dp_rank: int, ep_rank: int, scope: str = ""):
+        return f"{scope}rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.layers."
 
     @staticmethod
-    def global_weight_prefix(tp_rank: int, dp_rank: int, ep_rank: int):
-        return f"rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.global."
+    def global_weight_prefix(tp_rank: int, dp_rank: int, ep_rank: int, scope: str = ""):
+        return f"{scope}rank_{tp_rank:02d}_{dp_rank:02d}_{ep_rank:02d}.global."
 
     def check_data(self, ori_tensor: torch.Tensor, update_tensor: torch.Tensor):
         if ori_tensor.shape != update_tensor.shape:

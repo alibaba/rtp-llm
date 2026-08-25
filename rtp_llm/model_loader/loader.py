@@ -2,6 +2,7 @@ import gc
 import logging
 import os
 from collections import OrderedDict
+from functools import partial
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import safetensors
@@ -188,9 +189,15 @@ class ModelLoader:
         tp_rank = self._load_config.tp_rank
         dp_rank = self._load_config.dp_rank
         ep_rank = self._load_config.ep_rank
+        scope = self._load_config.ft_style_scope
         weights = self._create_model_weights(device)
 
-        filename_prefix = f"{output_dir}/model-{tp_rank:02d}-{dp_rank:02d}-"
+        # Distinct file names per scope keep a draft model's partitions from
+        # overwriting the target's when both are dumped into one directory.
+        file_scope = scope.replace(".", "-") if scope else ""
+        filename_prefix = (
+            f"{output_dir}/model-{file_scope}{tp_rank:02d}-{dp_rank:02d}-{ep_rank:02d}-"
+        )
         os.makedirs(output_dir, exist_ok=True)
 
         max_size = 6 * 1024**3  # 6GB
@@ -227,11 +234,9 @@ class ModelLoader:
 
         for layer_id, name, tensor in self.prepare_weights(device):
             if layer_id is not None:
-                tensor_name = f"{weights.layer_weight_prefix(tp_rank, dp_rank, ep_rank)}{layer_id}.{name}"
+                tensor_name = f"{weights.layer_weight_prefix(tp_rank, dp_rank, ep_rank, scope)}{layer_id}.{name}"
             else:
-                tensor_name = (
-                    f"{weights.global_weight_prefix(tp_rank,dp_rank, ep_rank)}{name}"
-                )
+                tensor_name = f"{weights.global_weight_prefix(tp_rank, dp_rank, ep_rank, scope)}{name}"
             tensor_size = tensor.numel() * tensor.element_size()
             current_dict[tensor_name] = tensor.cpu().contiguous()
             current_size += tensor_size
@@ -247,6 +252,36 @@ class ModelLoader:
             )
             del current_dict
 
+    _FT_STYLE_EP_SHARDED_PREFIXES = tuple(
+        name.rsplit(".", 1)[0] + "." for name in (W.moe_w1, W.moe_w2)
+    )
+
+    def _ft_style_shard_spec(
+        self, layer_prefix: str, global_prefix: str, key: str
+    ) -> Optional[Tuple[int, int]]:
+        """How to cut one tensor of an unsharded dump: (num_shards, shard_index) or None.
+
+        Only two axes can differ between an unsharded dump and a sharded runtime, and both
+        split along dim 0: MoE experts by ep_rank, lm_head by lm_head_tp_rank. Everything
+        else is replicated. Topologies that would also split attention or dense FFN are
+        rejected in ModelDeployWeightInfo.create_load_config, so they never reach here.
+        """
+        if key.startswith(layer_prefix):
+            _, _, name = key[len(layer_prefix) :].partition(".")
+        elif key.startswith(global_prefix):
+            name = key[len(global_prefix) :]
+        else:
+            return None
+        if name == W.lm_head:
+            size = self._load_config.lm_head_tp_size
+            rank = self._load_config.lm_head_tp_rank
+        elif name.startswith(self._FT_STYLE_EP_SHARDED_PREFIXES):
+            size = self._load_config.ep_size
+            rank = self._load_config.ep_rank
+        else:
+            return None
+        return (size, rank) if size > 1 else None
+
     @timer_wrapper(description="load_from_ft_style")
     def _load_from_ft_style(self, device: str):
         num_layers = self._load_config.num_layers
@@ -254,22 +289,38 @@ class ModelLoader:
         dp_rank = self._load_config.dp_rank
         ep_rank = self._load_config.ep_rank
 
+        if self._load_config.ft_style_dump_unsharded:
+            tp_rank = dp_rank = ep_rank = 0
+
+        scope = self._load_config.ft_style_scope
         model_weights = ModelWeights(
             num_layers, device, self._load_config.compute_dtype
         )
         layer_weight_prefix = ModelWeights.layer_weight_prefix(
-            tp_rank, dp_rank, ep_rank
+            tp_rank, dp_rank, ep_rank, scope
         )
         global_weight_prefix = ModelWeights.global_weight_prefix(
-            tp_rank, dp_rank, ep_rank
+            tp_rank, dp_rank, ep_rank, scope
         )
         direct_io = self._load_config.exported_device.support_dio_load
+        # An unsharded dump holds the whole model, which does not fit on one device, so the
+        # slicing is pushed into the read: each rank only pulls its own rows off the disk.
+        shard_fn = (
+            partial(
+                self._ft_style_shard_spec, layer_weight_prefix, global_weight_prefix
+            )
+            if self._load_config.ft_style_dump_unsharded
+            else None
+        )
         # 清空现有的权重
         weights = [{} for _ in range(num_layers)]
         global_weights = {}
         # 重新构建权重
         all_tensors = self._load_config.database.load_tensors_by_prefix(
-            (layer_weight_prefix, global_weight_prefix), device, direct_io=direct_io
+            (layer_weight_prefix, global_weight_prefix),
+            device,
+            direct_io=direct_io,
+            shard_fn=shard_fn,
         )
         for key, tensor in all_tensors.items():
             if key.startswith(layer_weight_prefix):
@@ -584,6 +635,8 @@ class ModelLoader:
         return device
 
     def _load_from_scratch(self, device: str):
+        if self._load_config.force_cpu_load_weights:
+            device = "cpu"
         weights = self._create_model_weights(device)
         convert_device = self._choose_weight_convert_device(
             device

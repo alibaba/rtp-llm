@@ -4,7 +4,7 @@ import logging
 import os
 import struct
 from pathlib import PosixPath
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import torch
 from safetensors import safe_open
@@ -22,6 +22,22 @@ class FinetuneType(enum.Enum):
     pretrain = "pretrain"
     lora = "lora"
     ptuning = "ptuning"
+
+
+_SAFETENSORS_DTYPES: Dict[str, torch.dtype] = {
+    "BOOL": torch.bool,
+    "U8": torch.uint8,
+    "I8": torch.int8,
+    "F8_E4M3": torch.float8_e4m3fn,
+    "F8_E5M2": torch.float8_e5m2,
+    "I16": torch.int16,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "I32": torch.int32,
+    "F32": torch.float32,
+    "I64": torch.int64,
+    "F64": torch.float64,
+}
 
 
 class CkptFileInfo:
@@ -191,6 +207,82 @@ class CkptFileInfo:
                     tensor = tensor.contiguous().to(datatype)
 
                     return tensor
+
+    def safetensors_header(self) -> Tuple[Dict[str, Any], int]:
+        """Full per-tensor header, plus the offset where the data block starts.
+
+        self.metadata only keeps each tensor's start offset; shape and dtype are needed
+        to read a row range, so the header is parsed again here and cached.
+        """
+        if not self.is_safetensor():
+            raise Exception(f"{self.file_name} is not a safetensors file")
+        if getattr(self, "_st_header", None) is None:
+            with open(self.file_name, "rb") as f:
+                length_of_header = struct.unpack("<Q", f.read(8))[0]
+                header = json.loads(f.read(length_of_header))
+            header.pop("__metadata__", None)
+            self._st_header = (header, 8 + length_of_header)
+        return self._st_header
+
+    def load_tensors_by_row_shard(self, names: List[str], device: str, shard_fn):
+        """Read the named tensors, keeping only this rank's dim-0 slice where asked.
+
+        shard_fn(name) returns (num_shards, shard_index) for a tensor that has to be cut,
+        or None to read it whole. safetensors stores tensors contiguously in C order, so a
+        dim-0 row range is one contiguous byte range and can be read with a single pread
+        -- the other shards' bytes never leave the disk.
+        """
+        header, data_start = self.safetensors_header()
+        result: Dict[str, torch.Tensor] = {}
+        fd = os.open(self.file_name, os.O_RDONLY)
+        try:
+            # Offset order keeps the access pattern sequential across the file.
+            for name in sorted(names, key=lambda n: header[n]["data_offsets"][0]):
+                meta = header[name]
+                dtype_name = meta["dtype"]
+                if dtype_name not in _SAFETENSORS_DTYPES:
+                    raise Exception(
+                        f"{self.file_name}: tensor {name} has unsupported dtype {dtype_name}"
+                    )
+                shape = list(meta["shape"])
+                begin, end = meta["data_offsets"]
+                offset, num_bytes = begin, end - begin
+
+                shard = shard_fn(name) if shape else None
+                if shard is not None:
+                    num_shards, shard_index = shard
+                    rows = shape[0]
+                    if rows % num_shards != 0 or num_bytes % rows != 0:
+                        raise Exception(
+                            f"{self.file_name}: tensor {name} with shape {shape} and"
+                            f" {num_bytes} bytes cannot be split into {num_shards} shards"
+                        )
+                    row_bytes = num_bytes // rows
+                    shape[0] = rows // num_shards
+                    num_bytes = shape[0] * row_bytes
+                    offset = begin + shard_index * num_bytes
+
+                buffer = torch.empty(num_bytes, dtype=torch.uint8)
+                view = memoryview(buffer.numpy())
+                # A single read(2) transfers at most 0x7ffff000 bytes, so tensors above
+                # 2GiB come back short and have to be resumed.
+                done = 0
+                while done < num_bytes:
+                    read = os.preadv(fd, [view[done:]], data_start + offset + done)
+                    if read <= 0:
+                        raise IOError(
+                            f"{self.file_name}: tensor {name} short read, got {done}"
+                            f" of {num_bytes} bytes at {data_start + offset}"
+                        )
+                    done += read
+                result[name] = (
+                    buffer.view(_SAFETENSORS_DTYPES[dtype_name])
+                    .reshape(shape)
+                    .to(device)
+                )
+        finally:
+            os.close(fd)
+        return result
 
     def load_tensors(self, device: str = "cuda", direct_io=True):
         file_path = os.path.abspath(self.file_name)

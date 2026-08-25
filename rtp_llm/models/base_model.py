@@ -164,10 +164,17 @@ class BaseModel(object):
         )
         if skip_python_model:
             return
+        # Sharing weights with a colocated model requires that model to be
+        # resident, so it belongs to bringing up inference rather than to
+        # loading weights (which also runs when dumping them offline).
+        self._bind_colocated_weights(device_str)
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
         self._create_python_model()
+
+    def _bind_colocated_weights(self, device: str):
+        pass
 
     def _create_python_model(self):
         pass

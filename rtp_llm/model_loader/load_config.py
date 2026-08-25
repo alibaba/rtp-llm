@@ -54,6 +54,10 @@ class LoadConfig(BaseModel):
     quant_algo: Any = None
 
     is_ft_style_weight: bool = False
+    ft_style_dump_unsharded: bool = False
+    # Namespace prepended to ft_style tensor keys, so that a target model and its
+    # draft model can be dumped into, and loaded from, one directory.
+    ft_style_scope: str = ""
 
     exported_device: Optional[Any] = None
 
