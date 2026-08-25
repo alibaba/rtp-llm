@@ -209,7 +209,11 @@ def set_parallelism_config(
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
     if need_local:
-        if torch.cuda.is_available():
+        # LOCAL_WORLD_SIZE wins: it decides how many rank processes are spawned.
+        env_local_world_size = os.environ.get("LOCAL_WORLD_SIZE", "").strip()
+        if env_local_world_size:
+            n = int(env_local_world_size)
+        elif torch.cuda.is_available():
             n = min(torch.cuda.device_count(), world_size)
         else:
             n = world_size

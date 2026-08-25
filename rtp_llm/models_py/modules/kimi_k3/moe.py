@@ -14,6 +14,9 @@ from torch import nn
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_enabled
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.distributed.symm_mem import (
+    configure_symm_mem_backend_from_env,
+)
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
 from rtp_llm.ops import ParallelismConfig
@@ -23,6 +26,23 @@ if TYPE_CHECKING:
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
+
+
+def _validate_full_world_mega_topology(
+    *, ep_size: int, world_size: int, local_expert_count: int
+) -> None:
+    """Validate K3's one-rank-per-EP-partition full-world MegaMoE layout."""
+
+    if ep_size != world_size:
+        raise RuntimeError(
+            "K3 DeepGEMM MegaMoE requires EP to span the full distributed "
+            f"world; got EP={ep_size}, world={world_size}"
+        )
+    if local_expert_count <= 0:
+        raise RuntimeError(
+            "K3 DeepGEMM MegaMoE requires at least one local expert, got "
+            f"{local_expert_count}"
+        )
 
 
 def _transient_full_native_column_weight(
@@ -232,19 +252,13 @@ class KimiK3LatentMoE(nn.Module):
             raise RuntimeError(
                 "K3 DeepGEMM MegaMoE requires torch.distributed initialization"
             )
+        configure_symm_mem_backend_from_env()
         world_size = int(dist.get_world_size())
-        if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
-        ):
-            raise RuntimeError(
-                "K3 DeepGEMM MegaMoE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
-                f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
-                f"local_experts={self.local_expert_count}"
-            )
+        _validate_full_world_mega_topology(
+            ep_size=self.ep_size,
+            world_size=world_size,
+            local_expert_count=self.local_expert_count,
+        )
 
         mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
         required_parameters = {

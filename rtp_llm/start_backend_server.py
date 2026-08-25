@@ -277,8 +277,13 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
     """Validate data parallelism configuration"""
     pc = py_env_configs.parallelism_config
     if pc.dp_size > 1:
-        # tp must on one device when dp
-        assert pc.world_rank % pc.tp_size == 0
+        if pc.tp_size > pc.local_world_size:
+            # Multi-node TP: every process block must start at a node boundary.
+            assert pc.tp_size % pc.local_world_size == 0
+            assert pc.world_rank % pc.local_world_size == 0
+        else:
+            # A node may host one or more complete TP groups.
+            assert pc.world_rank % pc.tp_size == 0
 
 
 def _create_rank_processes(

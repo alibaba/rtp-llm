@@ -40,7 +40,7 @@ _STATES: dict[tuple[dist.ProcessGroup, int], _GemmReduceScatterState] = {}
 def gemm_reduce_scatter_backend() -> str:
     """Return the process-lifetime backend selected for K3 o_proj + RS."""
 
-    backend = os.environ.get(_BACKEND_ENV, "deepgemm").strip().lower()
+    backend = os.environ.get(_BACKEND_ENV, "auto").strip().lower()
     if backend not in ("auto", "deepgemm", "nccl", "off"):
         raise ValueError(
             f"{_BACKEND_ENV} must be auto, deepgemm, nccl, or off; " f"got {backend!r}"
@@ -81,12 +81,19 @@ def configure_gemm_reduce_scatter(
             )
         return existing.enabled
 
+    world_size = int(group.size())
     backend = gemm_reduce_scatter_backend()
     requested = enabled and backend not in ("nccl", "off")
+    # A world size is a group property, so all ranks reach the same verdict here
+    # without a collective; skip the readiness rendezvous when it is unsupported.
+    supported_world_size = world_size in _SUPPORTED_WORLD_SIZES
     deep_gemm = None
     local_ready = requested
     failure_reason = ""
-    if requested:
+    if requested and not supported_world_size:
+        supported = "/".join(str(size) for size in _SUPPORTED_WORLD_SIZES)
+        failure_reason = f"DeepGEMM GEMM/RS supports TP{supported}, not TP{world_size}"
+    if requested and supported_world_size:
         try:
             import deep_gemm as imported_deep_gemm
 
@@ -109,30 +116,22 @@ def configure_gemm_reduce_scatter(
             failure_reason = f"failed to import DeepGEMM: {exc}"
 
     group_ready = False
-    if requested:
+    if requested and supported_world_size:
         readiness = torch.tensor([int(local_ready)], dtype=torch.int32, device=device)
         dist.all_reduce(readiness, op=dist.ReduceOp.MIN, group=group)
         group_ready = bool(readiness.item())
-        if not group_ready:
-            message = failure_reason or (
-                "at least one TP rank cannot use DeepGEMM GEMM/RS"
-            )
-            if backend == "deepgemm":
-                raise RuntimeError(message)
-            logging.warning(
-                "[K3_GEMM_REDUCE_SCATTER] falling back to NCCL: %s",
-                message,
-            )
+    if requested and not group_ready:
+        message = failure_reason or "at least one TP rank cannot use DeepGEMM GEMM/RS"
+        if backend == "deepgemm":
+            raise RuntimeError(message)
+        logging.warning(
+            "[K3_GEMM_REDUCE_SCATTER] falling back to NCCL: %s",
+            message,
+        )
 
-    world_size = int(group.size())
     use_deepgemm = requested and group_ready
     workspace = None
     if use_deepgemm:
-        if world_size not in _SUPPORTED_WORLD_SIZES:
-            raise RuntimeError(
-                "DeepGEMM GEMM/RS supports "
-                f"TP{_SUPPORTED_WORLD_SIZES}, got TP{world_size}"
-            )
         if max_m <= 0 or max_m % world_size:
             raise ValueError(
                 f"GEMM/RS max_m must be positive and divisible by TP{world_size}, "

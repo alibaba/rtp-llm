@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -15,6 +16,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     get_process_group,
 )
 from rtp_llm.models_py.distributed.symm_mem import (
+    configure_symm_mem_backend_from_env,
     fused_all_gather_matmul,
     reserve_fused_all_gather_matmul_workspace,
 )
@@ -25,6 +27,19 @@ from rtp_llm.models_py.modules.kimi_k3._collective_gemm import (
 )
 
 DEFAULT_ALL_GATHER_GEMM_MIN_TOKENS = DEFAULT_COLLECTIVE_GEMM_MIN_M
+_BACKEND_ENV = "KIMI_K3_ALL_GATHER_GEMM_BACKEND"
+
+
+def all_gather_gemm_backend() -> str:
+    """Return the process-lifetime backend selected for K3 Prefill AG/GEMM."""
+
+    backend = os.environ.get(_BACKEND_ENV, "auto").strip().lower()
+    if backend not in ("auto", "symm_mem", "nccl", "off"):
+        raise ValueError(
+            f"{_BACKEND_ENV} must be auto, symm_mem, nccl, or off; "
+            f"got {backend!r}"
+        )
+    return backend
 
 
 @dataclass
@@ -50,6 +65,25 @@ def should_use_all_gather_gemm(
     """Choose fused AllGather/GEMM from the current physical global M."""
 
     return should_use_collective_gemm(physical_m, min_m=min_m)
+
+
+def _ranks_per_node() -> int:
+    """Return the co-located rank count, above which a TP group spans nodes."""
+
+    local_world_size = os.environ.get("LOCAL_WORLD_SIZE", "").strip()
+    if local_world_size:
+        return max(int(local_world_size), 1)
+    return max(torch.cuda.device_count(), 1)
+
+
+def _all_ranks_ready(
+    local_ready: bool,
+    group: dist.ProcessGroup,
+    device: torch.device,
+) -> bool:
+    readiness = torch.tensor([int(local_ready)], dtype=torch.int32, device=device)
+    dist.all_reduce(readiness, op=dist.ReduceOp.MIN, group=group)
+    return bool(readiness.item())
 
 
 def configure_all_gather_gemm(
@@ -78,7 +112,36 @@ def configure_all_gather_gemm(
         return existing.enabled
 
     world_size = int(group.size())
-    use_fused = enabled and should_use_all_gather_gemm(max_m)
+    backend = all_gather_gemm_backend()
+    requested = (
+        enabled
+        and backend not in ("nccl", "off")
+        and should_use_all_gather_gemm(max_m)
+    )
+    symm_backend = configure_symm_mem_backend_from_env()
+    local_ready = requested
+    failure_reason = ""
+    ranks_per_node = _ranks_per_node()
+    if requested and world_size > ranks_per_node and symm_backend != "NVSHMEM":
+        failure_reason = (
+            f"cross-node TP{world_size} (only {ranks_per_node} ranks per node) "
+            "fused AllGather/GEMM requires KIMI_K3_SYMM_MEM_BACKEND=NVSHMEM"
+        )
+        local_ready = False
+
+    group_ready = requested and _all_ranks_ready(local_ready, group, device)
+    if requested and not group_ready:
+        message = failure_reason or (
+            "at least one TP rank cannot use symmetric-memory AllGather/GEMM"
+        )
+        if backend == "symm_mem":
+            raise RuntimeError(message)
+        logging.warning(
+            "[K3_ALL_GATHER_GEMM] %s; falling back to NCCL AllGather + "
+            "Torch GEMM",
+            message,
+        )
+    use_fused = requested and group_ready
     workspace_bytes = 0
     if use_fused:
         if dtype != torch.bfloat16:
@@ -200,6 +263,7 @@ def all_gather_gemm(
 
 __all__ = [
     "DEFAULT_ALL_GATHER_GEMM_MIN_TOKENS",
+    "all_gather_gemm_backend",
     "all_gather_gemm",
     "configure_all_gather_gemm",
     "should_use_all_gather_gemm",

@@ -281,8 +281,7 @@ def _create_process_groups(
                     logging.info(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
-
-                _get_symm_mem().init_symm_mem_communicator(tp_group)
+                    _get_symm_mem().init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
@@ -377,10 +376,13 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
+        # C++ passes a rank local to the selected group, while PyTorch expects
+        # ``src`` to be a global rank even when ``group`` is specified.
+        global_root = torch.distributed.get_global_rank(pg, root)
         device_id = torch.cuda.current_device()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
-            torch.distributed.broadcast(gpu_t, root, group=pg)
+            torch.distributed.broadcast(gpu_t, src=global_root, group=pg)
             if was_cpu:
                 t.copy_(gpu_t)
 

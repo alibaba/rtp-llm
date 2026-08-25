@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -8,6 +8,72 @@ import rtp_llm.models_py.distributed.symm_mem as fused_ag_gemm
 
 
 class FusedAllGatherMatmulUnitTest(unittest.TestCase):
+    def test_configure_backend_rejects_unavailable_runtime(self) -> None:
+        with (
+            patch.dict(
+                fused_ag_gemm.os.environ,
+                {"KIMI_K3_SYMM_MEM_BACKEND": "NVSHMEM"},
+                clear=True,
+            ),
+            patch.object(fused_ag_gemm, "_configured_backend", None),
+            patch.object(fused_ag_gemm, "torch_symm_mem_available", False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "is unavailable"):
+                fused_ag_gemm.configure_symm_mem_backend_from_env()
+
+    def test_configure_backend_reports_missing_torch_apis(self) -> None:
+        symm_mem_without_apis = SimpleNamespace()
+        with (
+            patch.dict(
+                fused_ag_gemm.os.environ,
+                {"KIMI_K3_SYMM_MEM_BACKEND": "NVSHMEM"},
+                clear=True,
+            ),
+            patch.object(fused_ag_gemm, "_configured_backend", None),
+            patch.object(fused_ag_gemm, "torch_symm_mem_available", True),
+            patch.object(
+                fused_ag_gemm,
+                "torch_symm_mem",
+                symm_mem_without_apis,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing required APIs"):
+                fused_ag_gemm.configure_symm_mem_backend_from_env()
+
+    def test_configure_backend_is_idempotent_and_rejects_changes(self) -> None:
+        symm_mem = SimpleNamespace(
+            get_backend=Mock(return_value="CUDA"),
+            set_backend=Mock(),
+            is_nvshmem_available=Mock(return_value=True),
+        )
+        with (
+            patch.dict(
+                fused_ag_gemm.os.environ,
+                {"KIMI_K3_SYMM_MEM_BACKEND": "NVSHMEM"},
+                clear=True,
+            ),
+            patch.object(fused_ag_gemm, "_configured_backend", None),
+            patch.object(fused_ag_gemm, "torch_symm_mem_available", True),
+            patch.object(fused_ag_gemm, "torch_symm_mem", symm_mem),
+        ):
+            self.assertEqual(
+                fused_ag_gemm.configure_symm_mem_backend_from_env(),
+                "NVSHMEM",
+            )
+            self.assertEqual(
+                fused_ag_gemm.configure_symm_mem_backend_from_env(),
+                "NVSHMEM",
+            )
+            symm_mem.get_backend.assert_called_once_with(torch.device("cuda"))
+            symm_mem.set_backend.assert_called_once_with("NVSHMEM")
+            with patch.dict(
+                fused_ag_gemm.os.environ,
+                {"KIMI_K3_SYMM_MEM_BACKEND": "NCCL"},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "already configured"):
+                    fused_ag_gemm.configure_symm_mem_backend_from_env()
+
     def test_workspace_reservation_forwards_group_and_size(self) -> None:
         group = SimpleNamespace(group_name="tp-test")
         with patch.object(
