@@ -4,14 +4,18 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.master.WorkerStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /** Unified cache matching and metadata update service. */
 @Slf4j
@@ -20,14 +24,17 @@ public class CacheAwareService {
 
     private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchQueryOrchestrator queryOrchestrator;
+    private final LocalStandbyComparisonService comparisonService;
     private final CacheMetadataUpdateOrchestrator updateOrchestrator;
 
     public CacheAwareService(
             CacheMetricsReporter cacheMetricsReporter,
             CacheMatchQueryOrchestrator queryOrchestrator,
+            LocalStandbyComparisonService comparisonService,
             CacheMetadataUpdateOrchestrator updateOrchestrator) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.queryOrchestrator = queryOrchestrator;
+        this.comparisonService = comparisonService;
         this.updateOrchestrator = updateOrchestrator;
     }
 
@@ -57,5 +64,10 @@ public class CacheAwareService {
     public void updateFromRoutedRequest(
             Request request, List<ServerStatus> selectedWorkers) {
         updateOrchestrator.updateFromRoutedRequest(request, selectedWorkers);
+    }
+
+    public CompletableFuture<CacheHitComparisonResult> buildCacheHitComparison(
+            CacheHitFeedback feedback) {
+        return comparisonService.buildCacheHitComparison(feedback);
     }
 }

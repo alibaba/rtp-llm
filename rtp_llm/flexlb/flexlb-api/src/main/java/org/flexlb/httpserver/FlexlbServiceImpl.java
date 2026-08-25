@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -23,6 +24,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.config.ConfigService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -50,6 +52,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final PrioritySchedulerReporter prioritySchedulerReporter;
+    private final CacheAwareService cacheAwareService;
+    private final OptimizerClient optimizerClient;
+
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -58,7 +63,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
-                             PrioritySchedulerReporter prioritySchedulerReporter) {
+                             PrioritySchedulerReporter prioritySchedulerReporter,
+                             CacheAwareService cacheAwareService,
+                             OptimizerClient optimizerClient) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
@@ -68,6 +75,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
         this.prioritySchedulerReporter = prioritySchedulerReporter;
+        this.cacheAwareService = cacheAwareService;
+        this.optimizerClient = optimizerClient;
     }
 
     @Override
@@ -524,6 +533,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (!response.getSuccess()) {
                 ctx.setErrorMessage(response.getErrorMessage());
             }
+            if (isLocalSuccessfulDecision(ctx, response, origin)) {
+                updateRequestCacheMetadata(ctx);
+                fireOptimizerTraceQuery(ctx);
+            }
         }
         try {
             observer.onNext(response);
@@ -540,6 +553,45 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (ctx != null) {
             engineHealthReporter.reportBalancingService(ctx);
             reportPrioritySchedule(ctx, response);
+        }
+    }
+
+    private boolean isLocalSuccessfulDecision(
+            BalanceContext ctx,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            ScheduleOrigin origin) {
+        return origin != ScheduleOrigin.FORWARDED_TO_MASTER
+                && origin != ScheduleOrigin.FORWARD_FAILED
+                && response.getSuccess()
+                && ctx.getResponse() != null
+                && ctx.getResponse().isSuccess();
+    }
+
+    private void updateRequestCacheMetadata(BalanceContext ctx) {
+        try {
+            if (ctx.getResponse().getServerStatus() == null
+                    || ctx.getResponse().getServerStatus().isEmpty()) {
+                return;
+            }
+            cacheAwareService.updateFromRoutedRequest(
+                    ctx.getRequest(), ctx.getResponse().getServerStatus());
+        } catch (RuntimeException error) {
+            Logger.warn("Failed to update request cache metadata, request_id={}",
+                    ctx.getRequestId(), error);
+        }
+    }
+
+    private void fireOptimizerTraceQuery(BalanceContext ctx) {
+        try {
+            ServerStatus selectedWorker =
+                    ctx.getResponse().getServerStatus() == null
+                            || ctx.getResponse().getServerStatus().isEmpty()
+                            ? null
+                            : ctx.getResponse().getServerStatus().getFirst();
+            optimizerClient.traceQuery(ctx.getRequest(), selectedWorker);
+        } catch (RuntimeException error) {
+            Logger.warn("Failed to dispatch optimizer trace query, request_id={}",
+                    ctx.getRequestId(), error);
         }
     }
 
@@ -611,15 +663,21 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             String logFormat = "[priority-scheduler] request_id={} priority={} seq_len={} max_new_tokens={} "
                     + "request_expires_at_ms={} schedule_attempt={} plan_type={} plan_cost={} "
                     + "victim_count={} selected_prefill={} selected_decode={} failure_reason={} commit_result={}";
-            Object[] logArgs = {
-                    ctx.getRequestId(), ctx.getPriority(), ctx.getRequest().getSeqLen(),
+            Logger.debug(
+                    logFormat,
+                    ctx.getRequestId(),
+                    ctx.getPriority(),
+                    ctx.getRequest().getSeqLen(),
                     ctx.getRequest().getMaxNewTokens(),
                     ctx.getRequestExpiresAtMs(),
-                    ctx.getScheduleAttempt(), ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
-                    selectedPrefill, selectedDecode,
+                    ctx.getScheduleAttempt(),
+                    ctx.getPlanType(),
+                    ctx.getPlanCost(),
+                    ctx.getVictimCount(),
+                    selectedPrefill,
+                    selectedDecode,
                     success ? "" : response.getErrorMessage(),
-                    result};
-            Logger.debug(logFormat, logArgs);
+                    result);
         } catch (Exception e) {
             Logger.debug("[priority-scheduler] schedule observability report failed, request_id={}",
                     ctx.getRequestId(), e);

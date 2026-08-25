@@ -10,8 +10,10 @@ import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
+import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
 import org.flexlb.exception.KvcmQueryException;
 import org.flexlb.listener.ApplicationWarmupState;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.kvcm.grpc.ErrorCode;
 import org.flexlb.kvcm.grpc.GetHostCacheStateRequest;
 import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
@@ -49,6 +51,7 @@ public class KvcmGrpcClient {
     private final KvcmWorkerMetadataResolver workerMetadataResolver;
     private final ApplicationWarmupState applicationWarmupState;
     private final GrpcReporter grpcReporter;
+    private final KvcmMetricsReporter metricsReporter;
     private final ScheduledExecutorService refreshExecutor;
     private final int heartbeatFailureThreshold;
     private final int queryFailureThreshold;
@@ -73,7 +76,8 @@ public class KvcmGrpcClient {
             KvcmWorkerMetadataResolver workerMetadataResolver,
             GrpcReporter grpcReporter) {
         this(configuration, metaServiceClient, leaderResolver, workerMetadataResolver,
-                () -> true, grpcReporter);
+                () -> true, grpcReporter,
+                new KvcmMetricsReporter(NoOpFlexMonitor.getInstance()));
     }
 
     @Autowired
@@ -83,12 +87,14 @@ public class KvcmGrpcClient {
             KvcmLeaderResolver leaderResolver,
             KvcmWorkerMetadataResolver workerMetadataResolver,
             ApplicationWarmupState applicationWarmupState,
-            GrpcReporter grpcReporter) {
+            GrpcReporter grpcReporter,
+            KvcmMetricsReporter metricsReporter) {
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
         this.workerMetadataResolver = workerMetadataResolver;
         this.applicationWarmupState = applicationWarmupState;
         this.grpcReporter = grpcReporter;
+        this.metricsReporter = metricsReporter;
         this.config = configuration.getKvcmConfig();
         this.enabled = configuration.isKvcmEnabled();
 
@@ -164,8 +170,10 @@ public class KvcmGrpcClient {
             } catch (RuntimeException failure) {
                 if (attemptIndex == maxQueryRetryCount) {
                     recordQueryFailure();
+                    metricsReporter.reportQueryFailure();
                     throw failure;
                 }
+                metricsReporter.reportQueryRetry(attemptIndex + 1);
                 log.debug("KVCM cache query failed; retrying, requestId={}, "
                                 + "attempt={}, maxRetryCount={}",
                         requestId, attemptIndex + 1, maxQueryRetryCount, failure);

@@ -250,6 +250,24 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX =
             "app.engine.worker.status.prefill.nonfinal.chunk.tokens.max";
 
+    /* ------------------------ Routing Observability -------------------------- */
+
+    /** Failed KVCM query attempts after the configured retry budget is exhausted. */
+    public static final String KVCM_QUERY_FAILURE_QPS =
+            "app.cache.kvcm.query.failure.qps";
+
+    /** KVCM retry attempts issued after an initial query failure. */
+    public static final String KVCM_QUERY_RETRY_QPS =
+            "app.cache.kvcm.query.retry.qps";
+
+    /** Optimizer trace queries that could not be dispatched or returned an error. */
+    public static final String OPTIMIZER_TRACE_QUERY_FAILED_QPS =
+            "app.optimizer.trace.query.failed.qps";
+
+    /** Optimizer trace queries intentionally skipped because prerequisites were unavailable. */
+    public static final String OPTIMIZER_TRACE_QUERY_SKIPPED_QPS =
+            "app.optimizer.trace.query.skipped.qps";
+
     /* ------------------------ Cache Health Monitoring -------------------------- */
 
     /**

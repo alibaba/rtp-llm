@@ -4,6 +4,7 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.WorkerStatus;
@@ -27,7 +28,10 @@ class CacheAwareServiceTest {
     private final CacheMetadataUpdateOrchestrator updateOrchestrator =
             mock(CacheMetadataUpdateOrchestrator.class);
     private final CacheAwareService service = new CacheAwareService(
-            metricsReporter, queryOrchestrator, updateOrchestrator);
+            metricsReporter,
+            queryOrchestrator,
+            mock(LocalStandbyComparisonService.class),
+            updateOrchestrator);
 
     @Test
     void delegatesCacheQueriesToOrchestrator() {

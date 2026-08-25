@@ -249,7 +249,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 configService,
                 reporter,
                 latencyRecorder,
-                mock(PrioritySchedulerReporter.class, withSettings().stubOnly()));
+                mock(PrioritySchedulerReporter.class, withSettings().stubOnly()),
+                mock(org.flexlb.cache.match.CacheAwareService.class, withSettings().stubOnly()),
+                mock(org.flexlb.service.optimizer.OptimizerClient.class, withSettings().stubOnly()));
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {

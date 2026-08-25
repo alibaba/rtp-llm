@@ -55,7 +55,9 @@ class FlexlbServiceCancelTest {
                 mock(ConfigService.class),
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
-                mock(PrioritySchedulerReporter.class));
+                mock(PrioritySchedulerReporter.class),
+                mock(org.flexlb.cache.match.CacheAwareService.class),
+                mock(org.flexlb.service.optimizer.OptimizerClient.class));
     }
 
     @Test

@@ -4,6 +4,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
@@ -19,6 +20,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.BeforeEach;
@@ -76,7 +78,9 @@ class FlexlbServiceImplTest {
                 configService,
                 batchSchedulerReporter,
                 serverLatencyRecorder,
-                mock(PrioritySchedulerReporter.class)
+                mock(PrioritySchedulerReporter.class),
+                mock(CacheAwareService.class),
+                mock(OptimizerClient.class)
         );
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");

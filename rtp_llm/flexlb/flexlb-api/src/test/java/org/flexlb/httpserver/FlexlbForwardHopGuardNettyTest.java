@@ -181,7 +181,9 @@ class FlexlbForwardHopGuardNettyTest {
                     configService,
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
-                    mock(PrioritySchedulerReporter.class));
+                    mock(PrioritySchedulerReporter.class),
+                    mock(org.flexlb.cache.match.CacheAwareService.class),
+                    mock(org.flexlb.service.optimizer.OptimizerClient.class));
 
             serverExecutor = new ThreadPoolExecutor(
                     4, 4, 0L, TimeUnit.MILLISECONDS,

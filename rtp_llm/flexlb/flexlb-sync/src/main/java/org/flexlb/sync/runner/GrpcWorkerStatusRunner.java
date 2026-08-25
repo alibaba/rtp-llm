@@ -3,7 +3,11 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.cache.domain.CacheHitComparisonResult;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.TaskStateUpdateResult;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -13,10 +17,12 @@ import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.IdUtils;
+import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
@@ -27,6 +33,7 @@ import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 public class GrpcWorkerStatusRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
     private final String ipPort;
     private final String modelName;
@@ -46,6 +53,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
     private final EndpointRegistry endpointRegistry;
     private final Executor callbackExecutor;
+    private final CacheAwareService cacheAwareService;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
@@ -56,6 +64,21 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   PriorityScheduler priorityScheduler,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
+        this(modelName, ipPort, site, roleType, group, workerStatus, workerStatusMap,
+                engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                priorityScheduler, endpointRegistry, callbackExecutor, null);
+    }
+
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType,
+                                  String group, WorkerStatus workerStatus,
+                                  Map<String, WorkerStatus> workerStatusMap,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  PriorityScheduler priorityScheduler,
+                                  EndpointRegistry endpointRegistry,
+                                  Executor callbackExecutor,
+                                  CacheAwareService cacheAwareService) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -72,6 +95,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
         this.callbackExecutor = callbackExecutor;
+        this.cacheAwareService = cacheAwareService;
     }
 
     @Override
@@ -158,8 +182,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
             // status version is unchanged. Reconcile it on every successful poll.
             workerStatus.updateFromResponse(newWorkerStatus);
             workerStatus.setWaitingTaskList(waitingTaskInfo);
-            workerStatus.updateTaskStates(
+            TaskStateUpdateResult taskStateUpdateResult = workerStatus.updateTaskStates(
                     waitingTaskInfo, lifecycleRunningTaskInfo, finishedTaskInfo);
+            handleTaskStateUpdateResult(taskStateUpdateResult);
+            reportFinishedPrefillTasks(finishedTaskInfo);
             workerStatus.updateRunningQueueTime();
 
             if (versionAdvanced) {
@@ -236,6 +262,100 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
                 workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);
+    }
+
+    private void handleTaskStateUpdateResult(TaskStateUpdateResult updateResult) {
+        for (long latencyMs : updateResult.decisionToWaitingObservedLatenciesMs()) {
+            engineHealthReporter.reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
+        for (long latencyMs : updateResult.waitingToRunningObservedLatenciesMs()) {
+            engineHealthReporter.reportFlexlbObservedWaitingToRunningLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
+        for (long latencyMs : updateResult.engineWaitingToRunningLatenciesMs()) {
+            engineHealthReporter.reportEngineObservedWaitingToRunningLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
+        for (long latencyMs : updateResult.engineReceivedToWaitingLatenciesMs()) {
+            engineHealthReporter.reportEngineObservedReceivedToWaitingLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
+        if (cacheAwareService == null) {
+            return;
+        }
+        for (CacheHitFeedback feedback : updateResult.cacheHitFeedbacks()) {
+            cacheAwareService.buildCacheHitComparison(feedback)
+                    .thenAccept(this::reportCacheHitComparison)
+                    .exceptionally(error -> {
+                        logger.warn("Failed to build cache hit comparison, requestId={}",
+                                feedback.requestId(), error);
+                        return null;
+                    });
+        }
+    }
+
+    private void reportCacheHitComparison(CacheHitComparisonResult comparison) {
+        if (comparison == null) {
+            return;
+        }
+        engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
+        String json = JsonUtils.toStringOrEmpty(comparison);
+        if (!json.isEmpty()) {
+            pvLogger.info(json);
+        }
+    }
+
+    private void reportFinishedPrefillTasks(Map<String, TaskInfo> finishedTaskInfo) {
+        if ((roleType != RoleType.PREFILL && roleType != RoleType.PDFUSION)
+                || finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
+            return;
+        }
+        for (TaskInfo task : finishedTaskInfo.values()) {
+            engineHealthReporter.reportPrefillWorkerStatusTask(
+                    modelName, ip, roleType.getCode(), group, task);
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("event", "prefill_worker_status");
+            event.put("requestId", task.getRequestId());
+            event.put("model", modelName);
+            event.put("workerIp", ip);
+            event.put("workerPort", grpcPort);
+            event.put("role", roleType.getCode());
+            event.put("group", group);
+            event.put("inputQueueEnqueueTimeMs", task.getInputQueueEnqueueTimeMs());
+            event.put("inputQueueDrainTimeMs", task.getInputQueueDrainTimeMs());
+            event.put("remoteKvWaitMs", task.getRemoteKvWaitMs());
+            event.put("firstTokenTimeMs", task.getFirstTokenTimeMs());
+            event.put("hbmLocalMatchTokens", task.getHbmLocalMatchTokens());
+            event.put("remoteKvAddedMatchTokens", task.getRemoteKvAddedMatchTokens());
+            event.put("firstPrefillStepId", task.getFirstPrefillStepId());
+            event.put("lastPrefillStepId", task.getLastPrefillStepId());
+            event.put("prefillStepCount", task.getPrefillStepCount());
+            event.put("prefillNonfinalChunkTokensMin",
+                    task.getPrefillNonfinalChunkTokensMin());
+            event.put("prefillNonfinalChunkTokensMax",
+                    task.getPrefillNonfinalChunkTokensMax());
+            event.put("inputQueueWaitMs",
+                    duration(task.getInputQueueDrainTimeMs(), task.getInputQueueEnqueueTimeMs()));
+            long schedulerToRunningMs =
+                    duration(task.getRunningEnteredTimeMs(), task.getWaitingEnteredTimeMs());
+            event.put("schedulerToRunningMs", schedulerToRunningMs);
+            event.put("schedulerWaitMs", schedulerToRunningMs < 0
+                    ? -1 : Math.max(0, schedulerToRunningMs - task.getRemoteKvWaitMs()));
+            event.put("runningToFirstTokenMs",
+                    duration(task.getFirstTokenTimeMs(), task.getRunningEnteredTimeMs()));
+            String json = JsonUtils.toStringOrEmpty(event);
+            if (!json.isEmpty()) {
+                pvLogger.info(json);
+            }
+        }
+    }
+
+    private long duration(long endTimeMs, long startTimeMs) {
+        if (endTimeMs <= 0 || startTimeMs <= 0) {
+            return -1;
+        }
+        return Math.max(0, endTimeMs - startTimeMs);
     }
 
     private static Map<String, TaskInfo> runningOnly(Map<String, TaskInfo> tasks) {

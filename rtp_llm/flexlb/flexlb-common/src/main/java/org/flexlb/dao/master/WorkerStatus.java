@@ -189,6 +189,7 @@ public class WorkerStatus {
         addObservedTasks(runningTaskInfo, TaskStateEnum.RUNNING);
         addObservedTasks(waitingTaskInfo, TaskStateEnum.CONFIRMED);
 
+        List<CacheHitFeedback> cacheHitFeedbacks = new ArrayList<>();
         List<Long> decisionToWaitingObservedLatenciesMs = new ArrayList<>();
         List<Long> waitingToRunningObservedLatenciesMs = new ArrayList<>();
         List<Long> engineWaitingToRunningLatenciesMs = new ArrayList<>();
@@ -209,7 +210,7 @@ public class WorkerStatus {
                 }
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
                 updateTaskInputLength(localTask, finishedTask);
-                updateCacheHitFromEngine(localTask, finishedTask);
+                updateCacheHitFromEngine(localTask, finishedTask, "finished", cacheHitFeedbacks);
                 localTask.setRequestReceivedTimeMs(finishedTask.getRequestReceivedTimeMs());
                 localTask.setWaitingEnteredTimeMs(finishedTask.getWaitingEnteredTimeMs());
                 localTask.setRunningEnteredTimeMs(finishedTask.getRunningEnteredTimeMs());
@@ -255,7 +256,7 @@ public class WorkerStatus {
                 }
 
                 updateTaskInputLength(localTask, runningTask);
-                updateCacheHitFromEngine(localTask, runningTask);
+                updateCacheHitFromEngine(localTask, runningTask, "running", cacheHitFeedbacks);
                 updatePrefillRunningProgressFromEngine(localTask, runningTask);
                 localTask.setPrefillTime(runningTask.getPrefillTime());
                 localTask.setWaitingTime(runningTask.getWaitingTime());
@@ -295,7 +296,7 @@ public class WorkerStatus {
                 }
 
                 updateTaskInputLength(localTask, waitingTask);
-                updateCacheHitFromEngine(localTask, waitingTask);
+                updateCacheHitFromEngine(localTask, waitingTask, "waiting", cacheHitFeedbacks);
                 if (localTask.getTaskState() == TaskStateEnum.RUNNING) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
                 }
@@ -323,6 +324,7 @@ public class WorkerStatus {
         refreshInTransitAndWaitingStats();
         refreshRunningRemainingPrefillTokens();
         return TaskStateUpdateResult.from(
+                cacheHitFeedbacks,
                 decisionToWaitingObservedLatenciesMs,
                 waitingToRunningObservedLatenciesMs,
                 engineWaitingToRunningLatenciesMs,
@@ -361,7 +363,11 @@ public class WorkerStatus {
                 Math.max(0, engineTask.getLastCompletedPrefillStepId()));
     }
 
-    private void updateCacheHitFromEngine(TaskInfo localTask, TaskInfo engineTask) {
+    private void updateCacheHitFromEngine(
+            TaskInfo localTask,
+            TaskInfo engineTask,
+            String taskState,
+            List<CacheHitFeedback> cacheHitFeedbacks) {
         if (!engineTask.isPrefixLengthValid()) {
             if (localTask.isPrefixLengthValid()) {
                 long previousPrefillTime = localTask.estimatePrefillTime();
@@ -372,10 +378,37 @@ public class WorkerStatus {
             return;
         }
 
+        boolean cacheHitBecameValid = !localTask.isPrefixLengthValid();
         long previousPrefillTime = localTask.estimatePrefillTime();
         localTask.setPrefixLength(engineTask.getPrefixLength());
         localTask.setPrefixLengthValid(true);
         correctRunningQueueTime(localTask.estimatePrefillTime() - previousPrefillTime);
+
+        if (!cacheHitBecameValid) {
+            return;
+        }
+
+        long predictedHitTokens = localTask.getPredictedPrefixLength();
+        long actualHitTokens = localTask.getPrefixLength();
+        long blockSize = cacheStatus == null ? 0 : cacheStatus.getBlockSize();
+        cacheHitFeedbacks.add(new CacheHitFeedback(
+                "cache_hit_comparison",
+                String.valueOf(localTask.getRequestId()),
+                localTask.getCacheMatchSource(),
+                role == null ? "" : role.name(),
+                group,
+                ip,
+                port,
+                taskState,
+                localTask.getInputLength(),
+                blockSize,
+                predictedHitTokens,
+                localTask.isKvcmMatchAvailable(),
+                localTask.getKvcmLocalMatchTokens(),
+                localTask.getKvcmP2pFetchTokens(),
+                localTask.getKvcmP2pTotalMatchTokens(),
+                actualHitTokens,
+                actualHitTokens - predictedHitTokens));
     }
 
     private void correctRunningQueueTime(long correction) {
