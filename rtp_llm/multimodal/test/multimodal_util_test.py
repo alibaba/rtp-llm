@@ -3,7 +3,7 @@ import io
 import logging
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 from PIL import Image
@@ -11,7 +11,11 @@ from PIL import Image
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MMPreprocessConfigPB
 from rtp_llm.multimodal.mm_error_messages import MMErr
-from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url, trans_config
+from rtp_llm.multimodal.multimodal_util import (
+    get_bytes_io_from_url,
+    request_get,
+    trans_config,
+)
 
 
 class _FakeResponse:
@@ -134,6 +138,36 @@ class TestMultiModalUtil(unittest.TestCase):
         self.assertEqual(result.read(), b"payload")
         self.assertTrue(response.content_accessed)
         self.assertTrue(response.closed)
+
+    def test_request_get_retries_connect_timeout_twice(self):
+        response = _FakeResponse()
+        request_impl = Mock(
+            side_effect=[
+                requests.exceptions.ConnectTimeout(),
+                requests.exceptions.ConnectTimeout(),
+                response,
+            ]
+        )
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            self.assertIs(request_get("https://example.com/image", {}), response)
+
+        self.assertEqual(request_impl.call_count, 3)
+
+    def test_request_get_stops_after_two_connect_timeout_retries(self):
+        request_impl = Mock(side_effect=requests.exceptions.ConnectTimeout())
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            with self.assertRaises(requests.exceptions.ConnectTimeout):
+                request_get("https://example.com/image", {})
+
+        self.assertEqual(request_impl.call_count, 3)
+
+    def test_request_get_does_not_retry_read_timeout(self):
+        request_impl = Mock(side_effect=requests.exceptions.ReadTimeout())
+        with patch("rtp_llm.multimodal.multimodal_util.REQUEST_GET", request_impl):
+            with self.assertRaises(requests.exceptions.ReadTimeout):
+                request_get("https://example.com/image", {})
+
+        self.assertEqual(request_impl.call_count, 1)
 
     def test_http_timeout(self):
         with patch(
