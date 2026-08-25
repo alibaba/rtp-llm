@@ -6,15 +6,44 @@ spring:
   main:
     web-application-type: reactive
   codec:
-    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:5MB}
+    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:10MB}
+  lifecycle:
+    timeout-per-shutdown-phase: ${FLEXLB_SHUTDOWN_TIMEOUT:30s}
+
+flexlb:
+  monitor:
+    provider: ${FLEXLB_MONITOR_PROVIDER:noop}
+    # Set FLEXLB_MONITOR_ENABLED=false to disable monitoring.
+    enabled: true
+    # Set false to aggregate per-engine metrics and reduce cardinality.
+    per-engine-tags: true
+    # Set FLEXLB_MONITOR_MODE=all to report all metrics.
+    mode: critical-only
+  log:
+    path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
+    # application.log 和 pv.log 的独立路径，默认与 path 一致
+    app-path: ${FLEXLB_APP_LOG_PATH:${flexlb.log.path}}
+    async-queue-size: ${FLEXLB_LOG_ASYNC_QUEUE_SIZE:16384}
+  # CPU-bound block hashing pool: use core threads first, queue pending work, then
+  # expand up to max threads when the queue is full. Extra threads expire after keep-alive.
+  block-hash:
+    core-thread-count: ${FLEXLB_BLOCK_HASH_CORE_THREAD_COUNT:8}
+    max-thread-count: ${FLEXLB_BLOCK_HASH_MAX_THREAD_COUNT:32}
+    keep-alive-seconds: ${FLEXLB_BLOCK_HASH_KEEP_ALIVE_SECONDS:60}
+    queue-capacity: ${FLEXLB_BLOCK_HASH_QUEUE_CAPACITY:16384}
+
 logging:
+  group:
+    flexlb: org.flexlb,flexlbLogger,syncLogger,syncConsistencyLogger
   level:
     root: info
+    flexlb: ${FLEXLB_LOG_LEVEL:INFO}
     io.grpc: info
     com.google.protobuf: info
     org.flexlb.utils.LoggingUtils: trace
 server:
   port: 7001
+  shutdown: graceful
 
 management:
   server:
@@ -32,14 +61,14 @@ trace:
   otel:
     web:
       filter-order: 0x7fffffff
-      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN}
+      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN:/health|/hook/.*}
     config:
       service-name: flexlb
       instrumentation-name: trace
     exporter:
       otlp:
         enabled: true
-        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT:http://127.0.0.1:4317}
       logging:
         enabled: true
         format: json
@@ -47,14 +76,3 @@ otel:
   exporter:
     otlp:
       endpoint: none
-
-flexlb:
-  monitor:
-    # Default on. Set FLEXLB_MONITOR_ENABLED=false env var to disable.
-    # When enabled with 750+ engines, /prometheus returns 23MB (139K series).
-    enabled: true
-    # Set to false to aggregate per-engine metrics (reduces ~139K series to ~250)
-    # Default: per-engine tags retained (high cardinality with many engines)
-    per-engine-tags: true
-    # Default: critical-only metrics reported. Set FLEXLB_MONITOR_MODE=all to report all metrics.
-    mode: critical-only

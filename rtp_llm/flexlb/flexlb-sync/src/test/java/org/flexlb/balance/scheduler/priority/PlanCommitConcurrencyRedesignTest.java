@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -10,9 +8,10 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.PrefillQueueManager;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -48,8 +47,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;

@@ -1,0 +1,3 @@
+flexlb:
+  log:
+    path: ${java.io.tmpdir}/flexlb-test/logs

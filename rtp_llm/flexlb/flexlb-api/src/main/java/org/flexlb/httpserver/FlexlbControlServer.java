@@ -6,7 +6,6 @@ import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
-import org.flexlb.enums.LogLevel;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;

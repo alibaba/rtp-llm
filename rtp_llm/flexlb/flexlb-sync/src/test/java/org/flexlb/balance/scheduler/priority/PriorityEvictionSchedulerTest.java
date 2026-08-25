@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
@@ -9,6 +7,7 @@ import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;

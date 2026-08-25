@@ -544,7 +544,6 @@ public class WorkerStatus {
         this.statusLastUpdateTime.set(nowUs);
     }
 
-
     /**
      * Update resource availability with hysteresis to prevent state oscillation.
      * <p>

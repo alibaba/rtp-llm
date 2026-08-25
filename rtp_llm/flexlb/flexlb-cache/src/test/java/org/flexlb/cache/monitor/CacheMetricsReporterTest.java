@@ -1,7 +1,6 @@
 package org.flexlb.cache.telemetry;
 
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
-
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;

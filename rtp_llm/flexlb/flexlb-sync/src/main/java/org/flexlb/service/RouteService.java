@@ -1,7 +1,7 @@
 package org.flexlb.service;
 
-import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.Router;

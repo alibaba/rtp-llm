@@ -7,9 +7,8 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.springframework.stereotype.Component;
-
 import org.flexlb.util.Logger;
+import org.springframework.stereotype.Component;
 
 import java.util.Map;
 

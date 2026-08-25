@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.enums.DecodeTaskPhase;
-
 import java.util.Comparator;
 import java.util.List;
 

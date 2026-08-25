@@ -17,7 +17,6 @@ import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;

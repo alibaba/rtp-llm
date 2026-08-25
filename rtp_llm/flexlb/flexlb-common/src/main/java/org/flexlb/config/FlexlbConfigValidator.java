@@ -246,6 +246,10 @@ final class FlexlbConfigValidator {
     }
 
     private static void validateObservability(ObservabilityConfig observability) {
+        require(observability.getLogging() != null,
+                "observability.logging", "is required");
+        require(observability.getLogging().getLevel() != null,
+                "observability.logging.level", "is required");
         require(observability.getCacheHit() != null,
                 "observability.cacheHit", "is required");
         ObservabilityConfig.CacheHitConfig cacheHit = observability.getCacheHit();

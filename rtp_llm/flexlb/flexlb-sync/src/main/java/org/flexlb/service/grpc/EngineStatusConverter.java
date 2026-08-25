@@ -4,11 +4,10 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.KvCacheGroupMode;
-import org.flexlb.enums.TaskPhase;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
 import java.util.HashSet;

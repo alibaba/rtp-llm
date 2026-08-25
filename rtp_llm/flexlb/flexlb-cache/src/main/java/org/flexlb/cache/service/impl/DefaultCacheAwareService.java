@@ -1,10 +1,10 @@
 package org.flexlb.cache.service.impl;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.match.localsync.KvCacheManager;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.cache.match.localsync.KvCacheManager;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
