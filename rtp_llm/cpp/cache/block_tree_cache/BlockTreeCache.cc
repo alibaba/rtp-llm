@@ -120,7 +120,10 @@ BlockTreeCache::~BlockTreeCache() {
         std::lock_guard<std::mutex> lock(mutex_);
         storer_.stopAdmissionLocked();
     }
+    task_pool_->stopAdmission();
+    transfer_dispatcher_->cancelPendingStagingTransfers();
     task_pool_->waitForIdle();
+    transfer_dispatcher_->shutdown();
     task_pool_->shutdown();
     RTP_LLM_LOG_INFO("destroyed");
 }

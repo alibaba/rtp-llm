@@ -63,5 +63,67 @@ TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
     EXPECT_TRUE(weak_guard.expired());
 }
 
+TEST(TransferBatchAsyncContextTest, CallbackRegisteredBeforeCompletionRunsOnce) {
+    TransferBatchAsyncContext context;
+    std::atomic<size_t> callback_count{0};
+    ErrorCode           callback_code = ErrorCode::INVALID_PARAMS;
+
+    context.onDone([&](ErrorInfo error) {
+        callback_code = error.code();
+        ++callback_count;
+    });
+    context.complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "first completion"));
+    context.complete(ErrorInfo::OkStatus());
+
+    EXPECT_EQ(callback_count.load(), 1u);
+    EXPECT_EQ(callback_code, ErrorCode::EXECUTION_EXCEPTION);
+}
+
+TEST(TransferBatchAsyncContextTest, CallbackRegisteredAfterCompletionRunsImmediately) {
+    TransferBatchAsyncContext context;
+    context.complete(ErrorInfo::OkStatus());
+
+    size_t callback_count = 0;
+    context.onDone([&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        ++callback_count;
+    });
+
+    EXPECT_EQ(callback_count, 1u);
+}
+
+TEST(TransferBatchAsyncContextTest, CallbackCanReadContextWithoutDeadlock) {
+    TransferBatchAsyncContext context;
+    context.onDone([&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        EXPECT_TRUE(context.done());
+        EXPECT_TRUE(context.success());
+    });
+
+    context.complete(ErrorInfo::OkStatus());
+}
+
+TEST(TransferBatchAsyncContextTest, MultipleCallbacksAndWaiterObserveSameTerminalResult) {
+    auto context = std::make_shared<TransferBatchAsyncContext>();
+    std::atomic<size_t> callback_count{0};
+
+    context->onDone([&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        ++callback_count;
+    });
+    context->onDone([&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        ++callback_count;
+    });
+
+    std::thread waiter([&] { context->waitDone(); });
+    context->complete(ErrorInfo::OkStatus());
+    context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "duplicate completion"));
+    waiter.join();
+
+    EXPECT_EQ(callback_count.load(), 2u);
+    EXPECT_TRUE(context->success());
+}
+
 }  // namespace
 }  // namespace rtp_llm
