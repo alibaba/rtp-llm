@@ -459,6 +459,14 @@ torch::Tensor MtpExecutor::buildDraftCacheGroupTypes(const CacheConfig&      glo
 }
 
 void MtpExecutor::runChunkPrefillRound(ChunkPrefillContext& hook, const PrefillChunkRound& round, bool is_last) {
+    const size_t round_index = hook.round_index++;
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+        "executor.mtp.chunk_prefill.draft_round(index=%zu,target_tokens=%ld,slices=%zu,last=%d)",
+        round_index,
+        round.token_count(),
+        round.slices.size(),
+        static_cast<int>(is_last));
+
     PrefillChunkRound draft_round;
     for (const auto& slice : round.slices) {
         RTP_LLM_CHECK_WITH_INFO(slice.original_batch_idx >= 0
@@ -1168,6 +1176,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (chunked_mtp_prefill) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(chunked_target_draft_forward)");
         const size_t total_tokens = static_cast<size_t>(model_input.combo_tokens.size(0));
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+            "executor.mtp.chunk_prefill.session(total_tokens=%zu,requests=%ld,chunk_budget=%zu)",
+            total_tokens,
+            model_input.input_lengths.numel(),
+            configured_chunk_tokens);
         RTP_LLM_CHECK_WITH_INFO((tp_rank_ == 0 && !streams.empty()) || (tp_rank_ != 0 && streams.empty()),
                                 "MTP chunk Prefill requires user streams on TP rank 0 only: streams=%ld TP rank=%d",
                                 streams.size(),

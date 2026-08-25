@@ -919,7 +919,12 @@ class KimiK3Model(GptModelBase):
                         f"physical_page={page_size}"
                     )
         chunk_cache_publisher.publish_prefix()
-        for round_plan in rounds:
+        for round_idx, round_plan in enumerate(rounds):
+            terminal_count = sum(int(item.terminal) for item in round_plan.slices)
+            round_label = (
+                f"round={round_idx},tokens={round_plan.token_count},"
+                f"requests={len(round_plan.slices)},terminal={terminal_count}"
+            )
             chunk_inputs = build_chunk_model_inputs(
                 input_ids,
                 attention_inputs,
@@ -932,13 +937,16 @@ class KimiK3Model(GptModelBase):
             # and all-gathers the next 3-layer Eagle hidden tensor.
             self._release_prefill_mtp_hidden_buffer()
             chunk_publish_context = chunk_cache_publisher.begin_round(round_plan)
-            round_output = self._forward_impl_one(
-                chunk_inputs,
-                fmha_impl,
-                kda_current_state_registry=current_state_registry,
-                round_plan=round_plan,
-                chunk_publish_context=chunk_publish_context,
-            )
+            with torch.profiler.record_function(
+                f"RTP::kimi_k3.chunk_prefill.target_forward({round_label})"
+            ):
+                round_output = self._forward_impl_one(
+                    chunk_inputs,
+                    fmha_impl,
+                    kda_current_state_registry=current_state_registry,
+                    round_plan=round_plan,
+                    chunk_publish_context=chunk_publish_context,
+                )
             chunk_cache_publisher.commit_round(chunk_publish_context)
             if chunk_prefill_round_hook is not None:
                 round_mtp_hidden = self.get_mtp_target_hidden_states(-1)

@@ -224,6 +224,7 @@ private:
         PrefillChunkRound terminal_round;
         std::vector<bool> terminal_seen;
         int64_t*          model_forward_us = nullptr;
+        size_t            round_index      = 0;
     };
     void runChunkPrefillRound(ChunkPrefillContext& hook, const PrefillChunkRound& round, bool is_last);
 
