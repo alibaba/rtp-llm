@@ -1,76 +1,195 @@
 package org.flexlb.util;
 
-import lombok.Getter;
-import lombok.Setter;
-import org.flexlb.enums.LogLevel;
 import org.slf4j.LoggerFactory;
 
 /**
- * Logging utility class, in order to log when enable global switch or set log level in master request
- *
- * <p>The {@code info} {@code warn} and {@code error} level in enabled by default.</p>
- *
- * @see LogLevel
+ * Business logger facade. Log filtering is delegated to the configured SLF4J backend.
  */
-public class Logger {
+public final class Logger {
 
     private static final org.slf4j.Logger log = LoggerFactory.getLogger("flexlbLogger");
 
-    @Getter
-    @Setter
-    private static LogLevel globalLogLevel;
+    private Logger() {
+    }
 
-    static {
-        String logLevelStr = System.getenv("LOG_LEVEL");
-        if (logLevelStr != null) {
-            try {
-                globalLogLevel = LogLevel.valueOf(logLevelStr.toUpperCase().trim());
-            } catch (IllegalArgumentException e) {
-                log.warn("Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.", logLevelStr);
-            }
+    public static boolean isDebugEnabled() {
+        return log.isDebugEnabled();
+    }
+
+    public static void trace(String message) {
+        log.trace(message);
+    }
+
+    public static void trace(String format, Object argument) {
+        log.trace(format, argument);
+    }
+
+    public static void trace(String format, Object firstArgument, Object secondArgument) {
+        log.trace(format, firstArgument, secondArgument);
+    }
+
+    public static void trace(String message, Throwable throwable) {
+        log.trace(message, throwable);
+    }
+
+    public static void debug(String message) {
+        log.debug(message);
+    }
+
+    public static void debug(String format, Object argument) {
+        log.debug(format, argument);
+    }
+
+    public static void debug(String format, Object firstArgument, Object secondArgument) {
+        log.debug(format, firstArgument, secondArgument);
+    }
+
+    public static void debug(String message, Throwable throwable) {
+        log.debug(message, throwable);
+    }
+
+    public static void debug(
+            String format, Object firstArgument, Object secondArgument, Object thirdArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, firstArgument, secondArgument, thirdArgument);
         }
     }
 
-    public static void trace(String format, Object... args) {
-        log(LogLevel.TRACE, () -> log.trace(format, args));
-    }
-
-    public static void debug(String format, Object... args) {
-        log(LogLevel.DEBUG, () -> log.debug(format, args));
-    }
-
-    public static void info(String format, Object... args) {
-        log(LogLevel.INFO, () -> log.info(format, args), false);
-    }
-
-    public static void warn(String format, Object... args) {
-        log(LogLevel.WARN, () -> log.warn(format, args), false);
-    }
-
-    public static void error(String format, Object... args) {
-        log(LogLevel.ERROR, () -> log.error(format, args), false);
-    }
-
-    private static void log(LogLevel targetLevel, Runnable logAction) {
-        log(targetLevel, logAction, true);
-    }
-
-    private static void log(LogLevel targetLevel, Runnable logAction, boolean checkGlobalLevel) {
-        boolean shouldLog = shouldLog(targetLevel, checkGlobalLevel);
-
-        if (shouldLog) {
-            logAction.run();
+    public static void debug(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, firstArgument, secondArgument, thirdArgument, fourthArgument);
         }
     }
 
-    private static boolean shouldLog(LogLevel targetLevel, boolean checkGlobalLevel) {
-        boolean shouldLog;
-        if (checkGlobalLevel) {
-            shouldLog = globalLogLevel != null && globalLogLevel.compareTo(targetLevel) <= 0;
-        } else {
-            // warn and error are enabled by default
-            shouldLog = globalLogLevel == null || globalLogLevel.compareTo(targetLevel) <= 0;
+    public static void debug(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument,
+            Object fifthArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument);
         }
-        return shouldLog;
+    }
+
+    public static void debug(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument,
+            Object fifthArgument,
+            Object sixthArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format,
+                    firstArgument,
+                    secondArgument,
+                    thirdArgument,
+                    fourthArgument,
+                    fifthArgument,
+                    sixthArgument);
+        }
+    }
+
+    public static void info(String message) {
+        log.info(message);
+    }
+
+    public static void info(String format, Object argument) {
+        log.info(format, argument);
+    }
+
+    public static void info(String format, Object firstArgument, Object secondArgument) {
+        log.info(format, firstArgument, secondArgument);
+    }
+
+    public static void info(String message, Throwable throwable) {
+        log.info(message, throwable);
+    }
+
+    public static void warn(String message) {
+        log.warn(message);
+    }
+
+    public static void warn(String format, Object argument) {
+        log.warn(format, argument);
+    }
+
+    public static void warn(String format, Object firstArgument, Object secondArgument) {
+        log.warn(format, firstArgument, secondArgument);
+    }
+
+    public static void warn(String message, Throwable throwable) {
+        log.warn(message, throwable);
+    }
+
+    public static void warn(
+            String format, Object firstArgument, Object secondArgument, Object thirdArgument) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, firstArgument, secondArgument, thirdArgument);
+        }
+    }
+
+    public static void warn(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, firstArgument, secondArgument, thirdArgument, fourthArgument);
+        }
+    }
+
+    public static void warn(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument,
+            Object fifthArgument) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument);
+        }
+    }
+
+    public static void error(String message) {
+        log.error(message);
+    }
+
+    public static void error(String format, Object argument) {
+        log.error(format, argument);
+    }
+
+    public static void error(String format, Object firstArgument, Object secondArgument) {
+        log.error(format, firstArgument, secondArgument);
+    }
+
+    public static void error(String message, Throwable throwable) {
+        log.error(message, throwable);
+    }
+
+    public static void error(
+            String format, Object firstArgument, Object secondArgument, Object thirdArgument) {
+        if (log.isErrorEnabled()) {
+            log.error(format, firstArgument, secondArgument, thirdArgument);
+        }
+    }
+
+    public static void error(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument) {
+        if (log.isErrorEnabled()) {
+            log.error(format, firstArgument, secondArgument, thirdArgument, fourthArgument);
+        }
     }
 }

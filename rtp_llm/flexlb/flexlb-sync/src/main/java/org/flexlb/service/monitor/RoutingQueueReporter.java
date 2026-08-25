@@ -18,6 +18,7 @@ import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_REJECTED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_TIMEOUT_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_RETRY_QPS;
+import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_SUCCESS_QPS;
 
@@ -46,11 +47,12 @@ public class RoutingQueueReporter {
     public void init() {
         monitor.register(ROUTING_QUEUE_LENGTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_ENTRY_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS);
-        monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS);
-        monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS);
+        monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Routing status monitoring metrics
         monitor.register(ROUTING_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -61,7 +63,7 @@ public class RoutingQueueReporter {
     }
 
     public void reportQueueSize(long queueSize) {
-        monitor.report(ROUTING_QUEUE_LENGTH, FlexMetricTags.of("type", "mainQueue"), queueSize);
+        monitor.report(ROUTING_QUEUE_LENGTH, tags, queueSize);
     }
 
     public void reportQueueWaitingMetric(long waitTimeMs) {
@@ -70,6 +72,14 @@ public class RoutingQueueReporter {
 
     public void reportRouteExecutionMetric(long routeExecutionTimeMs) {
         monitor.report(ROUTING_ROUTE_EXECUTION_TIME_MS, tags, routeExecutionTimeMs);
+    }
+
+    /**
+     * Reports one {@code Router.route(...)} invocation. This excludes queue waiting and the
+     * retry interval between routing attempts.
+     */
+    public void reportRouteAttemptExecutionMetric(long routeAttemptTimeMs) {
+        monitor.report(ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS, tags, routeAttemptTimeMs);
     }
 
     public void reportTimeout() {
@@ -92,11 +102,17 @@ public class RoutingQueueReporter {
     }
 
     /**
-     * Report routing success metrics
+     * Report routing success metrics.
      */
-    public void reportRoutingSuccessQps(int retryTimes) {
+    public void reportRoutingSuccessQps() {
         monitor.report(ROUTING_SUCCESS_QPS, tags, 1.0);
-        monitor.report(ROUTING_RETRY_QPS, tags, retryTimes);
+    }
+
+    /**
+     * Report one retry decision made by a scheduling worker.
+     */
+    public void reportRoutingRetryQps() {
+        monitor.report(ROUTING_RETRY_QPS, tags, 1.0);
     }
 
     /**

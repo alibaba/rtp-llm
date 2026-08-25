@@ -22,7 +22,7 @@ public class GrpcReporter {
         this.monitor = monitor;
     }
 
-    // gRPC call related metric constants
+    // gRPC call durations are reported in microseconds.
     private static final String GRPC_CALL_DURATION = "grpc.call.duration";
     private static final String GRPC_RESPONSE_SIZE = "grpc.response.size";
     private static final String GRPC_CALL_COUNT = "grpc.call.count";
@@ -33,7 +33,7 @@ public class GrpcReporter {
         this.monitor.register(GRPC_CHANNEL_POOL_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(GRPC_CALL_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_RESPONSE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS);
+        this.monitor.register(GRPC_CALL_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_CONNECTION_DURATION, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
@@ -51,7 +51,7 @@ public class GrpcReporter {
      *
      * @param ip Target IP address
      * @param serviceType Service type
-     * @param duration Call duration in milliseconds
+     * @param duration Call duration in microseconds
      * @param responseSize Response body size in bytes
      * @param isRetry Whether this is a retry call
      */
@@ -62,7 +62,7 @@ public class GrpcReporter {
             "retry", String.valueOf(isRetry)
         );
 
-        // Report call duration
+        // Report call duration in microseconds.
         monitor.report(GRPC_CALL_DURATION, tags, duration);
 
         // Report response body size
@@ -85,7 +85,7 @@ public class GrpcReporter {
             "service", serviceType
         );
 
-        // Report connection duration
+        // Report connection duration in microseconds.
         monitor.report(GRPC_CONNECTION_DURATION, tags, connectionDuration);
     }
 }
