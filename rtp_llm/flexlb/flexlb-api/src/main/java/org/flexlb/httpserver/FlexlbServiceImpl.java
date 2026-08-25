@@ -682,6 +682,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        // KVCM matching uses the generic block-size field. The dsv4 wire
+        // protocol still names the same value cache_key_block_size.
+        request.setBlockSize(pb.getCacheKeyBlockSize());
 
         var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB

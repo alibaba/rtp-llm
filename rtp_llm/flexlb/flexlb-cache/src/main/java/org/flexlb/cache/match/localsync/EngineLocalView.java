@@ -1,9 +1,8 @@
-package org.flexlb.cache.core;
+package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 

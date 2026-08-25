@@ -1,4 +1,4 @@
-package org.flexlb.cache.core;
+package org.flexlb.cache.match.localsync;
 
 import com.google.common.collect.Sets;
 import lombok.extern.slf4j.Slf4j;

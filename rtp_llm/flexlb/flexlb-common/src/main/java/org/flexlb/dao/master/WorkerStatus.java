@@ -39,6 +39,7 @@ public class WorkerStatus {
     private long dpSize;
     private long tpSize;
     private long dpRank;
+    private int blockHashLookaheadTokens;
     /** Model-level maximum sequence length reported by the Engine. */
     private long maxSeqLen;
     /** Strict aggregate context-token limit for an Engine batch/group. */

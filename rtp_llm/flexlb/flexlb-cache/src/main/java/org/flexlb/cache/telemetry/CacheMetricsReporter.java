@@ -1,6 +1,7 @@
-package org.flexlb.cache.monitor;
+package org.flexlb.cache.telemetry;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
@@ -124,10 +125,7 @@ public class CacheMetricsReporter {
         // Calculate cache count and bytes
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", engineIp,
-                "role", role
-        );
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", engineIp, "role", role);
 
         monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
@@ -156,7 +154,6 @@ public class CacheMetricsReporter {
      * @param hitRatio  Hit percentage
      */
     public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
-
         FlexMetricTags baseTags = FlexMetricTags.of(
                 "role", roleType.name()
         );
@@ -349,7 +346,7 @@ public class CacheMetricsReporter {
         // ConcurrentHashMap base structure overhead (object header 12 + fields 44 = 56 bytes aligned)
         long chmBaseSize = 56L;
 
-        // table array overhead (capacity calculated based on 75% load factor, reference is 4 bytes with compressed oops)
+        // table array overhead (capacity calculated using a 75% load factor and 4-byte compressed references)
         int initialCapacity = Math.max(16, (int) Math.ceil(totalBlocks / 0.75));
         long tableArraySize = alignTo8Bytes(16L + initialCapacity * 4L);
 
@@ -372,23 +369,20 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report response time for finding matching engines
+     * Report cache-match lookup time in microseconds.
      *
      * @param roleType  Role type
      * @param startTime Start time in microseconds
      * @param success   Whether successful
      */
     public void reportFindMatchingEnginesRT(RoleType roleType, long startTime, String success) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "success", success
-        );
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "success", success);
 
         monitor.report(CACHE_FIND_MATCHING_ENGINES_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
     }
 
     /**
-     * Report response time for updating engine cache
+     * Report local cache metadata update time in microseconds.
      *
      * @param role         Engine role
      * @param startTime    Start time in microseconds
@@ -399,6 +393,11 @@ public class CacheMetricsReporter {
                 "role", role,
                 "success", success
         );
+        monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
+    }
+
+    public void reportUpdateEngineBlockCacheRT(String engineIpPort, String role, long startTime, String success) {
+        FlexMetricTags tags = FlexMetricTags.of("engineIpPort", engineIpPort, "role", role, "success", success);
 
         monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
     }
@@ -414,6 +413,20 @@ public class CacheMetricsReporter {
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", role != null ? role : "unknown"
         );
+        reportCacheDiffMetrics(tags, addedBlocksSize, removedBlocksSize);
+    }
+
+    public void reportCacheDiffMetrics(String engineIp, String role, int addedBlocksSize, int removedBlocksSize) {
+        if (engineIp == null) {
+            return;
+        }
+
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", engineIp, "role", role != null ? role : "unknown");
+
+        reportCacheDiffMetrics(tags, addedBlocksSize, removedBlocksSize);
+    }
+
+    private void reportCacheDiffMetrics(FlexMetricTags tags, int addedBlocksSize, int removedBlocksSize) {
 
         monitor.report(CACHE_DIFF_ADDED_BLOCKS_SIZE, tags, addedBlocksSize);
         monitor.report(CACHE_DIFF_REMOVED_BLOCKS_SIZE, tags, removedBlocksSize);

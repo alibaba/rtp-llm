@@ -1,7 +1,6 @@
-package org.flexlb.cache.service.impl;
+package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.WorkerRegistryConfig;
 import org.springframework.stereotype.Service;
