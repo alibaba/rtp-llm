@@ -34,6 +34,23 @@ std::string makeTokenizerInfoJson() {
     return info.SerializeJSON();
 }
 
+std::string makeGlm5PaddedTokenizerInfoJson() {
+    // GLM5 exposes a 154880-row LM head, while its tokenizer only defines
+    // token ids [0, 154856). XGrammar classifies the remaining padded ids as
+    // special tokens so they are masked during constrained decoding.
+    constexpr int32_t kTokenizerVocabSize = 154856;
+    constexpr int32_t kModelVocabSize     = 154880;
+    constexpr int32_t kStopTokenId        = 154820;
+
+    std::vector<std::string> vocab(kTokenizerVocabSize);
+    vocab[static_cast<size_t>('a')] = "a";
+    xgrammar::TokenizerInfo info(vocab,
+                                 xgrammar::VocabType::RAW,
+                                 /*vocab_size=*/kModelVocabSize,
+                                 /*stop_token_ids=*/std::vector<int32_t>{kStopTokenId});
+    return info.SerializeJSON();
+}
+
 XGrammarBackendCpp makeBackend() {
     XGrammarBackendOptions options;
     options.max_compiler_threads = 1;
@@ -344,6 +361,112 @@ TEST(GrammarLogitsProcessorTest, SpecTryAcceptMasksModelVocabTailBeyondGrammarVo
     EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data(), 159));
     EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data() + W, 128));
     EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data() + W, 159));
+}
+
+TEST(GrammarLogitsProcessorTest, Glm5PaddedToken154879IsMaskedAndRejectedIfCommitted) {
+    constexpr int32_t kModelVocabSize = 154880;
+    constexpr int32_t kPaddedTokenId  = 154879;
+    constexpr int32_t kStopTokenId    = 154820;
+
+    XGrammarBackendOptions options;
+    options.max_compiler_threads = 1;
+    XGrammarBackendCpp backend(makeGlm5PaddedTokenizerInfoJson(), options);
+    auto               compiled = backend.compileNow({"regex", "a"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    bool        reported = false;
+    std::string reported_message;
+    auto        matcher = backend.createMatcher(compiled, false, std::nullopt);
+    auto        processor = std::make_shared<GrammarLogitsProcessor>(
+        matcher,
+        /*eos_token_id=*/kStopTokenId,
+        [&reported, &reported_message](ErrorCode, const std::string& message, bool) {
+            reported         = true;
+            reported_message = message;
+        });
+
+    const int            P = 1;
+    const size_t         W = SpecLogitsProcessor::bitmaskWordCount(kModelVocabSize);
+    std::vector<int32_t> draft{kPaddedTokenId};
+    std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = P;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = W;
+    request.vocab_size         = kModelVocabSize;
+
+    // The MTP verify artifact must reject the padded draft before it can be
+    // committed to the stateful grammar matcher.
+    EXPECT_EQ(processor->tryAcceptAndFillBitmask(request), 0);
+    EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data(), kPaddedTokenId));
+    EXPECT_TRUE(processor->isSpecVerifyEligible());
+
+    // Reproduce the production warning/error by bypassing the verify mask and
+    // committing the same padded id directly.
+    processor->updateStatus(torch::tensor({{kPaddedTokenId}}, torch::kInt32), 1);
+    EXPECT_TRUE(reported);
+    EXPECT_NE(reported_message.find("parser rejected token 154879"), std::string::npos);
+    EXPECT_FALSE(processor->isSpecVerifyEligible());
+    EXPECT_EQ(processor->acceptedTokenLen(), 0);
+}
+
+TEST(GrammarLogitsProcessorTest, Glm5DegenerateGrammarReportsNoValidMtpReplacementToken) {
+    constexpr int32_t kModelVocabSize = 154880;
+    constexpr int32_t kPaddedTokenId  = 154879;
+
+    XGrammarBackendOptions options;
+    options.max_compiler_threads = 1;
+    XGrammarBackendCpp backend(makeGlm5PaddedTokenizerInfoJson(), options);
+    auto compiled = backend
+                        .compileNow({"json",
+                                     R"({
+  "$ref": "#/definitions/Self",
+  "definitions": {
+    "Self": {"$ref": "#/definitions/Self"}
+  }
+})"})
+                        .compiled;
+    ASSERT_TRUE(compiled);
+
+    bool        reported = false;
+    std::string reported_message;
+    auto        matcher = backend.createMatcher(compiled, false, std::nullopt);
+    GrammarLogitsProcessor processor(
+        matcher,
+        /*eos_token_id=*/154820,
+        [&reported, &reported_message](ErrorCode, const std::string& message, bool) {
+            reported         = true;
+            reported_message = message;
+        });
+
+    const int            P = 1;
+    const size_t         W = SpecLogitsProcessor::bitmaskWordCount(kModelVocabSize);
+    std::vector<int32_t> draft{kPaddedTokenId};
+    std::vector<int32_t> bitmask((P + 1) * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = P;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = W;
+    request.vocab_size         = kModelVocabSize;
+
+    // The rejected draft is replaced from row 0. Fail the request before an
+    // all-masked row reaches CUDA sampling, and leave only token 0 as a safety
+    // value for this round. The errored stream will not commit that token.
+    EXPECT_EQ(processor.tryAcceptAndFillBitmask(request), 0);
+    size_t allowed_token_count = 0;
+    for (int32_t token_id = 0; token_id < kModelVocabSize; ++token_id) {
+        allowed_token_count += packedBitmaskAllowsToken(bitmask.data(), token_id) ? 1 : 0;
+    }
+    EXPECT_EQ(allowed_token_count, 1u);
+    EXPECT_TRUE(packedBitmaskAllowsToken(bitmask.data(), 0));
+    EXPECT_FALSE(packedBitmaskAllowsToken(bitmask.data(), kPaddedTokenId));
+    EXPECT_TRUE(reported);
+    EXPECT_NE(reported_message.find("no valid next token"), std::string::npos);
+    EXPECT_FALSE(processor.isSpecVerifyEligible());
 }
 
 TEST(GrammarLogitsProcessorTest, SpecTryAcceptRejectsInvalidFirstDraftToken) {

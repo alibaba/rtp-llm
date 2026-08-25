@@ -35,6 +35,21 @@ bool bitmaskAllowsToken(const int32_t* bitmask, int32_t token_id) {
     return (static_cast<uint32_t>(word) & (1u << (token_id % 32))) != 0u;
 }
 
+bool bitmaskAllowsAnyToken(const int32_t* bitmask, size_t words, size_t vocab_size) {
+    const size_t required_words = SpecLogitsProcessor::bitmaskWordCount(vocab_size);
+    if (required_words == 0 || words < required_words) {
+        return false;
+    }
+    for (size_t word_idx = 0; word_idx + 1 < required_words; ++word_idx) {
+        if (bitmask[word_idx] != 0) {
+            return true;
+        }
+    }
+    const size_t   tail_bits = vocab_size % 32;
+    const uint32_t tail_mask = tail_bits == 0 ? ~0u : (1u << tail_bits) - 1u;
+    return (static_cast<uint32_t>(bitmask[required_words - 1]) & tail_mask) != 0u;
+}
+
 void clearTokenFromBitmask(int32_t* bitmask, size_t words, int64_t token_id) {
     if (token_id < 0 || static_cast<size_t>(token_id / 32) >= words) {
         return;
@@ -285,6 +300,15 @@ int GrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorReq
     for (int offset = 0; offset <= P; ++offset) {
         int32_t* row = request.bitmask_cpu_out + offset * W;
         fill_row(row);
+        if (!bitmaskAllowsAnyToken(row, W, request.vocab_size)) {
+            // The CUDA sampler treats an all-masked finite-logit row as a
+            // distribution and may emit an arbitrary token. Fail this request
+            // and leave one non-committed safety token for the current round.
+            forceTokenInBitmask(row, W, 0);
+            cap = offset;
+            reportErrorOnce(ErrorCode::INVALID_PARAMS, "grammar has no valid next token", false);
+            break;
+        }
         if (offset == P) {
             break;
         }
