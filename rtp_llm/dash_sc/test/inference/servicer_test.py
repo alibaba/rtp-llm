@@ -1832,6 +1832,94 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [9])
 
+    async def test_kimi_k3_expands_ordinary_text_image_placeholder(self) -> None:
+        class _KimiTokenizer:
+            @staticmethod
+            def decode(
+                token_ids: list[int], skip_special_tokens: bool = False
+            ) -> str:
+                del skip_special_tokens
+                # The token containing the leading space and "<|" (22) differs
+                # from the standalone placeholder tokenization, as real BPE does.
+                assert token_ids == [7, 22, 11, 8]
+                return "before <|kimi_image_placeholder|> after"
+
+            @staticmethod
+            def encode(text: str, add_special_tokens: bool = False) -> list[int]:
+                del add_special_tokens
+                assert text == (
+                    "before <|media_begin|>image 640x480"
+                    "<|media_content|><|media_pad|><|media_end|> after"
+                )
+                return [7, 20, 640, 480, 163605, 21, 8]
+
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=7, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=_KimiTokenizer(),
+            model_type="kimi_k3",
+            mm_download_headers='{"Authorization":"test"}',
+        )
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "kimi-k3-mm"
+        req.model_name = "default"
+        input_ids = [7, 22, 11, 8]
+        _add_input_tensor(
+            req,
+            "input_ids",
+            "INT32",
+            [len(input_ids)],
+            struct.pack("<4i", *input_ids),
+        )
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": "https://example.com/image.jpg",
+                                    "min_pixels": 50176,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+        with patch(
+            "rtp_llm.multimodal.kimi_k3_request._preflight_image",
+            return_value=(torch.tensor([1, 2, 3], dtype=torch.uint8), (640, 480)),
+        ) as preflight:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+            )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_input = visitor.last_generate_input
+        self.assertEqual(
+            generate_input.token_ids.tolist(),
+            [7, 20, 640, 480, 163605, 21, 8],
+        )
+        self.assertEqual(len(generate_input.mm_inputs), 1)
+        mm_input = generate_input.mm_inputs[0]
+        self.assertEqual(mm_input.url, "https://example.com/image.jpg")
+        self.assertEqual(mm_input.tensor.tolist(), [1, 2, 3])
+        self.assertEqual(mm_input.mm_preprocess_config.min_pixels, 50176)
+        preflight.assert_called_once_with(
+            "https://example.com/image.jpg", '{"Authorization":"test"}'
+        )
+
     async def test_timeout_request_sets_dashscope_partial_response_metadata(
         self,
     ) -> None:

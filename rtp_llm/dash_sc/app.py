@@ -568,6 +568,8 @@ class DashScApp:
                     echo_prefix_ids=echo_prefix_ids,
                     extra_stop_word_ids=extra_stop_word_ids,
                     tokenizer=base_tok,
+                    model_type=model_config.model_type,
+                    mm_download_headers=self.py_env_configs.vit_config.download_headers,
                     generate_env_config=self.py_env_configs.generate_env_config,
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,

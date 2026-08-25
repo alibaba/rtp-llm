@@ -60,6 +60,9 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
+from rtp_llm.multimodal.kimi_k3_request import (
+    prepare_kimi_k3_multimodal_prompt,
+)
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_request_headers,
@@ -83,12 +86,13 @@ _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 
 
-def _build_mm_inputs_from_request(request: Any) -> list:
-    """Build ``MultimodalInput`` list from a dash_sc gRPC request.
+def _build_mm_inputs(
+    mm_parts: list, tensors: Optional[list[torch.Tensor]] = None
+) -> list:
+    """Build ``MultimodalInput`` list from parsed dash_sc multimodal parts.
 
-    Pulls :class:`~rtp_llm.dash_sc.codec.MultimodalPart` records via
-    :func:`parse_multimodal_parts_from_request` and wraps each in a
-    ``MultimodalInput`` whose ``MMPreprocessConfig`` carries the per-part
+    Wraps each parsed multimodal part in a ``MultimodalInput`` whose
+    ``MMPreprocessConfig`` carries the per-part
     overrides (``min_pixels`` / ``max_pixels`` / ``fps`` / ``max_frames`` /
     ``min_frames``). Fields unset by the upstream stay ``-1`` so the engine
     falls back to model defaults — same as the original "all -1" behavior.
@@ -101,18 +105,20 @@ def _build_mm_inputs_from_request(request: Any) -> list:
     ``MMPreprocessConfig`` import is lazy so this module stays importable in
     environments without the C++ binding (e.g. lightweight codec unit tests).
     """
-    mm_parts = parse_multimodal_parts_from_request(request)
     if not mm_parts:
         return []
-    import torch  # noqa: PLC0415  (lazy; only needed when mm parts present)
-
     from rtp_llm.ops import MMPreprocessConfig, MultimodalInput  # noqa: PLC0415
+
+    if tensors is None:
+        tensors = [torch.empty(0)] * len(mm_parts)
+    if len(tensors) != len(mm_parts):
+        raise ValueError("multimodal tensor count must match multimodal input count")
 
     return [
         MultimodalInput(
             part.url,
             part.mm_type,
-            torch.empty(0),
+            tensor,
             MMPreprocessConfig(
                 -1,  # width (no upstream control today)
                 -1,  # height
@@ -125,8 +131,40 @@ def _build_mm_inputs_from_request(request: Any) -> list:
                 -1,  # use VitConfig.mm_timeout_ms
             ),
         )
-        for part in mm_parts
+        for part, tensor in zip(mm_parts, tensors)
     ]
+
+
+async def _prepare_multimodal_request(
+    request: Any,
+    input_ids_list: list[int],
+    *,
+    tokenizer: Any,
+    is_kimi_k3: bool = False,
+    download_headers: str = "",
+) -> tuple[list[int], list]:
+    """Expand K3 chat-template placeholders and build backend multimodal inputs."""
+    mm_parts = parse_multimodal_parts_from_request(request)
+    if not mm_parts:
+        return input_ids_list, []
+
+    if not is_kimi_k3:
+        return input_ids_list, _build_mm_inputs(mm_parts)
+
+    hf_tok = _hf_tokenizer(tokenizer)
+    if hf_tok is None:
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            "Kimi K3 tokenizer is required for multimodal placeholder expansion",
+        )
+    prompt = hf_tok.decode(input_ids_list, skip_special_tokens=False)
+    expanded_ids, tensors = await prepare_kimi_k3_multimodal_prompt(
+        prompt,
+        [part.url for part in mm_parts],
+        lambda text: _encode_tag(tokenizer, text),
+        download_headers,
+    )
+    return expanded_ids, _build_mm_inputs(mm_parts, tensors)
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -549,6 +587,8 @@ async def iter_real_model_stream_infer(
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: Any = None,
     mm_inputs: Optional[list] = None,
+    is_kimi_k3: bool = False,
+    mm_download_headers: str = "",
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -593,6 +633,14 @@ async def iter_real_model_stream_infer(
     should_echo = bool(matched_echo_ids)
     echoed = False
     try:
+        if mm_inputs is None:
+            input_ids_list, mm_inputs = await _prepare_multimodal_request(
+                request,
+                input_ids_list,
+                tokenizer=tokenizer,
+                is_kimi_k3=is_kimi_k3,
+                download_headers=mm_download_headers,
+            )
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
@@ -1186,6 +1234,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         echo_prefix_ids: Optional[list[int]] = None,
         extra_stop_word_ids: Optional[list[list[int]]] = None,
         tokenizer: Any = None,
+        model_type: str = "",
+        mm_download_headers: str = "",
         generate_env_config: Any = None,
         think_runtime: Optional[_ThinkRuntime] = None,
         rank_id: Optional[int] = None,
@@ -1202,6 +1252,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             [list(w) for w in extra_stop_word_ids] if extra_stop_word_ids else []
         )
         self._tokenizer = tokenizer
+        normalized_model_type = str(model_type or "").replace("-", "_").lower()
+        self._is_kimi_k3 = normalized_model_type == "kimi_k3"
+        self._mm_download_headers = mm_download_headers
         self._generate_env_config = generate_env_config
         # Empty runtime is a safe default — phase-2 disabled, all dashllm limit
         # params null. Production callers (``DashScApp``) pre-build via
@@ -1424,7 +1477,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         yield resp
                     return
                 else:
-                    mm_inputs = _build_mm_inputs_from_request(request)
                     async for resp, stats in iter_real_model_stream_infer(
                         request,
                         input_ids_list,
@@ -1440,7 +1492,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         think_runtime=self._think_runtime,
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
-                        mm_inputs=mm_inputs,
+                        is_kimi_k3=self._is_kimi_k3,
+                        mm_download_headers=self._mm_download_headers,
                         yield_access_stats=True,
                     ):
                         (
