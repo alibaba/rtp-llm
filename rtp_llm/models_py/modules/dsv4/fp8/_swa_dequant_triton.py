@@ -695,9 +695,7 @@ def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
     token_bf16_ptr = token_ptr + fp8_dim
     token_scale_ptr = token_ptr + token_data_size
     output_row_ptr = (
-        out_ptr
-        + batch_idx * out_stride0
-        + (offset + token_in_request) * out_stride1
+        out_ptr + batch_idx * out_stride0 + (offset + token_in_request) * out_stride1
     )
 
     for qblock_idx in tl.static_range(n_quant_blocks):
@@ -769,10 +767,6 @@ def try_restore_dequantize_scatter_packed_k_cache_flat(
     Returns ``False`` for unsupported inputs so callers can retain the existing
     PyTorch path as an exact fallback.
     """
-    enabled = os.environ.get("DSV4_CP_POOL_RESTORE_TRITON", "1").strip().lower()
-    if enabled in ("0", "false", "off", "no"):
-        return False
-
     batch_size = int(seq_lens.numel())
     n_tokens = int(restore_indices.numel())
     if batch_size == 0:

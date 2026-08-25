@@ -397,11 +397,11 @@ def build_cp_context(
     prepare_fusion_requested = False
     try:
         from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
-            cp_prepare_fusion_enabled,
+            cp_metadata_fusion_supported,
         )
 
         prepare_fusion_requested = (
-            torch.device(device).type == "cuda" and cp_prepare_fusion_enabled()
+            torch.device(device).type == "cuda" and cp_metadata_fusion_supported()
         )
     except (ImportError, ModuleNotFoundError):
         pass
@@ -1128,9 +1128,7 @@ def build_cp_full_prefill_positions(
                 if prefix_host is not None and len(prefix_host) == 1
                 else int(cp_ctx.prefix_length)
             )
-            pos = torch.arange(
-                start, start + total, dtype=torch.long, device=device
-            )
+            pos = torch.arange(start, start + total, dtype=torch.long, device=device)
         elif batch_size > 1:
             flat_offsets = torch.arange(total, dtype=torch.long, device=device)
             req = torch.repeat_interleave(
@@ -1469,9 +1467,7 @@ def build_kv_allgather_restore_indices(
         if batch_size == 1 and total_kv_len is not None:
             total_local = cp_padded_local_kv_len(total_real, cp_size, block_size)
         else:
-            local_per_req = cp_padded_local_kv_lens(
-                total_kv_lens, cp_size, block_size
-            )
+            local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
             total_local = int(local_per_req.sum().item())
     else:
         total_local = int(total_local_kv)
@@ -1496,9 +1492,7 @@ def build_kv_allgather_restore_indices(
         return fused_restore
 
     local_per_req = cp_padded_local_kv_lens(total_kv_lens, cp_size, block_size)
-    cu_local_per_req = torch.zeros(
-        batch_size + 1, dtype=torch.int64, device=device
-    )
+    cu_local_per_req = torch.zeros(batch_size + 1, dtype=torch.int64, device=device)
     cu_local_per_req[1:] = torch.cumsum(local_per_req, dim=0)
 
     # Flat ``[total_real]`` arange of "logical token position within request".
@@ -1549,9 +1543,7 @@ def cp_padded_local_kv_len(total_kv_len: int, cp_size: int, block_size: int) -> 
         raise ValueError(f"block_size must be positive, got {block_size}")
     total_kv_len = int(total_kv_len)
     virtual_block_size = block_size * cp_size
-    return (
-        (total_kv_len + virtual_block_size - 1) // virtual_block_size
-    ) * block_size
+    return ((total_kv_len + virtual_block_size - 1) // virtual_block_size) * block_size
 
 
 def cp_actual_owned_kv_len(
@@ -1570,9 +1562,7 @@ def cp_actual_owned_kv_len(
     total_kv_len = int(total_kv_len)
     full_blocks, tail = divmod(total_kv_len, block_size)
     owned_full_blocks = (
-        (full_blocks - 1 - cp_rank) // cp_size + 1
-        if full_blocks > cp_rank
-        else 0
+        (full_blocks - 1 - cp_rank) // cp_size + 1 if full_blocks > cp_rank else 0
     )
     owns_tail = tail > 0 and full_blocks % cp_size == cp_rank
     return owned_full_blocks * block_size + (tail if owns_tail else 0)

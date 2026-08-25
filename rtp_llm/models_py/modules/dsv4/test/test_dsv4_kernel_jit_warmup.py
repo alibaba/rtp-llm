@@ -34,9 +34,10 @@ _stub_package(
     os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
 )
 
+import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
-    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_batched_fp8_einsum_shapes,
+    _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
     _collect_dsv4_fp8_mqa_logits_shapes,
     _collect_dsv4_mhc_head_fused_shapes,
@@ -54,6 +55,7 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _sm100_dense_layout_signature,
     _state_ring_entries_warmup_values,
     _warmup_fused_kv_compress_norm_rope_insert,
+    resolve_dense_gemm_warmup_max_m,
     warmup_batched_fp8_einsum_jit,
     warmup_compressor_combine_branch_kernels,
     warmup_cp_metadata_jit,
@@ -62,9 +64,8 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     warmup_fp8_mqa_logits_jit,
     warmup_mhc_head_fused_jit,
     warmup_mhc_prenorm_gemm_jit,
-    resolve_dense_gemm_warmup_max_m,
+    warmup_prefill_cp_metadata_jit,
 )
-import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 
 
 def _module_type(name, attrs):
@@ -90,6 +91,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 cp_size=2,
                 max_batch_size=4,
                 fp8_kv_cache=True,
+                kv_cache_sharded=True,
                 device=device,
             )
             warmup_dense_gemm_jit({}, max_m=1, device=device)
@@ -105,9 +107,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
 
     def test_cp_warmup_covers_pool_restore_batch_blocks(self):
         from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_gather_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _fused_compressor_meta_triton,
+            _indexer_cp_gather_triton,
+            _swa_dequant_triton,
+        )
 
         pool_calls = []
         indexer_calls = []
@@ -212,9 +216,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             "_run_triton_warmup_launch_with_retry",
             side_effect=run_launch,
         ), mock.patch.object(
-            _cp_metadata_triton, "_enabled", return_value=True
-        ), mock.patch.object(
-            _cp_metadata_triton, "cp_prepare_fusion_enabled", return_value=True
+            _cp_metadata_triton, "cp_metadata_fusion_supported", return_value=True
         ), mock.patch.object(
             _cp_metadata_triton,
             "try_build_cp_restore_indices",
@@ -233,10 +235,6 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             side_effect=fake_pool_restore,
         ), mock.patch.object(
             _indexer_cp_gather_triton,
-            "cp_indexer_padded_gather_enabled",
-            return_value=True,
-        ), mock.patch.object(
-            _indexer_cp_gather_triton,
             "try_gather_indexer_k_to_padded",
             side_effect=fake_indexer_gather,
         ), mock.patch.object(
@@ -245,18 +243,13 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             _fused_compressor_meta_triton,
             "fused_compressor_slot_mapping",
             side_effect=fake_compressor_meta,
-        ), mock.patch.dict(
-            os.environ,
-            {
-                "DSV4_CP_POOL_RESTORE_TRITON": "1",
-                "DSV4_CP_INDEXER_GATHER_TRITON": "1",
-            },
         ):
             warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
             warmup_cp_metadata_jit(
                 cp_size=4,
                 max_batch_size=64,
                 fp8_kv_cache=True,
+                kv_cache_sharded=True,
                 device=torch.device("cpu"),
             )
             warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
@@ -300,14 +293,28 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(_cp_batch_block_warmup_sizes(1), (1,))
         self.assertEqual(_cp_batch_block_warmup_sizes(3), (1, 2, 4))
         self.assertEqual(_cp_batch_block_warmup_sizes(5), (1, 2, 4, 8))
-        self.assertEqual(
-            _cp_batch_block_warmup_sizes(1024), (1, 2, 4, 8, 16, 32, 64)
+        self.assertEqual(_cp_batch_block_warmup_sizes(1024), (1, 2, 4, 8, 16, 32, 64))
+
+    def test_cp_warmup_non_sharded_only_compiles_reachable_kernels(self):
+        from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _fused_compressor_meta_triton,
+            _indexer_cp_gather_triton,
+            _swa_dequant_triton,
         )
 
-    def test_cp_warmup_skips_fp8_kernels_for_non_fp8_cache(self):
-        from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_gather_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
+        restore = mock.Mock(return_value=())
+        positions = mock.Mock(return_value=())
+        forward = mock.Mock(return_value=())
+        compressor_cp_sizes = []
+
+        def fake_compressor(*_args, **kwargs):
+            compressor_cp_sizes.append(kwargs["cp_size"])
+            return (), (), ()
+
+        def run_launch(_label, _detail, launch_fn, *, device):
+            self.assertEqual(device.type, "cpu")
+            launch_fn()
 
         with mock.patch.object(
             warmup_module, "model_warm_up_enabled", return_value=True
@@ -316,29 +323,199 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         ), mock.patch.object(
             warmup_module, "_assert_not_capturing"
         ), mock.patch.object(
-            _cp_metadata_triton, "_enabled", return_value=False
+            warmup_module, "_dist_barrier"
         ), mock.patch.object(
-            _cp_metadata_triton, "cp_prepare_fusion_enabled", return_value=False
+            warmup_module, "_sync_cuda"
         ), mock.patch.object(
-            _indexer_cp_gather_triton, "cp_indexer_padded_gather_enabled"
-        ) as indexer_enabled, mock.patch.object(
+            warmup_module,
+            "_run_triton_warmup_launch_with_retry",
+            side_effect=run_launch,
+        ), mock.patch.object(
+            _cp_metadata_triton, "cp_metadata_fusion_supported", return_value=True
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_restore_indices",
+            restore,
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_full_prefill_positions",
+            positions,
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_forward_metadata",
+            forward,
+        ), mock.patch.object(
             _indexer_cp_gather_triton, "try_gather_indexer_k_to_padded"
         ) as indexer_gather, mock.patch.object(
             _swa_dequant_triton,
             "try_restore_dequantize_scatter_packed_k_cache_flat",
-        ) as pool_restore:
+        ) as pool_restore, mock.patch.object(
+            _fused_compressor_meta_triton, "_TRITON_AVAILABLE", True
+        ), mock.patch.object(
+            _fused_compressor_meta_triton,
+            "fused_compressor_slot_mapping",
+            side_effect=fake_compressor,
+        ):
             warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
             warmup_cp_metadata_jit(
                 cp_size=4,
-                max_batch_size=4,
-                fp8_kv_cache=False,
+                max_batch_size=3,
+                fp8_kv_cache=True,
+                kv_cache_sharded=False,
                 device=torch.device("cpu"),
             )
             warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
 
-        indexer_enabled.assert_not_called()
+        restore.assert_not_called()
+        self.assertEqual(
+            [call.args[0].numel() for call in positions.call_args_list], [2, 4]
+        )
+        self.assertEqual(
+            [call.args[0].numel() for call in forward.call_args_list], [1, 2, 4]
+        )
         indexer_gather.assert_not_called()
         pool_restore.assert_not_called()
+        self.assertEqual(compressor_cp_sizes, [1, 1, 1])
+
+    def test_cp_warmup_non_fp8_only_compiles_metadata(self):
+        from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _fused_compressor_meta_triton,
+            _indexer_cp_gather_triton,
+            _swa_dequant_triton,
+        )
+
+        def run_launch(_label, _detail, launch_fn, *, device):
+            self.assertEqual(device.type, "cpu")
+            launch_fn()
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            warmup_module, "_dist_barrier"
+        ), mock.patch.object(
+            warmup_module, "_sync_cuda"
+        ), mock.patch.object(
+            warmup_module,
+            "_run_triton_warmup_launch_with_retry",
+            side_effect=run_launch,
+        ), mock.patch.object(
+            _cp_metadata_triton, "cp_metadata_fusion_supported", return_value=True
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_restore_indices",
+            return_value=(),
+        ) as restore, mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_full_prefill_positions",
+            return_value=(),
+        ) as positions, mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_forward_metadata",
+            return_value=(),
+        ) as forward, mock.patch.object(
+            _indexer_cp_gather_triton, "try_gather_indexer_k_to_padded"
+        ) as indexer_gather, mock.patch.object(
+            _swa_dequant_triton,
+            "try_restore_dequantize_scatter_packed_k_cache_flat",
+        ) as pool_restore, mock.patch.object(
+            _fused_compressor_meta_triton,
+            "fused_compressor_slot_mapping",
+        ) as compressor:
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+            warmup_cp_metadata_jit(
+                cp_size=4,
+                max_batch_size=3,
+                fp8_kv_cache=False,
+                kv_cache_sharded=True,
+                device=torch.device("cpu"),
+            )
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+
+        self.assertEqual(restore.call_count, 3)
+        self.assertEqual(positions.call_count, 2)
+        self.assertEqual(forward.call_count, 3)
+        indexer_gather.assert_not_called()
+        pool_restore.assert_not_called()
+        compressor.assert_not_called()
+
+    def test_cp_warmup_fails_if_reachable_fusion_returns_unsupported(self):
+        from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
+
+        def run_launch(_label, _detail, launch_fn, *, device):
+            self.assertEqual(device.type, "cpu")
+            launch_fn()
+
+        with mock.patch.object(
+            warmup_module, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_is_cuda_device", return_value=True
+        ), mock.patch.object(
+            warmup_module, "_assert_not_capturing"
+        ), mock.patch.object(
+            warmup_module, "_dist_barrier"
+        ), mock.patch.object(
+            warmup_module,
+            "_run_triton_warmup_launch_with_retry",
+            side_effect=run_launch,
+        ), mock.patch.object(
+            _cp_metadata_triton, "cp_metadata_fusion_supported", return_value=True
+        ), mock.patch.object(
+            _cp_metadata_triton,
+            "try_build_cp_forward_metadata",
+            return_value=None,
+        ):
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+            with self.assertRaisesRegex(RuntimeError, "forward_metadata"):
+                warmup_cp_metadata_jit(
+                    cp_size=4,
+                    max_batch_size=1,
+                    fp8_kv_cache=False,
+                    kv_cache_sharded=False,
+                    device=torch.device("cpu"),
+                )
+            warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
+
+    def test_prefill_cp_warmup_includes_non_sharded_topology(self):
+        with mock.patch.object(warmup_module, "warmup_cp_metadata_jit") as warmup:
+            warmup_prefill_cp_metadata_jit(
+                is_decode_role=False,
+                cp_enabled=True,
+                cp_size=8,
+                max_batch_size=64,
+                fp8_kv_cache=True,
+                kv_cache_sharded=False,
+                device=torch.device("cuda"),
+            )
+        warmup.assert_called_once_with(
+            cp_size=8,
+            max_batch_size=64,
+            fp8_kv_cache=True,
+            kv_cache_sharded=False,
+            device=torch.device("cuda"),
+        )
+
+    def test_prefill_cp_warmup_skips_decode_or_disabled_cp(self):
+        with mock.patch.object(warmup_module, "warmup_cp_metadata_jit") as warmup:
+            for is_decode_role, cp_enabled, cp_size in (
+                (True, True, 8),
+                (False, False, 8),
+                (False, True, 1),
+            ):
+                warmup_prefill_cp_metadata_jit(
+                    is_decode_role=is_decode_role,
+                    cp_enabled=cp_enabled,
+                    cp_size=cp_size,
+                    max_batch_size=64,
+                    fp8_kv_cache=True,
+                    kv_cache_sharded=False,
+                    device=torch.device("cuda"),
+                )
+        warmup.assert_not_called()
 
     def test_tilelang_prewarm_skips_when_model_warmup_disabled(self):
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
@@ -1042,9 +1219,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             old_enabled = mhc_tilelang.tk_mhc_head_fused_enabled
             mhc_tilelang.tk_mhc_head_fused_enabled = lambda: True
             self.addCleanup(
-                lambda: setattr(
-                    mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled
-                )
+                lambda: setattr(mhc_tilelang, "tk_mhc_head_fused_enabled", old_enabled)
             )
 
             warmup_module._MHC_HEAD_FUSED_JIT_WARMED_KEYS.clear()
@@ -1221,10 +1396,12 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
 
     def test_jit_kernel_specialization_contracts(self):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _compressor_vllm_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_gather_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
-        from rtp_llm.models_py.modules.dsv4.fp8 import _swa_kv_insert_triton
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _compressor_vllm_triton,
+            _indexer_cp_gather_triton,
+            _swa_dequant_triton,
+            _swa_kv_insert_triton,
+        )
 
         compress_src = inspect.getsource(
             _compressor_vllm_triton._fused_kv_compress_norm_rope_insert_sparse_attn.fn
@@ -1337,7 +1514,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 raise RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
 
@@ -1357,7 +1534,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             calls.append(None)
             if len(calls) == 1:
                 cause = RuntimeError(
-                    'Catastrophic error: cannot open source file '
+                    "Catastrophic error: cannot open source file "
                     '"/tmp/tmpxft_000011ba_00000000-7_tvm_kernels.cpp1.ii"'
                 )
                 raise RuntimeError("TileLang mhc_pre failed: shape=(1, 2)") from cause

@@ -140,17 +140,15 @@ def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in _TRUE_ENV_VALUES
 
 
-def _cp_prepare_fusion_enabled(v4: "V4Transformer") -> bool:
-    if getattr(v4, "_cp_info", None) is None or int(
-        getattr(v4, "_cp_size", 1)
-    ) <= 1:
+def _cp_prepare_fusion_supported(v4: "V4Transformer") -> bool:
+    if getattr(v4, "_cp_info", None) is None or int(getattr(v4, "_cp_size", 1)) <= 1:
         return False
     try:
         from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
-            cp_prepare_fusion_enabled,
+            cp_metadata_fusion_supported,
         )
 
-        return cp_prepare_fusion_enabled()
+        return cp_metadata_fusion_supported()
     except (ImportError, ModuleNotFoundError):
         return False
 
@@ -735,13 +733,11 @@ def forward_prefill(
     # tensor produces an unpinned intermediate which capture rejects.
     if positions is None:
         with _profiler.record_function_range("dsv4.prefill.prepare_positions"):
-            if _cp_prepare_fusion_enabled(v4):
+            if _cp_prepare_fusion_supported(v4):
                 # CPContext replaces this placeholder with rank-local zigzag
                 # global positions before embedding. Building contiguous
                 # fallback positions here would be dead work.
-                positions = torch.empty(
-                    0, dtype=torch.int64, device=input_ids.device
-                )
+                positions = torch.empty(0, dtype=torch.int64, device=input_ids.device)
             else:
                 il_d = attn.input_lengths
                 pl_d = attn.prefix_lengths

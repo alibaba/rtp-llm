@@ -28,7 +28,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_HEAD_DIM,
 )
 
-
 _WORLD_SIZE = 2
 _BLOCK_SIZE = 4
 _PER_REQ_TOTAL_LENS = (13, 10, 20)
@@ -41,9 +40,7 @@ def _expected_payload() -> tuple[torch.Tensor, torch.Tensor]:
     for req_id, req_len in enumerate(_PER_REQ_TOTAL_LENS):
         for token_idx in range(req_len):
             k_rows.append(
-                ((dim_offsets + req_id * 37 + token_idx * 11) % 251).to(
-                    torch.uint8
-                )
+                ((dim_offsets + req_id * 37 + token_idx * 11) % 251).to(torch.uint8)
             )
             scales.append(req_id * 100.0 + token_idx + 0.25)
     k_bytes = torch.stack(k_rows).contiguous()
@@ -71,10 +68,7 @@ def _rank_cache_payload(
     for req_len in _PER_REQ_TOTAL_LENS:
         logical_blocks = (req_len + _BLOCK_SIZE - 1) // _BLOCK_SIZE
         owned_blocks_per_req.append(
-            sum(
-                block_idx % _WORLD_SIZE == rank
-                for block_idx in range(logical_blocks)
-            )
+            sum(block_idx % _WORLD_SIZE == rank for block_idx in range(logical_blocks))
         )
 
     max_owned_blocks = max(owned_blocks_per_req)
@@ -144,7 +138,6 @@ def _fused_gather_allgather_restore_worker(
 
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    os.environ["DSV4_CP_INDEXER_GATHER_TRITON"] = "1"
     os.environ["DSV4_TRAP_INVALID_KV_ACCESS"] = "0"
 
     try:

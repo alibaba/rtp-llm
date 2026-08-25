@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Optional, Tuple
 
 import torch
@@ -48,15 +47,11 @@ if _TRITON_AVAILABLE:
         cu_value,
     ):
         req_valid = req_idx < batch_size
-        req_len = tl.load(lengths_ptr + req_idx, mask=req_valid, other=0).to(
+        req_len = tl.load(lengths_ptr + req_idx, mask=req_valid, other=0).to(tl.int64)
+        req_chunk = tl.load(chunk_lengths_ptr + req_idx, mask=req_valid, other=0).to(
             tl.int64
         )
-        req_chunk = tl.load(
-            chunk_lengths_ptr + req_idx, mask=req_valid, other=0
-        ).to(tl.int64)
-        prefix = tl.load(prefixes_ptr + req_idx, mask=req_valid, other=0).to(
-            tl.int64
-        )
+        prefix = tl.load(prefixes_ptr + req_idx, mask=req_valid, other=0).to(tl.int64)
         padded_len = req_chunk * cp_size
 
         is_local_request = (
@@ -70,9 +65,7 @@ if _TRITON_AVAILABLE:
         padded_position = tl.where(
             is_local_request, padded_start + relative, padded_position
         )
-        local_position = tl.where(
-            is_local_request, clamped_relative, local_position
-        )
+        local_position = tl.where(is_local_request, clamped_relative, local_position)
         global_position = tl.where(
             is_local_request,
             prefix + clamped_relative,
@@ -120,8 +113,8 @@ if _TRITON_AVAILABLE:
         owner_block_size,
         BLOCK: tl.constexpr,
     ):
-        offsets = (
-            tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+        offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
+            tl.int64
         )
         mask = offsets < total_tokens
         block_idx = offsets // owner_block_size
@@ -151,8 +144,8 @@ if _TRITON_AVAILABLE:
         BATCH_BLOCK: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
-        offsets = (
-            tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+        offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
+            tl.int64
         )
         mask = offsets < total_tokens
         global_start = tl.zeros((BLOCK,), dtype=tl.int64)
@@ -173,9 +166,7 @@ if _TRITON_AVAILABLE:
                 & (offsets < global_start + req_len)
             )
             position = tl.where(is_request, offsets - global_start, position)
-            request_local_start = tl.where(
-                is_request, local_start, request_local_start
-            )
+            request_local_start = tl.where(is_request, local_start, request_local_start)
             padded_local_len = (
                 (req_len + virtual_block_size - 1) // virtual_block_size
             ) * owner_block_size
@@ -185,9 +176,7 @@ if _TRITON_AVAILABLE:
         block_idx = position // owner_block_size
         owner = block_idx % cp_size
         local_block_idx = block_idx // cp_size
-        local_pos = (
-            local_block_idx * owner_block_size + position % owner_block_size
-        )
+        local_pos = local_block_idx * owner_block_size + position % owner_block_size
         restore = owner * total_local_kv + request_local_start + local_pos
         tl.store(out_ptr + offsets, restore, mask=mask)
 
@@ -199,8 +188,8 @@ if _TRITON_AVAILABLE:
         total_tokens,
         BLOCK: tl.constexpr,
     ):
-        offsets = (
-            tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+        offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
+            tl.int64
         )
         mask = offsets < total_tokens
         prefix = tl.load(prefixes_ptr).to(tl.int64)
@@ -218,8 +207,8 @@ if _TRITON_AVAILABLE:
         BATCH_BLOCK: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
-        offsets = (
-            tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+        offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
+            tl.int64
         )
         mask = offsets < total_tokens
         global_start = tl.zeros((BLOCK,), dtype=tl.int64)
@@ -240,9 +229,7 @@ if _TRITON_AVAILABLE:
                 & (offsets >= global_start)
                 & (offsets < global_start + req_len)
             )
-            position = tl.where(
-                is_request, prefix + offsets - global_start, position
-            )
+            position = tl.where(is_request, prefix + offsets - global_start, position)
             request_id = tl.where(is_request, req_idx, request_id)
             global_start += req_len
 
@@ -279,9 +266,8 @@ if _TRITON_AVAILABLE:
         B64_LOOP_UNROLL: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
-        offsets = (
-            tl.program_id(0).to(tl.int64) * BLOCK
-            + tl.arange(0, BLOCK).to(tl.int64)
+        offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(
+            tl.int64
         )
         local_mask = offsets < chunk_length
         unpad_mask = offsets < seq_len_full
@@ -295,9 +281,9 @@ if _TRITON_AVAILABLE:
         request_id = tl.zeros((BLOCK,), dtype=tl.int32)
         restore_position = tl.zeros((BLOCK,), dtype=tl.int64)
         cu_value = tl.zeros((BLOCK,), dtype=tl.int64)
-        relative = tl.load(
-            shuffle_indices_ptr + offsets, mask=local_mask, other=0
-        ).to(tl.int64)
+        relative = tl.load(shuffle_indices_ptr + offsets, mask=local_mask, other=0).to(
+            tl.int64
+        )
 
         if BATCH_BLOCK == 64:
             for req_idx in tl.range(
@@ -370,9 +356,7 @@ if _TRITON_AVAILABLE:
                     cu_value,
                 )
 
-        is_real = tl.load(
-            padding_mask_ptr + padded_position, mask=local_mask, other=0
-        )
+        is_real = tl.load(padding_mask_ptr + padded_position, mask=local_mask, other=0)
         restore = tl.load(
             restore_indices_ptr + restore_position,
             mask=unpad_mask,
@@ -397,20 +381,14 @@ if _TRITON_AVAILABLE:
             mask=offsets < batch_size + 1,
         )
         prefix_mask = offsets < batch_size
-        prefix_value = tl.load(
-            prefixes_ptr + offsets, mask=prefix_mask, other=0
-        ).to(tl.int64)
+        prefix_value = tl.load(prefixes_ptr + offsets, mask=prefix_mask, other=0).to(
+            tl.int64
+        )
         tl.store(prefixes_out_ptr + offsets, prefix_value, mask=prefix_mask)
 
 
-def _enabled() -> bool:
-    value = os.environ.get("DSV4_CP_METADATA_TRITON", "1").strip().lower()
-    return value not in ("0", "false", "off", "no")
-
-
-def cp_prepare_fusion_enabled() -> bool:
-    value = os.environ.get("DSV4_CP_PREPARE_TRITON", "1").strip().lower()
-    return value not in ("0", "false", "off", "no")
+def cp_metadata_fusion_supported() -> bool:
+    return _TRITON_AVAILABLE
 
 
 def _batch_block(batch_size: int) -> int:
@@ -420,8 +398,7 @@ def _batch_block(batch_size: int) -> int:
 
 def _supported(lengths: torch.Tensor) -> bool:
     return (
-        _TRITON_AVAILABLE
-        and _enabled()
+        cp_metadata_fusion_supported()
         and lengths.is_cuda
         and lengths.dim() == 1
         and 0 < int(lengths.numel()) <= _MAX_BATCH
@@ -540,8 +517,7 @@ def try_build_cp_forward_metadata(
     )
     batch_size = int(lengths.numel())
     if (
-        not _TRITON_AVAILABLE
-        or not cp_prepare_fusion_enabled()
+        not cp_metadata_fusion_supported()
         or batch_size <= 0
         or batch_size > _MAX_BATCH
         or any(not tensor.is_cuda or tensor.dim() != 1 for tensor in tensors)
@@ -566,21 +542,11 @@ def try_build_cp_forward_metadata(
         chunk_length, dtype=torch.int64, device=lengths.device
     )
     global_positions = torch.empty_like(relative_positions)
-    request_ids = torch.empty(
-        chunk_length, dtype=torch.int32, device=lengths.device
-    )
-    local_is_real = torch.empty(
-        chunk_length, dtype=torch.bool, device=lengths.device
-    )
-    unpad_restore = torch.empty(
-        seq_len_full, dtype=torch.int64, device=lengths.device
-    )
-    cu_seqlens = torch.empty(
-        batch_size + 1, dtype=torch.int32, device=lengths.device
-    )
-    prefixes_out = torch.empty(
-        batch_size, dtype=torch.int64, device=lengths.device
-    )
+    request_ids = torch.empty(chunk_length, dtype=torch.int32, device=lengths.device)
+    local_is_real = torch.empty(chunk_length, dtype=torch.bool, device=lengths.device)
+    unpad_restore = torch.empty(seq_len_full, dtype=torch.int64, device=lengths.device)
+    cu_seqlens = torch.empty(batch_size + 1, dtype=torch.int32, device=lengths.device)
+    prefixes_out = torch.empty(batch_size, dtype=torch.int64, device=lengths.device)
     total_rows = max(chunk_length, seq_len_full, batch_size + 1)
     if total_rows == 0:
         return (

@@ -125,9 +125,10 @@ def warmup_cp_metadata_jit(
     cp_size: int,
     max_batch_size: int,
     fp8_kv_cache: bool,
+    kv_cache_sharded: bool,
     device: torch.device,
 ) -> None:
-    """Compile CP metadata and fused CP pool readers at startup."""
+    """Compile the fused CP kernels reachable by the configured cache topology."""
 
     if not model_warm_up_enabled():
         return
@@ -139,53 +140,43 @@ def warmup_cp_metadata_jit(
         int(cp_size),
         int(max_batch_size),
         bool(fp8_kv_cache),
+        bool(kv_cache_sharded),
         str(device),
     )
     if warmup_key in _CP_METADATA_JIT_WARMED_KEYS:
         return
 
     from rtp_llm.models_py.modules.dsv4._cp_metadata_triton import (
-        _enabled as cp_metadata_triton_enabled,
-        cp_prepare_fusion_enabled,
-        try_build_cp_full_prefill_positions,
+        cp_metadata_fusion_supported,
         try_build_cp_forward_metadata,
+        try_build_cp_full_prefill_positions,
         try_build_cp_restore_indices,
     )
     from rtp_llm.models_py.modules.dsv4.cp import cp_padded_local_kv_len
-    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
-        ENTRY_BYTES,
-        HEAD_DIM,
-        try_restore_dequantize_scatter_packed_k_cache_flat,
-    )
+    from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
     from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_gather_triton import (
-        cp_indexer_padded_gather_enabled,
         try_gather_indexer_k_to_padded,
     )
     from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
         INDEXER_ENTRY_BYTES,
         INDEXER_HEAD_DIM,
     )
-    from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
-
-    metadata_enabled = cp_metadata_triton_enabled()
-    prepare_enabled = cp_prepare_fusion_enabled()
-    pool_restore_enabled = bool(fp8_kv_cache) and os.environ.get(
-        "DSV4_CP_POOL_RESTORE_TRITON", "1"
-    ).strip().lower() not in ("0", "false", "off", "no")
-    indexer_gather_enabled = bool(
-        fp8_kv_cache and cp_indexer_padded_gather_enabled()
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
+        ENTRY_BYTES,
+        HEAD_DIM,
+        try_restore_dequantize_scatter_packed_k_cache_flat,
     )
+
+    if not cp_metadata_fusion_supported():
+        return
+
+    restore_enabled = bool(kv_cache_sharded)
+    pool_restore_enabled = bool(fp8_kv_cache and kv_cache_sharded)
+    indexer_gather_enabled = bool(fp8_kv_cache and kv_cache_sharded)
     compressor_meta_enabled = bool(
         fp8_kv_cache and _fused_compressor_meta_triton._TRITON_AVAILABLE
     )
-    if (
-        not metadata_enabled
-        and not prepare_enabled
-        and not pool_restore_enabled
-        and not indexer_gather_enabled
-        and not compressor_meta_enabled
-    ):
-        return
+    compressor_cp_size = int(cp_size) if kv_cache_sharded else 1
 
     _dist_barrier()
     t0 = time.time()
@@ -193,15 +184,12 @@ def warmup_cp_metadata_jit(
     for batch_size in batch_sizes:
         lengths_host = (2,) * batch_size
         lengths = torch.tensor(lengths_host, dtype=torch.int64, device=device)
-        prefixes = torch.arange(
-            len(lengths_host), dtype=torch.int64, device=device
-        )
+        prefixes = torch.arange(len(lengths_host), dtype=torch.int64, device=device)
         total_tokens = sum(lengths_host)
         total_local = sum(
-            cp_padded_local_kv_len(length, int(cp_size), 4)
-            for length in lengths_host
+            cp_padded_local_kv_len(length, int(cp_size), 4) for length in lengths_host
         )
-        restore = None
+        restore = None if restore_enabled else ()
         positions = () if batch_size == 1 else None
         forward_metadata = None
         pool_restore = None if pool_restore_enabled else True
@@ -210,8 +198,7 @@ def warmup_cp_metadata_jit(
 
         alignment = 2 * int(cp_size)
         chunks_host = [
-            ((length + alignment - 1) // alignment) * 2
-            for length in lengths_host
+            ((length + alignment - 1) // alignment) * 2 for length in lengths_host
         ]
         padding_host = []
         shuffle_host = []
@@ -225,15 +212,11 @@ def warmup_cp_metadata_jit(
         chunks = torch.tensor(chunks_host, dtype=torch.int32, device=device)
         forward_lengths = lengths.to(torch.int32)
         forward_prefixes = prefixes.to(torch.int32)
-        padding_mask = torch.tensor(
-            padding_host, dtype=torch.int32, device=device
-        )
+        padding_mask = torch.tensor(padding_host, dtype=torch.int32, device=device)
         forward_restore_indices = torch.arange(
             len(padding_host), dtype=torch.int32, device=device
         )
-        shuffle_indices = torch.tensor(
-            shuffle_host, dtype=torch.int32, device=device
-        )
+        shuffle_indices = torch.tensor(shuffle_host, dtype=torch.int32, device=device)
         pool_gathered = torch.zeros(
             (max(total_tokens, 1), ENTRY_BYTES),
             dtype=torch.uint8,
@@ -257,9 +240,7 @@ def warmup_cp_metadata_jit(
         indexer_padded_lens = torch.full(
             (batch_size,), 2, dtype=torch.int64, device=device
         )
-        indexer_actual_lens = torch.ones(
-            batch_size, dtype=torch.int64, device=device
-        )
+        indexer_actual_lens = torch.ones(batch_size, dtype=torch.int64, device=device)
         indexer_out_q = torch.empty(
             (2 * batch_size, INDEXER_HEAD_DIM),
             dtype=torch.float8_e4m3fn,
@@ -274,9 +255,7 @@ def warmup_cp_metadata_jit(
         compressor_b_idx = torch.arange(
             batch_size, dtype=torch.int64, device=device
         ).repeat_interleave(torch.tensor(lengths_host, device=device))
-        compressor_bt = torch.ones(
-            (batch_size, 2), dtype=torch.int32, device=device
-        )
+        compressor_bt = torch.ones((batch_size, 2), dtype=torch.int32, device=device)
         compressor_cu = torch.arange(
             0,
             total_tokens + 1,
@@ -288,7 +267,7 @@ def warmup_cp_metadata_jit(
         def _launch() -> None:
             nonlocal restore, positions, forward_metadata, pool_restore
             nonlocal indexer_gather, compressor_meta
-            if metadata_enabled:
+            if restore_enabled:
                 restore = try_build_cp_restore_indices(
                     lengths,
                     cp_size=int(cp_size),
@@ -296,28 +275,22 @@ def warmup_cp_metadata_jit(
                     total_tokens=total_tokens,
                     total_local_kv=total_local,
                 )
-                if batch_size > 1:
-                    positions = try_build_cp_full_prefill_positions(
-                        lengths, prefixes, total_tokens=total_tokens
-                    )
-            else:
-                restore = ()
-                positions = ()
-            if prepare_enabled:
-                forward_metadata = try_build_cp_forward_metadata(
-                    forward_lengths,
-                    chunks,
-                    forward_prefixes,
-                    padding_mask,
-                    forward_restore_indices,
-                    shuffle_indices,
-                    cp_size=int(cp_size),
-                    cp_rank=0,
-                    chunk_length=sum(chunks_host),
-                    seq_len_full=total_tokens,
+            if batch_size > 1:
+                positions = try_build_cp_full_prefill_positions(
+                    lengths, prefixes, total_tokens=total_tokens
                 )
-            else:
-                forward_metadata = ()
+            forward_metadata = try_build_cp_forward_metadata(
+                forward_lengths,
+                chunks,
+                forward_prefixes,
+                padding_mask,
+                forward_restore_indices,
+                shuffle_indices,
+                cp_size=int(cp_size),
+                cp_rank=0,
+                chunk_length=sum(chunks_host),
+                seq_len_full=total_tokens,
+            )
             if pool_restore_enabled:
                 pool_restore = try_restore_dequantize_scatter_packed_k_cache_flat(
                     pool_out,
@@ -354,7 +327,7 @@ def warmup_cp_metadata_jit(
                         4,
                         pool_rows=4 * batch_size,
                         kv_tokens_per_block=4,
-                        cp_size=int(cp_size),
+                        cp_size=compressor_cp_size,
                         cp_rank=0,
                         kv_owner_tokens_per_block=4,
                     )
@@ -362,28 +335,63 @@ def warmup_cp_metadata_jit(
 
         _run_triton_warmup_launch_with_retry(
             "DSV4 CPMetadata",
-            f"batch_size={batch_size} cp_size={int(cp_size)}",
+            f"batch_size={batch_size} cp_size={int(cp_size)} "
+            f"kv_cache_sharded={bool(kv_cache_sharded)}",
             _launch,
             device=device,
         )
-        if (
-            restore is None
-            or positions is None
-            or forward_metadata is None
-            or pool_restore is not True
-            or indexer_gather is not True
-            or compressor_meta is None
-        ):
-            return
+        missing = []
+        if restore is None:
+            missing.append("restore")
+        if positions is None:
+            missing.append("positions")
+        if forward_metadata is None:
+            missing.append("forward_metadata")
+        if pool_restore is not True:
+            missing.append("pool_restore")
+        if indexer_gather is not True:
+            missing.append("indexer_gather")
+        if compressor_meta is None:
+            missing.append("compressor_metadata")
+        if missing:
+            raise RuntimeError(
+                "DSV4 CP JIT warmup did not launch reachable fused kernels: "
+                f"batch_size={batch_size} kv_cache_sharded={kv_cache_sharded} "
+                f"missing={missing}"
+            )
     _sync_cuda(device)
     _dist_barrier()
     if _dist_rank() == 0:
         logging.info(
-            "[DSV4 CPMetadata] JIT warmup batches=%s done in %.2fs",
+            "[DSV4 CPMetadata] JIT warmup batches=%s "
+            "kv_cache_sharded=%s done in %.2fs",
             batch_sizes,
+            bool(kv_cache_sharded),
             time.time() - t0,
         )
     _CP_METADATA_JIT_WARMED_KEYS.add(warmup_key)
+
+
+def warmup_prefill_cp_metadata_jit(
+    *,
+    is_decode_role: bool,
+    cp_enabled: bool,
+    cp_size: int,
+    max_batch_size: int,
+    fp8_kv_cache: bool,
+    kv_cache_sharded: bool,
+    device: torch.device,
+) -> None:
+    """Warm all fused CP kernels reachable by a prefill deployment."""
+    if is_decode_role or not cp_enabled or int(cp_size) <= 1:
+        return
+    warmup_cp_metadata_jit(
+        cp_size=int(cp_size),
+        max_batch_size=int(max_batch_size),
+        fp8_kv_cache=bool(fp8_kv_cache),
+        kv_cache_sharded=bool(kv_cache_sharded),
+        device=device,
+    )
 
 
 def _state_ring_entries_warmup_values(
@@ -2070,9 +2078,7 @@ def warmup_mhc_head_fused_jit(
         return
     _assert_not_capturing()
 
-    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-        tk_mhc_head_fused_enabled,
-    )
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused_enabled
 
     if not tk_mhc_head_fused_enabled():
         return
@@ -2108,13 +2114,9 @@ def warmup_mhc_head_fused_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHCHeadFused", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHCHeadFused", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 

@@ -31,7 +31,9 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 def _triton_cache_size(kernel_fn) -> int:
-    return sum(len(kernel_cache) for kernel_cache, *_ in kernel_fn.device_caches.values())
+    return sum(
+        len(kernel_cache) for kernel_cache, *_ in kernel_fn.device_caches.values()
+    )
 
 
 class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
@@ -157,10 +159,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
         fused_scale = torch.empty_like(ref_scale)
         with mock.patch.dict(
             os.environ,
-            {
-                "DSV4_CP_INDEXER_GATHER_TRITON": "1",
-                "DSV4_TRAP_INVALID_KV_ACCESS": "0",
-            },
+            {"DSV4_TRAP_INVALID_KV_ACCESS": "0"},
         ):
             fused = try_gather_indexer_k_to_padded(
                 pool,
@@ -211,7 +210,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
                     block_padding=block_padding,
                 )
 
-    def test_disabled_gate_leaves_outputs_untouched(self) -> None:
+    def test_unsupported_input_leaves_outputs_untouched(self) -> None:
         pool = torch.zeros(
             (2, 4, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device=self.device
         )
@@ -227,36 +226,17 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
         out_scale = torch.full((2, 4), 0xA5, dtype=torch.uint8, device=self.device)
         q_before = out_q.view(torch.uint8).clone()
         scale_before = out_scale.clone()
-        with mock.patch.dict(
-            os.environ, {"DSV4_CP_INDEXER_GATHER_TRITON": "0"}
-        ):
-            fused = try_gather_indexer_k_to_padded(
+        self.assertFalse(
+            try_gather_indexer_k_to_padded(
                 pool,
                 block_table,
-                padded,
-                actual,
+                padded.to(torch.int32),
+                actual.to(torch.int32),
                 out_q,
                 out_scale,
                 total_actual_tokens=1,
             )
-        self.assertFalse(fused)
-        self.assertTrue(torch.equal(out_q.view(torch.uint8), q_before))
-        self.assertTrue(torch.equal(out_scale, scale_before))
-
-        with mock.patch.dict(
-            os.environ, {"DSV4_CP_INDEXER_GATHER_TRITON": "1"}
-        ):
-            self.assertFalse(
-                try_gather_indexer_k_to_padded(
-                    pool,
-                    block_table,
-                    padded.to(torch.int32),
-                    actual.to(torch.int32),
-                    out_q,
-                    out_scale,
-                    total_actual_tokens=1,
-                )
-            )
+        )
         self.assertTrue(torch.equal(out_q.view(torch.uint8), q_before))
         self.assertTrue(torch.equal(out_scale, scale_before))
 
@@ -282,10 +262,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
         stream = torch.cuda.Stream(device=self.device)
         with torch.cuda.stream(stream), mock.patch.dict(
             os.environ,
-            {
-                "DSV4_CP_INDEXER_GATHER_TRITON": "1",
-                "DSV4_TRAP_INVALID_KV_ACCESS": "0",
-            },
+            {"DSV4_TRAP_INVALID_KV_ACCESS": "0"},
         ):
             pool.copy_(source)
             self.assertTrue(
@@ -300,13 +277,17 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
                 )
             )
         torch.cuda.current_stream(self.device).wait_stream(stream)
-        expected_q = source[1].reshape(-1)[: block_size * INDEXER_HEAD_DIM].reshape(
-            block_size, INDEXER_HEAD_DIM
+        expected_q = (
+            source[1]
+            .reshape(-1)[: block_size * INDEXER_HEAD_DIM]
+            .reshape(block_size, INDEXER_HEAD_DIM)
         )
         scale_offset = block_size * INDEXER_HEAD_DIM
-        expected_scale = source[1].reshape(-1)[
-            scale_offset : scale_offset + block_size * 4
-        ].reshape(block_size, 4)
+        expected_scale = (
+            source[1]
+            .reshape(-1)[scale_offset : scale_offset + block_size * 4]
+            .reshape(block_size, 4)
+        )
         self.assertTrue(torch.equal(out_q.view(torch.uint8), expected_q))
         self.assertTrue(torch.equal(out_scale, expected_scale))
 
@@ -314,9 +295,9 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
         pool = torch.zeros(
             (8, 64, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device=self.device
         )
-        block_table = torch.arange(
-            1, 5, dtype=torch.int32, device=self.device
-        ).reshape(4, 1)
+        block_table = torch.arange(1, 5, dtype=torch.int32, device=self.device).reshape(
+            4, 1
+        )
         padded = torch.full((4,), 64, dtype=torch.int64, device=self.device)
         actual = torch.full((4,), 2, dtype=torch.int64, device=self.device)
         out_q = torch.empty(
@@ -372,11 +353,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
         _cp_gather_indexer_k_to_padded_kernel.device_caches.clear()
         with mock.patch.dict(
             os.environ,
-            {
-                "DSV4_CP_INDEXER_GATHER_TRITON": "1",
-                "DSV4_CP_POOL_RESTORE_TRITON": "1",
-                "DSV4_TRAP_INVALID_KV_ACCESS": "0",
-            },
+            {"DSV4_TRAP_INVALID_KV_ACCESS": "0"},
         ):
             warm_lens = torch.full((4,), 2, dtype=torch.int32, device=self.device)
             self.assertTrue(
@@ -384,7 +361,9 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
                     torch.empty(
                         (4, 2, HEAD_DIM), dtype=torch.bfloat16, device=self.device
                     ),
-                    torch.zeros((8, ENTRY_BYTES), dtype=torch.uint8, device=self.device),
+                    torch.zeros(
+                        (8, ENTRY_BYTES), dtype=torch.uint8, device=self.device
+                    ),
                     torch.arange(8, dtype=torch.int64, device=self.device),
                     warm_lens,
                     0,
@@ -443,9 +422,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
                 pool_cache_after_warmup,
             )
 
-            divisible_lens = torch.full(
-                (4,), 4, dtype=torch.int32, device=self.device
-            )
+            divisible_lens = torch.full((4,), 4, dtype=torch.int32, device=self.device)
             self.assertTrue(
                 try_restore_dequantize_scatter_packed_k_cache_flat(
                     torch.empty(
@@ -471,9 +448,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
                 (2, 4, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device=self.device
             )
             warm_bt = torch.zeros((4, 1), dtype=torch.int32, device=self.device)
-            warm_padded = torch.full(
-                (4,), 2, dtype=torch.int64, device=self.device
-            )
+            warm_padded = torch.full((4,), 2, dtype=torch.int64, device=self.device)
             warm_actual = torch.ones(4, dtype=torch.int64, device=self.device)
             self.assertTrue(
                 try_gather_indexer_k_to_padded(
@@ -523,12 +498,8 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
                 device=self.device,
             )
             prod_bt = torch.zeros((4, 128), dtype=torch.int32, device=self.device)
-            prod_padded = torch.full(
-                (4,), 64, dtype=torch.int64, device=self.device
-            )
-            prod_actual = torch.full(
-                (4,), 2, dtype=torch.int64, device=self.device
-            )
+            prod_padded = torch.full((4,), 64, dtype=torch.int64, device=self.device)
+            prod_actual = torch.full((4,), 2, dtype=torch.int64, device=self.device)
             self.assertTrue(
                 try_gather_indexer_k_to_padded(
                     prod_pool,
@@ -564,9 +535,7 @@ class IndexerCPPaddedGatherTritonTest(unittest.TestCase):
                 padded = torch.full(
                     (batch_block,), 2, dtype=torch.int64, device=self.device
                 )
-                actual = torch.ones(
-                    batch_block, dtype=torch.int64, device=self.device
-                )
+                actual = torch.ones(batch_block, dtype=torch.int64, device=self.device)
                 self.assertTrue(
                     try_gather_indexer_k_to_padded(
                         pool,
