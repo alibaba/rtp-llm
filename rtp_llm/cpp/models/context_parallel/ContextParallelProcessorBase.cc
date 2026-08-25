@@ -1,3 +1,5 @@
+#include <mutex>
+
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
@@ -269,12 +271,23 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     size_t num_prefill_stream = input_lengths.size(0) - num_decode_stream;
 
     const bool has_prefix_lengths = model_input.prefix_lengths.defined() && model_input.prefix_lengths.numel() > 0;
-    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || !model_input.prefix_lengths.is_cuda(),
-                            "CP prefix_lengths must be a host tensor");
+    // Under RTP_LLM_DEVICE_INPUT the scheduler publishes prefix_lengths on CUDA;
+    // mirror it back since the loop below dereferences it on the host.
+    const bool prefix_lengths_on_device = has_prefix_lengths && model_input.prefix_lengths.is_cuda();
+    if (prefix_lengths_on_device) {
+        static std::once_flag prefix_lengths_d2h_once;
+        std::call_once(prefix_lengths_d2h_once, []() {
+            RTP_LLM_LOG_INFO("CP prefix_lengths arrived on device; mirroring to host for boundary math");
+        });
+    }
+    auto prefix_lengths = prefix_lengths_on_device ? model_input.prefix_lengths.cpu() : model_input.prefix_lengths;
     RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths
-                                || model_input.prefix_lengths.numel() == static_cast<int64_t>(num_prefill_stream),
+                                || prefix_lengths.numel() == static_cast<int64_t>(num_prefill_stream),
                             "CP prefix_lengths must match the prefill stream count");
-    const int32_t* prefix_lengths_ptr = has_prefix_lengths ? model_input.prefix_lengths.data_ptr<int32_t>() : nullptr;
+    // prefix_lengths_ptr is indexed linearly below, and .cpu() keeps the source stride.
+    RTP_LLM_CHECK_WITH_INFO(!has_prefix_lengths || prefix_lengths.is_contiguous(),
+                            "CP prefix_lengths must be contiguous");
+    const int32_t* prefix_lengths_ptr = has_prefix_lengths ? prefix_lengths.data_ptr<int32_t>() : nullptr;
     bool           has_prefix_reuse   = false;
     for (size_t p = 0; p < num_prefill_stream && has_prefix_lengths; ++p) {
         RTP_LLM_CHECK_WITH_INFO(prefix_lengths_ptr[p] >= 0, "CP prefix_lengths must be non-negative");
