@@ -8,7 +8,6 @@ from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
 
-
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -98,6 +97,7 @@ class AuxInfo:
     input_len: int = 0
     output_len: int = 0
     step_output_len: int = 0
+    predicted_remaining_len: float = -1.0
     first_token_cost_time: float = 0
     wait_time: float = 0
     pd_sep: bool = False

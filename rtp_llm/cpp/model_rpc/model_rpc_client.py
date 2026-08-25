@@ -45,6 +45,7 @@ from rtp_llm.utils.grpc_util import (
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
+
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
@@ -435,6 +436,7 @@ def trans_output(
                 prefix_len=aux_info_pb.prefix_len,
                 output_len=aux_info_pb.output_len,
                 step_output_len=aux_info_pb.step_output_len,
+                predicted_remaining_len=aux_info_pb.predicted_remaining_len,
                 pd_sep=aux_info_pb.pd_sep,
                 reuse_len=aux_info_pb.total_reuse_len,
                 local_reuse_len=aux_info_pb.local_reuse_len,
@@ -682,7 +684,9 @@ class ModelRpcClient(object):
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
+            self._handle_grpc_error(
+                e, f"request: [{input_pb.request_id}]", target_address
+            )
         except Exception as e:
             logging.error(
                 f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"

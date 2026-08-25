@@ -317,6 +317,8 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
         attn._kv_cache = prev_kv
         attn._block_tables_by_type = prev_bt
         attn._cp_ctx = prev_cp
+
+
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -1141,6 +1143,11 @@ class AttentionFP8(nn.Module):
         self._kv_cache: Optional[Any] = None
         self._block_tables_by_type: Optional[Dict[str, torch.Tensor]] = None
 
+        # Cache tags this layer does not own, remembered per cache handle.
+        # See ``_layer_cache_or_none``.
+        self._unowned_tags: set = set()
+        self._unowned_tags_owner: Optional[Any] = None
+
         # Precomputed pool specs per cache tag — (vec_dtype, vec_dim) used
         # to reinterpret the raw ``[num_blocks, stride_elems]`` framework
         # pool tensor as a typed ``[total_slots, vec_dim]`` flat view.
@@ -1181,6 +1188,31 @@ class AttentionFP8(nn.Module):
         work then all-gathers across ranks and strips padding."""
         self._cp_ctx = cp_ctx
 
+    def _layer_cache_or_none(self, attn_type: str) -> Optional[Any]:
+        """Resolve this layer's framework pool handle for ``attn_type``, or
+        ``None`` when this layer does not own that cache tag.
+
+        ``build_paged_pool_specs`` sweeps every cache tag across every layer,
+        so non-ownership is normal control flow rather than an error. The C++
+        accessor signals it by raising — but it writes an ERROR log line
+        first, so re-probing every forward floods the engine log at decode
+        rates. Ownership is fixed once the cache topology exists, so the
+        negative answer is remembered per cache handle.
+        """
+        kv_cache = self._kv_cache
+        if kv_cache is None:
+            return None
+        if self._unowned_tags_owner is not kv_cache:
+            self._unowned_tags_owner = kv_cache
+            self._unowned_tags = set()
+        if attn_type in self._unowned_tags:
+            return None
+        try:
+            return kv_cache.get_layer_cache(self.layer_id, attn_type)
+        except RuntimeError:
+            self._unowned_tags.add(attn_type)
+            return None
+
     def _pool_view(self, attn_type: str) -> Optional[torch.Tensor]:
         """Return a flat ``[total_slots, vec_dim]`` typed view of the
         framework BlockPool for this layer + cache tag, or ``None`` if
@@ -1192,13 +1224,8 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        # Polymorphic probe: build_paged_pool_specs sweeps every cache tag
-        # across every layer.  C++ raises "layer=X does not own tag=Y" for
-        # layers that don't own this group — catching it tells the caller to
-        # skip.  Not defensive bloat.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._layer_cache_or_none(attn_type)
+        if layer_kv is None:
             return None
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -1237,9 +1264,8 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._layer_cache_or_none(attn_type)
+        if layer_kv is None:
             return None
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -1264,9 +1290,8 @@ class AttentionFP8(nn.Module):
     def _pool_raw_u8(self, attn_type: str) -> Optional[torch.Tensor]:
         if self._kv_cache is None:
             return None
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._layer_cache_or_none(attn_type)
+        if layer_kv is None:
             return None
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -1337,10 +1362,8 @@ class AttentionFP8(nn.Module):
         spec = self._pool_spec.get(attn_type)
         if spec is None:
             return 0
-        # Polymorphic probe — see _pool_view for rationale.
-        try:
-            layer_kv = self._kv_cache.get_layer_cache(self.layer_id, attn_type)
-        except RuntimeError:
+        layer_kv = self._layer_cache_or_none(attn_type)
+        if layer_kv is None:
             return 0
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
@@ -1492,9 +1515,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         if win <= 0:
@@ -1576,9 +1597,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0 or dense_len <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         device = pool_view.device
         dtype = torch.bfloat16
@@ -1710,12 +1729,8 @@ class AttentionFP8(nn.Module):
             state_bt = bt_by_type.get(INDEXER_STATE) if bt_by_type is not None else None
             state_eb = self._pool_entries_per_block(INDEXER_STATE)
             kv_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_KV)
-            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(
-                self._kv_cache, INDEXER_KV
-            )
-            state_tpb = _dsv4_pool_tokens_per_block(
-                self._kv_cache, tag=INDEXER_STATE
-            )
+            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(self._kv_cache, INDEXER_KV)
+            state_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_STATE)
             self.indexer.set_pool_context(
                 kv_view,
                 kv_bt,
@@ -4325,9 +4340,7 @@ class AttentionFP8(nn.Module):
         cmp_eb = self._pool_entries_per_block(cmp_at)
         if swa_eb <= 0 or cmp_eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         # ``use_varlen`` is required — set by ``_build_shared_prefill_meta``
@@ -4795,9 +4808,7 @@ class AttentionFP8(nn.Module):
                 slot_in_flat=None,
                 cache_slot_mapping=None,
             )
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         # Group-1 (every pool-bound FP8 layer): SWA pool write meta.
         #

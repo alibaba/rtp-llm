@@ -89,6 +89,7 @@ public:
         json.Jsonize("output_len", output_len, output_len);
         json.Jsonize("pd_sep", pd_sep, pd_sep);
         json.Jsonize("step_output_len", step_output_len, step_output_len);
+        json.Jsonize("predicted_remaining_len", predicted_remaining_len, predicted_remaining_len);
         json.Jsonize("beam_responses", beam_responses, beam_responses);
         if (json.GetMode() == FastJsonizableBase::Mode::TO_JSON && cum_log_probs.has_value()) {
             auto               tensor = cum_log_probs.value().to(torch::kFloat).contiguous();
@@ -113,6 +114,7 @@ public:
         reuse_len                           = base.reuse_len;
         output_len                          = base.output_len;
         step_output_len                     = base.step_output_len;
+        predicted_remaining_len             = base.predicted_remaining_len;
         pd_sep                              = base.pd_sep;
         cum_log_probs                       = base.cum_log_probs;
         local_reuse_len                     = base.local_reuse_len;

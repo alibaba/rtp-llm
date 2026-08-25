@@ -238,6 +238,7 @@ message AuxInfoPB {
     map<int32, int32> multimodal_lengths = 27;
     int32 speculative_draft_rounds = 28;
     repeated int32 speculative_accepted_tokens_per_pos = 29;
+    float predicted_remaining_len = 30;
 }
 
 message PromptLogitsOutputPB {

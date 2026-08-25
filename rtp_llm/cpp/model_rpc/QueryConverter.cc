@@ -29,7 +29,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -54,7 +54,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -494,6 +494,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_prefix_len(response.aux_info.prefix_len);
             aux_info->set_output_len(response.aux_info.output_len);
             aux_info->set_step_output_len(response.aux_info.step_output_len);
+            aux_info->set_predicted_remaining_len(response.aux_info.predicted_remaining_len);
             aux_info->set_pd_sep(response.aux_info.pd_sep);
             aux_info->set_total_reuse_len(response.aux_info.reuse_len);
             aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
