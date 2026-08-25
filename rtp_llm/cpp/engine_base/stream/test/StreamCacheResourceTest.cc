@@ -44,6 +44,13 @@ public:
         done_ = true;
     }
 
+    void onDone(DoneCallback callback) override {
+        if (done_ && callback) {
+            callback(success_ ? ErrorInfo::OkStatus() :
+                                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "allocator failed"));
+        }
+    }
+
     bool done() const override {
         return done_;
     }
@@ -70,6 +77,7 @@ public:
     }
 
     void waitDone() override {}
+    void onDone(DoneCallback) override {}
     bool done() const override {
         return false;
     }

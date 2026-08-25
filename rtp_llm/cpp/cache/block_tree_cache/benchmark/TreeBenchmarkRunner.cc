@@ -556,6 +556,9 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addResolvedConfigInt("warmup_seconds", static_cast<int64_t>(config.warmup_seconds));
     writer_.addResolvedConfigInt("measured_seconds", static_cast<int64_t>(config.measured_seconds));
     writer_.addResolvedConfigInt("task_pool_size_resolved", static_cast<int64_t>(options_.task_pool_size));
+    writer_.addResolvedConfigInt(
+        "shared_transfer_worker_count", static_cast<int64_t>(BlockTreeCacheConfig{}.transfer_worker_count));
+    writer_.addResolvedConfig("completion_queue_policy", "unbounded_priority_fifo");
     writer_.addResolvedConfigInt("foreground_scheduler_threads", 1);
     writer_.addResolvedConfigInt("repetition_identity", static_cast<int64_t>(repetition_id_));
     writer_.addResolvedConfigInt("cuda_device_resolved", static_cast<int64_t>(cuda_device_));

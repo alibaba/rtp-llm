@@ -91,11 +91,24 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     task->target_tier = target_tier;
     task->cache_keys  = cache_keys;
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
+    bool business_credit_acquired = false;
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task, &business_credit_acquired]() {
+        if (business_credit_acquired) {
+            task_pool_->releaseBusinessCredit();
+        }
+        settleLocked(*task, /*publish=*/false);
+    });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
     }
+    if (!task_pool_->acquireBusinessCredit()) {
+        RTP_LLM_LOG_WARNING("store aborted: in-flight business limit reached, target=%s blocks=%zu",
+                            tierName(target_tier),
+                            task->descriptors.size());
+        return;
+    }
+    business_credit_acquired = true;
     if (!task_pool_->submit([this, task]() { runStoreTask(task); })) {
         RTP_LLM_LOG_WARNING("store aborted: cache task queue full, target=%s blocks=%zu",
                             tierName(target_tier),
@@ -106,25 +119,40 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
 }
 
 void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
-    bool                                   copy_success = false;
-    block_tree_cache_detail::ScopeRollback settle_guard(
-        [this, &task, &copy_success]() { settleTask(*task, copy_success); });
-
     if (stopping_.load()) {
+        scheduleStoreSettlement(
+            task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"));
         return;
     }
 
     try {
-        copy_success = store_task_runner_.runTransfer(
-            *task, *transfer_dispatcher_, metrics_reporter_, host_timeout_ms_, disk_timeout_ms_);
+        store_task_runner_.runTransfer(task,
+                                       *transfer_dispatcher_,
+                                       metrics_reporter_,
+                                       host_timeout_ms_,
+                                       disk_timeout_ms_,
+                                       [this, task](ErrorInfo error) {
+                                           scheduleStoreSettlement(task, std::move(error));
+                                       });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("store copy threw: %s", error.what());
+        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
     } catch (...) {
         RTP_LLM_LOG_ERROR("store copy threw an unknown exception");
+        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store copy exception"));
+    }
+}
+
+void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
+    auto settle = [this, task, error = std::move(error)]() mutable { settleTask(*task, error.ok()); };
+    if (!task_pool_->submitCompletion(settle)) {
+        RTP_LLM_LOG_WARNING("store completion queue is closed; settling inline");
+        settle();
     }
 }
 
 void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
+    block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
     bool   stopping = false;
     size_t accepted = 0;
     {
