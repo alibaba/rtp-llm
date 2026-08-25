@@ -125,7 +125,6 @@ export SCHEDULE_WORKER_SIZE="${SCHEDULE_WORKER_SIZE:-16}"
 
 MOCK_PID=""
 FLEXLB_PID=""
-MASTER_COUNTER_POLLER_PID=""
 CLIENT_PIDS=()
 JAVA_MODULE_OPTS=(
   --add-modules ALL-SYSTEM
@@ -150,7 +149,6 @@ if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
 fi
 
 cleanup() {
-  stop_master_counter_poller
   for pid in "${CLIENT_PIDS[@]}"; do
     kill "${pid}" >/dev/null 2>&1 || true
   done
@@ -319,52 +317,15 @@ save_master_prometheus() {
   return 1
 }
 
-# Per-second master arrival/completion counter time series. The management
-# Prometheus endpoint has no arrival/completion counters, but the master
-# already exposes cumulative arrival_count/completion_count on the existing
-# GET /rtp_llm/server_latency endpoint — poll that (no master code change).
-# Counters are cumulative within the recorder window; the multi-worker path
-# resets the window right after the poller starts, visible as a counter drop.
+# Per-second master arrival/completion counter time series. The master itself
+# dumps the recorder counters to this file (FLEXLB_COUNTER_DUMP_PATH /
+# FLEXLB_COUNTER_DUMP_INTERVAL_MS, see ServerScheduleLatencyCounterDumper);
+# line format is identical to the former Python poller. Counters are cumulative
+# within the recorder window; the multi-worker path resets the window right
+# after the clients start, visible as a counter drop. The daemon dumper flushes
+# every tick and writes a final line on graceful master shutdown.
 MASTER_COUNTERS_FILE="${RUN_DIR}/master_counters_timeseries.txt"
-MASTER_COUNTER_POLL_INTERVAL_S="${MASTER_COUNTER_POLL_INTERVAL_S:-1}"
-
-start_master_counter_poller() {
-  if [[ "${START_FLEXLB}" != "1" ]]; then
-    return 0
-  fi
-  python3 - "${FLEXLB_HTTP_ADDR}" "${MASTER_COUNTERS_FILE}" \
-    "${MASTER_COUNTER_POLL_INTERVAL_S}" <<'PY' &
-import json
-import sys
-import time
-import urllib.request
-
-addr, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
-url = f"http://{addr}/rtp_llm/server_latency"
-with open(out_path, "a", encoding="utf-8") as out:
-    while True:
-        started = time.time()
-        try:
-            with urllib.request.urlopen(url, timeout=2) as response:
-                data = json.load(response)
-            out.write(
-                f"ts_epoch_ms={int(started * 1000)} "
-                f"arrival_count={data.get('arrival_count', 0)} "
-                f"completion_count={data.get('completion_count', 0)}\n")
-            out.flush()
-        except Exception:
-            pass  # master briefly unavailable; skip this sample
-        time.sleep(max(0.0, interval_s - (time.time() - started)))
-PY
-  MASTER_COUNTER_POLLER_PID="$!"
-}
-
-stop_master_counter_poller() {
-  if [[ -n "${MASTER_COUNTER_POLLER_PID}" ]]; then
-    kill "${MASTER_COUNTER_POLLER_PID}" >/dev/null 2>&1 || true
-    MASTER_COUNTER_POLLER_PID=""
-  fi
-}
+MASTER_COUNTER_DUMP_INTERVAL_MS="${MASTER_COUNTER_DUMP_INTERVAL_MS:-1000}"
 
 assert_mock_engine_healthy() {
   if [[ "${START_MOCK}" != "1" ]]; then
@@ -586,6 +547,8 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
       "HIPPO_ROLE=${HIPPO_ROLE}" \
       "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
+      "FLEXLB_COUNTER_DUMP_PATH=${MASTER_COUNTERS_FILE}" \
+      "FLEXLB_COUNTER_DUMP_INTERVAL_MS=${MASTER_COUNTER_DUMP_INTERVAL_MS}" \
       bash -lc "${FLEXLB_START_CMD}" >"${RUN_DIR}/flexlb.log" 2>&1 &
   else
     if [[ ! -f "${FLEXLB_JAR}" ]]; then
@@ -598,6 +561,8 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
       "HIPPO_ROLE=${HIPPO_ROLE}" \
       "FLEXLB_LOG_PATH=${FLEXLB_LOG_PATH}" \
+      "FLEXLB_COUNTER_DUMP_PATH=${MASTER_COUNTERS_FILE}" \
+      "FLEXLB_COUNTER_DUMP_INTERVAL_MS=${MASTER_COUNTER_DUMP_INTERVAL_MS}" \
       java -XX:StartFlightRecording=filename=${JFR_FILE},settings=profile,duration=${JFR_DURATION},disk=true,maxsize=256m,dumponexit=true "${JAVA_HEAP_OPTS[@]}" "${JAVA_MODULE_OPTS[@]}" "${JVM_SYSTEM_PROPS[@]}" -jar "${FLEXLB_JAR}" \
       --server.port="${FLEXLB_HTTP_PORT}" \
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
@@ -635,10 +600,6 @@ PY
 )"
 echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
 echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
-
-# Capture the master arrival/completion counter time series for the whole load
-# window (stopped right after all clients finish; also killed by cleanup).
-start_master_counter_poller
 
 # Launch one load client instance. Args: output_dir, num_shards, shard_index,
 # max_concurrency, skip_server_latency (0/1). JavaLoadClient is env-var
@@ -851,7 +812,6 @@ PY
   fi
 fi
 
-stop_master_counter_poller
 assert_mock_engine_healthy
 
 if [[ "${SLO_BATCH_DRAIN_SECONDS}" -gt 0 ]]; then

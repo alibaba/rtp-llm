@@ -1424,8 +1424,8 @@ public final class JavaLoadClient {
     // ---- Markdown Report ----
 
     /**
-     * Writes a minimal report.md aligned with Python report.write_markdown_report:
-     * Overview + Latency table + Status counts + Top errors.
+     * Writes a minimal report.md: Overview + Latency table + Status counts +
+     * Top errors.
      */
     private void writeMarkdownReport(ObjectNode summary) throws IOException {
         List<String> lines = new ArrayList<>();

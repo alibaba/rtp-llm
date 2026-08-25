@@ -25,8 +25,10 @@ After completion, the important outputs are:
 - `flexlb.log`
 - `master_counters_timeseries.txt`: per-second master `arrival_count` /
   `completion_count` samples (`ts_epoch_ms=... arrival_count=... completion_count=...`
-  lines, polled from `GET /rtp_llm/server_latency` during the load window;
-  interval via `MASTER_COUNTER_POLL_INTERVAL_S`, default 1s).
+  lines). The master dumps these counters itself
+  (`FLEXLB_COUNTER_DUMP_PATH` / `FLEXLB_COUNTER_DUMP_INTERVAL_MS`, see
+  `ServerScheduleLatencyCounterDumper`), covering the whole master lifetime
+  including warmup; interval default 1s.)
 
 The mock engine's periodic `java_mock_stats` line in `mock_engine.log` carries a
 leading `ts_epoch_ms` field for cross-source time alignment; its cadence is
