@@ -2,8 +2,8 @@ package org.flexlb.httpserver;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.service.grace.strategy.HealthCheckHooker;
-import org.flexlb.service.grace.strategy.QueryWarmerHooker;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -18,6 +18,12 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 @Slf4j
 @Data
 public class HealthCheckServer {
+
+    private final ApplicationWarmupState applicationWarmupState;
+
+    public HealthCheckServer(ApplicationWarmupState applicationWarmupState) {
+        this.applicationWarmupState = applicationWarmupState;
+    }
 
     /**
      * Health check
@@ -37,7 +43,7 @@ public class HealthCheckServer {
             return ServerResponse.status(404).body(Mono.just("shutdown received"), String.class);
         }
         // Return 404 if warmup not completed
-        if (!QueryWarmerHooker.warmUpFinished) {
+        if (!applicationWarmupState.isWarmupFinished()) {
             return ServerResponse.status(404).body(Mono.just("warm not finish"), String.class);
         }
         return ServerResponse.ok().body(Mono.just("success"), String.class);
