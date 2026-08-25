@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -49,7 +49,6 @@ from .quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 logger = logging.getLogger(__name__)
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
-_CUDA_GRAPH_CLONE_BUF_CACHE: Dict[tuple, object] = {}
 _PRE_KERNEL_BARRIER_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER"
 _PRE_KERNEL_BARRIER_VERBOSE_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
@@ -64,43 +63,14 @@ def _mega_output_capacity(buf, requested_capacity: int) -> int:
     return capacity
 
 
-def _get_or_create_cuda_graph_clone_buf(src_buf, group, cfg: GLM5MegaMoeCfg):
-    if src_buf is None or group is None:
-        return src_buf
-    key = (
-        id(src_buf),
-        id(group),
-        cfg.n_routed_experts,
-        cfg.max_tokens_per_rank,
-        cfg.n_activated_experts,
-        cfg.dim,
-        cfg.moe_inter_dim,
-    )
-    cached = _CUDA_GRAPH_CLONE_BUF_CACHE.get(key)
-    if cached is not None:
-        return cached
+def _cfg_activation_name(cfg: "GLM5MegaMoeCfg") -> str:
+    if cfg.swiglu_alpha > 0.0 and cfg.swiglu_limit > 0.0:
+        return "swiglu_oai"
+    return "swiglu"
 
-    import deep_gemm
 
-    cached = deep_gemm.get_symm_buffer_for_mega_moe(
-        group=group,
-        num_experts=cfg.n_routed_experts,
-        num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
-        num_topk=cfg.n_activated_experts,
-        hidden=cfg.dim,
-        intermediate_hidden=cfg.moe_inter_dim,
-        use_fp8_dispatch=True,
-        activation="swiglu",
-    )
-    _CUDA_GRAPH_CLONE_BUF_CACHE[key] = cached
-    logging.info(
-        "[GLM5 MegaMoE] allocated CUDA graph clone symm buffer: layer=%d "
-        "max_tokens_per_rank=%d hidden=%d",
-        cfg.layer_id,
-        cfg.max_tokens_per_rank,
-        cfg.dim,
-    )
-    return cached
+def _activation_clamp_or_none(limit: float) -> Optional[float]:
+    return limit if limit > 0.0 else None
 
 
 def _pre_kernel_barrier_enabled() -> bool:
@@ -222,6 +192,7 @@ class GLM5MegaMoE(nn.Module):
         self._mega_y: Optional[torch.Tensor] = None
         self._input_packer = None
         self._mega_group = None
+        self._activation_name = _cfg_activation_name(cfg)
 
     def clone_for_cuda_graph(self) -> "GLM5MegaMoE":
         clone = object.__new__(type(self))
@@ -231,14 +202,21 @@ class GLM5MegaMoE(nn.Module):
         clone._mega_l1_sf = self._mega_l1_sf
         clone._mega_l2_w = self._mega_l2_w
         clone._mega_l2_sf = self._mega_l2_sf
-        clone._mega_buf = _get_or_create_cuda_graph_clone_buf(
-            self._mega_buf, self._mega_group, self.cfg
-        )
+        # DeepGEMM MegaMoE symmetric buffers are process/group scoped.  A
+        # graph clone must keep using the buffer that was collectively created
+        # during module setup.  Allocating another symmetric buffer while the
+        # model clones its layers can make ranks rendezvous in a different
+        # order and abort engine initialization (and is unnecessary for CUDA
+        # graph capture because all views have stable addresses already).
+        clone._mega_buf = self._mega_buf
         clone._mega_y = (
             torch.empty_like(self._mega_y) if self._mega_y is not None else None
         )
         clone._input_packer = get_mega_moe_input_packer()
         clone._mega_group = self._mega_group
+        clone._activation_name = self._activation_name
+        if hasattr(self, "_num_shared_experts"):
+            clone._num_shared_experts = self._num_shared_experts
         return clone
 
     @classmethod
@@ -294,17 +272,38 @@ class GLM5MegaMoE(nn.Module):
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
-        device = w1_w.device
+
+        # Smoke/production launchers commonly use FORCE_CPU_LOAD_WEIGHTS=1 to
+        # keep checkpoint loading from filling HBM.  The wrapper pops one
+        # layer at a time, so transfer that layer here immediately before the
+        # CUDA-only DeepGEMM layout transforms.  Keeping this at the kernel
+        # boundary also lets the generic loader retain its CPU-load policy.
+        device = (
+            w1_w.device
+            if w1_w.is_cuda
+            else torch.device("cuda", torch.cuda.current_device())
+        )
+        with torch.cuda.device(device):
+            w1_w = w1_w.to(device=device, non_blocking=True)
+            w1_s = w1_s.to(device=device, non_blocking=True)
+            w2_w = w2_w.to(device=device, non_blocking=True)
+            w2_s = w2_s.to(device=device, non_blocking=True)
 
         # Transform scales to DeepGEMM int32 layout
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(w1_s, 2 * inter, D, E)
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(w2_s, D, inter, E)
+        with torch.cuda.device(device):
+            s13_int = prepare_fp4_weight_scale_for_deepgemm(w1_s, 2 * inter, D, E)
+            s2_int = prepare_fp4_weight_scale_for_deepgemm(w2_s, D, inter, E)
 
         # Apply mega MoE transform: L1 gate/up interleave + UTCCP transpose SF
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w1_w, s13_int),
-            (w2_w, s2_int),
-        )
+        with torch.cuda.device(device):
+            (l1_w, l1_sf), (
+                l2_w,
+                l2_sf,
+            ) = deep_gemm.transform_weights_for_mega_moe(
+                (w1_w, s13_int),
+                (w2_w, s2_int),
+                activation=self._activation_name,
+            )
         del s13_int, s2_int
         torch.cuda.empty_cache()
 
@@ -436,6 +435,7 @@ class GLM5MegaMoE(nn.Module):
         (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13_packed, s13_int),
             (w2_packed, s2_int),
+            activation=self._activation_name,
         )
         del w13_packed, s13_int, w2_packed, s2_int
         torch.cuda.empty_cache()
@@ -504,6 +504,7 @@ class GLM5MegaMoE(nn.Module):
         (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13_packed, s13_int),
             (w2_packed, s2_int),
+            activation=self._activation_name,
         )
         del w13_packed, s13_int, w2_packed, s2_int
         torch.cuda.empty_cache()
@@ -534,8 +535,9 @@ class GLM5MegaMoE(nn.Module):
             num_topk=cfg.n_activated_experts,
             hidden=cfg.dim,
             intermediate_hidden=cfg.moe_inter_dim,
+            num_shared_experts=int(getattr(self, "_num_shared_experts", 0)),
             use_fp8_dispatch=True,
-            activation="swiglu",
+            activation=self._activation_name,
         )
         self._mega_y = get_or_create_mega_output(
             _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
@@ -589,6 +591,9 @@ class GLM5MegaMoE(nn.Module):
             cfg.moe_inter_dim,
             int(cfg.max_tokens_per_rank),
             cfg.swiglu_limit,
+            cfg.swiglu_alpha,
+            self._activation_name,
+            int(getattr(self, "_num_shared_experts", 0)),
             num_sms,
             tuple(token_counts),
         )
@@ -654,6 +659,8 @@ class GLM5MegaMoE(nn.Module):
         x: torch.Tensor,  # [T, D] BF16 local-rank tokens
         weights: torch.Tensor,  # [T, topk] FP32 router weights
         indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
+        activation: Optional[str] = None,
+        extra_expert_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         """Run the fused DeepGEMM Mega MoE kernel.
 
@@ -663,6 +670,31 @@ class GLM5MegaMoE(nn.Module):
         Returns [T, D] BF16 combined routed-expert output.
         """
         import deep_gemm
+
+        activation_name = (activation or self._activation_name).lower()
+        if activation_name in ("siglu", "silu"):
+            activation_name = "swiglu"
+        if activation_name == "swiglu_oai":
+            if self._activation_name != "swiglu_oai":
+                raise RuntimeError(
+                    "moe_strategy=mega_moe received swiglu_oai activation but "
+                    "the symmetric buffer was initialized for regular swiglu"
+                )
+            alpha = float(
+                (extra_expert_args or {}).get("swiglu_alpha", self.cfg.swiglu_alpha)
+            )
+            limit = float(
+                (extra_expert_args or {}).get("swiglu_limit", self.cfg.swiglu_limit)
+            )
+            if alpha <= 0.0 or limit <= 0.0:
+                raise ValueError(
+                    "swiglu_oai requires positive swiglu_alpha and swiglu_limit"
+                )
+        elif activation_name == "swiglu":
+            alpha = None
+            limit = self.cfg.swiglu_limit
+        else:
+            raise ValueError(f"mega_moe does not support activation={activation!r}")
 
         T = x.size(0)
         buf = self._mega_buf
@@ -680,6 +712,7 @@ class GLM5MegaMoE(nn.Module):
 
         # Pack inputs into symmetric memory buffer
         self._input_packer.pack(x, weights, indices, buf, T)
+        fused_shared_kwargs = self._fused_shared_expert_kwargs(T)
         self._maybe_pre_kernel_barrier(T)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
@@ -687,19 +720,27 @@ class GLM5MegaMoE(nn.Module):
         )
 
         y = self._mega_y[:T]
-        deep_gemm.fp8_fp4_mega_moe(
-            y,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
-            buf,
-            recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
-            activation_clamp=(
-                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
-            ),
-            fast_math=True,
-        )
+        kwargs = {
+            "recipe": (1, 1, FP4_BLOCK),
+            "activation": activation_name,
+            "activation_clamp": _activation_clamp_or_none(limit),
+            "fast_math": True,
+        }
+        if activation_name == "swiglu_oai":
+            kwargs["activation_alpha"] = alpha
+        with torch.cuda.device(x.device):
+            deep_gemm.fp8_fp4_mega_moe(
+                y,
+                (self._mega_l1_w, self._mega_l1_sf),
+                (self._mega_l2_w, self._mega_l2_sf),
+                buf,
+                **fused_shared_kwargs,
+                **kwargs,
+            )
         return y
+
+    def _fused_shared_expert_kwargs(self, tokens: int) -> Dict[str, Any]:
+        return {}
 
     def _maybe_pre_kernel_barrier(self, tokens: int) -> None:
         """Optional host-side rendezvous before the DeepGEMM MegaMoE kernel."""

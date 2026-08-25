@@ -743,7 +743,11 @@ def is_mega_moe_strategy() -> bool:
     """Return True when a MegaMoE strategy is set in the env."""
     import os
 
-    return os.environ.get("MOE_STRATEGY") in {"mega_moe", "mega_moe_fused"}
+    return os.environ.get("MOE_STRATEGY") in {
+        "mega_moe",
+        "mega_moe_se",
+        "mega_moe_fused",
+    }
 
 
 def is_mega_moe_fused_strategy() -> bool:

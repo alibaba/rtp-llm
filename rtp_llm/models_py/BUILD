@@ -22,6 +22,16 @@ requirement(rtp_kernel)
 requirement(flashattn)
 requirement(flashattn4)
 
+py_test(
+    name = "test_glm5_mega_moe_wrapper_layout",
+    srcs = ["modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py"],
+    main = "modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py",
+    deps = [
+        ":modules",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
 
 filegroup(
     name = "cutlass_moe_config",

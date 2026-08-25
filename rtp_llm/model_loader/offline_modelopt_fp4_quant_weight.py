@@ -13,6 +13,7 @@ Auto-detected by ``is_offline_mega_moe_fp4_ckpt(database)`` — looks for
 the FP4 scale suffix on any expert weight in the ckpt index.
 """
 
+import functools
 from typing import Any, Dict, Optional
 
 import torch
@@ -34,6 +35,24 @@ _SHARED_EXPERT_KERNEL_NAMES = (W.ffn_w13, W.ffn_w2)
 
 _FP4_W_SUFFIX = ".weight"
 _FP4_S_SUFFIX = ".weight_scale"
+
+
+def _is_native_mxfp4_weight_name(name: str) -> bool:
+    return name.endswith(".w13_weight") or name.endswith(".w2_weight")
+
+
+def _fp4_scale_ckpt_name(name: str) -> str:
+    if _is_native_mxfp4_weight_name(name):
+        return name + "_scale"
+    if name.endswith(_FP4_W_SUFFIX):
+        return name[: -len(_FP4_W_SUFFIX)] + _FP4_S_SUFFIX
+    raise ValueError(f"cannot derive offline FP4 scale key from {name!r}")
+
+
+def _decode_native_ue8m0_scale(ts: list[torch.Tensor], process_fun) -> torch.Tensor:
+    """Apply native row layout then decode uint8 UE8M0 exponent bytes."""
+    encoded = process_fun(ts).float()
+    return torch.exp2(encoded - 127.0).contiguous()
 
 
 def _mega_moe_scale_name(name: str) -> str:
@@ -99,18 +118,25 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
             stacked_ckpt_keys=getattr(src_weight_info, "stacked_ckpt_keys", False),
         )
         scale_weights = [
-            CkptWeightInfo(
-                w.name[: -len(_FP4_W_SUFFIX)] + _FP4_S_SUFFIX,
-                w.merge_fun,
-            )
-            for w in src_weight_info.weights
+            CkptWeightInfo(_fp4_scale_ckpt_name(weight.name), weight.merge_fun)
+            for weight in src_weight_info.weights
         ]
+        scale_process_fun = src_weight_info.process_fun
+        if any(
+            _is_native_mxfp4_weight_name(weight.name)
+            for weight in src_weight_info.weights
+        ):
+            scale_process_fun = functools.partial(
+                _decode_native_ue8m0_scale,
+                process_fun=src_weight_info.process_fun,
+            )
         scale = MoeAtomicWeight(
             name=_mega_moe_scale_name(src_weight_info.name),
             weights=scale_weights,
-            process_fun=src_weight_info.process_fun,
+            process_fun=scale_process_fun,
             data_type=torch.float32,
             config=src_weight_info.config,
+            stacked_ckpt_keys=getattr(src_weight_info, "stacked_ckpt_keys", False),
         )
 
         sub_weights = {kernel.name: kernel, scale.name: scale}
@@ -277,8 +303,10 @@ import os as _os
 import re as _re
 
 _OFFLINE_FP4_SCALE_RE = _re.compile(
-    r"model\.layers\.\d+\.mlp\.(experts\.\d+|shared_experts)\."
-    r"(gate|up|down)_proj\.weight_scale$"
+    r"(?:model\.layers\.\d+\.mlp\.(experts\.\d+|shared_experts)\."
+    r"(gate|up|down)_proj\.weight_scale|"
+    r"model\.layers\.\d+\.block_sparse_moe\.experts\."
+    r"(?:w13|w2)_weight_scale)$"
 )
 
 
@@ -307,6 +335,16 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
                     cfg = _json.load(f)
                 qc = cfg.get("quantization_config") or {}
                 if qc.get("expert_dtype") == "fp4":
+                    return True
+                mixed = qc.get("quantization") or {}
+                quantized_layers = (
+                    qc.get("quantized_layers") or mixed.get("quantized_layers") or {}
+                )
+                if any(
+                    isinstance(layer, dict)
+                    and str(layer.get("quant_algo", "")).upper() == "MXFP4"
+                    for layer in quantized_layers.values()
+                ):
                     return True
             except Exception:
                 pass  # fall through to tensor scan
