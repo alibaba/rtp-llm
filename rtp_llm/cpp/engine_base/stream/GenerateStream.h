@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -136,6 +137,18 @@ public:
     virtual bool                         hasOutput() {
         return false;
     }
+
+    // Event-driven completion notification: fired exactly once when this
+    // stream first reaches its terminal FINISHED state (errored streams
+    // converge to FINISHED as well). Lets the runtime meta migrate the entry
+    // to the finished list at completion time instead of a lazy report-time
+    // scan. One-shot: the stored callback is consumed on the first FINISHED
+    // transition; registering on an already-FINISHED stream fires it
+    // immediately. The callback runs without the stream mutex held and must
+    // not capture the stream itself (use a weak reference at the
+    // registration site to avoid an ownership cycle).
+    using FinishCallback = std::function<void()>;
+    void setFinishCallback(FinishCallback callback);
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
@@ -776,6 +789,9 @@ protected:
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> cv_;
+    // guarded by mutex_; one-shot terminal-FINISHED notification (see
+    // setFinishCallback)
+    FinishCallback finish_callback_;
 
     GenerateStreamPtr propose_stream_ = nullptr;
     GenerateStreamPtr score_stream_   = nullptr;

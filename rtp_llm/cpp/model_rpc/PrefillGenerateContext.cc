@@ -74,6 +74,23 @@ void PrefillGenerateContext::setStream(const std::shared_ptr<GenerateStream>& st
     stream_ = stream;
     if (stream) {
         meta->enqueue(task_identity_, stream_);
+        // Event-driven finish promotion: migrate the runtime-meta entry to the
+        // finished list as soon as the local stream reaches its terminal
+        // FINISHED state (normal completion or error converges there),
+        // instead of a lazy scan at getEngineScheduleInfo() time. A later
+        // fetch() or stopStream() dequeue is find-miss idempotent. Only the
+        // meta shared_ptr, the request id, and a weak stream reference are
+        // captured: the context itself is not captured (it may already be
+        // destroyed when the callback fires) and the weak ref cannot extend
+        // the stream's lifetime or create an ownership cycle.
+        auto                          meta_holder = meta;
+        auto                          rid         = request_id;
+        std::weak_ptr<GenerateStream> weak_stream = stream;
+        stream->setFinishCallback([meta_holder, rid, weak_stream]() {
+            if (auto finished = weak_stream.lock()) {
+                meta_holder->dequeue(rid, finished);
+            }
+        });
     }
 }
 
@@ -189,11 +206,9 @@ bool PrefillGenerateContext::isPriorityPreempted() const {
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
     std::lock_guard<std::mutex> lock(terminal_transition_mu_);
-    auto expected = PrefillTerminalCause::ACTIVE;
-    if (terminal_cause_.compare_exchange_strong(expected,
-                                                PrefillTerminalCause::OTHER,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+    auto                        expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(
+            expected, PrefillTerminalCause::OTHER, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return true;
     }
     return expected == PrefillTerminalCause::OTHER;
@@ -236,9 +251,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
-    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
-                                error_info.ToString(),
-                                serialized_details);
+    error_status =
+        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
 
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
@@ -260,9 +274,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     }
 
     if (meta) {
-        meta->markPriorityPreemptionCanceled(request_id,
-                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request");
+        meta->markPriorityPreemptionCanceled(
+            request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "preempted by a higher-priority request");
     }
     priority_finalized_ = true;
     return true;

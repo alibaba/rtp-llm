@@ -682,21 +682,56 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
     generate_status_->setReserveStep(reserve_step);
 }
 
+void GenerateStream::setFinishCallback(FinishCallback callback) {
+    FinishCallback fire_now;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (generate_status_->getStatus() == StreamState::FINISHED) {
+            // Registration lost the race with the terminal transition: fire
+            // immediately (outside the lock) so no completion goes unseen.
+            fire_now = std::move(callback);
+        } else {
+            finish_callback_ = std::move(callback);
+        }
+    }
+    if (fire_now) {
+        try {
+            fire_now();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("finish callback failed on an already-finished stream: %s", e.what());
+        }
+    }
+}
+
 StreamState GenerateStream::moveToNext() {
     checkTimeout();
-    StreamState state;
-    bool        should_report_metric = false;
+    StreamState    state;
+    bool           should_report_metric = false;
+    FinishCallback finish_callback;
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         auto                        old_state = generate_status_->getStatus();
         state                                 = generate_status_->moveToNext();
         should_report_metric                  = old_state != StreamState::FINISHED && state == StreamState::FINISHED;
+        if (should_report_metric) {
+            // One-shot handoff: take the callback under the lock, fire it
+            // outside so it may safely call back into stream/meta APIs.
+            finish_callback  = std::move(finish_callback_);
+            finish_callback_ = nullptr;
+        }
     }
 
     // notify one thread waiting for stream completion
     if (state == StreamState::FINISHED) {
         if (should_report_metric) {
             reportMetricOnce();
+        }
+        if (finish_callback) {
+            try {
+                finish_callback();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("finish callback failed on terminal transition: %s", e.what());
+            }
         }
         cv_->notify_one();
     }
