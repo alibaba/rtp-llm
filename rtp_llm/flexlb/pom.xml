@@ -29,6 +29,7 @@
         <maven-resources.version>3.3.1</maven-resources.version>
         <jacoco.version>0.8.15</jacoco.version>
         <jacocoArgLine/>
+        <jacoco.aggregate.outputDirectory>${maven.multiModuleProjectDirectory}/target/site/jacoco-aggregate</jacoco.aggregate.outputDirectory>
         <spring-boot.version>2.7.18</spring-boot.version>
         <grpc.version>1.65.0</grpc.version>
         <protoc.version>3.25.1</protoc.version>
@@ -54,6 +55,7 @@
         <module>flexlb-common</module>
         <module>flexlb-grpc</module>
         <module>flexlb-cache</module>
+        <module>flexlb-integration-test</module>
     </modules>
 
     <!-- 此处定义所有模块都依赖的 -->
@@ -160,6 +162,11 @@
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-collections4</artifactId>
                 <version>${commons-collections4.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.flexlb</groupId>
+                <artifactId>flexlb-api</artifactId>
+                <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.flexlb</groupId>

@@ -17,6 +17,7 @@ FlexLB 是面向 AI 模型推理负载（RTP-LLM）的高性能智能负载均�
 | [04-worker-sync-and-cache](04-worker-sync-and-cache.md) | Worker 状态 gRPC 同步、本地乐观预测、KV cache 三种匹配源（LOCAL_SYNC / KVCM / LOCAL_STANDBY） |
 | [05-lifecycle-and-consistency](05-lifecycle-and-consistency.md) | 生命周期 Hook 与 /hook/* 端点、ZooKeeper LeaderSelector 主选举、slave 转发 |
 | [06-configuration-and-observability](06-configuration-and-observability.md) | 全量配置字段与默认值、HTTP 端点、日志架构、指标体系 |
+| [07-integration-testing](07-integration-testing.md) | 单引擎 transport-real 集成测试架构、fake 外部边界、场景矩阵与稳定性回归约束 |
 
 ## 技术栈
 
@@ -30,7 +31,7 @@ FlexLB 是面向 AI 模型推理负载（RTP-LLM）的高性能智能负载均�
 | 本地缓存 | Caffeine |
 | 网络 | Netty 4.1.127.Final |
 | 观测 | FlexMonitor 抽象（默认 NoOp，internal profile 下 KMonitor）、OpenTelemetry W3C 传播 |
-| 测试 | JUnit 5 + Mockito 5.20.0 |
+| 测试 | JUnit 5 + Mockito 5.20.0；集成测试模块使用 Awaitility 4.2.2 等待异步可观测状态 |
 
 ## 模块划分
 
@@ -43,6 +44,7 @@ FlexLB 是面向 AI 模型推理负载（RTP-LLM）的高性能智能负载均�
 | **flexlb-grpc** | 引擎 gRPC 客户端（worker status / cache status）+ KVCM meta-service 客户端（`KvcmGrpcClient`、leader 解析、健康探测） |
 | **flexlb-sync** | 核心：路由与策略、排队调度、动态资源管理、worker 状态同步、主选举、生命周期 Hook、监控上报 |
 | **flexlb-cache** | KV cache 匹配：LOCAL_SYNC 两级索引（`KvCacheManager`/`GlobalCacheIndex`/`EngineLocalView`）、KVCM provider、Local Standby 兜底索引、failover 编排、block hash 计算 |
+| **flexlb-integration-test** | transport-real 单引擎回归：真实 Spring Boot/WebFlux 与 FlexLB 生产 bean，loopback gRPC fake 引擎/KVCM 边界；详见 [07-integration-testing](07-integration-testing.md) |
 
 flexlb-sync 内部包结构（`org.flexlb`）：
 
