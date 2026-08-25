@@ -144,7 +144,8 @@ def get_mla_impl(
 
 
 def _is_fmha_impl_disabled(
-    impl_class_name: str, fmha_config: Optional[FMHAConfig]
+    impl_class_name: str,
+    fmha_config: Optional[FMHAConfig],
 ) -> bool:
     """Check if a FMHA implementation is disabled in fmha_config.
 
@@ -178,7 +179,8 @@ def _is_fmha_impl_disabled(
     # FlashInfer native implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flashinfer_native
-    # Aiter ASM / Paged prefill
+    # Aiter ASM / Paged prefill. The full-prefill Triton PA kernel reads the
+    # same shuffled K/V layout produced by the ASM RoPE+KV writer.
     elif (
         "AiterPrefillImplAsm" in impl_class_name
         or "AiterPrefillImplPaged" in impl_class_name

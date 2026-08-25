@@ -237,7 +237,12 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     attn_params->cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device;
     attn_params->input_lengths = attn_inputs.input_lengths;
     attn_params->max_seq_len   = attn_inputs.input_lengths.max().item<int32_t>();
-    if (pad_query) {
+    // A full-prefill graph keeps packed Q, but the fused RoPE/KV writer still
+    // captures seq_len as a host scalar. Preserve that capture stride so
+    // prepare_in_place() can rebuild padding_offset for changing active-request
+    // layouts before replay. Without this, a capture containing only the final
+    // sentinel request keeps writing replay tokens into request 0's KV blocks.
+    if (pad_query || attn_inputs.is_cuda_graph) {
         attn_params->prefill_capture_max_seq_len = attn_params->max_seq_len;
     }
     attn_params->padding_offset = attn_inputs.padding_offset;
