@@ -560,6 +560,13 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                                 original.dim());
         const int64_t batch = original.size(0);
         const int64_t width = original.size(1);
+        // Cache groups are stacked into one [group, batch, max_kernel_blocks]
+        // tensor, so a LINEAR KDA row can be narrower than the padded live
+        // group view (for example 1 physical KDA block versus a 32-slot MLA
+        // row).  CUDA Graph executes the whole fixed KTP bucket, including
+        // fake rows, so every padding slot must point at BlockPool's permanently
+        // reserved block 0.  Using NULL_BLOCK_IDX here would make captured KDA
+        // state updates index outside the cache pool on idle DP ranks.
         auto local_host = torch::zeros(
             {batch, width}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
 
@@ -594,8 +601,8 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             const auto* shadow_ptr  = shadow.data_ptr<int32_t>();
             auto*       local_ptr   = local_host.data_ptr<int32_t>();
             const int64_t shadow_width = shadow.size(1);
-            RTP_LLM_CHECK_WITH_INFO(shadow_width == width,
-                                    "KDA shadow table width mismatch: snapshot=%ld live=%ld",
+            RTP_LLM_CHECK_WITH_INFO(shadow_width <= width,
+                                    "KDA shadow table width exceeds live padded width: snapshot=%ld live=%ld",
                                     shadow_width,
                                     width);
             for (int64_t local_row = 0; local_row < batch; ++local_row) {
@@ -611,10 +618,10 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                                         "KDA shadow shard is not READY for request=%ld epoch=%ld",
                                         request_ptr[local_row],
                                         epoch_ptr[local_row]);
-                if (width > 0) {
+                if (shadow_width > 0) {
                     std::memcpy(local_ptr + local_row * width,
                                 shadow_ptr + snapshot_row * shadow_width,
-                                static_cast<size_t>(width) * sizeof(int32_t));
+                                static_cast<size_t>(shadow_width) * sizeof(int32_t));
                 }
             }
         }

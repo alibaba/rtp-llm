@@ -362,6 +362,8 @@ class KtpBatchPlan:
                 "KTP physical rows do not match rank-major layout: "
                 f"shape={tuple(value.shape)}, expected={self.physical_rows}"
             )
+        if self.valid_rows == self.physical_rows:
+            return value.contiguous()
         indices = torch.tensor(
             self.valid_physical_indices, dtype=torch.int64, device=value.device
         )
@@ -375,6 +377,8 @@ class KtpBatchPlan:
                 "KTP valid rows do not match the rendezvous plan: "
                 f"shape={tuple(value.shape)}, expected={self.valid_rows}"
             )
+        if self.valid_rows == self.physical_rows:
+            return value.contiguous()
         expanded = value.new_zeros([self.physical_rows] + list(value.shape[1:]))
         indices = torch.tensor(
             self.valid_physical_indices, dtype=torch.int64, device=value.device
