@@ -192,7 +192,12 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 f"connections: {self.load_balancer.connection_counts[worker_address]}, "
                 f"timeout: {timeout_s}s"
             )
-            response = stub.RemoteMultimodalEmbedding(request, timeout=timeout_s)
+            worker_call = stub.RemoteMultimodalEmbedding.future(
+                request, timeout=timeout_s
+            )
+            if not context.add_callback(worker_call.cancel):
+                worker_call.cancel()
+            response = worker_call.result()
 
             kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
             self.profiler.on_request_complete()
@@ -203,7 +208,10 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 f"RPC error when forwarding to worker {worker_address}: {e.code()} - {e.details()}"
             )
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
-            raise
+            trailing_metadata = e.trailing_metadata()
+            if trailing_metadata:
+                context.set_trailing_metadata(trailing_metadata)
+            context.abort(e.code(), e.details())
         except Exception as e:
             logging.error(f"Error forwarding request to worker {worker_address}: {e}")
             kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
@@ -223,7 +231,10 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             logging.error(
                 f"RPC error when forwarding AsyncSubmit to worker {worker_address}: {e.code()} - {e.details()}"
             )
-            raise
+            trailing_metadata = e.trailing_metadata()
+            if trailing_metadata:
+                context.set_trailing_metadata(trailing_metadata)
+            context.abort(e.code(), e.details())
         except Exception as e:
             logging.error(
                 f"Error forwarding AsyncSubmit to worker {worker_address}: {e}"

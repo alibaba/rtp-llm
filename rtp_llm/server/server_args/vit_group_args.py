@@ -185,6 +185,14 @@ def init_vit_group_args(parser, vit_config):
         help="ViT 异步计算的最大并发数",
     )
     vit_group.add_argument(
+        "--vit_max_queue_size",
+        env_name="VIT_MAX_QUEUE_SIZE",
+        bind_to=(vit_config, "vit_max_queue_size"),
+        type=int,
+        default=64,
+        help="ViT 异步计算等待队列的最大任务数",
+    )
+    vit_group.add_argument(
         "--biencoder_preprocess",
         env_name="BIENCODER_PREPROCESS",
         bind_to=(vit_config, "biencoder_preprocess"),

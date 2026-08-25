@@ -4,6 +4,7 @@ namespace rtp_llm {
 
 enum class ErrorCode {
     NONE_ERROR                   = 0,
+    CONCURRENCY_LIMIT_ERROR      = 409,
     LONG_PROMPT_ERROR            = 511,
     UNKNOWN_ERROR                = 514,
     MALLOC_FAILED                = 602,
@@ -90,6 +91,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
     switch (code) {
         case ErrorCode::NONE_ERROR:
             return "NONE_ERROR";
+        case ErrorCode::CONCURRENCY_LIMIT_ERROR:
+            return "CONCURRENCY_LIMIT_ERROR";
         case ErrorCode::LONG_PROMPT_ERROR:
             return "LONG_PROMPT_ERROR";
         case ErrorCode::UNKNOWN_ERROR:

@@ -8,7 +8,7 @@ import signal
 import threading
 import time
 from types import SimpleNamespace
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.profiler
@@ -317,6 +317,14 @@ class MMEmbeddingRes:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
 
 
+class _AsyncComputeTask:
+    def __init__(self, cache_key: str, entry: MMEmbeddingCacheEntry):
+        self.cache_key = cache_key
+        self.entry = entry
+        self.request_ids: Set[int] = set()
+        self.future: Optional[concurrent.futures.Future] = None
+
+
 def _derive_embedding_cache_max_bytes(
     mm_part: MultiModalEmbeddingInterface,
     model_config: ModelConfig,
@@ -498,13 +506,28 @@ class MMProcessEngine:
             )
 
         async_compute_workers = max(1, int(vit_config.vit_concurrency))
+        async_queue_size = max(0, int(vit_config.vit_max_queue_size))
         self._async_compute_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=async_compute_workers,
             thread_name_prefix="mm-async-compute",
         )
+        self._async_compute_workers = async_compute_workers
+        self._async_queue_size = async_queue_size
+        self._async_admission_capacity = async_compute_workers + async_queue_size
+        self._async_admission_lock = threading.Lock()
+        self._async_admitted = 0
+        # Protect task ownership from the gap between cache claim and executor
+        # submission. An RLock is required because Future.cancel() invokes done
+        # callbacks synchronously in the cancelling thread.
+        self._async_task_lock = threading.RLock()
+        self._async_tasks: Dict[MMEmbeddingCacheEntry, _AsyncComputeTask] = {}
+        self._async_request_tasks: Dict[int, Set[MMEmbeddingCacheEntry]] = {}
         logging.info(
-            "MMProcessEngine: async compute executor max_workers=%d",
+            "MMProcessEngine: async compute executor max_workers=%d "
+            "max_queue_size=%d total_capacity=%d",
             async_compute_workers,
+            async_queue_size,
+            self._async_admission_capacity,
         )
 
         # Embedding scheduler: always an MMScheduler; gpu-batch vs serial is
@@ -772,6 +795,7 @@ class MMProcessEngine:
         mm_inputs: List[MultimodalInput],
         timeout_ms: int = 60000,
         request_id: int = 0,
+        cancellation_event: Optional[threading.Event] = None,
     ) -> GreenNetVerdict:
         """Block until every input's greennet verdict is decided; return the
         first non-passing verdict (first-failure-wins), else a passing verdict.
@@ -782,15 +806,17 @@ class MMProcessEngine:
         if not self._greennet_enabled():
             return GreenNetVerdict(passed=True)
 
-        for mm_input in mm_inputs:
-            if mm_input.url == "":
-                continue
-            cache_key = mm_input.cache_key()
-            state, entry = self._async_cache.try_acquire(cache_key)
-            if state == "miss":
-                single_input = [mm_input]
-                self._submit_async_compute(single_input, cache_key, entry, request_id)
-            verdict = entry.wait_greennet(timeout=timeout_ms / 1000.0)
+        valid_inputs = [mm_input for mm_input in mm_inputs if mm_input.url != ""]
+        claims = self._claim_and_submit_async(
+            valid_inputs,
+            request_id=request_id,
+            queue_timeout_ms=timeout_ms,
+            cancellation_event=cancellation_event,
+        )
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        for _, entry in claims:
+            remaining = max(0.0, deadline - time.monotonic())
+            verdict = entry.wait_greennet(timeout=remaining)
             if verdict is not None and not verdict.passed:
                 return verdict
         return GreenNetVerdict(passed=True)
@@ -995,26 +1021,15 @@ class MMProcessEngine:
         are not recomputed.
         """
         self.mm_part.validate_inputs(mm_inputs)
-        cache_keys = []
-        for mm_input in mm_inputs:
-            if mm_input.url == "":
-                raise ValueError("async_submit requires non-empty url for each input")
-
-            cache_key = mm_input.cache_key()
-            cache_keys.append(cache_key)
-
-            state, entry = self._async_cache.try_acquire(cache_key)
-            if state == "miss":
-                single_input = [mm_input]
-                self._submit_async_compute(single_input, cache_key, entry, request_id)
-
-        return cache_keys
+        claims = self._claim_and_submit_async(mm_inputs, request_id=request_id)
+        return [cache_key for cache_key, _ in claims]
 
     def get_embedding_result(
         self,
         mm_inputs: List[MultimodalInput],
         timeout_ms: int = 120000,
         request_id: int = 0,
+        cancellation_event: Optional[threading.Event] = None,
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
@@ -1024,23 +1039,162 @@ class MMProcessEngine:
         If complete, returns immediately.
         """
         self.mm_part.validate_inputs(mm_inputs)
+        claims = self._claim_and_submit_async(
+            mm_inputs,
+            request_id=request_id,
+            queue_timeout_ms=timeout_ms,
+            cancellation_event=cancellation_event,
+        )
+        deadline = time.monotonic() + timeout_ms / 1000.0
         results = []
-        for mm_input in mm_inputs:
-            if mm_input.url == "":
-                raise ValueError(
-                    "get_embedding_result requires non-empty url for each input"
-                )
-
-            cache_key = mm_input.cache_key()
-            state, entry = self._async_cache.try_acquire(cache_key)
-
-            if state == "miss":
-                self._submit_async_compute([mm_input], cache_key, entry, request_id)
-
-            raw_result = entry.wait(timeout=timeout_ms / 1000.0)
+        for _, entry in claims:
+            remaining = max(0.0, deadline - time.monotonic())
+            raw_result = entry.wait(timeout=remaining)
             results.append(self._work_item_result_to_response(raw_result))
 
         return results
+
+    def _claim_and_submit_async(
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        queue_timeout_ms: Optional[int] = None,
+        cancellation_event: Optional[threading.Event] = None,
+    ) -> List[Tuple[str, MMEmbeddingCacheEntry]]:
+        claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
+        pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]] = []
+        for mm_input in mm_inputs:
+            if mm_input.url == "":
+                raise ValueError(
+                    "async embedding requires non-empty url for each input"
+                )
+
+            cache_key = mm_input.cache_key()
+            with self._async_task_lock:
+                state, entry = self._async_cache.try_acquire(cache_key)
+                claims.append((cache_key, entry))
+                if state == "miss":
+                    self._async_tasks[entry] = _AsyncComputeTask(cache_key, entry)
+                    pending.append((mm_input, cache_key, entry))
+
+                if state in ("miss", "in_progress"):
+                    task = self._async_tasks.get(entry)
+                    if task is not None:
+                        task.request_ids.add(request_id)
+                        self._async_request_tasks.setdefault(request_id, set()).add(
+                            entry
+                        )
+
+        self._raise_if_async_request_cancelled(request_id, cancellation_event)
+
+        self._submit_async_compute_batch(
+            pending,
+            request_id=request_id,
+            queue_timeout_ms=queue_timeout_ms,
+        )
+        self._raise_if_async_request_cancelled(request_id, cancellation_event)
+        return claims
+
+    def _raise_if_async_request_cancelled(
+        self,
+        request_id: int,
+        cancellation_event: Optional[threading.Event],
+    ) -> None:
+        if cancellation_event is None or not cancellation_event.is_set():
+            return
+        self.cancel_queued_request(request_id)
+        raise FtRuntimeException(
+            ExceptionType.CANCELLED_ERROR,
+            f"ViT request {request_id} was cancelled",
+        )
+
+    def _forget_async_task_locked(self, entry: MMEmbeddingCacheEntry) -> None:
+        task = self._async_tasks.pop(entry, None)
+        if task is None:
+            return
+        for request_id in task.request_ids:
+            request_tasks = self._async_request_tasks.get(request_id)
+            if request_tasks is None:
+                continue
+            request_tasks.discard(entry)
+            if not request_tasks:
+                self._async_request_tasks.pop(request_id, None)
+
+    def cancel_queued_request(self, request_id: int) -> int:
+        """Cancel work that is still queued and exclusively owned by a request.
+
+        Running futures are deliberately left alone. A deduplicated task remains
+        queued while any other request still owns it.
+        """
+        cancelled = 0
+        with self._async_task_lock:
+            entries = list(self._async_request_tasks.pop(request_id, set()))
+            for entry in entries:
+                task = self._async_tasks.get(entry)
+                if task is None:
+                    continue
+                task.request_ids.discard(request_id)
+                if task.request_ids:
+                    continue
+
+                if task.future is None:
+                    self._forget_async_task_locked(entry)
+                    self._fail_async_compute(
+                        task.cache_key,
+                        entry,
+                        FtRuntimeException(
+                            ExceptionType.CANCELLED_ERROR,
+                            f"ViT request {request_id} was cancelled before submission",
+                        ),
+                    )
+                    cancelled += 1
+                elif task.future.cancel():
+                    # The done callback removes the task, fails the cache entry,
+                    # and releases its admission slot.
+                    cancelled += 1
+
+        if cancelled:
+            logging.info(
+                "Cancelled %d queued ViT task(s) for request %d",
+                cancelled,
+                request_id,
+            )
+        return cancelled
+
+    def _try_reserve_async_slots(self, count: int) -> Tuple[bool, int]:
+        if count <= 0:
+            return True, self._async_admitted
+        with self._async_admission_lock:
+            if self._async_admitted + count > self._async_admission_capacity:
+                return False, self._async_admitted
+            self._async_admitted += count
+            return True, self._async_admitted
+
+    def _release_async_slots(self, count: int = 1) -> None:
+        if count <= 0:
+            return
+        with self._async_admission_lock:
+            self._async_admitted -= count
+            if self._async_admitted < 0:
+                logging.error(
+                    "MMProcessEngine: async admission count underflow: %d",
+                    self._async_admitted,
+                )
+                self._async_admitted = 0
+
+    def _resolve_async_timeout_ms(
+        self,
+        pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]],
+        queue_timeout_ms: Optional[int],
+    ) -> int:
+        if queue_timeout_ms is not None and queue_timeout_ms > 0:
+            return queue_timeout_ms
+        per_input_timeouts = [
+            item.mm_preprocess_config.mm_timeout_ms
+            for item, _, _ in pending
+            if item.mm_preprocess_config.mm_timeout_ms > 0
+        ]
+        return max(per_input_timeouts, default=self.vit_config.mm_timeout_ms)
 
     def _fail_async_compute(
         self,
@@ -1060,41 +1214,110 @@ class MMProcessEngine:
         entry: MMEmbeddingCacheEntry,
         future: concurrent.futures.Future,
     ) -> None:
-        if future.cancelled():
-            self._fail_async_compute(
-                cache_key,
-                entry,
-                RuntimeError("ViT async compute cancelled during shutdown"),
-            )
-            return
+        with self._async_task_lock:
+            try:
+                if future.cancelled():
+                    self._fail_async_compute(
+                        cache_key,
+                        entry,
+                        FtRuntimeException(
+                            ExceptionType.CANCELLED_ERROR,
+                            "ViT async compute cancelled before execution",
+                        ),
+                    )
+                    return
 
-        error = future.exception()
-        if error is not None:
-            self._fail_async_compute(cache_key, entry, error)
+                error = future.exception()
+                if error is not None:
+                    self._fail_async_compute(cache_key, entry, error)
+            finally:
+                self._forget_async_task_locked(entry)
+                self._release_async_slots()
 
-    def _submit_async_compute(
+    def _run_async_compute(
         self,
         mm_inputs: List[MultimodalInput],
         cache_key: str,
         entry: MMEmbeddingCacheEntry,
-        request_id: int = 0,
-    ) -> concurrent.futures.Future:
-        try:
-            future = self._async_compute_executor.submit(
-                self._async_compute,
-                mm_inputs,
+        request_id: int,
+        deadline: float,
+    ) -> None:
+        if time.monotonic() >= deadline:
+            self._fail_async_compute(
                 cache_key,
                 entry,
-                request_id,
+                FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT,
+                    "ViT queue wait timed out before execution",
+                ),
             )
-        except RuntimeError as error:
-            self._fail_async_compute(cache_key, entry, error)
-            raise
+            return
+        self._async_compute(mm_inputs, cache_key, entry, request_id)
 
-        future.add_done_callback(
-            lambda completed: self._on_async_compute_done(cache_key, entry, completed)
-        )
-        return future
+    def _submit_async_compute_batch(
+        self,
+        pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]],
+        request_id: int = 0,
+        queue_timeout_ms: Optional[int] = None,
+    ) -> None:
+        if not pending:
+            return
+
+        # Serialize submission with cancellation so a request cannot create new
+        # queued work after its cancellation callback has already run.
+        with self._async_task_lock:
+            active_pending = [
+                item
+                for item in pending
+                if item[2] in self._async_tasks
+                and self._async_tasks[item[2]].request_ids
+            ]
+            if not active_pending:
+                return
+
+            accepted, admitted = self._try_reserve_async_slots(len(active_pending))
+            if not accepted:
+                error = FtRuntimeException(
+                    ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                    "ViT queue is full: "
+                    f"admitted={admitted}, capacity={self._async_admission_capacity}, "
+                    f"requested={len(active_pending)}",
+                )
+                logging.warning(error.message)
+                for _, cache_key, entry in active_pending:
+                    self._forget_async_task_locked(entry)
+                    self._fail_async_compute(cache_key, entry, error)
+                raise error
+
+            timeout_ms = self._resolve_async_timeout_ms(
+                active_pending, queue_timeout_ms
+            )
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            submitted = 0
+            try:
+                for mm_input, cache_key, entry in active_pending:
+                    future = self._async_compute_executor.submit(
+                        self._run_async_compute,
+                        [mm_input],
+                        cache_key,
+                        entry,
+                        request_id,
+                        deadline,
+                    )
+                    self._async_tasks[entry].future = future
+                    future.add_done_callback(
+                        lambda completed, key=cache_key, cache_entry=entry: self._on_async_compute_done(
+                            key, cache_entry, completed
+                        )
+                    )
+                    submitted += 1
+            except RuntimeError as error:
+                unsubmitted = active_pending[submitted:]
+                self._release_async_slots(len(unsubmitted))
+                for _, cache_key, entry in unsubmitted:
+                    self._forget_async_task_locked(entry)
+                    self._fail_async_compute(cache_key, entry, error)
+                raise
 
     def _async_compute(
         self,

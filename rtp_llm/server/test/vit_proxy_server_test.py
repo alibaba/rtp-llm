@@ -1,10 +1,11 @@
 import threading
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
+    MultimodalOutputPB,
 )
 from rtp_llm.server.vit_proxy_server import (
     LoadBalancer,
@@ -27,18 +28,29 @@ class VitWorkerRequestIdTest(TestCase):
         servicer.engine = engine
         servicer._rdma = None
         request = MultimodalInputsPB(request_id=987654321)
+        async_context = MagicMock()
+        wait_context = MagicMock()
+        remote_context = MagicMock()
+        wait_context.add_callback.return_value = True
+        remote_context.add_callback.return_value = True
 
-        servicer.AsyncSubmitEmbedding(request, MagicMock())
-        servicer.WaitGreenNetVerdict(request, MagicMock())
-        servicer.RemoteMultimodalEmbedding(request, MagicMock())
+        servicer.AsyncSubmitEmbedding(request, async_context)
+        servicer.WaitGreenNetVerdict(request, wait_context)
+        servicer.RemoteMultimodalEmbedding(request, remote_context)
 
         engine.async_submit.assert_called_once_with(converted, 987654321)
         engine.wait_greennet_verdict.assert_called_once_with(
-            converted, request_id=987654321
+            converted, request_id=987654321, cancellation_event=ANY
         )
         engine.get_embedding_result.assert_called_once_with(
-            converted, request_id=987654321
+            converted, request_id=987654321, cancellation_event=ANY
         )
+
+        wait_context.add_callback.call_args.args[0]()
+        remote_context.add_callback.call_args.args[0]()
+        self.assertEqual(engine.cancel_queued_request.call_count, 2)
+        for cancel_call in engine.cancel_queued_request.call_args_list:
+            self.assertEqual(cancel_call.args, (987654321,))
 
 
 class LoadBalancerRoundRobinTest(TestCase):
@@ -216,6 +228,29 @@ class WorkerConnectionPoolTest(TestCase):
         # should not propagate
         pool.close_all()
         self.assertEqual(pool.channels, {})
+
+
+class VitProxyCancellationTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.init")
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_parent_rpc_cancellation_cancels_worker_rpc(self, _mock_report, _mock_init):
+        load_balancer = MagicMock()
+        load_balancer.get_worker.return_value = "worker-a"
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        worker_call = MagicMock()
+        worker_call.result.return_value = MultimodalOutputPB()
+        stub.RemoteMultimodalEmbedding.future.return_value = worker_call
+        context = MagicMock()
+        context.add_callback.return_value = True
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+
+        cancel_callback = context.add_callback.call_args.args[0]
+        cancel_callback()
+        worker_call.cancel.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import logging
+import threading
 from concurrent import futures
 
 import grpc
@@ -50,24 +51,65 @@ def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
     return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None)
 
 
+def _abort_ft_runtime(context, error: FtRuntimeException) -> None:
+    details = ErrorDetailsPB(
+        error_code=int(error.exception_type),
+        error_message=error.message,
+    )
+    context.set_trailing_metadata(
+        (("grpc-status-details-bin", details.SerializeToString()),)
+    )
+    if error.exception_type == ExceptionType.CONCURRENCY_LIMIT_ERROR:
+        status = grpc.StatusCode.RESOURCE_EXHAUSTED
+    elif error.exception_type == ExceptionType.GENERATE_TIMEOUT:
+        status = grpc.StatusCode.DEADLINE_EXCEEDED
+    elif error.exception_type == ExceptionType.CANCELLED_ERROR:
+        status = grpc.StatusCode.CANCELLED
+    else:
+        status = grpc.StatusCode.INTERNAL
+    context.abort(status, f"[{error.exception_type.name}] {error.message}")
+
+
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def __init__(self, mm_process_engine: MMProcessEngine):
         self.engine = mm_process_engine
 
+    def _register_queue_cancellation(self, request_id: int, context):
+        rpc_done = threading.Event()
+
+        def cancel_queued_work() -> None:
+            rpc_done.set()
+            self.engine.cancel_queued_request(request_id)
+
+        if not context.add_callback(cancel_queued_work):
+            cancel_queued_work()
+        return rpc_done
+
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
-        converted_inputs = trans_mm_input(multimodal_inputs)
-        self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
-        return EmptyPB()
+        try:
+            converted_inputs = trans_mm_input(multimodal_inputs)
+            self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
+            return EmptyPB()
+        except FtRuntimeException as error:
+            _abort_ft_runtime(context, error)
 
     def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
         """Block until greennet decides for all inputs (kicked earlier by
         AsyncSubmitEmbedding). On a violation, fail the RPC with an
         ErrorDetailsPB(error_code=UNSAFE_INPUT_CONTENT) trailer so the LLM
         client reconstructs the exact FtRuntimeException."""
-        converted_inputs = trans_mm_input(multimodal_inputs)
-        verdict = self.engine.wait_greennet_verdict(
-            converted_inputs, request_id=multimodal_inputs.request_id
-        )
+        try:
+            converted_inputs = trans_mm_input(multimodal_inputs)
+            cancellation_event = self._register_queue_cancellation(
+                multimodal_inputs.request_id, context
+            )
+            verdict = self.engine.wait_greennet_verdict(
+                converted_inputs,
+                request_id=multimodal_inputs.request_id,
+                cancellation_event=cancellation_event,
+            )
+        except FtRuntimeException as error:
+            _abort_ft_runtime(context, error)
         if not verdict.passed:
             error_code = (
                 ExceptionType.UNSAFE_INPUT_CONTENT
@@ -88,15 +130,18 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
+            cancellation_event = self._register_queue_cancellation(
+                multimodal_inputs.request_id, context
+            )
             results = self.engine.get_embedding_result(
-                converted_inputs, request_id=multimodal_inputs.request_id
+                converted_inputs,
+                request_id=multimodal_inputs.request_id,
+                cancellation_event=cancellation_event,
             )
             merged = merge_embedding_results(results)
             return trans_output(merged)
-        except FtRuntimeException as e:
-            context.abort(
-                grpc.StatusCode.INTERNAL, f"[{e.exception_type.name}] {e.message}"
-            )
+        except FtRuntimeException as error:
+            _abort_ft_runtime(context, error)
         except Exception as e:
             logging.exception("RemoteMultimodalEmbedding failed")
             context.abort(

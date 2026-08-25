@@ -686,7 +686,6 @@ class ModelRpcClient(object):
         stream_done = False
         terminal_seen = False
         if input_pb.multimodal_inputs:
-            await self._try_async_submit_vit(input_py, input_pb)
             # GreenNet content-safety gate: block before prefill until the VIT
             # encoder's inspection verdict lands. A violation raises
             # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
@@ -766,23 +765,6 @@ class ModelRpcClient(object):
             )
             if response_iterator and should_cancel:
                 response_iterator.cancel()
-
-    async def _try_async_submit_vit(
-        self, input_py: GenerateInput, input_pb: GenerateInputPB
-    ) -> None:
-        for role_addr in input_py.generate_config.role_addrs:
-            if role_addr.role == RoleType.VIT:
-                vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
-                try:
-                    mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
-                    channel = await self._channel_pool.get(vit_addr)
-                    stub = MultimodalRpcServiceStub(channel)
-                    await stub.AsyncSubmitEmbedding(mm_inputs_pb, timeout=5.0)
-                except Exception as e:
-                    logging.warning(
-                        f"request: [{input_py.request_id}] async vit submit to {vit_addr} failed: {e}"
-                    )
-                break
 
     async def _wait_greennet_verdict(
         self, input_py: GenerateInput, input_pb: GenerateInputPB
