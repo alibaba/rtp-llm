@@ -2516,7 +2516,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
             }
         }
         if (expiredCount > 0) {
-            reporter.reportInflightTtlExpired(expiredCount);
+            reporter.reportSchedulerInflightTtlExpired("ttl", expiredCount);
             Logger.info("event=scheduler_inflight_ttl_eviction evicted={} "
                             + "oldest_age_ms={} ttl_ms={} request_samples={}",
                     expiredCount, oldestExpiredAgeMs, ttlMs, expiredRequestSamples);
@@ -2533,15 +2533,26 @@ public class PriorityScheduler implements DecisionGroupHandler,
         for (Map.Entry<String, DecodeEndpoint> decodeEntry
                 : endpointRegistry.getDecodeEndpoints().entrySet()) {
             DecodeEndpoint decodeEp = decodeEntry.getValue();
+            int orphanReclaimed = 0;
             for (Map.Entry<Long, RequestInflight> reserved : decodeEp.reservedView().entrySet()) {
                 long requestId = reserved.getKey();
                 if (now - reserved.getValue().createdAtMs() > ttlMs
                         && releaseOrphanDecodeReservation(
                                 decodeEp, requestId, reserved.getValue())) {
+                    orphanReclaimed++;
                     Logger.warn("orphan decode reservation reclaimed: request_id={} worker={} age_ms={}",
                             requestId, decodeEntry.getKey(),
                             now - reserved.getValue().createdAtMs());
                 }
+            }
+            // Observability (intent-ported from 51af09456f): the reclaim is a
+            // per-endpoint ledger release, so it joins the endpoint series of
+            // inflight.ttl.expired.qps with its own reason bucket rather than
+            // being log-only.
+            if (orphanReclaimed > 0) {
+                reporter.reportEndpointInflightTtlExpired(
+                        RoleType.DECODE.name(), decodeEntry.getKey(),
+                        "orphan_reservation", orphanReclaimed);
             }
         }
         // This is the single scheduled TTL owner. Endpoint ledgers run only
@@ -4911,6 +4922,13 @@ public class PriorityScheduler implements DecisionGroupHandler,
             return;
         }
         reporter.reportSchedulerInflightSize(inflight.size());
+        // Observability (intent-ported from 51af09456f): age of the oldest
+        // scheduler-ledger inflight entry. With a healthy TTL the size gauge
+        // alone cannot distinguish "busy" from "leaking"; a max age creeping
+        // toward the TTL window is the leak signature. Tagged role=SCHEDULER
+        // so one role='*' grouping compares this ledger against the per-worker
+        // endpoint ledgers on the same series.
+        reporter.reportSchedulerInflightMaxAgeMs(schedulerInflightMaxAgeMs());
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
@@ -4928,6 +4946,22 @@ public class PriorityScheduler implements DecisionGroupHandler,
             admissionScheduler.reportPrefillQueueDepths();
             admissionScheduler.reportDecodeAdmissionGauges();
         }
+    }
+
+    /**
+     * Age (ms) of the oldest entry in the scheduler's own inflight ledger,
+     * 0 when the ledger is empty. Single traversal of the concurrent map;
+     * per-entry {@code createdAtMs()} reads the lifecycle snapshot without
+     * holding the entry monitor (same access pattern as the TTL cleanup
+     * scan).
+     */
+    private long schedulerInflightMaxAgeMs() {
+        long oldest = Long.MAX_VALUE;
+        for (InflightEntry entry : inflight.values()) {
+            oldest = Math.min(oldest, entry.createdAtMs());
+        }
+        return oldest == Long.MAX_VALUE ? 0L
+                : Math.max(0L, System.currentTimeMillis() - oldest);
     }
 
     @PreDestroy
