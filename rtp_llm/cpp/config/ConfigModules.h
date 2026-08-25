@@ -170,7 +170,7 @@ struct KVCacheConfig {
     bool                                    disk_cache_buffered_io                          = true;
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
     int64_t                                 disk_cache_staging_block_count                  = 4;
-    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 64;
+    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
     int                                     linear_step = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         fp8_kv_cache                 = 0;

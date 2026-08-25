@@ -57,6 +57,14 @@ TransferDescriptor descriptor(size_t group_id) {
     return TransferDescriptor::hostToDisk(group_id, 1, 1);
 }
 
+TransferDescriptor deviceHostDescriptor(size_t group_id) {
+    return TransferDescriptor::hostToDevice(group_id, 1, {1});
+}
+
+TransferDescriptor hostDiskDescriptor(size_t group_id) {
+    return TransferDescriptor::hostToDisk(group_id, 1, 1);
+}
+
 TEST(BlockTransferDispatcherTest, DescriptorVectorUsesPerRankEntry) {
     std::shared_ptr<ScriptedPerRankEngine> engine = std::make_shared<ScriptedPerRankEngine>();
     BlockTransferDispatcher                dispatcher(engine);
@@ -140,7 +148,7 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
     auto third  = std::make_shared<TransferBatchAsyncContext>();
     auto engine = std::make_shared<ScriptedPerRankEngine>(
         std::deque<std::shared_ptr<AsyncContext>>{first, second, third});
-    BlockTransferDispatcher dispatcher(engine, nullptr, 2);
+    BlockTransferDispatcher dispatcher(engine, nullptr, 2, 2);
 
     size_t    callback_count = 0;
     ErrorInfo final_error    = ErrorInfo::OkStatus();
@@ -166,6 +174,45 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
     third->complete(ErrorInfo::OkStatus());
     EXPECT_EQ(callback_count, 1u);
     EXPECT_FALSE(final_error.ok());
+}
+
+TEST(BlockTransferDispatcherTest, DefaultBatchLimitsAreDirectionAware) {
+    auto device_host_engine = std::make_shared<ScriptedPerRankEngine>();
+    BlockTransferDispatcher device_host_dispatcher(device_host_engine);
+    std::vector<TransferDescriptor> device_host_descriptors;
+    for (size_t index = 0; index < 9; ++index) {
+        device_host_descriptors.push_back(deviceHostDescriptor(0));
+    }
+    size_t device_host_callback_count = 0;
+    device_host_dispatcher.runTransfer(device_host_descriptors,
+                                       100,
+                                       [&](ErrorInfo error) {
+                                           EXPECT_TRUE(error.ok());
+                                           ++device_host_callback_count;
+                                       });
+    ASSERT_EQ(device_host_engine->submittedBatches().size(), 2u);
+    EXPECT_EQ(device_host_engine->submittedBatches()[0].size(), 8u);
+    EXPECT_EQ(device_host_engine->submittedBatches()[1].size(), 1u);
+    EXPECT_EQ(device_host_callback_count, 1u);
+
+    auto host_disk_engine = std::make_shared<ScriptedPerRankEngine>();
+    BlockTransferDispatcher host_disk_dispatcher(host_disk_engine);
+    std::vector<TransferDescriptor> host_disk_descriptors;
+    for (size_t index = 0; index < 3; ++index) {
+        host_disk_descriptors.push_back(hostDiskDescriptor(0));
+    }
+    size_t host_disk_callback_count = 0;
+    host_disk_dispatcher.runTransfer(host_disk_descriptors,
+                                     100,
+                                     [&](ErrorInfo error) {
+                                         EXPECT_TRUE(error.ok());
+                                         ++host_disk_callback_count;
+                                     });
+    ASSERT_EQ(host_disk_engine->submittedBatches().size(), 3u);
+    for (const auto& batch : host_disk_engine->submittedBatches()) {
+        EXPECT_EQ(batch.size(), 1u);
+    }
+    EXPECT_EQ(host_disk_callback_count, 1u);
 }
 
 }  // namespace

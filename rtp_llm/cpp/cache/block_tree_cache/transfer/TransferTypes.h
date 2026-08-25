@@ -24,7 +24,7 @@ enum class TransferStatus {
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
     size_t staged_sm_min_bytes{64 * 1024};
-    bool   staged_sm_copy_enabled{false};
+    bool   staged_sm_copy_enabled{true};
     bool   cuda_batch_copy_enabled{true};
 };
 

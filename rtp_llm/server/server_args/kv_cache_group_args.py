@@ -220,8 +220,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH",
         bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
         type=int,
-        default=64,
-        help="单次直接传输底层批调用包含的最大 descriptor 数。",
+        default=8,
+        help="Device<->Host 单次底层批调用包含的最大 descriptor 数；其他方向默认逐条执行。",
     )
     kv_cache_group.add_argument(
         "--write_cache_sync",
