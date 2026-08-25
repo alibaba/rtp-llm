@@ -1,6 +1,6 @@
 # DSV4 Mega CSA/HCA TP1 接入状态与后续方案
 
-更新日期：2026-08-22
+更新日期：2026-08-25
 
 ## 1. 当前结论
 
@@ -89,13 +89,13 @@ MTP 是独立模型且当前 `compress_ratio == 0`，不会挂载 CSA adapter。
 | `fp8/decode/mega_csa_runtime.py` | 共享 workspace、logits、MQA schedule 和 RoPE table；校验并透传框架 slot tensor |
 | `fp8/decode/mega_csa_adapter.py` | 绑定现有 cache/metadata，编排 Mega 算子、TopK、原生 FlashMLA 和 o-proj |
 | `fp8/test/test_mega_csa_adapter.py` | 覆盖选路、PDFUSION、权重布局、ABI 和 runtime 生命周期 |
-| `fp8/test/test_mega_csa_rtp_eager.py` | 用真实 `AttentionFP8`/`KVCache` 对照原 attention 子层，并覆盖 eager、graph、cache/state 和性能 |
+| `fp8/test/test_mega_csa_rtp_eager.py` | 用真实 `AttentionFP8`/`KVCache` 对照原 attention 子层，并覆盖 eager、graph 和 cache/state 正确性 |
 | `fp8/decode/mega_hca_weights.py` | HCA 层 fused 布局：`front_fp8=[wq_a;wkv]`、`front_bf16=[comp_wkv;comp_wgate]`、`wq_b`，约 130 MiB/层 × 31 层 ≈ 4 GiB |
 | `fp8/decode/mega_hca_adapter.py` | HCA 编排：front/WQ-B 两个融合 GEMM、CUDA `q_rmsnorm_rope_cuda_`、稠密 idx、原生 FlashMLA、共享 o-proj producer |
 | `fp8/decode/mega_csa_runtime.py`（扩展） | 新增 HCA workspace 缓存与 HCA 三组 slot（HCA_STATE/HCA_KV/SWA_KV）int64 直传校验，`begin_decode`/rope 表与 CSA 共享 |
 | `dsv4/block.py`（扩展） | `enable_mega_hca`（仅 ratio==128），`forward_decode` 统一 `_mega_csa_adapter or _mega_hca_adapter` 选路 |
 | `fp8/test/test_mega_hca_adapter.py` | HCA 选路、双开关、权重布局、geometry/ABI、runtime slot 生命周期 |
-| `fp8/test/test_mega_hca_rtp_eager.py` | 真实 `AttentionFP8(ratio=128)` 对照原 `_forward_decode_hca`：输出、边界压缩 HCA_KV、SWA、state 环、长上下文、graph、性能 |
+| `fp8/test/test_mega_hca_rtp_eager.py` | 真实 `AttentionFP8(ratio=128)` 对照原 `_forward_decode_hca`：输出、边界压缩 HCA_KV、SWA、state 环、长上下文和 graph 正确性 |
 | `mega_csa_weights.py`（Flash 化） | `CSAGeometry` profile（PRO/FLASH），打包形状全部由 profile 派生；模块级 Pro 常量保留为别名 |
 | `mega_csa_adapter.py` / `mega_hca_adapter.py`（Flash 化） | `_validate_geometry` 按 `attn.dim` 选 profile 并 fail-fast；ABI 探针改为按本层几何的子集校验（extension 广告双形状） |
 | `mega_csa_runtime.py`（Flash 化） | CSA/HCA workspace 尺寸按 profile 分配并以 dim 入 key；`num_hc_splits` 接受 hidden 宽度 |
@@ -264,9 +264,7 @@ compress_rope_theta=160000, hc_mult=4, hc_sinkhorn_iters=20
 FP8 indexer, TP1, RTP persistent TopK, RTP wo_a/wo_b, official FlashMLA
 ```
 
-Mega 和 reference 都调用 RTP 现有 persistent TopK；没有迁移或选择 Wuda TopK。2026-08-15
-纠正：提交 `792fd721d` 中的合成测试误用了 `index_topk=512`、`o_groups=8`，该提交记录的
-性能数字不是 Pro 配置，已全部作废并由下表替换。
+Mega 和 reference 都调用 RTP 现有 persistent TopK；没有迁移或选择 Wuda TopK。
 
 测试使用一个真实 `AttentionFP8` 层、确定性合成权重和两套相同初态的 RTP pybind `KVCache`。
 reference 严格执行 `Block.forward_decode` 的原 attention 分支：
@@ -292,40 +290,6 @@ Mega 与 reference 分别写独立 cache，连续执行 position `0..3` 到首�
 另在 position `4095` 预填充 1024 个随机有效 FP8 packed CSA/Indexer cache entry，从 1024 个
 候选中选择 Top-1024：Mega/reference 有效 TopK overlap 为 `1024/1024`，最终输出
 `calc_diff=3.094866e-09`。
-
-reference 使用 RTP 默认 TileLang mHC。切换到 int64 slot ABI 后重新测量 B128/64K；首次 JIT、
-metadata 构造和每个 model step 只调用一次的 `runtime.begin_decode` 不计入单层时间：
-
-| Batch | Context | 口径 | 原路径 | Mega | 变化 |
-| ---: | ---: | --- | ---: | ---: | ---: |
-| 128 | 65536 | 生产 CUDA Event | `384.72 us` | `289.91 us` | `-24.6%` |
-| 128 | 65536 | 预绑定纯算子链 | `357.17 us` | `261.22 us` | `-26.9%` |
-
-Mega 生产 graph 的 profiler kernel envelope 为 `290.47 us`。与 `261.22 us` 的纯算子链相比，
-仍相差约 `29.3 us`，主要是动态 FlashMLA metadata planner；新的 O-proj producer 直接消费
-position/cos/sin，不再需要此前的 `freqs_cis.index_select` 输入复制。五个 slot conversion kernel
-仍未出现在 timeline。因此约 `290 us` 是 RTP 当前生产 graph，约 `261 us` 是与 Wuda `graph`
-列对应的预绑定算子链；二者差额不能归因于 RTP TopK。
-
-此前 B1/8/16 和 B128 的生产数据使用旧 int32 mirror ABI，不再作为当前性能结论；完整 batch
-grid 需要在新 wheel/最终依赖环境下重测。
-
-B128/64K 使用两套相同的随机有效 FP8 packed CSA/Indexer/SWA cache。最终 attention sublayer
-输出 `calc_diff=2.684947e-07`、最大绝对误差 `2.954102e-02`、cosine `0.999789596`。每个请求
-从 16384 个 compressed 候选中选择 Top-1024，有效
-overlap min/mean/max 为 `1000/1023.7/1024`。测试门限为每个请求至少 97% 有效 overlap；差异
-集中在 TopK 截断边界，最终输出仍满足数值门限。ctx=2048 时只有 512 个有效 compressed 候选，
-因此固定宽度 1024 的 TopK buffer 表现为 512 个有效索引和 512 个 padding；这三个 case 的有效
-overlap 均为 `512/512`。
-
-B128/64K 同步校验本步写入内容，而不只校验最终输出：CSA KV、Indexer KV、SWA KV 的
-`calc_diff` 分别为 `2.986297e-05`、`3.371339e-04`、`2.818445e-07`，CSA state 和 Indexer state
-分别为 `6.308681e-10`、`7.094991e-10`，均通过各自数值门限。
-
-性能模式通过 `--test_env=DSV4_MEGA_RUN_PERF=1` 显式开启，并对每个 batch 设置不高于原路径
-`1.05x` 的 eager、生产 CUDA Graph 和预绑定算子链回归门。它覆盖真实 RTP 单层算子链，但
-typed pool/block table 仍由测试按生产 geometry 构造，不是 `KVCacheManager` 分配；也未使用
-真实 checkpoint，不能替代整模型端到端验证。
 
 ### 2026-08-18：Mega HCA TP1 接入与验证
 
@@ -357,25 +321,6 @@ view 直接写框架池。
 
 CSA 回归在新 wheel 与共享 runtime/block/transformer 改动下重跑，数值与 2026-08-15 基线
 逐位一致。
-
-性能（生产 CUDA Graph 口径；测量时 GPU 带约 15% 外部负载，绝对值有噪声）：
-
-| Batch | Context | 步型 | 原路径 | Mega | 变化 |
-| ---: | ---: | --- | ---: | ---: | ---: |
-| 8 | 2000 | 非边界 | `176.0 us` | `140.8 us` | `-20.0%` |
-| 8 | 2048 | 压缩边界 | `316.5 us` | `141.6 us` | `-55.3%` |
-| 16 | 2048 | 压缩边界 | `315.3 us` | `145.2 us` | `-53.9%` |
-| 128 | 4096 | 压缩边界 | `445.6 us` | `253.2 us` | `-43.2%` |
-
-原路径的边界压缩是独立 Triton kernel，Mega 把它并进 WQ-B GEMM，因此边界步收益远大于
-非边界步；按每 128 步一次边界加权约 `-20%`/层。两点已知说明：
-
-1. 边界步会立即稠密读回本步刚压缩的 HCA_KV entry；两条实现在该 entry 上的 bf16/FP8
-   舍入差（约 `1.5e-05`）在稠密短候选下的 softmax 占比大，把输出差放大到最坏
-   `2.1e-04`（仍远低于 `1e-3` 主门限）。因此 HCA 性能用例的 cosine 门限为 `0.995`
-   （非边界步实测 ~`0.99998`），并额外强制 per-request `calc_diff < 1e-3`。
-2. HCA state 环对照为 `1e-06` 量级（CSA 为 `1e-11`）：extension FRONT-EMIT 的 bf16
-   round 语义与框架 Triton compressor 存在实现差，后续可对齐；不阻塞当前结论。
 
 ### 2026-08-18：裁层 DSV4-Pro 本地 serving 端到端
 
@@ -440,11 +385,6 @@ logits 级定量（`run_e2e_logits.py`，服务器返回**最后一步** logits�
   `6.7e-04`~`2.5e-03`，top1 全部一致（margin 0.13~10.7），低于框架 smoke 数值档
   `isclose(1e-2)` 一个量级。
 
-端到端延时（同卡背靠背，B=1 串行、**eager**（`--enable_cuda_graph 0`）、共享卡）：
-全量 Flash decode 每 token `135 -> 91 ms`（约 **-31%**）；prefill 不变
-（137.9 vs 137.8 ms）。裁层 Pro 4 层约 `-19%`。注意 eager 口径放大了 kernel
-launch 节省，生产 CUDA Graph + batch 口径需按 §6 缺口 6 另测。
-
 ### 2026-08-22：compressor state 正确性修复与精度对齐
 
 本轮对应 RTP `c24dbcde6..4ca774e0c` 与 `cuda_extension@360b83f..2d6261a`，主要完成
@@ -481,6 +421,28 @@ mHC post 的 `attn_out` 完全一致（CSA-only 首个 CSA block 与 HCA-only �
 mix 归约重写为 TileLang 的串行 split 累加，会牺牲当前归约并行度且没有正确性收益；现有
 误差在验收门限内，因此本轮保留实现，也不将其列为剩余缺口。
 
+### 2026-08-25：8EP 无 MTP 固定 batch 单层耗时
+
+测试配置为 8EP、无 MTP、固定每 rank decode batch。`B/M` 分别表示 baseline 和
+CSA+HCA Mega。Attention 耗时为 timeline 中对应 CSA/HCA attention sublayer 的单层均值。
+MoE 耗时按 batch 归一化，取 4 个 context、baseline/Mega 以及 CSA/HCA 层中从 attention
+结束到下一层 attention 开始区间的等权平均。
+
+| Batch/rank | Context | CSA Attn B/M (us) | CSA 加速比 | HCA Attn B/M (us) | HCA 加速比 | MoE (us) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 8K | 171.1 / 111.9 | 1.528x | 128.1 / 88.4 | 1.448x | 140.8 |
+| 32 | 32K | 202.0 / 121.1 | 1.668x | 131.9 / 90.5 | 1.458x | 140.8 |
+| 32 | 64K | 214.5 / 127.0 | 1.689x | 134.0 / 92.5 | 1.448x | 140.8 |
+| 32 | 128K | 240.8 / 157.5 | 1.529x | 138.0 / 96.0 | 1.438x | 140.8 |
+| 64 | 8K | 199.1 / 114.9 | 1.733x | 129.5 / 82.9 | 1.563x | 162.4 |
+| 64 | 32K | 217.6 / 134.5 | 1.618x | 139.3 / 97.9 | 1.422x | 162.4 |
+| 64 | 64K | 236.3 / 155.6 | 1.519x | 142.4 / 100.9 | 1.410x | 162.4 |
+| 64 | 128K | 263.3 / 183.7 | 1.434x | 146.7 / 104.4 | 1.406x | 162.4 |
+| 128 | 8K | 196.0 / 122.6 | 1.599x | 138.1 / 90.8 | 1.521x | 177.4 |
+| 128 | 32K | 223.6 / 153.1 | 1.461x | 142.0 / 100.7 | 1.410x | 177.4 |
+| 128 | 64K | 253.6 / 186.0 | 1.363x | 147.8 / 107.2 | 1.379x | 177.4 |
+| 128 | 128K | 313.7 / 230.4 | 1.361x | 160.9 / 114.9 | 1.400x | 177.4 |
+
 ## 6. 端到端剩余缺口
 
 按阻塞顺序还需要：
@@ -492,20 +454,7 @@ mix 归约重写为 TileLang 的串行 split 累加，会牺牲当前归约并�
    （target verify / MTP 场景仍未覆盖）；
 4. 整模型正确性收口：为 Mega 配置生成 per-配置 golden（框架 smoke 惯例），并在健康模型
    上完成 logits 级对照（Flash 对照排队中）；建议同时把 4 层 Pro 裁层 checkpoint 上传 NAS
-   并新增 `v4_pro_4layer_tp1` / `..._mega` smoke case；
-5. 测量开关关闭时普通 FP8 整模型路径，确认新增 Python 分支不可测；
-6. 对 normal FP8 与 Mega FP8 做真实模型、代表性长上下文和完整 batch grid 性能 A/B。
-
-性能报告至少应单列：
-
-- 框架 int64 slot 直传，并确认 timeline 中没有隐式 conversion/copy；
-- mHC pre 到 front、WQ-B 到 MQA 的 PDL 收益；
-- MQA schedule 生成；
-- TopK + 原生 FlashMLA；
-- 完整 attention sublayer；
-- 开关关闭的普通 FP8 路径；
-- eager 与 CUDA Graph；
-- batch 1/8/16/32/64/128 和代表性 context length。
+   并新增 `v4_pro_4layer_tp1` / `..._mega` smoke case。
 
 ## 7. 内源合入方案
 
@@ -518,14 +467,13 @@ HCA 两组 adapter/runtime/weights/测试文件）：
 3. 新 wheel 发布后，同时更新内源 CUDA13 requirements lock 和实际 Bazel 依赖选择；
 4. 先跑与开源相同的 CPU tests 和 `//rtp_llm:rtp_llm` 完整编译；
 5. 再在内源服务配置中只对 TP1 FP8 `DECODE/PDFUSION` 打开开关，按 `DSV4_MEGA_CSA` →
-   `DSV4_MEGA_HCA` → 双开的顺序分阶段验证；双开后 Mega 覆盖全部 61 个 attention 层；
-6. 完成第 6 节 GPU 矩阵后，才能把开关从实验配置提升为默认配置。
+   `DSV4_MEGA_HCA` → 双开的顺序分阶段验证；双开后 Mega 覆盖全部 61 个 attention 层。
 
 HCA 已按同样的“完整 sublayer adapter”模式接入（`MegaHCAAdapter`，独立 geometry 检查）。
 SWA-only、prefill、TP2/DP2 与 FlashMLA 通用接口仍不修改；若后续接入这些场景，应分别
 新增受支持的完整 sublayer adapter，不能放宽现有 CSA/HCA TP1 adapter 的 geometry 检查。
 
-## 8. 开发操作手册（分支 / 编译 / 运行 / 测试 / benchmark）
+## 8. 开发操作手册（分支 / 编译 / 运行 / 测试）
 
 以下为本文档所有验证实际使用的流程，可在任一台 SM100/SM103（CUDA 13）内部开发机
 上复现。`<work>` 代指你的工作目录。
@@ -659,28 +607,3 @@ Mega 轮在 target 的 `envs` 里加 `DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`。gol
 `test.outputs/outputs.zip` 里有每条 query 的 actual dump）；正式收编需按框架惯例
 生成本环境 per-配置 golden。smoke 宏会自动注入 `DETERMINISTIC_GEMM=1` 与
 `DSV4_INDEXER_TOPK_CANONICALIZE=1`。
-
-### 8.5 Benchmark
-
-1. **RTP 单层生产口径**（最有对比价值）：eager 测试内建性能模式，测同一真实
-   sublayer 的原路径 vs Mega，三口径（eager / 生产 CUDA Graph / 预绑定算子链）
-   并带 `1.05x` 回归门：
-
-   ```bash
-   bazelisk test ... //rtp_llm/models_py/modules/dsv4/fp8/test:test_mega_csa_rtp_eager \
-     --test_env=DSV4_MEGA_RUN_PERF=1 \
-     --test_env=DSV4_MEGA_PERF_CASES="1:2048,8:2048,32:8192,128:65536"
-   # HCA 同理换 test_mega_hca_rtp_eager；边界步用 ctx 为 128 的倍数（如 8:2048）
-   ```
-
-   已有基线：CSA B128/64K `-24.6%`（§5 表）；HCA 非边界 `-20%`、压缩边界 `-54%`、
-   B128/4K `-43%`（§5 HCA 表）。
-2. **端到端口径**：`docs/dsv4_mega_e2e/run_e2e_prod_perf.py`
-   （`baseline|mega|compare`）为生产形态 A/B——CUDA Graph decode（capture 覆盖
-   被测并发档）、fp8 KV、并发 greedy 流，输出各并发档的聚合 tps 与
-   decode ms/token；`run_e2e_compare.py` 的 aux_info 则是 eager 粗口径。
-   整机 dp8/ep8 的正式吞吐 A/B 见第 6 节缺口 6。
-3. **extension 侧微基准**：`tests/benchmark_dsv4_mega_flash_segments.py`（Flash HCA
-   decode 链冷-L2 分段基准：opA→opB→Q norm/RoPE→FlashMLA→O-proj），
-   以及 Wuda 仓 `dsv4_megakernel/megakernel/test/` 下的原始 bench（`test_e2e_decode.py`
-   等，含 cuBLAS 对照）——后者在 Wuda 环境跑，用于算子级归因，不是 RTP 生产口径。
