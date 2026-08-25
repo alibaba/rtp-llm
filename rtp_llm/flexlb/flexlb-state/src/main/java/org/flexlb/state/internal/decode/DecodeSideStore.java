@@ -116,9 +116,22 @@ public final class DecodeSideStore {
 
     /**
      * 引擎上报观察入账（裁决接受后调用）：引擎首见计数 + 引擎事实 KV 增量。
+     *
+     * <p><b>在册守卫</b>（与 P 侧 PrefillSideStore.noteEngineObserved 对称）：
+     * 调用方（dispatchRunning）经 get 拿到条目引用与本方法记账之间存在
+     * 窗口——并发移除（settleRemove/releaseRemove）可能已先完成出账（出账
+     * 时 engineOwned=false 不减首见账、按出账时刻 kv 出账——因从未加过），
+     * 随后本方法的首见 +1 与 kv 增量账打在已移除条目上<b>永久悬挂</b>。
+     * 守卫在条目锁内验证在册归属：移除已发生则整体 no-op（迟到引擎观察，
+     * 墓碑已吸收/释放语义允许重入账）；守卫通过则后续并发移除的出账
+     * （同一条目锁临界区）必读到本方法置位的现态而对称出账——任意交错
+     * 恒配平。</p>
      */
     public void noteEngineObserved(DecodeRequestState entry, long round, long kvTokens, long version) {
         synchronized (entry) {
+            if (entries.get(entry.requestId()) != entry) {
+                return; // 已被并发移除：迟到引擎观察，不产生任何计数
+            }
             boolean first = !entry.engineOwned();
             long oldKv = entry.kvTokensReported();
             entry.markEngineObserved(round, kvTokens, version);
@@ -210,6 +223,13 @@ public final class DecodeSideStore {
     /**
      * rebuild 引擎收养：不认识 requestId 的 running 条目按 engineOwned=true
      * 直接入账（重启重建）。收养条目无预占历史（reservedKv=0、expectedKv=0）。
+     *
+     * <p>记账口径：条目经 {@code putIfAbsent} 对外可见后与本方法的入账之间
+     * 存在窗口——并发观察线程（事件泵后续 tick）可能已刷新引擎事实 KV
+     * （noteEngineObserved 的 kv 增量账先行执行）。因此入账必须以<b>收养
+     * 时刻口径</b>（可见前预取的 kvTokens）记账：预取值 + 后续 kv 增量账 −
+     * 终局移除出账（读终局时刻现态）在任意交错下恒配平。若在窗口后按条目
+     * 现态入账，则会与先行 kv 增量账双重记账（与 P 侧收养相位口径问题同根）。</p>
      */
     public DecodeRequestState adoptEngineOwned(long requestId, int endpointId, long generation,
                                                long nowMs, DecodePhase adoptedPhase,
@@ -219,14 +239,16 @@ public final class DecodeSideStore {
         adopted.markEngineObserved(0L, kvTokens, version);
         // 条目相位实际推进到收养相位（trace 按格闭包补记）——保证 driftAgainst 全量重算与账一致。
         adopted.transitionTo(adoptedPhase, version, nowMs);
+        // 入账口径预取（条目此刻不对外可见，无并发写）。
+        long adoptedKv = adopted.kvTokensReported();
         DecodeRequestState prev = entries.putIfAbsent(requestId, adopted);
         if (prev != null) {
             return prev;
         }
         indexEndpoint(adopted); // 收养即绑定观察端点——入 byEndpoint 索引
         // 单次记账：收养相位人口 + 引擎事实 KV + engineOwned（+ confirmed 若 ≥ 引擎加载临界相位）。
-        counters.onAdopted(adoptedPhase, adopted.kvTokensReported(), true);
-        epCounters.onAdopted(endpointId, adoptedPhase, adopted.kvTokensReported(), true);
+        counters.onAdopted(adoptedPhase, adoptedKv, true);
+        epCounters.onAdopted(endpointId, adoptedPhase, adoptedKv, true);
         tickPublish();
         return adopted;
     }

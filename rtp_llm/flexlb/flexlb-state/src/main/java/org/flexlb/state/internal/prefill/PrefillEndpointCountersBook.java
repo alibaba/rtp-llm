@@ -98,6 +98,29 @@ final class PrefillEndpointCountersBook {
         onEntryAdded(toEndpointId, entry);
     }
 
+    /**
+     * rebuild 引擎收养入账（与 D 侧 DecodeEndpointCountersBook.onAdopted 对称）：
+     * 相位账记<b>收养相位参数</b>而非调用时条目现态。收养条目经
+     * {@code putIfAbsent} 对外可见后与收养线程入账之间存在窗口——并发观察
+     * 线程可能已推进条目相位（{@link #onPhaseTransition} 的桶迁移账以收养
+     * 相位为 from 先行执行）；入账按收养相位 +1 恰与该迁移账的 from −1
+     * 抵消，任意交错下桶账恒正确。若按现态（onEntryAdded）入账则会造成
+     * 收养相位 −1 / 推进相位 +1 的永久漂移（线上 master 重启演练实测）。
+     *
+     * <p>predictedMs / engineOwned 由调用方在条目对外可见前预取——收养条目
+     * 构造后这两个字段不可变（notePredictedBatchMs 对已派发相位 no-op），
+     * 预取值与任意交错下的移除出账（读终局时刻现态）恒配平。</p>
+     */
+    void onAdopted(int endpointId, PrefillPhase adoptedPhase, boolean owned, long predictedBatchMs) {
+        Bucket b = buckets.computeIfAbsent(endpointId, k -> new Bucket());
+        b.activeTotal.increment();
+        b.phaseCounts[adoptedPhase.ordinal()].increment();
+        if (owned) {
+            b.engineOwned.increment();
+        }
+        b.predictedMs.add(predictedBatchMs);
+    }
+
     // ---- 读（无锁 O(1)）----
 
     /** 端点级派生计数快照（无桶 = 无活跃条目 → 全零视图）。 */

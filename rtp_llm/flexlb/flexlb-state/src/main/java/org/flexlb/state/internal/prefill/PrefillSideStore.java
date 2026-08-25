@@ -101,9 +101,20 @@ public final class PrefillSideStore {
 
     /**
      * 引擎上报观察入账（裁决接受后调用）：引擎首见计数。
+     *
+     * <p><b>在册守卫</b>：调用方（dispatchRunning）经 get 拿到条目引用与
+     * 本方法记账之间存在窗口——并发终局移除（settleRemove）可能已先完成
+     * 出账（出账时 engineOwned=false 不减首见账，因从未加过），随后本方法
+     * 的首见 +1 打在已移除条目上<b>永久悬挂</b>（重启演练实测 engineOwned
+     * counter 恒高 1）。守卫在条目锁内验证在册归属：移除已发生则整体 no-op
+     * （迟到引擎观察，墓碑已吸收）；守卫通过则后续并发移除的出账（同一
+     * 条目锁临界区）必读到本方法置位的现态而对称出账——任意交错恒配平。</p>
      */
     public void noteEngineObserved(PrefillRequestState entry, long round, long kvTokens, long version) {
         synchronized (entry) {
+            if (entries.get(entry.requestId()) != entry) {
+                return; // 已被并发移除：迟到引擎观察，不产生任何计数
+            }
             boolean first = !entry.engineOwned();
             entry.markEngineObserved(round, kvTokens, version);
             if (first) {
@@ -148,6 +159,14 @@ public final class PrefillSideStore {
     /**
      * rebuild 引擎收养：不认识 requestId 的 running 条目按 batchId=-1、
      * engineOwned=true 直接入账（重启重建）。
+     *
+     * <p>记账口径：条目经 {@code putIfAbsent} 对外可见后与本方法的入账之间
+     * 存在窗口——并发观察线程（事件泵后续 tick）可能已推进条目相位（advance
+     * 的桶迁移账以收养相位为 from 先行执行）。因此入账必须以<b>收养时刻口径</b>
+     * （adoptedPhase 参数 + 可见前预取的 predictedMs）记账，与并发迁移账
+     * 任意交错下恒配平；不得在窗口后按条目现态入账（会造成收养相位 −1 /
+     * 推进相位 +1 的端点簿永久漂移——与 D 侧 DecodeSideStore.adoptEngineOwned
+     * 的记账口径对称）。</p>
      */
     public PrefillRequestState adoptEngineOwned(long requestId, int endpointId, long generation,
                                                 long nowMs, PrefillPhase adoptedPhase,
@@ -157,6 +176,8 @@ public final class PrefillSideStore {
         adopted.markEngineObserved(0L, kvTokens, version);
         // 条目相位实际推进到收养相位（trace 按格闭包补记沿途）——保证 driftAgainst 全量重算与账一致。
         adopted.transitionTo(adoptedPhase, version, nowMs);
+        // 入账口径预取（条目此刻不对外可见，无并发写；收养条目构造后 predictedBatchMs 亦不可变）。
+        long adoptedPredictedMs = Math.max(adopted.predictedBatchMs(), 0L);
         PrefillRequestState prev = entries.putIfAbsent(requestId, adopted);
         if (prev != null) {
             return prev;
@@ -164,7 +185,7 @@ public final class PrefillSideStore {
         indexEndpoint(adopted); // 收养即绑定观察端点——入 byEndpoint 索引
         // 单次记账：收养相位人口 +1、engineOwned +1（构造时未走 register，无 INIT 账可减）。
         counters.onAdopted(adoptedPhase, true);
-        epCounters.onEntryAdded(endpointId, adopted);
+        epCounters.onAdopted(endpointId, adoptedPhase, true, adoptedPredictedMs);
         tickPublish();
         return adopted;
     }

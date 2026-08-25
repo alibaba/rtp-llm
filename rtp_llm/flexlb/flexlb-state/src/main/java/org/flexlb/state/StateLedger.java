@@ -412,12 +412,18 @@ public final class StateLedger {
         if (r.side() == StateRole.PREFILL) {
             PrefillRequestState e = pStore.get(id);
             if (e == null) {
-                if (rebuildMode) {
+                // 迟到 running：本地终局事实（墓碑）优先于引擎收养——若收养复活
+                // 已终局请求，复活条目无后续出账路径（finished 已结算、缺席判死
+                // 需多轮完整 tick），收养入账将成为永久悬挂漂移（重启演练并发
+                // 复现实测：结算移除后收养晚到，activeTotal/engineOwned/收养相位
+                // 三字段各恒高 1）。墓碑吸收口径与非 rebuild 分支一致；墓碑 TTL
+                // 过期（本地遗忘终局）后恢复收养，缺席判死兜底收敛。
+                if (pStore.isTombstoned(id)) {
+                    pStore.absorbLateEvent();
+                } else if (rebuildMode) {
                     // 引擎收养：batchId=-1、engineOwned=true
                     pStore.adoptEngineOwned(id, (int) ep.endpointId(), ep.generation(), nowMs,
                             PrefillPhase.fromEnginePhase(r.enginePhase()), r.kvTokens(), r.version());
-                } else if (pStore.isTombstoned(id)) {
-                    pStore.absorbLateEvent();
                 } else {
                     unknownRunningEvents.increment();
                 }
@@ -443,15 +449,18 @@ public final class StateLedger {
 
         DecodeRequestState e = dStore.get(id);
         if (e == null) {
-            if (rebuildMode) {
+            // 迟到 running：墓碑优先于引擎收养（与 P 侧同口径——复活条目无出账路径，
+            // 收养入账永久悬挂）。墓碑命中时无需跨侧收缩：D 终局时的 F1 因果闭包
+            // 已完成收缩，此处只是迟到重放。
+            if (dStore.isTombstoned(id)) {
+                dStore.absorbLateEvent();
+            } else if (rebuildMode) {
                 dStore.adoptEngineOwned(id, (int) ep.endpointId(), ep.generation(), nowMs,
                         DecodePhase.fromEnginePhase(r.enginePhase()), r.kvTokens(), r.version());
                 // 收养即引擎事实：相位 ≥ D_LOADING 时同样触发跨侧收缩（重放中 D 已确认 ⇒ P 已完成）
                 if (DecodePhase.fromEnginePhase(r.enginePhase()).ordinal() >= DecodePhase.D_LOADING.ordinal()) {
                     shrinkPrefillOnDecodeConfirmed(id, nowMs);
                 }
-            } else if (dStore.isTombstoned(id)) {
-                dStore.absorbLateEvent();
             } else {
                 unknownRunningEvents.increment();
             }
