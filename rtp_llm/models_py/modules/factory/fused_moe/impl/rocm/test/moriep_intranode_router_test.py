@@ -237,6 +237,7 @@ class _MockMoEConfig:
     """Minimal mock satisfying MoriEpIntranodeRouter's config requirements."""
 
     def __init__(self, ep_size: int, ep_rank: int, expert_num: int):
+        self.tp_size = 1
         self.ep_size = ep_size
         self.ep_rank = ep_rank
         self.expert_num = expert_num

@@ -230,6 +230,39 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=False,
         help="控制各 KV cache group 是否独立驱逐。默认关闭。",
     )
+    # Deprecated DSv4 alias for --enable_independent_group_eviction above.
+    #
+    # enable_independent_group_eviction is a verbatim rename of the DSv4-era
+    # enable_dsv4_state_block_independent_eviction: both read sites are identical
+    # apart from the field name --
+    #   KVCacheManager::init          guards on
+    #       enable_memory_cache && enable_prefix_tree_memory_cache && <flag>
+    #   KVCacheMemoryConnector.cc     takes the popOldestStateOrChainEvictable
+    #       path on `<flag> && copy_info.kind == CacheBlockKind::STATE_SWA_KV`
+    # so this is one knob, not two, and it is bound to the live field. (The dead
+    # C++ field KVCacheConfig::enable_dsv4_state_block_independent_eviction has
+    # been deleted.)
+    #
+    # The alias is kept because deployed DSv4 bizes set the old env name; dropping
+    # it would silently disable STATE/SWA independent eviction on upgrade.
+    #
+    # Two registration details are load-bearing:
+    #   * default=None -- config bindings whose parsed value is None are skipped
+    #     (EnvArgumentParser._apply_config_bindings), so an unset alias never
+    #     clobbers the canonical flag's value with None.
+    #   * must be registered AFTER the canonical flag -- within the same source
+    #     (env/default vs CLI) bindings apply in registration order, so the alias
+    #     can override the canonical default; an explicitly-passed CLI flag always
+    #     wins over env-derived values regardless of order
+    #     (EnvArgumentParser._apply_config_bindings two-pass rule).
+    kv_cache_group.add_argument(
+        "--enable_dsv4_state_block_independent_eviction",
+        env_name="ENABLE_DSV4_STATE_BLOCK_INDEPENDENT_EVICTION",
+        bind_to=(kv_cache_config, "enable_independent_group_eviction"),
+        type=str2bool,
+        default=None,
+        help="[deprecated] --enable_independent_group_eviction 的旧名，等价开关，请使用新名。",
+    )
     kv_cache_group.add_argument(
         "--write_cache_sync",
         env_name="WRITE_CACHE_SYNC",
@@ -415,4 +448,30 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=0,
         help="分层 cache 模式下 GPU 侧至少保留的空闲 block 数；当空闲 block 低于该阈值时，会把冷 block 从 GPU 淘汰到 memory。"
         "不填或填 0 时自动计算为 min(max_context_batch_size * max_seq_len, max_batch_tokens_size) / seq_size_per_block。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_fixed_pool_blocks",
+        env_name="DSV4_FIXED_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
+        type=int,
+        default=0,
+        help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
+        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_hca_state_pool_blocks",
+        env_name="DSV4_HCA_STATE_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "dsv4_hca_state_pool_blocks"),
+        type=int,
+        default=0,
+        help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
+        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_fixed_pool_use_memory",
+        env_name="DSV4_FIXED_POOL_USE_MEMORY",
+        bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
+        type=str2bool,
+        default=False,
+        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
     )

@@ -4,6 +4,8 @@ import torch
 from torch import nn
 
 
+# Keep this layout contract aligned with cpp/multimodal_processor/MultimodalInputUtils.h.
+# Python consumes the flattened C++ representation after transport.
 def reshape_extra_input_to_deepstack(
     extra_input: Sequence[torch.Tensor],
     multimodal_features: Sequence[torch.Tensor],
@@ -69,13 +71,8 @@ class MultimodalEmbeddingInjector(nn.Module):
             if feature.device != embeddings.device:
                 feature = feature.to(embeddings.device)
 
-            # A partially-cached leading image arrives with loc < 0: its head rows already live in the
-            # reused KV prefix, so drop them and inject only the remaining tail at the recompute start.
             if loc < 0:
-                feature = feature[-loc:]
-                loc = 0
-                if feature.size(0) == 0:
-                    continue
+                raise ValueError(f"feature[{idx}] loc must be non-negative, got {loc}")
 
             length = feature.size(0)
             if loc + length > embeddings.size(0):
@@ -144,13 +141,10 @@ class MultimodalDeepstackInjector(nn.Module):
             if layer_embed.device != hidden.device:
                 layer_embed = layer_embed.to(hidden.device)
 
-            # Same partial-prefix handling as the embedding injector: drop the head rows of a
-            # partially-cached leading image (loc < 0) and add only the remaining tail at position 0.
             if loc < 0:
-                layer_embed = layer_embed[-loc:]
-                loc = 0
-                if layer_embed.size(0) == 0:
-                    continue
+                raise ValueError(
+                    f"deepstack tensor[{idx}] loc must be non-negative, got {loc}"
+                )
 
             length = layer_embed.size(0)
             if loc + length > hidden.size(0):

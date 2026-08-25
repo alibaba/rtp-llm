@@ -87,7 +87,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             tags = {"model": "qwen3_vl", "mm_type": "image"}
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
                 image_data = get_bytes_io_from_url(
-                    mm_input.url, vit_config.download_headers
+                    mm_input.url,
+                    vit_config.download_headers,
+                    max_file_size_kb=vit_config.mm_image_max_file_size_kb,
                 )
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC, tags):
                 image = Image.open(image_data)
@@ -153,7 +155,9 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             tags = {"model": "qwen3_vl", "mm_type": "video"}
             with vit_preprocess_timer(GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC, tags):
                 video_data = get_bytes_io_from_url(
-                    mm_input.url, vit_config.download_headers
+                    mm_input.url,
+                    vit_config.download_headers,
+                    max_file_size_kb=vit_config.mm_video_max_file_size_kb,
                 )
             video = Qwen3_VLImageEmbedding.load_video(
                 video_data,

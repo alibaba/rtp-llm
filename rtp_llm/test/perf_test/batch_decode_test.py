@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from typing import Any, Dict, List, Optional
 
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
@@ -65,6 +66,32 @@ def run_single(
 
 
 # ---------------------------------------------------------------------------
+#  Grid-mode helpers
+# ---------------------------------------------------------------------------
+
+
+def _effective_grid_max_seq_len(
+    args: argparse.Namespace, input_len_list: List[int]
+) -> int:
+    """Grid-mode max_seq_len: decode headroom, but never below explicit --max_seq_len.
+
+    prepare_config() sizes grid max_seq_len as max(input_len) + decode_test_length.
+    DSv4 perf targets size the KV pool from an explicitly larger --max_seq_len
+    (e.g. --input_len 65536 --decode_test_length 100 --max_seq_len 65664), so that
+    request must win.  Distribution mode already does this in prepare_config().
+    """
+    needed_seq_len = max(input_len_list) + args.decode_test_length
+    return max(needed_seq_len, args.max_seq_len)
+
+
+def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
+    """--batch_size as given on the command line, or None when it was defaulted."""
+    if not any(a.startswith("--batch_size") for a in sys.argv[1:]):
+        return None
+    return [int(x) for x in args.batch_size.split(",")]
+
+
+# ---------------------------------------------------------------------------
 #  Phase 3: Run — prefill / decode dispatch
 # ---------------------------------------------------------------------------
 
@@ -74,14 +101,22 @@ def _run_prefill(
     dp_size: int,
     config: PerfTestConfig,
     input_query_dict: Dict[int, str],
+    batch_size_list: Optional[List[int]] = None,
     **kwargs: Any,
 ) -> None:
+    """Prefill grid run.
+
+    Defaults to BS=1 (prefill measures single-request TTFT); prepare_config()
+    pins config.batch_size_list to [1] for --partial 2 as well.  DSv4 prefill
+    targets (e.g. v4_flash_cp4_ep4_prefill_64k_perf) sweep prefill at
+    batch_size > 1, so main() forwards an explicitly requested --batch_size.
+    """
     if not config.input_len_list:
         return
     GridRunner(
         port,
         dp_size,
-        [1],
+        batch_size_list or [1],
         config.input_len_list,
         input_query_dict,
         is_decode=False,
@@ -178,6 +213,8 @@ def main() -> str:
 
     # Phase 1: Configure
     config = prepare_config(args, remaining)
+    if not config.is_distribution:
+        config.max_seq_len = _effective_grid_max_seq_len(args, config.input_len_list)
 
     # Phase 2: Serve
     server = EngineServer(args, remaining)
@@ -201,7 +238,12 @@ def main() -> str:
 
         if args.partial == 2:
             _run_prefill(
-                server.port, args.dp_size, config, input_query_dict, **runner_kwargs
+                server.port,
+                args.dp_size,
+                config,
+                input_query_dict,
+                batch_size_list=_explicit_batch_size_list(args),
+                **runner_kwargs,
             )
 
         if args.partial == 1:

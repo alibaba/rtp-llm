@@ -54,6 +54,8 @@ python -m rtp_llm.dash_sc.server --port 8000 \
   --dash_sc_grpc_config_json '{"client_config":{},"server_config":{},"max_server_workers":4}'
 ```
 
+若使用 Bazel 打出的 **`rtp_llm_dash_sc_grpc` wheel**（`bazel build //rtp_llm:rtp_llm_dash_sc_grpc`），入口点为：`rtp-llm-dash-sc-grpc`（等价于上述模块的 `main`）。
+
 ## 配置：`--dash_sc_grpc_config_json` / `DASH_SC_GRPC_CONFIG_JSON`
 
 与 **Model RPC（C++）** 的 `--grpc_config_json` **相互独立**。DashSc 使用：
@@ -87,15 +89,16 @@ DeepSeek-V4 的 dash-sc 请求是预 tokenized wire。Python 客户端只做 raw
 
 ### DeepSeek-V4 tool-call guided decoding
 
-当前版本的 DashSc gRPC 尚未接入引擎侧 grammar backend。上游传入结构化输出/grammar 约束时会在入口 fail-fast 返回参数错误，避免请求被静默接受但输出不受约束：
+DashSc gRPC 支持把上游传入的 tool-call 结构化约束下沉到 RTP `GenerateConfig.structural_tag`：
 
 - 直接参数：`request.parameters["tool_call_structural_tag"]`
 - 兼容别名：`request.parameters["structural_tag"]`
 - DashScope header 兼容：`ds_header_attributes.parameters.tool_call_structural_tag` / `structural_tag`
+- `response_format` / `guided_json` / `json_format` 走同一条归一化路径（`guided_json` 会被规范成 `response_format` 的 `json_schema`）
 
-同样会拒绝 `response_format`、`guided_json` 和 `json_format`。若后续引擎侧 grammar backend 落地，再恢复这些参数的透传和编译校验。
+若 DashScope 侧把 tag 包成数组（例如 `["{...structural_tag...}", ...]`），dash-sc 与 dashllm 保持一致：非空 list 一律取第一个元素，空 list 视为未设置。dash-sc codec（`rtp_llm/dash_sc/structural_tag.py`）做轻量 shape 校验，并仅对 DashScope tool-call wrapper `sequence(const_string, tags_with_separator, const_string)` 做窄适配，转换成 xgrammar 可编译的 `tag(begin, content, end)`；最终约束由共享的 `GenerateConfig.finalize_response_format()`（`rtp_llm/config/response_format_compiler.py`）编译并交给 C++ xgrammar backend 判断。
 
-普通生成请求仍可用客户端调试；不要传 `--response_format`、`--json_format` 或 `--tool_call_structural_tag`：
+客户端调试可用：
 
 ```bash
 python -m rtp_llm.dash_sc.client \
@@ -103,11 +106,58 @@ python -m rtp_llm.dash_sc.client \
   --ckpt_path /path/to/model \
   --model_type deepseek_v4 \
   --prompt "<already-rendered-prompt-or-raw-debug-text>" \
+  --tool_call_structural_tag '<structural_tag_json>' \
   --max_new_tokens 64 \
   --temperature 0 \
   --top_k 1 \
   --enable_thinking false
 ```
+
+Thinking control must use the boolean
+`request.parameters["enable_thinking"]`. The legacy
+`ds_header_attributes["x-ds-llm-thinking"]` attribute is no longer consumed.
+
+`<structural_tag_json>` 必须是 xgrammar 当前支持的新格式，顶层包含 `format` 字段；不支持的 DSL 结构会由 C++ grammar backend 返回 `Invalid structural tag error`：
+
+```json
+{
+  "format": {
+    "type": "triggered_tags",
+    "triggers": ["<｜DSML｜invoke"],
+    "tags": [
+      {
+        "type": "tag",
+        "begin": "<｜DSML｜invoke name=\"get_weather\">",
+        "content": {
+          "type": "json_schema",
+          "json_schema": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+          }
+        },
+        "end": "</｜DSML｜invoke>"
+      }
+    ]
+  }
+}
+```
+
+2026-06-12 在 DeepSeek-V4-Flash PD 服务上做过精确 gRPC 校验，非模糊包含匹配：`input_len=295`，`output_len=47`，`finish_reason=0`，`generated_ids` 全量等于 smoke golden，decoded 输出为：
+
+```text
+
+
+好的，我来查询杭州的天气情况。
+
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name="get_weather">{
+  "city": "杭州"
+}</｜DSML｜invoke>
+</｜DSML｜tool_calls><｜end▁of▁sentence｜>
+```
+
+对应 smoke 用例在 `internal_source/rtp_llm/test/smoke/data/model/deepseek_v4/q_r_v4_flash_sm100_arm_fp8.json`，通过 `result.generated_ids` 做全量精确比较。
 
 仓库内还提供 Bash 封装（**必须用 bash**）：
 
@@ -133,8 +183,10 @@ python -m rtp_llm.dash_sc.generate_proto_py
 ## 相关代码路径（便于深入）
 
 - 服务生命周期：`rtp_llm/dash_sc/server.py`、`rtp_llm/dash_sc/app.py`
+- 进程级 App：`rtp_llm/dash_sc/app.py`（`DashScApp`，独立 asyncio loop + signal handler）
 - 推理 / 代理 servicer：`rtp_llm/dash_sc/inference/servicer.py`、`rtp_llm/dash_sc/proxy/servicer.py`
 - 请求解析 / 张量约定 / 响应构建：`rtp_llm/dash_sc/codec.py`
+- structural_tag 归一化：`rtp_llm/dash_sc/structural_tag.py`
 - 客户端：`rtp_llm/dash_sc/client.py`
 - 参数定义：`rtp_llm/server/server_args/grpc_group_args.py`（`init_dash_sc_grpc_group_args`）
 
@@ -142,11 +194,17 @@ python -m rtp_llm.dash_sc.generate_proto_py
 
 ```bash
 bazel test //rtp_llm/dash_sc/test:codec_test
+bazel test //rtp_llm/dash_sc/test:grammar_validator_test
 bazel test //rtp_llm/dash_sc/test:inference_servicer_test
 bazel test //rtp_llm/dash_sc/test:proxy_servicer_test
 bazel test //rtp_llm/dash_sc/test:access_log_test
+bazel test //rtp_llm/dash_sc/test:app_test
+bazel test //rtp_llm/dash_sc/test:think_test
+bazel test //rtp_llm/dash_sc/test:repetition_monitor_test
 ```
 
 `codec_test` 覆盖请求解析、`SamplingParams` / `DashScRequestControls` 以及 `build_stream_response_from_generate_outputs`；
+`grammar_validator_test` 覆盖 structural_tag / `response_format` / `guided_json` 的 shape 校验与 DashScope tool-call wrapper 窄适配；
 `inference_servicer_test` 覆盖 `iter_real_model_stream_infer`（mock `run_enqueue_sync`）、`DashScInferenceServicer.ModelStreamInfer` 与缺 `input_ids` 错误路径；
-`proxy_servicer_test` 覆盖 gRPC proxy 转发、下游异常和流关闭路径。
+`proxy_servicer_test` 覆盖 gRPC proxy 转发、下游异常和流关闭路径；
+`app_test` 覆盖 `DashScApp` 的独立 asyncio loop、`SERVICE_ROUTE` / `DASH_SC_GRPC_FORWARD_ADDR` 解析与信号驱动的优雅退出。

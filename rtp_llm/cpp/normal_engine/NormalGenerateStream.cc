@@ -75,7 +75,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
 
-    for (int i = 0; i < nextBatchSize(); i++) {
+    // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
+    for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
@@ -159,7 +160,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
-            if (generate_input_->generate_config->return_softmax_probs && softmax_probs_.defined()) {
+            generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
+            generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
+
+            if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
             }
@@ -220,10 +224,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         last_hidden_states_ = update_info.all_hidden_states;
     }
 
-    if (generate_input_->generate_config->return_softmax_probs && update_info.softmax_probs.defined()) {
+    if (calculateSoftmaxProbs() && update_info.softmax_probs.defined()) {
         RTP_LLM_CHECK(update_info.softmax_probs.dim() == 2);
         RTP_LLM_CHECK(update_info.softmax_probs.size(1) == update_info.num_new_tokens);
-        setSoftmaxProbs(update_info.softmax_probs, seqLength() - update_info.num_new_tokens);
+        setSoftmaxProbs(
+            update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
     finished_ = needFinish();
@@ -239,8 +244,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     // TODO: move it to better position
-    RTP_LLM_LOG_DEBUG("stream [%ld] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
-                      streamId(),
+    RTP_LLM_LOG_DEBUG("stream [%s] finished: %d, pd_sep: %d, is_streaming: %d, need_remote_generate: %d",
+                      streamLogTag().c_str(),
                       finished_,
                       queryPdSep(),
                       isStreaming(),
@@ -250,8 +255,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         // Hold KV cache even when the stream already finished in prefill
         // (e.g. stop words hit): the decode role still issues RemoteLoad for
         // these blocks and would hang if they were freed here.
+        RTP_LLM_LOG_DEBUG("stream [%s] hold kv cache for pd-sep", streamLogTag().c_str());
         holdKVCacheForPDSep();
         if (!finished_) {
+            RTP_LLM_LOG_DEBUG("stream [%s] set need_remote_generate", streamLogTag().c_str());
             reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
             reportEventWithoutLock(StreamEvents::GenerateDone);
         }
@@ -267,7 +274,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
+    RTP_LLM_LOG_DEBUG("stream [%s] enqueue generate output", streamLogTag().c_str());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
     if (hasErrorWithoutLock()) {

@@ -25,7 +25,10 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.backend_rpc_server_visitor import (
+    BackendRPCServerVisitor,
+    get_role_names,
+)
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
@@ -64,6 +67,8 @@ class Pipeline(object):
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        parallelism_config=None,
+        prefill_cp_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -84,6 +89,8 @@ class Pipeline(object):
             vit_separation=vit_separation,
             server_config=server_config,
             master_config=master_config,
+            parallelism_config=parallelism_config,
+            prefill_cp_config=prefill_cp_config,
         )
 
     async def close(self) -> None:
@@ -196,7 +203,7 @@ class Pipeline(object):
                     url,
                     MMUrlType.DEFAULT,
                     torch.empty(0),
-                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+                    MMPreprocessConfig(),
                 )
                 for url in urls
             ]
@@ -525,8 +532,8 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
-            batch_group_size=kwargs.get("batch_group_size", 1),
-            batch_group_id=kwargs.get("batch_group_id", -1),
+            group_size=kwargs.get("group_size", 1),
+            group_id=kwargs.get("group_id", -1),
             headers=request_headers,
         )
 
@@ -561,10 +568,7 @@ class Pipeline(object):
                     aux_info_dict["role_addrs"] = [
                         role_addr.model_dump(mode="json") for role_addr in role_addrs
                     ]
-                    roles = {
-                        str(getattr(role_addr.role, "name", role_addr.role))
-                        for role_addr in role_addrs
-                    }
+                    roles = get_role_names(role_addrs)
                     aux_info_dict.setdefault(
                         "pd_sep", {"PREFILL", "DECODE"}.issubset(roles)
                     )

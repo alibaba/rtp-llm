@@ -103,7 +103,7 @@ public:
 
 protected:
     virtual bool isCancelled(grpc::ServerContext* context) const {
-        return context->IsCancelled();
+        return context && context->IsCancelled();
     }
 
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);

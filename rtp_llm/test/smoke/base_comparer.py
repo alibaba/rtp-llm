@@ -128,7 +128,10 @@ class BaseComparer(object):
         request_info = query_info.model_dump(exclude_defaults=True)
         self.maybe_set_concurrency(query_info)
         ret, res = self.server_manager.visit(
-            request_info, visit_retry_time, self.request_endpoint
+            request_info,
+            visit_retry_time,
+            self.request_endpoint,
+            self.qr_info.get("expected_status_code", 200),
         )
         if not ret:
             raise SmokeException(

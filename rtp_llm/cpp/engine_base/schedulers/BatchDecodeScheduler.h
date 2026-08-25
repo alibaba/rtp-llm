@@ -67,13 +67,19 @@ public:
     }
 
     // Returns the input vector unchanged so callers can index 1:1 with their original list.
-    // Streams that fail checkInputLength are NOT added to the waiting queue but are still in the
-    // returned vector with their error already reported via reportError().
-    std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override {
+    // Streams that fail checkInputLength are NOT added to the waiting queue; their success flag
+    // is false and their error is already reported via reportError(). No group co-scheduling:
+    // valid streams are admitted as ordinary individual streams.
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override {
+        std::vector<bool> enqueue_successes;
+        enqueue_successes.reserve(streams.size());
         std::vector<GenerateStreamPtr> stream_enqueued;
         stream_enqueued.reserve(streams.size());
         for (const auto& stream : streams) {
-            if (checkInputLength(stream)) {
+            const bool success = checkInputLength(stream);
+            enqueue_successes.push_back(success);
+            if (success) {
                 stream_enqueued.emplace_back(stream);
             }
         }
@@ -82,7 +88,7 @@ public:
             waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         }
         cond_.notify_all();
-        return streams;
+        return {std::move(enqueue_successes), streams};
     }
 
     void updateSchedulerInfo(const std::string& scheduler_info) override {

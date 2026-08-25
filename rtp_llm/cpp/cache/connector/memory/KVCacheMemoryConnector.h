@@ -28,6 +28,7 @@ class BlockPool;
 class BroadcastManager;
 class KVCacheAllocator;
 class MemoryAsyncContext;
+struct StagedMemoryCopyScratch;
 
 class KVCacheMemoryConnector: public KVCacheConnector {
 public:
@@ -64,6 +65,7 @@ public:
     // virtual for test
     virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     std::vector<CacheKeyType> cacheKeys() const;
+    std::vector<CacheKeyType> cacheKeysForStatus() const;
 
 private:
     struct LayerTagSlot {
@@ -171,6 +173,18 @@ private:
                                 const std::vector<LayerTagSlot>& slots);
     bool validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
+    // Typed-group fast paths for the tag-keyed memory copy. Both consume already-normalized items, so the
+    // per-slot gpu block for slots[i] is items[k].gpu_blocks[i] (see normalizeCopyItemGpuBlocks). Both are
+    // best-effort: they return false whenever the layout is not expressible as flat tiles, and the caller
+    // falls back to copyMemoryItemsGeneric.
+    bool                     tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
+                                                               CopyDirection                    direction,
+                                                               const std::vector<LayerTagSlot>& slots);
+    bool                     tryCopyCacheWithStagedMemoryCopy(const NormalizedCopyItems&       items,
+                                                              CopyDirection                    direction,
+                                                              const std::vector<LayerTagSlot>& slots);
+    StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
+
     void                             checkLayerBlockStrideBytes() const;
     std::vector<LayerTagSlot>        layerTagSlots() const;
     static std::vector<BlockIdxType> normalizeCopyItemGpuBlocks(const MemoryOperationRequestPB::CopyItem& item,
@@ -178,6 +192,7 @@ private:
     static NormalizedCopyItem        normalizeCopyItem(const MemoryOperationRequestPB::CopyItem& item,
                                                        const std::vector<LayerTagSlot>&          slots);
     bool                             hasTypedLayerTagSlots(const std::vector<LayerTagSlot>& slots) const;
+    bool                             usesTypedMemoryPoolLayout(const std::vector<LayerTagSlot>& slots) const;
     bool                             supportsTypedPrefixCacheLayout(const std::vector<LayerTagSlot>& slots) const;
     bool                             checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
     LayerAttnBlockIds                resourceLayerRegionBlocks(const KVCacheResource&           resource,
@@ -306,15 +321,17 @@ private:
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
 
-    std::shared_ptr<BlockPool>                  block_pool_;
-    mutable std::mutex                          malloc_mutex_;
-    std::shared_ptr<MemoryDiskBlockCache>       block_cache_;
-    std::shared_ptr<PrefixTreeMemoryBlockCache> prefix_block_cache_;
-    std::unique_ptr<DiskMountGuard>             disk_mount_guard_;
-    std::shared_ptr<DiskBlockPool>              complete_disk_pool_;
-    std::shared_ptr<DiskBlockPool>              incomplete_disk_pool_;
-    std::shared_ptr<BroadcastManager>           broadcast_manager_;
-    std::shared_ptr<autil::LockFreeThreadPool>  wait_done_thread_pool_;
+    std::shared_ptr<BlockPool>                              block_pool_;
+    mutable std::mutex                                      malloc_mutex_;
+    mutable std::mutex                                      staged_copy_scratch_mutex_;
+    std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> staged_copy_scratch_by_device_;
+    std::shared_ptr<MemoryDiskBlockCache>                   block_cache_;
+    std::shared_ptr<PrefixTreeMemoryBlockCache>             prefix_block_cache_;
+    std::unique_ptr<DiskMountGuard>                         disk_mount_guard_;
+    std::shared_ptr<DiskBlockPool>                          complete_disk_pool_;
+    std::shared_ptr<DiskBlockPool>                          incomplete_disk_pool_;
+    std::shared_ptr<BroadcastManager>                       broadcast_manager_;
+    std::shared_ptr<autil::LockFreeThreadPool>              wait_done_thread_pool_;
 
     std::shared_ptr<BlockPool> complete_pool_;
     std::shared_ptr<BlockPool> incomplete_pool_;

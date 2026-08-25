@@ -101,26 +101,31 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
     return absl::OkStatus();
 }
 
-std::vector<std::shared_ptr<GenerateStream>> FIFOSchedulerBase::batchEnqueue(const vector<GenerateStreamPtr>& streams) {
+std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+FIFOSchedulerBase::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
-    std::vector<std::shared_ptr<GenerateStream>> stream_enqueued;
-    stream_enqueued.reserve(streams.size());
+    std::vector<bool> enqueue_successes;
+    enqueue_successes.reserve(streams.size());
+    std::vector<GenerateStreamPtr> valid_streams;
+    valid_streams.reserve(streams.size());
     for (const auto& stream : streams) {
-        if (checkInputLength(stream)) {
-            stream_enqueued.emplace_back(stream);
+        const bool success = checkInputLength(stream);
+        enqueue_successes.push_back(success);
+        if (success) {
+            valid_streams.push_back(stream);
         }
     }
-    const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    for (auto& stream : stream_enqueued) {
-        stream->recordSchedulerEnqueueTime(enqueue_time_us);
-    }
-    {
+    if (!valid_streams.empty()) {
+        const auto enqueue_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (auto& stream : valid_streams) {
+            stream->recordSchedulerEnqueueTime(enqueue_time_us);
+        }
         std::lock_guard<std::mutex> lock(lock_);
-        waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
+        waiting_streams_.insert(waiting_streams_.end(), valid_streams.begin(), valid_streams.end());
         schedule_trigger_ = true;
     }
     cond_.notify_all();
-    return stream_enqueued;
+    return {std::move(enqueue_successes), streams};
 }
 
 size_t FIFOSchedulerBase::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
@@ -161,50 +166,8 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
     const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       admitted_new_init_streams = 0;
 
-    struct GroupInfo {
-        int64_t first_arrival_time = 0;
-        int     count              = 0;
-    };
-    std::unordered_map<int64_t, GroupInfo> request_group_info;
-
-    int64_t now = autil::TimeUtility::currentTimeInMilliSeconds();
-    for (const auto& stream : waiting_streams) {
-        if (stream->forceBatch() && stream->batchGroupId() != -1) {
-            auto& info = request_group_info[stream->batchGroupId()];
-            if (info.count == 0) {
-                info.first_arrival_time = stream->enqueueTime() / 1000;
-            }
-            info.count++;
-        }
-    }
-
-    int64_t force_batch_group_id = -1;
-
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto& stream      = *it;
-        bool  force_batch = stream->forceBatch();
-
-        if (force_batch && stream->batchGroupId() != -1) {
-            auto& info = request_group_info[stream->batchGroupId()];
-            if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
-                force_batch = false;
-            } else if (info.count < stream->batchGroupSize()) {
-                it++;
-                continue;
-            }
-        }
-
-        if (!admitted_streams.empty()) {
-            if (force_batch_group_id != -1) {
-                if (!force_batch || stream->batchGroupId() != force_batch_group_id) {
-                    it++;
-                    continue;
-                }
-            } else if (force_batch) {
-                it++;
-                continue;
-            }
-        }
+        auto& stream = *it;
 
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
@@ -223,9 +186,6 @@ void FIFOSchedulerBase::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_
             admitted_stream_ptrs.insert(stream.get());
             if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
                 ++admitted_new_init_streams;
-            }
-            if (admitted_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
-                force_batch_group_id = stream->batchGroupId();
             }
         }
         it++;
@@ -312,6 +272,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOSchedulerBase::waitingTaskList() {
         task_info.request_id    = stream->streamId();
         task_info.prefix_length = stream->prefixLength();
         task_info.input_length  = stream->inputLength();
+        task_info.batch_id      = stream->groupId();
         waiting_task_list_.emplace_back(task_info);
     }
     return waiting_task_list_;
@@ -326,6 +287,7 @@ std::vector<EngineScheduleInfo::TaskInfo> FIFOSchedulerBase::runningTaskList() {
         task_info.request_id    = stream->streamId();
         task_info.prefix_length = stream->prefixLength();
         task_info.input_length  = stream->inputLength();
+        task_info.batch_id      = stream->groupId();
         running_task_list_.emplace_back(task_info);
     }
     return running_task_list_;

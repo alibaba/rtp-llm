@@ -25,6 +25,11 @@ DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
+# ROCm installs this hook to reject incompatible prefill/decode V layouts.
+VALIDATE_FMHA_CONFIG: Optional[
+    Callable[[AttentionConfigs, PyAttentionInputs, Optional[FMHAConfig]], bool]
+] = None
+
 FLASHINFER_TRTLLM_GEN_IMPLS = {
     "FlashInferTRTLLMPrefillImpl",
     "FlashInferTRTLLMSpecDecodeImpl",
@@ -118,6 +123,12 @@ def _is_fmha_impl_disabled(
     # FlashInfer TRT-LLM Gen implementations (SM100)
     elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
         return not fmha_config.enable_flashinfer_trtllm_gen
+    # FlashInfer native Hybrid Prefill
+    elif impl_class_name == "PyFlashinferHybridPrefillImpl":
+        return (
+            fmha_config.disable_flashinfer_hybrid_prefill
+            or fmha_config.disable_flashinfer_native
+        )
     # FlashInfer native implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flashinfer_native
@@ -159,6 +170,9 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    strict_impl_selection = VALIDATE_FMHA_CONFIG is not None and VALIDATE_FMHA_CONFIG(
+        attn_configs, attn_inputs, fmha_config
+    )
 
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
@@ -175,15 +189,18 @@ def get_fmha_impl(
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
             continue
+        kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
-            instance = impl(attn_configs, attn_inputs, parallelism_config)
-            if not is_cuda_graph or instance.support_cuda_graph():
-                return instance
-
+            instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
         except Exception as e:
-            # If instantiation fails, continue to next impl
+            # ROCm validation predicts the selected cache layout, so falling back
+            # after construction could select a reader with a different layout.
+            if strict_impl_selection:
+                raise
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
             continue
+        if not is_cuda_graph or instance.support_cuda_graph():
+            return instance
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved

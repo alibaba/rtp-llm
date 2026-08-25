@@ -66,6 +66,12 @@ class XQAAttnOp:
 
 class XQAParams:
     def __init__(self) -> None: ...
+    def fill_decode_cuda_graph_params(
+        self,
+        sequence_lengths_plus_1_d: torch.Tensor,
+        kv_cache_block_id_device: torch.Tensor,
+        seq_size_per_block: int,
+    ) -> None: ...
 
 def embedding(
     output: torch.Tensor,
@@ -123,6 +129,12 @@ def layernorm(
     weight: torch.Tensor,
     beta: torch.Tensor,
     eps: float,
+    def update(
+        self, params: XQAParams, attn_inputs: libth_transformer.PyAttentionInputs
+    ) -> None: ...
+    def update_kv_cache_offset(
+        self, kv_cache_offset: torch.Tensor, kv_cache_block_id_device: torch.Tensor
+    ) -> None: ...
     cuda_stream: int = 0,
 ) -> None:
     """

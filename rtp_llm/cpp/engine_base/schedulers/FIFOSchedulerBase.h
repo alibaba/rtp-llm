@@ -30,12 +30,16 @@ public:
 
     ~FIFOSchedulerBase() override = default;
 
-    absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
-    std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
-    absl::Status                                 stop() override;
-    bool                                         empty() override;
-    int64_t                                      lastScheduleTime() override;
-    int64_t                                      onflightStreams() override;
+    absl::Status enqueue(const GenerateStreamPtr& stream) override;
+    // Default group enqueue: validates each stream and admits the valid ones as
+    // ordinary individual streams (no co-scheduling). FIFOScheduler overrides this
+    // with real group-queue semantics.
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+                 enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
+    absl::Status stop() override;
+    bool         empty() override;
+    int64_t      lastScheduleTime() override;
+    int64_t      onflightStreams() override;
 
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
     std::vector<EngineScheduleInfo::TaskInfo> runningTaskList() override;

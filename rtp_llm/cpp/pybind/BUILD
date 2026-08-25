@@ -114,6 +114,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
+        "@xgrammar//:xgrammar",
     ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",

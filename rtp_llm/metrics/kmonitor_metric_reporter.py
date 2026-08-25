@@ -2,6 +2,26 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Union
 
+# Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
+# value the engine forwards to FlexLB as ``Schedule.priority``.
+QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+
+
+def qos_priority_tag(qos_level: Any) -> str:
+    """Normalize an ``x-dashscope-inner-qos-level`` value into the kmonitor
+    ``priority`` tag value.
+
+    Returns the raw 1-100 integer as a string, or ``"0"`` when the request
+    carries no (or an unparseable) priority — same convention as the FlexLB
+    ``auto_tpm.*`` metric family ("0" = legacy request without a budget).
+    """
+    if qos_level is None:
+        return "0"
+    try:
+        return str(int(str(qos_level).strip()))
+    except (TypeError, ValueError):
+        return "0"
+
 
 class AccMetrics(Enum):
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
@@ -98,6 +118,10 @@ class GaugeMetrics(Enum):
     VIT_RPC_SERVER_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_server_lifecycle_rt_us"
     VIT_RPC_PROXY_LIFECYCLE_RT_US_METRIC = "rtp_llm_vit_rpc_proxy_lifecycle_rt_us"
     VIT_RPC_PROXY_TO_WORKER_RT_US_METRIC = "rtp_llm_vit_rpc_proxy_to_worker_rt_us"
+    VIT_RPC_PROXY_HEALTHY_WORKER_COUNT_METRIC = (
+        "rtp_llm_vit_rpc_proxy_healthy_worker_count"
+    )
+    VIT_RPC_PROXY_TOTAL_WORKER_COUNT_METRIC = "rtp_llm_vit_rpc_proxy_total_worker_count"
     VIT_RPC_REQUEST_BYTES_METRIC = "rtp_llm_vit_rpc_request_bytes"
     VIT_RPC_RESPONSE_BYTES_METRIC = "rtp_llm_vit_rpc_response_bytes"
     VIT_RESPONSE_EMBEDDING_BYTES_METRIC = "rtp_llm_vit_response_embedding_bytes"

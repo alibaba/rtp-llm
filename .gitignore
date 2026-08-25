@@ -35,7 +35,6 @@ rpm/*.log
 
 logs/
 *.log
-deep_gemm_runtime/
 
 package/requirements*.txt
 package/rtp_llm*.whl

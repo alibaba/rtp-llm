@@ -114,7 +114,11 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         **kwargs,
     ):
         assert len(mm_inputs) == 1
-        data = get_bytes_io_from_url(mm_inputs[0].url, vit_config.download_headers)
+        data = get_bytes_io_from_url(
+            mm_inputs[0].url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         return Image.open(data).convert("RGB")
 
 
@@ -129,7 +133,13 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
         import torchaudio
 
         assert len(mm_inputs) == 1
-        data = get_bytes_io_from_url(mm_inputs[0].url, vit_config.download_headers)
+        # Audio intentionally shares the default multimodal size limit. Video
+        # alone has a separate, larger limit for backward compatibility.
+        data = get_bytes_io_from_url(
+            mm_inputs[0].url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         return torchaudio.load(data)
 
 
@@ -146,5 +156,9 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
                 "Install it with `pip install decord`."
             )
         assert len(mm_inputs) == 1
-        data = get_bytes_io_from_url(mm_inputs[0].url, vit_config.download_headers)
+        data = get_bytes_io_from_url(
+            mm_inputs[0].url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_video_max_file_size_kb,
+        )
         return VideoReader(data, ctx=cpu(0))

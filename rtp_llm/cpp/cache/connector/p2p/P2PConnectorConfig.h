@@ -39,7 +39,9 @@ struct P2PConnectorWorkerConfig {
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
-    // Prefill page-RR shard geometry. cp_size==1 disables RR remap.
+    // Prefill page-RR shard geometry. cp_size==1 disables RR remap (legacy path);
+    // cp_size>1 makes LayerCacheBufferUtil register cache_keys[cp_rank + i*cp_size]
+    // for the i-th rank-local owned block (Stage 4 fix).
     int  cp_rank          = 0;
     int  cp_size          = 1;
     bool kv_cache_sharded = false;

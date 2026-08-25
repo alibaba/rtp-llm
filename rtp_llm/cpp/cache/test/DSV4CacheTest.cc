@@ -190,6 +190,38 @@ static void initDsv4BatchGroups(BatchKVCacheResource& batch_res, const CacheConf
     batch_res.initGroups(config.topologyPtr());
 }
 
+// DEV's `isDsv4FixedRegion()` covered INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.  On MAIN
+// those are exactly the SWA-typed groups of a DSV4 topology, addressed by tag.
+static const std::vector<std::string>& dsv4StateSwaTags() {
+    static const std::vector<std::string> kTags = {"indexer_state", "csa_state", "hca_state", "swa_kv"};
+    return kTags;
+}
+
+// DEV expressed "put the fixed pools in pinned host memory" with a single global
+// KVCacheConfig::dsv4_fixed_pool_use_memory flag.  MAIN drives residency per pool through the
+// spec desc; a host-resident pool must also opt out of the paged HBM budget, otherwise
+// checkGroupResidencyBudget() rejects the topology.
+static void
+setDsv4PoolMemoryPlacement(ModelConfig& model_config, const std::string& tag, CacheMemoryPlacement placement) {
+    for (auto& descs : model_config.kv_cache_spec_descs) {
+        for (auto& desc : descs) {
+            if (desc.tag != tag) {
+                continue;
+            }
+            if (!desc.memory.has_value()) {
+                desc.memory = CacheMemoryPolicyDesc{};
+            }
+            desc.memory->placement = placement;
+            if (placement != CacheMemoryPlacement::DEVICE) {
+                if (!desc.capacity.has_value()) {
+                    desc.capacity = CacheCapacityPolicyDesc{};
+                }
+                desc.capacity->charge_to_paged_budget = false;
+            }
+        }
+    }
+}
+
 static std::vector<int> makeProLayerCompressRatios() {
     std::vector<int> ratios = {128, 128};
     for (int i = 2; i < 61; ++i) {
@@ -696,6 +728,60 @@ TEST(HybridPoolConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBl
     ASSERT_EQ(swa_pool.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
     EXPECT_EQ(swa_pool.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
+}
+
+// Ported from DEV HybridPoolConfigCreatorTest.DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk.
+// The test above pins the coupled default (physical == kernel == 128, bpk 1); this one pins the
+// decoupled case, where compressed pools stride by bpk kernel blocks while STATE_RING pools keep
+// bpk 1 because their kernel block equals their physical block.
+TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk) {
+    ParallelismConfig pc;
+    auto              mc = makeProModelConfig();
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block        = 16384;
+    kv_cache_config.kernel_seq_size_per_block = 128;
+    auto config = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
+
+    ASSERT_EQ(static_cast<size_t>(config.groupNums()), static_cast<size_t>(kDsv4PoolNum));
+    EXPECT_EQ(config.seq_size_per_block, 16384u);
+    EXPECT_EQ(config.kernel_seq_size_per_block, 128u);
+    EXPECT_EQ(config.kernelBlocksPerKvBlock(), 128u);
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        EXPECT_EQ(config.seqSizePerBlockForGroup(gid), 16384u) << "tag=" << config.tagForGroup(gid);
+    }
+
+    const auto  csa_kv_gid = gidForTag(config, "csa_kv");
+    const auto  hca_kv_gid = gidForTag(config, "hca_kv");
+    const auto  idx_kv_gid = gidForTag(config, "indexer_kv");
+    const auto  swa_kv_gid = gidForTag(config, "swa_kv");
+    const auto* csa_kv     = dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(csa_kv_gid).get());
+    const auto* hca_kv     = dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(hca_kv_gid).get());
+    const auto* idx_kv     = dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(idx_kv_gid).get());
+    const auto* swa_kv     = dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(swa_kv_gid).get());
+    ASSERT_NE(csa_kv, nullptr);
+    ASSERT_NE(hca_kv, nullptr);
+    ASSERT_NE(idx_kv, nullptr);
+    ASSERT_NE(swa_kv, nullptr);
+    // Entries per kernel block: kernel_tokens / compression_ratio for compressed pools, and the
+    // state-ring window for swa_kv.
+    EXPECT_EQ(opaqueEntriesPerBlock(*csa_kv, kDsv4KvEntryBytes), 32u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*hca_kv, kDsv4KvEntryBytes), 1u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 32u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 128u);
+
+    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(csa_kv_gid), 128u);
+    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(swa_kv_gid), 1u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(csa_kv_gid), csa_kv->block_size_bytes() * 128u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(hca_kv_gid), hca_kv->block_size_bytes() * 128u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes() * 128u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(swa_kv_gid), swa_kv->block_size_bytes());
+
+    auto full_pool_bpk = BlockPoolConfigHelper::createConfigForGroup(config, csa_kv_gid);
+    auto swa_pool_bpk  = BlockPoolConfigHelper::createConfigForGroup(config, swa_kv_gid);
+    ASSERT_EQ(full_pool_bpk.memory_layouts.size(), 1u);
+    ASSERT_EQ(swa_pool_bpk.memory_layouts.size(), 1u);
+    EXPECT_EQ(full_pool_bpk.memory_layouts[0].kernel_blocks_per_kv_block, 128u);
+    EXPECT_EQ(swa_pool_bpk.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
 }
 
 TEST(HybridPoolConfigCreatorTest, PrefillCpShardedSlicesFixedAndSwaPhysicalBlocks) {
@@ -1217,6 +1303,11 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKerne
     EXPECT_EQ(decoupled.kernelBlocksPerKvBlock(), 128u);
 }
 
+// Absorbs DEV's CacheConfigTest.DSV4KernelSeqSizeRejectsInvalidPhysicalKernelShape.  DEV enforced
+// the 128 kernel-token floor imperatively in validateDsv4KernelSeqSize(); MAIN enforces it
+// declaratively in HybridPoolConfigCreator's validateHybridPoolDescs() via
+// kCompressedKernelSeqSizeAlignment for every KERNEL_BLOCK_COMPRESSED pool, plus the
+// physical >= kernel / divisible-by-kernel check.  Both halves are pinned below.
 TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigRejectsInvalidKernelShape) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
@@ -1232,8 +1323,15 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigRejectsInvalidKernelShape) {
         return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
     };
 
+    // Below the 128-token compression unit, even when it divides the physical block.
+    EXPECT_THROW((void)create_config(16384, 32), std::exception);
     EXPECT_THROW((void)create_config(16384, 64), std::exception);
+    // A multiple of the compression unit that does not divide the physical block.
     EXPECT_THROW((void)create_config(16384, 384), std::exception);
+    // A kernel block larger than the physical block.
+    EXPECT_THROW((void)create_config(128, 256), std::exception);
+    // Exactly the compression unit is accepted.
+    EXPECT_NO_THROW((void)create_config(16384, 128));
 }
 
 TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksIndependentOfMaxConcurrency) {
@@ -1257,6 +1355,48 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksIndependentOfMaxConcurre
             EXPECT_EQ(config.blockNumForGroup(gid), expected)
                 << "gid=" << gid << " max_concurrency=" << max_concurrency;
         }
+    }
+}
+
+// DEV's broader variant of the test above: DEV sized *every* fixed region (indexer_state,
+// csa_state, hca_state, swa_kv) from one global dsv4_fixed_pool_blocks knob and asserted that
+// none of them tracks max_concurrency.  On MAIN each pool carries its own explicit_block_num, so
+// set all four and check the invariant still holds pool-by-pool.
+TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency) {
+    constexpr uint32_t kFixedPoolBlocks = 256;
+    for (uint32_t max_concurrency : {1u, 2u, 8u}) {
+        auto              mc = makeProModelConfig();
+        ParallelismConfig pc;
+        RuntimeConfig     runtime_config;
+        KVCacheConfig     kv_cache_config;
+        kv_cache_config.seq_size_per_block = 128;
+        kv_cache_config.test_block_num     = 100;
+        for (const auto& tag : dsv4StateSwaTags()) {
+            setDsv4ExplicitPoolBlocks(mc, tag, kFixedPoolBlocks);
+        }
+        runtime_config.max_generate_batch_size                      = max_concurrency;
+        runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+        auto config = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+
+        ASSERT_EQ(config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
+        size_t expected_reserve = 0;
+        for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+            const bool     is_fixed = config.typeForGroup(static_cast<size_t>(gid)) == CacheGroupType::SWA;
+            const uint32_t expected = is_fixed ? kFixedPoolBlocks : 100u;
+            EXPECT_EQ(config.blockNumForGroup(gid), expected)
+                << "gid=" << gid << " tag=" << config.tagForGroup(static_cast<size_t>(gid))
+                << " max_concurrency=" << max_concurrency;
+            if (is_fixed) {
+                expected_reserve +=
+                    static_cast<size_t>(kFixedPoolBlocks) * config.blockSizeBytesForGroup(static_cast<size_t>(gid));
+            }
+        }
+        // DEV also pinned down that every explicitly-sized pool contributes to the paged-budget
+        // reservation, not just hca_state.
+        EXPECT_GT(expected_reserve, 0u);
+        EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve)
+            << "max_concurrency=" << max_concurrency;
     }
 }
 
@@ -1633,6 +1773,106 @@ TEST(CacheConfigTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep)
         EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
     EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
+}
+
+// Ported from DEV CacheConfigTest.DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget.
+// DEV flipped every fixed pool to pinned host memory with KVCacheConfig::dsv4_fixed_pool_use_memory
+// and asserted the device pool grew because those pools stopped charging the GPU budget.  On MAIN
+// budget exclusion is `charge_to_paged_budget = false`, which blockBudgetForConfig() only honours
+// for explicitly-sized pools (non-explicit pools always contribute marginal bytes regardless of
+// residency), so the pinned pools are sized explicitly here.
+TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget) {
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+
+    constexpr uint32_t kFixedPoolBlocks = 64;
+
+    auto make_kv_config = [] {
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.seq_size_per_block = 128;
+        kv_cache_config.kv_cache_mem_mb    = 65536;
+        kv_cache_config.linear_step        = 4;
+        return kv_cache_config;
+    };
+
+    auto gpu_fixed_mc = makeProModelConfig();
+    for (const auto& tag : dsv4StateSwaTags()) {
+        setDsv4ExplicitPoolBlocks(gpu_fixed_mc, tag, kFixedPoolBlocks);
+    }
+    auto pinned_fixed_mc = gpu_fixed_mc;
+    for (const auto& tag : dsv4StateSwaTags()) {
+        setDsv4PoolMemoryPlacement(pinned_fixed_mc, tag, CacheMemoryPlacement::HOST_PINNED);
+    }
+
+    auto gpu_fixed    = CacheConfigCreator::createConfig(gpu_fixed_mc, pc, runtime_config, make_kv_config());
+    auto pinned_fixed = CacheConfigCreator::createConfig(pinned_fixed_mc, pc, runtime_config, make_kv_config());
+
+    // Device-resident fixed pools reserve HBM; pinned ones do not, so the paged pool is larger.
+    EXPECT_GT(gpu_fixed.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_EQ(pinned_fixed.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_GT(pinned_fixed.block_num, gpu_fixed.block_num);
+
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+        const auto tag = pinned_fixed.tagForGroup(static_cast<size_t>(gid));
+        if (pinned_fixed.typeForGroup(static_cast<size_t>(gid)) != CacheGroupType::SWA) {
+            continue;
+        }
+        EXPECT_EQ(pinned_fixed.blockNumForGroup(static_cast<size_t>(gid)), kFixedPoolBlocks) << "tag=" << tag;
+        EXPECT_EQ(pinned_fixed.policyForGroup(static_cast<size_t>(gid)).memory_placement,
+                  CacheMemoryPlacement::HOST_PINNED)
+            << "tag=" << tag;
+        EXPECT_EQ(gpu_fixed.blockNumForGroup(gidForTag(gpu_fixed, tag)), kFixedPoolBlocks) << "tag=" << tag;
+    }
+}
+
+// Ported from DEV CacheConfigTest.DSV4PinnedFixedPoolFallbackFollowsExpandedFullPoolWhenStepOne.
+// DEV's claim: with linear_step == 1 the non-explicit fixed pools track the full pool 1:1, and
+// putting them in pinned host memory does not perturb that rule.  MAIN's ceil(N / step) rule
+// degenerates to N at step 1, so both halves are asserted here.  DEV additionally expected the
+// pinned variant's block_num to grow; on MAIN residency alone does not change the budget for
+// non-explicit pools (see DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget above for the
+// explicitly-sized case that does), so block_num is asserted equal instead.
+TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackFollowsExpandedFullPoolWhenStepOne) {
+    ParallelismConfig pc;
+    RuntimeConfig     runtime_config;
+    runtime_config.max_generate_batch_size                      = 4;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
+
+    auto make_kv_config = [] {
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.seq_size_per_block = 128;
+        kv_cache_config.kv_cache_mem_mb    = 65536;
+        kv_cache_config.linear_step        = 1;
+        return kv_cache_config;
+    };
+
+    auto gpu_fixed_mc = makeProModelConfig();
+    for (const auto& tag : dsv4StateSwaTags()) {
+        setDsv4ExplicitPoolBlocks(gpu_fixed_mc, tag, 0);
+    }
+    auto pinned_fixed_mc = gpu_fixed_mc;
+    for (const auto& tag : dsv4StateSwaTags()) {
+        setDsv4PoolMemoryPlacement(pinned_fixed_mc, tag, CacheMemoryPlacement::HOST_PINNED);
+    }
+
+    auto gpu_fixed    = CacheConfigCreator::createConfig(gpu_fixed_mc, pc, runtime_config, make_kv_config());
+    auto pinned_fixed = CacheConfigCreator::createConfig(pinned_fixed_mc, pc, runtime_config, make_kv_config());
+
+    EXPECT_EQ(gpu_fixed.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_EQ(pinned_fixed.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_EQ(pinned_fixed.block_num, gpu_fixed.block_num);
+
+    ASSERT_EQ(gpu_fixed.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
+    ASSERT_EQ(pinned_fixed.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
+    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
+        EXPECT_EQ(gpu_fixed.blockNumForGroup(static_cast<size_t>(gid)), static_cast<uint32_t>(gpu_fixed.block_num))
+            << "gid=" << gid << " tag=" << gpu_fixed.tagForGroup(static_cast<size_t>(gid));
+        EXPECT_EQ(pinned_fixed.blockNumForGroup(static_cast<size_t>(gid)),
+                  static_cast<uint32_t>(pinned_fixed.block_num))
+            << "gid=" << gid << " tag=" << pinned_fixed.tagForGroup(static_cast<size_t>(gid));
+    }
 }
 
 TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
@@ -2789,6 +3029,53 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), config.block_num);
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         if (config.tagForGroup(gid) == "hca_state") {
+            block_nums[gid] = 11;
+        }
+    }
+    setGroupBlockNumsForTest(config, block_nums);
+
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
+        config, AllocationType::DEVICE, nullptr, /*reserve_block_ratio=*/50);
+    ASSERT_TRUE(allocator->init());
+
+    auto batch_res = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    initDsv4BatchGroups(*batch_res, config);
+
+    const int spb       = allocator->seqSizePerBlock();
+    const int seq_len   = 10 * spb;
+    auto      cti       = std::make_shared<CompleteTokenIds>(1, 1, seq_len + spb, spb);
+    auto      gi        = std::make_shared<GenerateInput>();
+    gi->input_ids       = torch::arange(seq_len, torch::kInt32);
+    gi->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(gi);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    info.verbose             = true;
+    auto result              = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+// DEV's broader variant of the test above: DEV applied one global fixed-pool block count to every
+// fixed region, so the reserve had to leave *all four* explicitly-sized pools at full capacity, not
+// just hca_state.  Kept alongside the hca_state-only case because it exercises a different shape:
+// four independently explicit pools, including swa_kv which spans every layer.
+TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitFixedPoolCapacity) {
+    auto              mc = makeFlashModelConfig();
+    ParallelismConfig pc;
+    for (const auto& tag : dsv4StateSwaTags()) {
+        setDsv4ExplicitPoolBlocks(mc, tag, 11);
+    }
+    auto config      = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    config.block_num = 40;
+    std::vector<uint32_t> block_nums(static_cast<size_t>(config.groupNums()), config.block_num);
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        if (config.typeForGroup(gid) == CacheGroupType::SWA) {
             block_nums[gid] = 11;
         }
     }

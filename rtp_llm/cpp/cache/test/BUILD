@@ -245,6 +245,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -350,6 +351,24 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "swa_kv_cache_group_malloc_range_test",
+    srcs = [
+        "SWAKVCacheGroupMallocRangeTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_group",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
+    },
     exec_properties = {'gpu':'H20'},
 )
 

@@ -16,6 +16,12 @@ namespace rtp_llm {
 
 namespace {
 
+// Kernel blocks feeding a compressed (OpaqueKV) pool must be a whole number of
+// 128-token units: 128 is the HCA compression unit and also FlashMLA's block
+// quantum. Divisibility alone (the generic check) is not enough -- a 64-token
+// kernel block passes it and then produces a partial compression unit.
+constexpr uint32_t kCompressedKernelSeqSizeAlignment = 128;
+
 void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_block, int gen_num_per_cycle) {
     RTP_LLM_CHECK_WITH_INFO(
         model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
@@ -45,6 +51,15 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
                                         kernel_tokens_per_block);
+                RTP_LLM_CHECK_WITH_INFO(
+                    kernel_tokens_per_block >= kCompressedKernelSeqSizeAlignment
+                        && kernel_tokens_per_block % kCompressedKernelSeqSizeAlignment == 0,
+                    "desc tag=%s derives entries from kernel block, so kernel_seq_size_per_block(%u) "
+                    "must be >= %u and a multiple of %u",
+                    desc.tag.c_str(),
+                    kernel_tokens_per_block,
+                    kCompressedKernelSeqSizeAlignment,
+                    kCompressedKernelSeqSizeAlignment);
             }
             if (desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING) {
                 RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,
@@ -140,7 +155,12 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
                                     "hybrid-pool layer %u has duplicate tag=%s",
                                     layer,
                                     spec->tag.c_str());
-            const auto policy            = SpecBuilder::groupPolicy(desc);
+            const auto policy = SpecBuilder::groupPolicy(desc);
+            // Residency and paged-budget accounting are independent knobs, and
+            // CacheConfig::finalizeBlockNums only looks at charge_to_paged_budget.
+            // A host-resident pool that still charges the budget would silently
+            // shrink the device paged pool by bytes it never occupies.
+            checkGroupResidencyBudget(policy, spec->tag);
             const auto type              = SpecBuilder::groupType(desc);
             const auto local_kv_head_num = localKvHeadNumForDesc(desc, model_config, parallelism_config);
             auto       group_it          = group_by_tag.find(spec->tag);

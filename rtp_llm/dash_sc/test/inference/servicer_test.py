@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import struct
@@ -17,16 +18,24 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
+    ExceptionType,
+    FtRuntimeException,
+)
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+from rtp_llm.dash_sc import grpc_metrics
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
+    DASH_ERROR_ADMISSION_OVERLOADED,
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -37,14 +46,24 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    _build_mm_inputs_from_request,
+    _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
+    _request_qos_level,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.server.master_client import MasterClient
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 
 
 def _add_input_tensor(
@@ -150,6 +169,84 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             DASH_ERROR_INTERNAL,
         )
 
+    def test_priority_preempted_has_dedicated_non_capacity_spec(self) -> None:
+        self.assertEqual(
+            _dash_error_mapping_for_ft_exception(
+                FtRuntimeException(ExceptionType.PRIORITY_PREEMPTED, "boom"),
+                qos_level=50,
+            ).error_spec,
+            DASH_ERROR_AUTO_TPM_PREEMPTED,
+        )
+        self.assertEqual(
+            _dash_error_spec_for_ft_exception(
+                FtRuntimeException(ExceptionType.PRIORITY_PREEMPTED, "boom")
+            ),
+            DASH_ERROR_CAPACITY,
+        )
+        self.assertEqual(
+            _dash_error_spec_for_ft_exception(
+                FtRuntimeException(ExceptionType.MASTER_NO_AVAILABLE_WORKER, "boom")
+            ),
+            DASH_ERROR_CAPACITY,
+        )
+
+    def test_typed_admission_reason_matrix(self) -> None:
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                DASH_ERROR_CAPACITY,
+                "Service unavailable.",
+                False,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                DASH_ERROR_CAPACITY,
+                "Service unavailable.",
+                False,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                DASH_ERROR_CAPACITY,
+                "Service unavailable.",
+                False,
+            ),
+            (
+                ExceptionType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+                DASH_ERROR_CAPACITY,
+                "Service unavailable.",
+                False,
+            ),
+        )
+        for exception_type, reason, expected_spec, expected_message, invalid in cases:
+            with self.subTest(exception_type=exception_type, reason=reason):
+                mapping = _dash_error_mapping_for_ft_exception(
+                    FtRuntimeException(
+                        exception_type,
+                        "private scheduler diagnostic",
+                        admission_reject_reason=reason,
+                    )
+                )
+                self.assertEqual(expected_spec, mapping.error_spec)
+                self.assertEqual(expected_message, mapping.public_message)
+                self.assertEqual(invalid, mapping.protocol_error)
+
+    def test_illegal_admission_reason_pair_has_safe_fallback(self) -> None:
+        mapping = _dash_error_mapping_for_ft_exception(
+            FtRuntimeException(
+                ExceptionType.RESOURCE_EXHAUSTED,
+                "do not parse this text",
+                admission_reject_reason=AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            )
+        )
+
+        self.assertEqual(DASH_ERROR_CAPACITY, mapping.error_spec)
+        self.assertEqual("Service unavailable.", mapping.public_message)
+        self.assertTrue(mapping.protocol_error)
+
 
 class _FakeTokenizer:
     eos_token_id = 2
@@ -171,7 +268,7 @@ class _FakeTokenizer:
 
 
 class _GenerateEnvCfg:
-    think_mode = 1
+    think_mode = "adaptive"
     think_end_token_id = -1
     think_start_tag = "<think>\n"
     think_end_tag = "</think>\n\n"
@@ -233,7 +330,19 @@ def _assert_parameter_error_response(
         expected_message_part,
         payload["status_message"],
     )
-    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
+    # 4xx contract: finish_reason=USE_PARAMETER_STATUS tells DashScope api-server to
+    # read the standalone status_* parameters instead of mapping STOP_ENGINE_PARAM
+    # onto a generic 500 EngineAbort.
+    testcase.assertEqual(_finish_reason(resp), LLMFinishReason.USE_PARAMETER_STATUS)
+    testcase.assertEqual(
+        infer.parameters["status_code"].int64_param, payload["status_code"]
+    )
+    testcase.assertEqual(
+        infer.parameters["status_name"].string_param, payload["status_name"]
+    )
+    testcase.assertEqual(
+        infer.parameters["status_message"].string_param, payload["status_message"]
+    )
     testcase.assertEqual(_gen_ids(resp), [])
 
 
@@ -318,6 +427,116 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [3, 4])
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
+
+    async def test_multimodal_inputs_reach_backend_generate_input(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        mm_input = object()
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                mm_inputs=[mm_input],
+            )
+        )
+
+        self.assertEqual(visitor.last_generate_input.mm_inputs, [mm_input])
+
+    def test_builds_generic_multimodal_inputs_from_payload(self) -> None:
+        req = self._minimal_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "http://x.png"},
+                                "min_pixels": 128,
+                                "max_pixels": 4096,
+                                "fps": 3,
+                                "min_frames": 5,
+                                "max_frames": 17,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        mm_inputs = _build_mm_inputs_from_request(req)
+
+        self.assertEqual(len(mm_inputs), 1)
+        self.assertEqual(mm_inputs[0].url, "http://x.png")
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.min_pixels, 128)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.max_pixels, 4096)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.fps, 3)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.min_frames, 5)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.max_frames, 17)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.mm_timeout_ms, -1)
+
+    def test_builds_multimodal_inputs_from_nested_dashscope_payload(self) -> None:
+        req = self._minimal_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "payload": {
+                    "input": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"image": "http://nested.png"}],
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+        mm_inputs = _build_mm_inputs_from_request(req)
+
+        self.assertEqual(len(mm_inputs), 1)
+        self.assertEqual(mm_inputs[0].url, "http://nested.png")
+
+    async def test_reuses_parsed_input_tensor_without_copy(self) -> None:
+        """The codec-built INT32 tensor must reach the engine without a re-copy."""
+        req = self._minimal_request()
+        input_ids_list = [1, 2]
+        input_ids_tensor = torch.tensor(input_ids_list, dtype=torch.int32)
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                input_ids_list,
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                input_ids_tensor=input_ids_tensor,
+            )
+        )
+
+        self.assertIs(visitor.last_generate_input.token_ids, input_ids_tensor)
 
     async def test_reasoning_effort_override_reaches_generate_config(self) -> None:
         req = self._minimal_request()
@@ -422,13 +641,21 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_ft_exception_sets_access_backend_error_code(self) -> None:
         req = self._minimal_request()
+        exception_aux_info = {
+            "input_len": 2,
+            "reuse_len": 1,
+            "remote_reuse_len": 1,
+            "aux_string": "route-diagnostic",
+        }
 
         class _BoomVisitor:
             async def enqueue(self, _gi):
-                raise FtRuntimeException(
+                error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
                     "route failed",
                 )
+                error.aux_info = exception_aux_info
+                raise error
 
         access_agg = GrpcAccessRecord(
             method="ModelStreamInfer",
@@ -454,9 +681,590 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         error_no, payload = _dash_error_payload(chunks[0])
         self.assertEqual(error_no, 5)
         self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
         self.assertIn("route failed", payload["status_message"])
-        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
+        self.assertEqual(access_agg.aux_info, exception_aux_info)
+
+    async def test_generic_exception_captures_access_aux_info(self) -> None:
+        """A non-Ft engine failure still carries the enqueue-side aux_info."""
+        req = self._minimal_request()
+        exception_aux_info = {
+            "input_len": 2,
+            "output_len": 0,
+            "step_output_len": 0,
+            "reuse_len": 0,
+            "pd_sep": True,
+        }
+
+        class _BoomVisitor:
+            async def enqueue(self, _gi):
+                error = RuntimeError("backend down")
+                error.aux_info = exception_aux_info
+                raise error
+
+        access_agg = GrpcAccessRecord(
+            method="ModelStreamInfer",
+            stream_type="bidi_stream",
+            peer="",
+            start_ts=0.0,
+            raw_mode=False,
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                _BoomVisitor(),
+                rtp_llm_request_id=1,
+                access_agg=access_agg,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
+        self.assertEqual(access_agg.aux_info, exception_aux_info)
+        # backend_error_code stays unset: only FtRuntimeException carries one.
+        self.assertIsNone(access_agg.backend_error_code)
+
+    async def test_auto_tpm_preempted_maps_to_throttling_aborted(self) -> None:
+        """8429 uses the QoS 429 contract only with an explicit valid header."""
+        req = self._minimal_request()
+
+        class _PreemptedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.PRIORITY_PREEMPTED,
+                    "AUTO_TPM_PREEMPTED victim request 703 by request 77",
+                )
+
+        for (
+            request_headers,
+            expected_error_no,
+            expected_status,
+            expected_name,
+            expected_message,
+        ) in (
+            (
+                {},
+                LLMFinishReason.TASK_LIST_FULL,
+                503,
+                "ServiceUnavailable",
+                "Service unavailable.",
+            ),
+            (
+                {"x-dashscope-inner-qos-level": "49"},
+                LLMFinishReason.ABORT,
+                429,
+                "Throttling.Aborted",
+                "Too many requests.",
+            ),
+            (
+                {"x-dashscope-inner-qos-level": "50"},
+                LLMFinishReason.ABORT,
+                429,
+                "Throttling.Aborted",
+                "Too many requests.",
+            ),
+        ):
+            with self.subTest(request_headers=request_headers):
+                access_agg = GrpcAccessRecord(
+                    method="ModelStreamInfer",
+                    stream_type="bidi_stream",
+                    peer="",
+                    start_ts=0.0,
+                    raw_mode=False,
+                )
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(request_headers=request_headers),
+                        _PreemptedVisitor(),
+                        rtp_llm_request_id=1,
+                        access_agg=access_agg,
+                    )
+                )
+
+                self.assertEqual(len(chunks), 1)
+                self.assertFalse(chunks[0].error_message)
+                infer = chunks[0].infer_response
+                error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(error_no, expected_error_no)
+                self.assertEqual(payload["status_code"], expected_status)
+                self.assertEqual(payload["status_name"], expected_name)
+                self.assertEqual(payload["status_message"], expected_message)
+                # Legacy error_msg JSON and standalone status_* parameters must
+                # stay byte-for-byte equivalent for old and new consumers.
+                self.assertEqual(
+                    infer.parameters["status_code"].int64_param, expected_status
+                )
+                self.assertEqual(
+                    infer.parameters["status_name"].string_param,
+                    expected_name,
+                )
+                self.assertEqual(
+                    infer.parameters["status_message"].string_param,
+                    expected_message,
+                )
+                self.assertEqual(
+                    _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+                )
+                public_payload = (
+                    infer.parameters["error_msg"].string_param
+                    + infer.parameters["status_message"].string_param
+                )
+                self.assertNotIn("AUTO_TPM_PREEMPTED", public_payload)
+                self.assertNotIn("703", public_payload)
+                self.assertNotIn("77", public_payload)
+                self.assertEqual(
+                    access_agg.backend_error_code,
+                    "8429_PRIORITY_PREEMPTED",
+                )
+
+    async def test_qos_header_maps_admission_rejections_by_priority_tier(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            ),
+        )
+
+        for exception_type, reason in cases:
+
+            class _RejectedVisitor:
+                async def enqueue(self, _gi):
+                    raise FtRuntimeException(
+                        exception_type,
+                        "private scheduler diagnostic",
+                        admission_reject_reason=reason,
+                    )
+
+            for qos, expected_name in (
+                ("49", "Throttling.ServiceOverloaded"),
+                ("50", "Throttling.ResourceExhausted"),
+            ):
+                with self.subTest(
+                    exception_type=exception_type, reason=reason, qos=qos
+                ):
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            req,
+                            [1, 2],
+                            SamplingParams(),
+                            DashScRequestControls(
+                                request_headers={"x-dashscope-inner-qos-level": qos}
+                            ),
+                            _RejectedVisitor(),
+                            rtp_llm_request_id=1,
+                        )
+                    )
+
+                    self.assertEqual(1, len(chunks))
+                    _, payload = _dash_error_payload(chunks[0])
+                    self.assertEqual(429, payload["status_code"])
+                    self.assertEqual(expected_name, payload["status_name"])
+                    self.assertEqual("Too many requests.", payload["status_message"])
+                    self.assertNotIn(
+                        "private scheduler diagnostic",
+                        chunks[0].infer_response.parameters["error_msg"].string_param,
+                    )
+
+    async def test_admission_rejections_without_qos_header_use_legacy_503(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                "ServiceUnavailable",
+                "Service unavailable.",
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                "ServiceUnavailable",
+                "Service unavailable.",
+            ),
+            (
+                ExceptionType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+                "ServiceUnavailable",
+                "Service unavailable.",
+            ),
+            (
+                ExceptionType.BATCH_SLO_EXPIRED,
+                AdmissionRejectReason.UNSPECIFIED,
+                "ServiceUnavailable",
+                "private scheduler diagnostic",
+            ),
+        )
+
+        for exception_type, reason, expected_name, expected_message in cases:
+
+            class _RejectedVisitor:
+                async def enqueue(self, _gi):
+                    raise FtRuntimeException(
+                        exception_type,
+                        "private scheduler diagnostic",
+                        admission_reject_reason=reason,
+                    )
+
+            with self.subTest(exception_type=exception_type, reason=reason):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(),
+                        _RejectedVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+
+                self.assertEqual(1, len(chunks))
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(503, payload["status_code"])
+                self.assertEqual(expected_name, payload["status_name"])
+                self.assertEqual(expected_message, payload["status_message"])
+
+    async def test_admission_qos_mapping_reads_invocation_metadata(self) -> None:
+        req = self._minimal_request()
+
+        class _RejectedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.RESOURCE_EXHAUSTED,
+                    "private scheduler diagnostic",
+                    admission_reject_reason=AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                )
+
+        for qos, expected_name in (
+            ("49", "Throttling.ServiceOverloaded"),
+            ("50", "Throttling.ResourceExhausted"),
+        ):
+            with self.subTest(qos=qos):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(),
+                        _RejectedVisitor(),
+                        rtp_llm_request_id=1,
+                        invocation_metadata=(("x-dashscope-inner-qos-level", qos),),
+                    )
+                )
+
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(expected_name, payload["status_name"])
+                self.assertEqual("Too many requests.", payload["status_message"])
+
+    async def test_priority_attribution_unavailable_is_503_even_with_qos(
+        self,
+    ) -> None:
+        req = self._minimal_request()
+
+        class _UnavailableVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.ADMISSION_UNAVAILABLE,
+                    "occupant priority provenance is unavailable",
+                    admission_reject_reason=AdmissionRejectReason.UNSPECIFIED,
+                )
+
+        for request_headers in (
+            {},
+            {"x-dashscope-inner-qos-level": "49"},
+            {"x-dashscope-inner-qos-level": "50"},
+        ):
+            with self.subTest(request_headers=request_headers):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(request_headers=request_headers),
+                        _UnavailableVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(503, payload["status_code"])
+                self.assertEqual("ServiceUnavailable", payload["status_name"])
+                self.assertEqual("Service unavailable.", payload["status_message"])
+
+    async def test_invalid_qos_header_keeps_existing_admission_mapping(self) -> None:
+        req = self._minimal_request()
+
+        class _RejectedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                    "private scheduler diagnostic",
+                    admission_reject_reason=AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                )
+
+        for qos in ("invalid", "0", "-1", "101"):
+            with self.subTest(qos=qos):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(
+                            request_headers={"x-dashscope-inner-qos-level": qos}
+                        ),
+                        _RejectedVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+
+                _, payload = _dash_error_payload(chunks[0])
+                self.assertEqual("ServiceUnavailable", payload["status_name"])
+                self.assertEqual("Service unavailable.", payload["status_message"])
+
+    def test_invalid_metadata_qos_falls_back_to_valid_request_header(self) -> None:
+        for metadata_qos in ("invalid", "0", "-1", "101"):
+            with self.subTest(metadata_qos=metadata_qos):
+                qos_level = _request_qos_level(
+                    DashScRequestControls(request_headers={"x-dashscope-inner-qos-level": "50"}),
+                    (("x-dashscope-inner-qos-level", metadata_qos),),
+                )
+                self.assertEqual(50, qos_level)
+
+    def test_invalid_metadata_and_request_qos_are_not_explicit_qos(
+        self,
+    ) -> None:
+        for qos in ("invalid", "0", "-1", "101"):
+            with self.subTest(qos=qos):
+                qos_level = _request_qos_level(
+                    DashScRequestControls(request_headers={"x-dashscope-inner-qos-level": qos}),
+                    (("x-dashscope-inner-qos-level", qos),),
+                )
+                self.assertIsNone(qos_level)
+
+    async def test_valid_metadata_qos_overrides_request_header(self) -> None:
+        req = self._minimal_request()
+
+        class _RejectedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.RESOURCE_EXHAUSTED,
+                    "private scheduler diagnostic",
+                    admission_reject_reason=AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(request_headers={"x-dashscope-inner-qos-level": "49"}),
+                _RejectedVisitor(),
+                rtp_llm_request_id=1,
+                invocation_metadata=(("x-dashscope-inner-qos-level", "50"),),
+            )
+        )
+
+        _, payload = _dash_error_payload(chunks[0])
+        self.assertEqual("Throttling.ResourceExhausted", payload["status_name"])
+        self.assertEqual("Too many requests.", payload["status_message"])
+
+    def test_explicit_qos_does_not_hide_invalid_admission_reason_pair(self) -> None:
+        invalid_pairs = (
+            (
+                ExceptionType.PRIORITY_PREEMPTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.PRIORITY_PREEMPTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.PRIORITY_PREEMPTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            ),
+        )
+
+        for exception_type, reason in invalid_pairs:
+            for qos_level in (49, 50):
+                with self.subTest(
+                    exception_type=exception_type,
+                    reason=reason,
+                    qos_level=qos_level,
+                ):
+                    mapping = _dash_error_mapping_for_ft_exception(
+                        FtRuntimeException(
+                            exception_type,
+                            "private scheduler diagnostic",
+                            admission_reject_reason=reason,
+                        ),
+                        qos_level=qos_level,
+                    )
+
+                    self.assertEqual(
+                        DASH_ERROR_CAPACITY,
+                        mapping.error_spec,
+                    )
+                    self.assertEqual("Service unavailable.", mapping.public_message)
+                    self.assertTrue(mapping.protocol_error)
+
+        invalid_raw_reason = FtRuntimeException(
+            ExceptionType.PRIORITY_PREEMPTED,
+            "private scheduler diagnostic",
+        )
+        invalid_raw_reason.admission_reject_reason = 999
+        for qos_level in (None, 49, 50):
+            with self.subTest(raw_reason=999, qos_level=qos_level):
+                mapping = _dash_error_mapping_for_ft_exception(
+                    invalid_raw_reason,
+                    qos_level=qos_level,
+                )
+                self.assertEqual(DASH_ERROR_CAPACITY, mapping.error_spec)
+                self.assertEqual("Service unavailable.", mapping.public_message)
+                self.assertTrue(mapping.protocol_error)
+
+    async def test_generic_capacity_mapping_does_not_depend_on_qos_priority(
+        self,
+    ) -> None:
+        """A QoS value is not a rejection reason.
+
+        Generic capacity failures keep the historical 503 contract for every
+        priority; only typed Auto-TPM outcomes opt into the QoS 429 mapping.
+        """
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        for request_headers in (
+            {},
+            {"x-dashscope-inner-qos-level": "40"},
+            {"x-dashscope-inner-qos-level": "50"},
+        ):
+            with self.subTest(request_headers=request_headers):
+                chunks = await _drain(
+                    iter_real_model_stream_infer(
+                        req,
+                        [1, 2],
+                        SamplingParams(),
+                        DashScRequestControls(request_headers=request_headers),
+                        _CapacityVisitor(),
+                        rtp_llm_request_id=1,
+                    )
+                )
+                self.assertEqual(len(chunks), 1)
+                self.assertFalse(chunks[0].error_message)
+                error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(error_no, 5)
+                self.assertEqual(payload["status_code"], 503)
+                self.assertEqual(payload["status_name"], "ServiceUnavailable")
+                self.assertIn("traffic limit exceeded", payload["status_message"])
+                self.assertEqual(
+                    _finish_reason(chunks[0]),
+                    LLMFinishReason.USE_PARAMETER_STATUS,
+                )
+
+    async def test_error_text_does_not_override_typed_internal_code(self) -> None:
+        """Diagnostic text is never used as a capacity classification."""
+        req = self._minimal_request()
+
+        class _TaskListFullVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL].",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                _TaskListFullVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+        self.assertEqual(payload["status_name"], "InternalError")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
+
+    async def test_generic_error_text_does_not_create_capacity_reason(self) -> None:
+        req = self._minimal_request()
+
+        class _TaskListFullGenericVisitor:
+            async def enqueue(self, _gi):
+                raise RuntimeError(
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL]."
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                _TaskListFullGenericVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, 19)
+        self.assertEqual(payload["status_code"], 500)
+        self.assertEqual(payload["status_name"], "InternalError")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -559,8 +1367,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         gc = visitor.last_generate_input.generate_config
         self.assertTrue(gc.in_think_mode)
+        self.assertEqual(gc.thinking_mode, ThinkingMode.ENABLED)
         self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
+        self.assertEqual(gc.structural_tag["format"]["type"], "sequence")
 
     async def test_budget_zero_disables_thinking(self) -> None:
         """Request-level zero budget must still produce a full think mask config."""
@@ -641,6 +1451,17 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_deepseek_v4_token1_forces_empty_think_phase2_prompt(self) -> None:
         req = self._minimal_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"image": "http://example/phase2.png"}],
+                    }
+                ]
+            }
+        )
+        mm_inputs = _build_mm_inputs_from_request(req)
         phase1 = GenerateOutputs(
             generate_outputs=[
                 GenerateOutput(
@@ -701,12 +1522,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 generate_env_config=env_cfg,
                 think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
                 phase2_request_id_factory=lambda: 200,
+                mm_inputs=mm_inputs,
             )
         )
 
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertEqual(visitor.generate_inputs[0].request_id, 100)
         self.assertEqual(visitor.generate_inputs[1].request_id, 200)
+        self.assertEqual(visitor.generate_inputs[0].mm_inputs, mm_inputs)
+        self.assertEqual(visitor.generate_inputs[1].mm_inputs, mm_inputs)
         self.assertTrue(visitor.generate_inputs[0].generate_config.in_think_mode)
         self.assertEqual(
             visitor.generate_inputs[0].generate_config.begin_think_token_ids,
@@ -733,7 +1557,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(phase1_config.structural_tag)
         self.assertIsNone(phase2_config.response_format)
         self.assertIsNone(phase2_config.structural_tag)
-        self.assertEqual(phase2_config.json_schema, {"type": "object"})
+        self.assertEqual(
+            phase2_config.json_schema,
+            {"anyOf": [{"type": "object"}, {"type": "array"}]},
+        )
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
         self.assertEqual(len(visitor.generate_inputs[0].generate_config.role_addrs), 1)
         self.assertEqual(visitor.generate_inputs[1].generate_config.role_addrs, [])
@@ -778,7 +1605,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens=2,
                     max_new_tokens_from_completion_alias=True,
                 ),
-                DashScRequestControls(max_new_think_tokens=10),
+                DashScRequestControls(enable_thinking=True, max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -835,7 +1662,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=105,
                 ),
-                DashScRequestControls(max_new_think_tokens=10),
+                DashScRequestControls(enable_thinking=True, max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 tokenizer=tok,
@@ -878,7 +1705,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=3,
                 ),
-                DashScRequestControls(max_new_think_tokens=10),
+                DashScRequestControls(enable_thinking=True, max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 tokenizer=tok,
@@ -1319,10 +2146,70 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value, 1)
         self.assertEqual(tags["protocol"], "dash_sc_grpc")
 
-    async def test_phase2_strips_leading_thinking_then_close(self) -> None:
-        """Phase-2 model occasionally emits accidental thinking followed by
-        ``</think>`` before the real answer. The leading reasoning + close
-        sequence must be stripped so only post-close tokens reach the client."""
+    async def test_phase2_grammar_streams_each_backend_chunk_immediately(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_first = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_final = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([22], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_stream = _FakeAsyncStream([phase2_first, phase2_final])
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1]), phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        responses = iter_real_model_stream_infer(
+            req,
+            [7, 8, 128821],
+            SamplingParams(
+                response_format=json.dumps({"type": "json_object"}),
+            ),
+            DashScRequestControls(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            echo_prefix_ids=[128821, 198],
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+
+        first_phase2 = None
+        async for response in responses:
+            if response.infer_response.id.endswith("-2"):
+                first_phase2 = response
+                break
+
+        self.assertIsNotNone(first_phase2)
+        self.assertEqual(_gen_ids(first_phase2), [20, 21])
+        self.assertEqual(phase2_stream._emitted, 1)
+
+        remaining = await _drain(responses)
+        self.assertEqual([_gen_ids(chunk) for chunk in remaining], [[22]])
+
+    async def test_phase2_preserves_leading_thinking_then_close(self) -> None:
+        """Phase-2 output is streamed unchanged, matching DashLLM ownership."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1383,18 +2270,16 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        # Phase-1 emits two chunks (truncated content then synthesised eos).
-        # Phase-2 sees [55, 56] (accidental thinking, buffered then dropped),
-        # then [128822, 271, 20, 21] (close + tail content). Client only sees
-        # [20, 21] from phase-2.
+        # Phase-2 servicer output is a transparent chunk-for-chunk pass-through.
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(len(phase2_chunks), 1)
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+        self.assertEqual(len(phase2_chunks), 2)
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in phase2_chunks],
+            [[55, 56], [128822, 271, 20, 21]],
+        )
 
-    async def test_phase2_strips_trailing_eos_artifact(self) -> None:
-        """Phase-2 ends with a structural ``</think>\\n\\n`` closing-tag
-        artifact mirroring the empty-think prompt body. That trailing
-        sequence must not leak into ``content``."""
+    async def test_phase2_preserves_trailing_think_close(self) -> None:
+        """Phase-2 trailing close tokens remain backend-owned output."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1447,8 +2332,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
         self.assertEqual(len(phase2_chunks), 1)
-        # Trailing [128822, 271] is stripped; only the real answer ids survive.
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [30, 31, 32])
+        self.assertEqual(
+            _gen_ids(phase2_chunks[0]),
+            [30, 31, 32, 128822, 271],
+        )
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
@@ -1650,13 +2537,60 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         )
         return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
 
+    async def test_model_stream_infer_passes_multimodal_payload_to_backend(
+        self,
+    ) -> None:
+        request = self._valid_infer_request()
+        request.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "http://example/image.png"},
+                                "min_pixels": 128,
+                                "max_pixels": 4096,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        visitor = self._terminal_visitor()
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([request]), _FakeGrpcContext())
+        )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(visitor.enqueue_called, 1)
+        mm_inputs = visitor.last_generate_input.mm_inputs
+        self.assertEqual(len(mm_inputs), 1)
+        self.assertEqual(mm_inputs[0].url, "http://example/image.png")
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.min_pixels, 128)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.max_pixels, 4096)
+
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token
         # ids, proving they travel servicer -> capture -> emit end to end.
         out = GenerateOutput(
             output_ids=torch.tensor([9], dtype=torch.int32),
             finished=True,
-            aux_info=AuxInfo(input_len=1, reuse_len=2),
+            aux_info=AuxInfo(
+                cost_time=12.5,
+                first_token_cost_time=3.5,
+                wait_time=1.25,
+                iter_count=4,
+                input_len=1,
+                output_len=1,
+                reuse_len=2,
+                local_reuse_len=1,
+                remote_reuse_len=1,
+                aux_string="backend-diagnostic",
+            ),
         )
         visitor = _FakeVisitor(
             _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
@@ -1677,6 +2611,13 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["backend_input_token_len"], 1)
         self.assertEqual(payload["output_token_len"], 1)
         self.assertEqual(payload["prompt_cached_token_num"], 2)
+        self.assertEqual(payload["aux_info"]["cost_time"], 12.5)
+        self.assertEqual(payload["aux_info"]["first_token_cost_time"], 3.5)
+        self.assertEqual(payload["aux_info"]["wait_time"], 1.25)
+        self.assertEqual(payload["aux_info"]["iter_count"], 4)
+        self.assertEqual(payload["aux_info"]["local_reuse_len"], 1)
+        self.assertEqual(payload["aux_info"]["remote_reuse_len"], 1)
+        self.assertEqual(payload["aux_info"]["aux_string"], "backend-diagnostic")
 
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [
@@ -1717,6 +2658,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(phase1[0]["role"], "PREFILL")
         self.assertEqual(phase1[1]["role"], "DECODE")
         self.assertEqual(phase1[0]["grpc_port"], 8081)
+        self.assertEqual(payload["aux_info"]["role_addrs"], phase1)
 
     async def test_empty_request_stream_marks_request_done(self) -> None:
         servicer = DashScInferenceServicer(
@@ -1785,6 +2727,93 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             [c[0] for c in order.mock_calls],
             ["emit_access_log", "report_frontend_rpc_done"],
         )
+
+    def _capture_kmonitor_calls(self):
+        # Patch the kmonitor the grpc_metrics leaf functions report through;
+        # the servicer calls them by imported name, so the module-global
+        # kmonitor reference is the single choke point.
+        calls: list[tuple] = []
+        patcher = patch.object(grpc_metrics, "kmonitor")
+        mock_kmon = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_kmon.report.side_effect = lambda m, v=1, tags=None: calls.append(
+            (m, v, dict(tags or {}))
+        )
+        return calls
+
+    @staticmethod
+    def _tagged_arrivals(calls):
+        return [
+            c for c in calls if c[0] == AccMetrics.QPS_METRIC and "priority" in c[2]
+        ]
+
+    async def test_priority_arrival_reports_true_qos_exactly_once(self) -> None:
+        # Normal RPC with a qos level: the tagged arrival fires once with
+        # the true value (after the first frame parse), and the done-tail
+        # fallback stays a no-op.
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"x-dashscope-inner-qos-level": 7}
+        )
+        calls = self._capture_kmonitor_calls()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext()))
+
+        tagged = self._tagged_arrivals(calls)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0][2]["priority"], "7")
+        # No untagged arrival series (single-report).
+        untagged = [
+            c for c in calls if c[0] == AccMetrics.QPS_METRIC and "priority" not in c[2]
+        ]
+        self.assertEqual(len(untagged), 0)
+        # Success carries the same priority.
+        success = [c for c in calls if c[0] == AccMetrics.SUCCESS_QPS_METRIC]
+        self.assertEqual(len(success), 1)
+        self.assertEqual(success[0][2]["priority"], "7")
+
+    async def test_priority_arrival_falls_back_to_zero_on_parse_error(self) -> None:
+        # Request that fails before the first frame parse completes (missing
+        # input_ids): the done-tail fallback back-fills the "0" bucket, still
+        # exactly one tagged arrival.
+        servicer = DashScInferenceServicer(
+            backend_visitor=_FakeVisitor(_FakeAsyncStream([]))
+        )
+        bad = predict_v2_pb2.ModelInferRequest()
+        bad.id = "x"
+        bad.model_name = "m"
+        calls = self._capture_kmonitor_calls()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([bad]), _FakeGrpcContext()))
+
+        tagged = self._tagged_arrivals(calls)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0][2]["priority"], "0")
+
+    async def test_priority_arrival_falls_back_to_zero_on_frameless_rpc(
+        self,
+    ) -> None:
+        # RPC with no request frame at all: no parse ever runs, the done-tail
+        # fallback reports the "0" bucket exactly once.
+        servicer = DashScInferenceServicer(
+            backend_visitor=_FakeVisitor(_FakeAsyncStream([]))
+        )
+        calls = self._capture_kmonitor_calls()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([]), _FakeGrpcContext()))
+
+        tagged = self._tagged_arrivals(calls)
+        self.assertEqual(len(tagged), 1)
+        self.assertEqual(tagged[0][2]["priority"], "0")
 
     async def test_missing_input_ids_error(self) -> None:
         servicer = DashScInferenceServicer(
@@ -1927,6 +2956,31 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "bad parameter")
 
+    async def test_video_frame_list_is_rejected_before_enqueue(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"video": ["http://f1.jpg", "http://f2.jpg"]}],
+                    }
+                ]
+            }
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(
+            self, responses[0], "video frame lists are not supported"
+        )
+
     async def test_openai_compat_max_new_tokens_negative_uses_default(
         self,
     ) -> None:
@@ -2010,7 +3064,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     self, responses[0], "max_completion_tokens"
                 )
 
-    async def test_dash_generation_without_enable_thinking_disables_env_thinking(
+    async def test_dash_generation_without_enable_thinking_inherits_adaptive_env(
         self,
     ) -> None:
         out = GenerateOutput(
@@ -2049,7 +3103,81 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         generate_config = visitor.last_generate_input.generate_config
         self.assertEqual(generate_config.max_new_tokens, 3)
         self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
+        self.assertEqual(generate_config.max_thinking_tokens, 32000)
+
+    async def test_dash_generation_without_explicit_mode_inherits_env(
+        self,
+    ) -> None:
+        cases = {
+            "disabled": (ThinkingMode.DISABLED, False, None),
+            "adaptive": (ThinkingMode.ADAPTIVE, False, "or"),
+            "enabled": (ThinkingMode.ENABLED, True, "sequence"),
+            "0": (ThinkingMode.DISABLED, False, None),
+            "1": (ThinkingMode.ENABLED, True, "sequence"),
+        }
+        for env_mode, (expected_mode, expected_in_think, grammar_type) in cases.items():
+            with self.subTest(env_mode=env_mode):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.think_mode = env_mode
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "qwen"),
+                )
+                request = self._valid_infer_request()
+
+                await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([request]), MagicMock())
+                )
+
+                generate_config = visitor.last_generate_input.generate_config
+                self.assertEqual(generate_config.thinking_mode, expected_mode)
+                self.assertEqual(generate_config.in_think_mode, expected_in_think)
+                if grammar_type is None:
+                    self.assertEqual(generate_config.max_thinking_tokens, 0)
+                    self.assertIsNone(generate_config.structural_tag)
+                else:
+                    self.assertEqual(generate_config.max_thinking_tokens, 32000)
+                    self.assertEqual(
+                        generate_config.structural_tag["format"]["type"],
+                        grammar_type,
+                    )
+
+    async def test_implicit_adaptive_multi_sequence_falls_back_to_disabled(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        _add_input_tensor(
+            req,
+            "num_return_sequences",
+            "INT32",
+            [1],
+            struct.pack("<i", 2),
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 0)
+        self.assertEqual(generate_config.begin_think_token_ids, [128821, 198])
+        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
+        self.assertIsNone(generate_config.structural_tag)
 
     async def test_dash_generation_enable_thinking_true_without_budget_keeps_thinking(
         self,
@@ -2072,6 +3200,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         generate_config = visitor.last_generate_input.generate_config
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 32000)
+        self.assertEqual(generate_config.structural_tag["format"]["type"], "sequence")
 
     async def test_dash_generation_response_format_is_finalized_before_enqueue(
         self,
@@ -2281,7 +3410,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(elements[0]["end"], "</think>\n\n")
         self.assertEqual(elements[1], tag["format"])
 
-    async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
+    async def test_dash_generation_budget_aliases_without_enable_thinking_are_enabled(
         self,
     ) -> None:
         for param_name in ("thinking_budget", "max_new_think_tokens"):
@@ -2297,13 +3426,24 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 )
                 req = self._valid_infer_request()
                 req.parameters[param_name].int64_param = 10
+                req.parameters["response_format"].string_param = json.dumps(
+                    {"type": "json_object"}
+                )
 
                 await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
 
                 self.assertEqual(visitor.enqueue_called, 1)
                 generate_config = visitor.last_generate_input.generate_config
                 self.assertTrue(generate_config.in_think_mode)
+                self.assertEqual(generate_config.thinking_mode, ThinkingMode.ENABLED)
                 self.assertEqual(generate_config.max_thinking_tokens, 10)
+                fixed = generate_config.structural_tag["format"]
+                self.assertEqual(fixed["type"], "sequence")
+                think_branch = fixed
+                self.assertEqual(
+                    think_branch["elements"][0]["content"]["max_tokens"], 10
+                )
+                self.assertEqual(think_branch["elements"][1]["type"], "json_schema")
 
     async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
         self,
@@ -2338,12 +3478,18 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         captured: list[int] = []
 
         class _CaptureVisitor:
+            request_id_factory = None
+
+            def set_request_id_factory(self, factory):
+                self.request_id_factory = factory
+
             async def enqueue(self, gi):
                 captured.append(gi.request_id)
                 return _FakeAsyncStream([])
 
+        visitor = _CaptureVisitor()
         servicer = DashScInferenceServicer(
-            backend_visitor=_CaptureVisitor(),
+            backend_visitor=visitor,
             ip="10.0.0.1",
             port=12345,
             server_id="srv-xyz",
@@ -2355,9 +3501,12 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
             expected = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 1)
+            retry_id = visitor.request_id_factory()
+            expected_retry_id = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 2)
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0], expected)
+        self.assertEqual(retry_id, expected_retry_id)
 
     async def test_real_mode_passes_invocation_metadata_to_generate_input(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2407,13 +3556,151 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 0)
         self.assertEqual(generate_config.end_think_token_ids, [])
-        self.assertEqual(generate_config.timeout_ms, 1_800_000)
-        self.assertEqual(generate_config.ttft_timeout_ms, 1_800_000)
+        self.assertIsNone(generate_config.structural_tag)
+        # 1_800_000 request timeout minus the 5s gateway margin capped by
+        # ``_apply_dash_sc_controls_to_generate_config``, so the engine times out
+        # before the upstream gateway sends RST_STREAM.
+        self.assertEqual(generate_config.timeout_ms, 1_795_000)
+        self.assertEqual(generate_config.ttft_timeout_ms, 1_795_000)
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
             {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
+        # qos_priority must NOT be set when x-dashscope-inner-qos-level
+        # is absent from the request.
+        self.assertIsNone(generate_config.qos_priority)
+
+    async def test_qos_priority_set_from_ds_header_attributes(self) -> None:
+        """dash_sc path must set generate_config.qos_priority from
+        x-dashscope-inner-qos-level, mirroring openai_endpoint.py."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-inner-qos-level": "77",
+                "x-ds-request-priority": "10",
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        generate_config = visitor.last_generate_input.generate_config
+        # Channel 2: qos_priority set by _apply_request_overrides
+        self.assertEqual(generate_config.qos_priority, 77)
+        # traffic_reject_priority still comes from x-ds-request-priority
+        self.assertEqual(generate_config.traffic_reject_priority, 10)
+        # Channel 1: headers also carry the qos level
+        self.assertEqual(
+            visitor.last_generate_input.headers.get("x-dashscope-inner-qos-level"),
+            "77",
+        )
+        # _extract_priority returns 77 via either channel
+        self.assertEqual(
+            MasterClient._extract_priority(visitor.last_generate_input), 77
+        )
+
+    async def test_extract_priority_fallback_to_qos_priority(self) -> None:
+        """When GenerateInput.headers is empty (e.g. after IPC),
+        _extract_priority must fall back to generate_config.qos_priority."""
+        gc = GenerateConfig()
+        gc.qos_priority = 77
+        input_no_headers = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_headers), 77)
+
+    async def test_extract_priority_returns_50_when_no_priority(self) -> None:
+        """When neither headers nor qos_priority carry a value,
+        _extract_priority returns the default 50."""
+        gc = GenerateConfig()
+        self.assertIsNone(gc.qos_priority)
+        input_no_priority = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_priority), 50)
+
+    async def test_int64_input_overflow_is_rejected_at_parse_boundary(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "overflow"
+        req.model_name = "default"
+        _add_input_tensor(req, "input_ids", "INT64", [1], struct.pack("<q", 2**40))
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(
+            _finish_reason(responses[0]), DASH_ERROR_INTERNAL.finish_reason
+        )
+
+    async def test_late_cancel_does_not_overwrite_backend_aux_info(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=1,
+                output_len=1,
+                reuse_len=7,
+                local_reuse_len=3,
+                memory_reuse_len=4,
+            ),
+        )
+        cancel = asyncio.CancelledError()
+        cancel.aux_info = {
+            "input_len": 1,
+            "output_len": 0,
+            "step_output_len": 0,
+            "reuse_len": 0,
+        }
+
+        class _LateCancelStream(_FakeAsyncStream):
+            async def __anext__(self):
+                if self._emitted >= len(self._chunks):
+                    raise cancel
+                return await super().__anext__()
+
+        visitor = _FakeVisitor(
+            _LateCancelStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info, self.assertRaises(asyncio.CancelledError):
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+                )
+            )
+
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(payload["status"], "OK")
+        self.assertEqual(payload["exc_type"], "CancelledError")
+        self.assertEqual(payload["aux_info"]["output_len"], 1)
+        self.assertEqual(payload["aux_info"]["reuse_len"], 7)
+        self.assertEqual(payload["aux_info"]["local_reuse_len"], 3)
+        self.assertEqual(payload["aux_info"]["memory_reuse_len"], 4)
 
 
 if __name__ == "__main__":

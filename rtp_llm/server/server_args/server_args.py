@@ -344,6 +344,8 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 break
                     i += 1
 
+            self._cli_provided_args = set(provided_args)
+
             # Now fill in missing values from environment variables
             for dest, env_name in self._env_mappings.items():
                 # Only set from environment if the value wasn't provided via command line
@@ -366,6 +368,8 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 try:
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
+                                except argparse.ArgumentTypeError as error:
+                                    self.error(f"{env_name} ({dest}): {error}")
                                 except (ValueError, TypeError):
                                     # If conversion fails, skip this value
                                     pass
@@ -393,8 +397,18 @@ class EnvArgumentParser(argparse.ArgumentParser):
         return parsed_args
 
     def _apply_config_bindings(self, parsed_args: argparse.Namespace) -> None:
-        """应用所有配置绑定，将解析的参数值设置到配置对象"""
-        for binding in self._config_bindings:
+        """应用所有配置绑定，将解析的参数值设置到配置对象。
+
+        绑定按两轮应用：先应用来自环境变量/默认值的绑定，再应用命令行显式提供的
+        绑定。这样当废弃 env 别名与显式传入的 canonical flag 指向同一配置字段时，
+        显式 CLI 值总是最终生效，不会被残留的旧 env 覆盖。每一轮内部仍保持注册
+        顺序（别名注册在 canonical 之后，因此别名可覆盖 canonical 的默认值）。
+        """
+        cli_provided = getattr(self, "_cli_provided_args", set())
+        ordered_bindings = [
+            b for b in self._config_bindings if b.dest not in cli_provided
+        ] + [b for b in self._config_bindings if b.dest in cli_provided]
+        for binding in ordered_bindings:
             value = getattr(parsed_args, binding.dest, None)
             if value is not None:
                 try:
@@ -465,7 +479,11 @@ def init_all_group_args(
     init_fmha_group_args(parser, py_env_configs.fmha_config)
     init_gang_group_args(parser, py_env_configs.distribute_config)
     init_generate_group_args(parser, py_env_configs.generate_env_config)
-    init_grammar_group_args(parser, py_env_configs.grammar_config)
+    init_grammar_group_args(
+        parser,
+        py_env_configs.grammar_config,
+        py_env_configs.grammar_admission_config,
+    )
     init_hw_kernel_group_args(parser, py_env_configs.py_hw_kernel_config)
     init_kv_cache_group_args(parser, py_env_configs.kv_cache_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)
@@ -531,5 +549,14 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parser.parse_args(args)
+
+    # Normalize the two switches before model construction and process spawn.
+    from rtp_llm.utils.warmup import configure_warmup
+
+    configure_warmup(
+        py_env_configs.runtime_config.warm_up,
+        py_env_configs.runtime_config.model_warm_up,
+    )
+
 
     return py_env_configs

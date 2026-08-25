@@ -55,6 +55,13 @@ public:
                                              SamplerOutput&                      draft_sampler_output,
                                              SamplerOutput&                      target_sampler_output);
 
+    SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
+                                    const torch::Tensor& anchors,
+                                    const torch::Tensor& temperature,
+                                    const torch::Tensor& markov_w1,
+                                    const torch::Tensor& markov_w2,
+                                    size_t               draft_vocab_size) const;
+
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,
                      const std::list<GenerateStreamPtr>& streams,
