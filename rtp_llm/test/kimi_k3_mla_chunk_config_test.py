@@ -58,12 +58,12 @@ class KimiK3MLAChunkConfigTest(unittest.TestCase):
             config = KimiK3Eagle3._create_config(checkpoint_dir)
         return config.attn_config.mla_prefill_kv_chunk_tokens
 
-    def test_k3_chunking_is_opt_in_by_default(self) -> None:
+    def test_k3_chunking_defaults_to_16k(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(self._ENV_NAME, None)
-            self.assertEqual(_mla_prefill_kv_chunk_tokens(), 0)
-            self.assertEqual(self._parse_chunk_tokens(), 0)
-            self.assertEqual(self._parse_eagle3_chunk_tokens(), 0)
+            self.assertEqual(_mla_prefill_kv_chunk_tokens(), 16384)
+            self.assertEqual(self._parse_chunk_tokens(), 16384)
+            self.assertEqual(self._parse_eagle3_chunk_tokens(), 16384)
 
     def test_explicit_chunk_capacity_is_forwarded_to_attention_config(self) -> None:
         with mock.patch.dict(os.environ, {self._ENV_NAME: "65536"}, clear=False):

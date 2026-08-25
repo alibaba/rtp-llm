@@ -18,7 +18,7 @@ _MLA_PREFILL_KV_CHUNK_TOKENS_ENV = "KIMI_K3_MLA_PREFILL_KV_CHUNK_TOKENS"
 def _mla_prefill_kv_chunk_tokens() -> int:
     """Resolve K3's dense-MLA historical-prefix chunk capacity."""
 
-    raw = os.environ.get(_MLA_PREFILL_KV_CHUNK_TOKENS_ENV, "0").strip()
+    raw = os.environ.get(_MLA_PREFILL_KV_CHUNK_TOKENS_ENV, "16384").strip()
     try:
         value = int(raw)
     except ValueError as error:
