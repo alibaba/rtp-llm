@@ -20,6 +20,7 @@ route_logger = logging.getLogger("route_logger")
 SCHEDULE_PATH = "/rtp_llm/schedule"
 DEFAULT_REQUEST_TIMEOUT_SEC = 0.5
 SUCCESS_CODE = 200
+FALLBACK_ERROR_CODE = 8600
 DEFAULT_REQUEST_PRIORITY = 100
 CONNECTOR_LIMIT_PER_HOST = 30
 CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
@@ -30,13 +31,15 @@ class FlexlbResponse:
     """
     Result of a FlexLB schedule request: success or failure state.
 
-    Success: role_addrs is set. Failure: connection_failed and/or
-    error_code/error_message from scheduler. request_id is always from frontend;
-    only connection_failed triggers slave retry and domain fallback.
+    Success: role_addrs is set. Failure: connection_failed, fallback, and/or
+    error_code/error_message from scheduler. request_id is always from frontend.
+    Only connection_failed triggers slave retry; connection_failed and fallback
+    both permit domain fallback.
     """
 
     role_addrs: Optional[List[RoleAddr]] = None
     connection_failed: bool = False
+    fallback: bool = False
     error_code: Optional[int] = None
     error_message: Optional[str] = None
     result: Optional[Dict[str, Any]] = None  # internal: raw JSON from scheduler
@@ -79,6 +82,17 @@ class FlexlbResponse:
             connection_failed=False,
             error_code=error_code,
             error_message=error_message,
+            result=None,
+        )
+
+    @classmethod
+    def fallback_response(cls) -> "FlexlbResponse":
+        return cls(
+            role_addrs=None,
+            connection_failed=False,
+            fallback=True,
+            error_code=FALLBACK_ERROR_CODE,
+            error_message="FALLBACK",
             result=None,
         )
 
@@ -187,6 +201,8 @@ class MasterClient:
                         error_code,
                         error_message or "",
                     )
+                    if error_code == FALLBACK_ERROR_CODE:
+                        return FlexlbResponse.fallback_response()
                     return FlexlbResponse.error_response(error_code, error_message)
 
                 result = await response.json()
@@ -222,7 +238,8 @@ class MasterClient:
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
 
         request_id is frontend-generated and only used for logging.
-        Only connection_failed triggers slave retry and domain fallback.
+        Only connection_failed triggers slave retry. A fallback response is returned
+        directly so the caller can perform domain fallback.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -277,6 +294,7 @@ class MasterClient:
             return FlexlbResponse(
                 role_addrs=None,
                 connection_failed=resp.connection_failed,
+                fallback=resp.fallback,
                 error_code=resp.error_code,
                 error_message=resp.error_message,
                 result=None,
