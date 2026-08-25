@@ -6,9 +6,11 @@ Selected by LinearFactory only on the compiled sm_120 architecture; sm_9x / sm_1
 keep using DeepGEMM via `CudaFp8GEMMLinear`.
 """
 
+import os
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
@@ -196,6 +198,9 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         self.weight_scales = weight_scales
         self.input_scales = input_scales
         self.bias = bias
+        self.fast_gelu_min_m = int(
+            os.environ.get("RTP_LLM_SM120_CUTLASS_FAST_GELU_MIN_M", "0")
+        )
 
         if self.weight.dim() != 2 or self.weight_scales.dim() != 2:
             raise ValueError(
@@ -282,4 +287,8 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         return self._forward_impl(input, use_gelu=False)
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
-        return self._forward_impl(input, use_gelu=True)
+        if self.fast_gelu_min_m > 0 and input.shape[0] >= self.fast_gelu_min_m:
+            return self._forward_impl(input, use_gelu=True)
+        # Small-M and default path retain exact GELU. The fast epilogue is
+        # opt-in because GELU_taylor can change borderline classifications.
+        return F.gelu(self._forward_impl(input, use_gelu=False))
