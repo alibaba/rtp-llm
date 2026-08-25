@@ -4,6 +4,14 @@ py_test_deps = [
 ]
 
 py_test (
+    name = "aiter_fmoe_config_test",
+    srcs = ["aiter_fmoe_config_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+py_test (
     name = "rocm_fused_moe_test",
     srcs = ["rocm_fused_moe_test.py"],
     deps = [

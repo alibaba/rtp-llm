@@ -1,9 +1,17 @@
 import copy
 from typing import Any, Dict, Optional
 
-import aiter
 import torch
-from aiter.fused_moe import fused_moe
+
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.aiter_fmoe_config import (
+    configure_aiter_fmoe_overrides,
+    require_aiter_fmoe_overrides_for_qwen35_tp4,
+)
+
+configure_aiter_fmoe_overrides()
+
+import aiter  # noqa: E402
+from aiter.fused_moe import fused_moe  # noqa: E402
 
 from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
@@ -31,6 +39,14 @@ def _moe_activation_type(activation: str) -> aiter.ActivationType:
     if activation in ("silu", "SiGLU"):
         return aiter.ActivationType.Silu
     return aiter.ActivationType.Gelu
+
+
+def _is_gfx942() -> bool:
+    try:
+        properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+        return "gfx942" in getattr(properties, "gcnArchName", "")
+    except Exception:
+        return False
 
 
 def build_ep_expert_mask(
@@ -197,6 +213,17 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w2 = weights[W.moe_w2]
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
+
+        is_qwen35_tp4_shape = (
+            _is_gfx942()
+            and config.tp_size == 4
+            and self.ep_size == 1
+            and self.num_experts == 256
+            and tuple(self.w1.shape) == (256, 256, 2048)
+            and tuple(self.w2.shape) == (256, 2048, 128)
+        )
+        if is_qwen35_tp4_shape:
+            require_aiter_fmoe_overrides_for_qwen35_tp4()
 
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1

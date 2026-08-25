@@ -35,6 +35,14 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "rocm_aiter_fmoe_configs",
+    srcs = [
+        "modules/factory/fused_moe/impl/rocm/data/qwen35_gfx942_tp4_fp8_tuned_fmoe.csv",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "tile_kernels_mhc",
     srcs = glob([
@@ -53,6 +61,7 @@ py_library(
     ]),
     data = [
         ":cutlass_moe_config",
+        ":rocm_aiter_fmoe_configs",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
     deps = [
