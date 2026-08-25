@@ -182,16 +182,8 @@ update_target() {
 }
 
 start_spring_boot() {
-    # prepare_service_out
-    # delete old SERVICE_OUT, keep last 20 logs
-    ls -t "$SERVICE_OUT".* 2>/dev/null | tail -n +$((20 + 1)) | xargs --no-run-if-empty rm -f
-    if [ -e "$SERVICE_OUT" ]; then
-        mv "$SERVICE_OUT" "$SERVICE_OUT.$(date '+%Y%m%d%H%M%S')" || exit1
-    fi
-    mkdir -p "$(dirname "${SERVICE_OUT}")" || exit1
-    touch "$SERVICE_OUT" || exit1
-
-    echo "INFO: spring boot service log: $SERVICE_OUT"
+    local REDIRECT_OUT=/proc/1/fd/1
+    echo "INFO: spring boot output redirected to container stdout"
 
     if [ ! -z "$SERVICE_PID" ]; then
         if [ -f "$SERVICE_PID" ]; then
@@ -241,7 +233,7 @@ start_spring_boot() {
                 -Dapp.location="\"${APP_HOME}/target/${APP_NAME}\"" \
                 -Djava.io.tmpdir="\"$SERVICE_TMPDIR\"" \
                 ${SPRING_BOOT_ARGS} "$@" \
-                >> "$SERVICE_OUT" 2>&1 "&"
+                >> "$REDIRECT_OUT" 2>&1 "&"
     else
         echo "Using classpath ${APP_HOME}/target/${APP_NAME}"
         eval exec "\"$JAVA_HOME/bin/java\"" $SERVICE_OPTS \
@@ -250,7 +242,7 @@ start_spring_boot() {
                 -Djava.endorsed.dirs="\"$JAVA_ENDORSED_DIRS\""  \
                 -Djava.io.tmpdir="\"$SERVICE_TMPDIR\"" \
                 org.springframework.boot.loader.JarLauncher ${SPRING_BOOT_ARGS} "$@" \
-                >> "$SERVICE_OUT" 2>&1 "&"
+                >> "$REDIRECT_OUT" 2>&1 "&"
     fi
 
     if [ ! -z "$SERVICE_PID" ]; then
@@ -318,8 +310,8 @@ start_nginx() {
 after_start_up() {
   now=`date "+%Y-%m-%d %H:%M:%S"`
   echo "INFO: ${APP_NAME} try to execute whale-handler after_start_up ... $now"
-  echo "INFO: Calling /usr/bin/curl --max-time 5 -s -w '\n%{http_code}' 'http://localhost:7001/hook/after_start'"
-  ret_str=`/usr/bin/curl --max-time 5 -s -w "\n%{http_code}" "http://localhost:7001/hook/after_start" 2>&1`
+  echo "INFO: Calling /usr/bin/curl --max-time 60 -s -w '\n%{http_code}' 'http://localhost:7001/hook/after_start'"
+  ret_str=`/usr/bin/curl --max-time 60 -s -w "\n%{http_code}" "http://localhost:7001/hook/after_start" 2>&1`
   http_code=$(echo "$ret_str" | tail -n1)
   response_body=$(echo "$ret_str" | head -n-1)
   echo "INFO: curl raw output: ${ret_str}"
@@ -363,6 +355,23 @@ stop_xagent() {
   echo "stop xagent finished..."
 }
 
+prepare_kmonitor_prometheus_config() {
+    if [[ "${FLEXLB_MONITOR_PROVIDER:-}" != "kmonitor-prometheus" ]]; then
+        return 0
+    fi
+
+    local classpath_dir="${APP_HOME}/target/${APP_NAME}/BOOT-INF/classes"
+    local template_file="${classpath_dir}/kmonitor-prometheus.properties.example"
+    local config_file="${classpath_dir}/kmonitor.properties"
+    if [[ ! -f "${template_file}" ]]; then
+        echo "ERROR: KMonitor Prometheus template is missing: ${template_file}"
+        return 1
+    fi
+
+    cp "${template_file}" "${config_file}" || return 1
+    echo "INFO: enabled KMonitor Prometheus exporter configuration: ${config_file}"
+}
+
 start() {
     echo "INFO: ${APP_NAME} try to start..."
     echo "APP_TGZ_FILE=${APP_TGZ_FILE}, APP_NAME=${APP_NAME}"
@@ -372,6 +381,7 @@ start() {
     HOME="$(getent passwd "$UID" | awk -F":" '{print $6}')" # fix "$HOME" by "$UID"
     echo "[start 1] start to unzip app tgz file..."
     update_target "${APP_TGZ_FILE}" "${APP_NAME}" || exit1
+    prepare_kmonitor_prometheus_config || exit1
 
     beforeStartApp
     echo "[start 2] try to start spring boot..."

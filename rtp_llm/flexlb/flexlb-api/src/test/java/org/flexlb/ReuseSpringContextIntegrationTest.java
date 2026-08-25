@@ -59,12 +59,20 @@ public class ReuseSpringContextIntegrationTest {
                                     "prefill_endpoint": {
                                         "address": "com.prefill.hosts.address",\s
                                         "protocol": "http",\s
-                                        "path": "/"
+                                        "path": "/",
+                                        "discovery": {
+                                            "type": "static-env",
+                                            "hosts": ["127.0.0.100:8080", "127.0.0.101:8080"]
+                                        }
                                     },\s
                                     "decode_endpoint": {
                                         "address": "com.decode.hosts.address",\s
                                         "protocol": "http",\s
-                                        "path": "/"
+                                        "path": "/",
+                                        "discovery": {
+                                            "type": "static-env",
+                                            "hosts": ["127.0.0.102:8080", "127.0.0.103:8080"]
+                                        }
                                     }
                                 }
                             ]
@@ -84,13 +92,13 @@ public class ReuseSpringContextIntegrationTest {
     @Test
     @DisplayName("Request cancellation test")
     public void requestCancelTest() {
-        RequestCancelTest.init(environmentVariables, configService, routeService).run();
+        RequestCancelTest.init(configService, routeService).run();
     }
 
     @Test
     @DisplayName("Queue full rejection test")
     public void queueFullRejectionTest() {
-        QueueStressTest.init(createWebClient(), environmentVariables, configService)
+        QueueStressTest.init(createWebClient(), configService)
                 .resetQueue(queueManager, 10)
                 .testQueueFullRejection();
     }
@@ -98,7 +106,7 @@ public class ReuseSpringContextIntegrationTest {
     @Test
     @DisplayName("Concurrent enqueue thread safety test")
     public void concurrentEnqueueTest() {
-        QueueStressTest.init(createWebClient(), environmentVariables, configService)
+        QueueStressTest.init(createWebClient(), configService)
                 .resetQueue(queueManager, 500)
                 .testConcurrentEnqueue();
     }
