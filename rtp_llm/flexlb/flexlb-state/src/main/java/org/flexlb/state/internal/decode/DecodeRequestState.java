@@ -53,6 +53,12 @@ public final class DecodeRequestState {
     // ---- 终局 ----
     private final AtomicBoolean finished = new AtomicBoolean();
     private volatile TerminalState terminalState;
+    /**
+     * 移除单次性守卫：终局（settleRemove）与释放（releaseRemove）对同一条目
+     * 的并发移除竞争由此 CAS 裁决——移除胜者恰一个（计数簿恰一次出账）。
+     * 与 {@code finished} 语义正交：释放不置终态标志，终局先置终态再争移除。
+     */
+    private final AtomicBoolean removed = new AtomicBoolean();
 
     public DecodeRequestState(long requestId, long seqLen, long expectedKv, long createdAtMs) {
         this.requestId = requestId;
@@ -217,6 +223,19 @@ public final class DecodeRequestState {
 
     public boolean isFinished() {
         return finished.get();
+    }
+
+    /**
+     * 移除胜者裁决（一次性 CAS）：条目从容器移除的互斥守卫——终局与释放
+     * 并发竞争时恰一个调用者胜出（胜者负责移除 + 计数出账）。
+     */
+    public boolean tryMarkRemoved() {
+        return removed.compareAndSet(false, true);
+    }
+
+    /** 移除胜者是否已产生（诊断/测试）。 */
+    public boolean isRemoved() {
+        return removed.get();
     }
 
     /** trace 快照（人类可读，最旧→最新）。 */

@@ -356,4 +356,232 @@ class StateLedgerPerEndpointCounterTest {
 
         assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
     }
+
+    /**
+     * 移除竞态的恰一次归位（单线程确定性时序——线上 master 重启收养
+     * 演练中端点级计数簿漂移的回归护栏）：释放（不置终态标志）与终局
+     * 对同一条目竞争移除时，移除胜者恰一个——计数簿恰一次出账。
+     *
+     * <p>四个时序：释放先/终局后、终局先/释放后、重复释放、释放后同
+     * requestId 重新入账（终局败者不落墓碑——重新入账不被墓碑阻挡）。</p>
+     */
+    @Test
+    void removalRacesRetireAccountExactlyOnce() {
+        StateLedger ledger = new StateLedger();
+        long dGen = ledger.newGeneration(TestEndpoints.ep(2L, StateRole.DECODE, 0L));
+        TestEndpoints.Endpoint dEp = TestEndpoints.ep(2L, StateRole.DECODE, dGen);
+        GenerationTriple dBinding = new GenerationTriple(2, dGen, -1L);
+        TerminalOutcome completed = new TerminalOutcome(TerminalState.COMPLETED,
+                TerminalReason.SUCCEEDED, "");
+
+        // 时序一：释放先胜——终局后到让位（不落墓碑、不再出账；释放语义
+        // 允许同 requestId 重新入账，终局归属以移除胜者为准）
+        long id1 = 101L;
+        advanceToRunning(ledger, dEp, dBinding, id1);
+        assertTrue(ledger.decode().release(id1));
+        assertTrue(!ledger.decode().settle(id1, completed, SettleReason.ENGINE_FINISHED),
+                "终局对已释放条目让位");
+        assertBucketRetired(ledger, 2);
+        assertEquals(0L, ledger.snapshot().decodeTombstones(), "释放胜者不落墓碑");
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+
+        // 时序二：终局先胜——释放后到让位（终局语义正常：墓碑 + 恰一次出账）
+        long id2 = 102L;
+        advanceToRunning(ledger, dEp, dBinding, id2);
+        assertTrue(ledger.decode().settle(id2, completed, SettleReason.ENGINE_FINISHED));
+        assertTrue(!ledger.decode().release(id2), "释放对已终局条目让位");
+        assertBucketRetired(ledger, 2);
+        assertEquals(1L, ledger.snapshot().decodeTombstones());
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+
+        // 时序三：重复释放幂等（第二次为移除败者，不再出账）
+        long id3 = 103L;
+        assertEquals(ReserveResult.OK, ledger.decode().reserve(id3, 128L, 256L, dBinding));
+        assertTrue(ledger.decode().onDispatched(id3, dBinding));
+        assertTrue(ledger.decode().release(id3));
+        assertTrue(!ledger.decode().release(id3), "重复释放第二次让位");
+        assertBucketRetired(ledger, 2);
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+
+        // 时序四：释放后同 requestId 重新入账不被阻挡（终局败者不落墓碑
+        // 是重新入账成立的前提），新条目正常生命周期终局归位
+        long id4 = 104L;
+        advanceToRunning(ledger, dEp, dBinding, id4);
+        assertTrue(ledger.decode().release(id4));
+        assertEquals(ReserveResult.OK, ledger.decode().reserve(id4, 64L, 128L, dBinding),
+                "释放（非终局）后同 requestId 可重新入账");
+        assertTrue(ledger.decode().onDispatched(id4, dBinding));
+        ledger.observe(TestEndpoints.finishedOnly(dEp, 9L, 2_000L,
+                TestEndpoints.finished(id4, StateRole.DECODE, 0, 2_000L, 9L)));
+        assertBucketRetired(ledger, 2);
+        assertEquals(2L, ledger.snapshot().decodeTombstones(), "仅时序二/四两条终局墓碑");
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+    }
+
+    /**
+     * 移除竞态并发真打（多轮迭代）：条目推进到引擎执行位（引擎事实 KV
+     * 在账）后，释放线程与终局线程同 tick 对齐并发移除——移除胜者恰一个、
+     * 计数簿与全量重算恒一致。修复前该竞态对同一条目双重出账，端点账与
+     * 全局账同打穿且漂移不收敛（对账只报不修）。
+     */
+    @Test
+    void concurrentRemovalRaceKeepsBooksExact() throws Exception {
+        StateLedger ledger = new StateLedger();
+        long dGen = ledger.newGeneration(TestEndpoints.ep(2L, StateRole.DECODE, 0L));
+        TestEndpoints.Endpoint dEp = TestEndpoints.ep(2L, StateRole.DECODE, dGen);
+        GenerationTriple dBinding = new GenerationTriple(2, dGen, -1L);
+
+        int iterations = 500;
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < iterations; i++) {
+                final int iter = i;
+                long id = 10_000L + i;
+                advanceToRunning(ledger, dEp, dBinding, id);
+                CountDownLatch go = new CountDownLatch(1);
+                java.util.concurrent.atomic.AtomicBoolean settleWin =
+                        new java.util.concurrent.atomic.AtomicBoolean();
+                Future<?> settler = pool.submit(() -> {
+                    go.await();
+                    settleWin.set(ledger.decode().settle(id, new TerminalOutcome(
+                            TerminalState.COMPLETED, TerminalReason.SUCCEEDED, ""),
+                            SettleReason.ENGINE_FINISHED));
+                    return null;
+                });
+                go.countDown();
+                boolean releaseWin = ledger.decode().release(id);
+                settler.get(10L, TimeUnit.SECONDS);
+                assertTrue(!(releaseWin && settleWin.get()),
+                        "释放与终局并发移除恰一胜者（iteration=" + iter + "）");
+                assertTrue(ledger.auditAndDrift().clean(),
+                        () -> "iteration=" + iter + " " + ledger.auditAndDrift());
+            }
+        } finally {
+            pool.shutdown();
+            assertTrue(pool.awaitTermination(10L, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * master 重启首报收养路径的端点账（收养即引擎事实）：未知 running 按
+     * engineOwned 直接入账——收养相位人口、引擎已见、引擎事实 KV、确认
+     * 临界（收养相位 ≥ 引擎加载位即确认）全部与全量重算一致。
+     */
+    @Test
+    void adoptionFirstReportBooksMatchRecount() {
+        StateLedger ledger = new StateLedger();
+        long dGen = ledger.newGeneration(TestEndpoints.ep(2L, StateRole.DECODE, 0L));
+        TestEndpoints.Endpoint dEp = TestEndpoints.ep(2L, StateRole.DECODE, dGen);
+
+        // 首报三条不同引擎相位（未知 requestId 全部收养）：KV 值随条目携带
+        ledger.observeAdopting(TestEndpoints.observation(dEp, 1L, 1_000L, List.of(
+                TestEndpoints.running(201L, StateRole.DECODE, EnginePhase.RECEIVED, -1L, 0L, 1L),
+                TestEndpoints.running(202L, StateRole.DECODE, EnginePhase.KV_ALLOCATED, -1L, 2_048L, 2L),
+                TestEndpoints.running(203L, StateRole.DECODE, EnginePhase.RUNNING, -1L, 4_096L, 3L)),
+                List.of()));
+
+        DecodeEndpointCounters book = ledger.decode().endpointCounters(2);
+        assertEquals(3, book.activeTotal());
+        assertEquals(3, book.engineOwnedCount(), "收养即引擎事实");
+        assertEquals(1, book.unconfirmedCount(), "仅派发位条目未过确认临界");
+        assertEquals(0L, book.unconfirmedExpectedKv(), "收养条目无预占历史");
+        assertEquals(0L, book.unconfirmedSeqKv());
+        assertEquals(6_144L, book.kvTokensReportedTotal(), "引擎事实 KV 随收养入账");
+        assertEquals(1L, book.phaseCounts().get(1)); // DISPATCHED（RECEIVED 保守映射）
+        assertEquals(1L, book.phaseCounts().get(2)); // D_LOADING
+        assertEquals(1L, book.phaseCounts().get(3)); // D_RUNNING
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+    }
+
+    /**
+     * 引擎事实 KV 刷新的端点账增量（已存在条目逐 tick 上报增长）：每次
+     * observe 携带的 KV 增量逐次入桶（非仅条目创建时的初始值）；unknown
+     * 上报（kv=0）不更新条目也不动账。
+     */
+    @Test
+    void kvTokensRefreshAccumulatesIntoBook() {
+        StateLedger ledger = new StateLedger();
+        long dGen = ledger.newGeneration(TestEndpoints.ep(2L, StateRole.DECODE, 0L));
+        TestEndpoints.Endpoint dEp = TestEndpoints.ep(2L, StateRole.DECODE, dGen);
+        GenerationTriple dBinding = new GenerationTriple(2, dGen, -1L);
+
+        assertEquals(ReserveResult.OK, ledger.decode().reserve(301L, 128L, 256L, dBinding));
+        assertTrue(ledger.decode().onDispatched(301L, dBinding));
+        ledger.observe(TestEndpoints.runningOnly(dEp, 1L, 1_000L,
+                TestEndpoints.running(301L, StateRole.DECODE, EnginePhase.KV_ALLOCATED, -1L, 1_024L, 1L)));
+        assertEquals(1_024L, ledger.decode().endpointCounters(2).kvTokensReportedTotal());
+
+        // 执行位逐 tick 增长：增量逐次入账
+        ledger.observe(TestEndpoints.runningOnly(dEp, 2L, 1_100L,
+                TestEndpoints.running(301L, StateRole.DECODE, EnginePhase.RUNNING, -1L, 2_048L, 2L)));
+        assertEquals(2_048L, ledger.decode().endpointCounters(2).kvTokensReportedTotal());
+        ledger.observe(TestEndpoints.runningOnly(dEp, 3L, 1_200L,
+                TestEndpoints.running(301L, StateRole.DECODE, EnginePhase.RUNNING, -1L, 3_072L, 3L)));
+        DecodeEndpointCounters grown = ledger.decode().endpointCounters(2);
+        assertEquals(3_072L, grown.kvTokensReportedTotal(), "KV 刷新增量随 tick 累计入账");
+        assertEquals(1, grown.engineOwnedCount());
+
+        // unknown 上报（kv=0）：条目保持现值，账不动
+        ledger.observe(TestEndpoints.runningOnly(dEp, 4L, 1_300L,
+                TestEndpoints.running(301L, StateRole.DECODE, EnginePhase.RUNNING, -1L, 0L, 4L)));
+        assertEquals(3_072L, ledger.decode().endpointCounters(2).kvTokensReportedTotal());
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+    }
+
+    /**
+     * 复合场景归零（收养 + KV 刷新 + 终局释放）：首报收养执行位条目 →
+     * 引擎事实 KV 逐 tick 增长 → 引擎 finished 终局——端点账全字段随
+     * 条目移除归零，全局账与端点账同口径对账一致。
+     */
+    @Test
+    void adoptRefreshThenSettleRetiresAllBooks() {
+        StateLedger ledger = new StateLedger();
+        long dGen = ledger.newGeneration(TestEndpoints.ep(2L, StateRole.DECODE, 0L));
+        TestEndpoints.Endpoint dEp = TestEndpoints.ep(2L, StateRole.DECODE, dGen);
+
+        ledger.observeAdopting(TestEndpoints.runningOnly(dEp, 1L, 1_000L,
+                TestEndpoints.running(401L, StateRole.DECODE, EnginePhase.RUNNING, -1L, 1_024L, 1L)));
+        ledger.observe(TestEndpoints.runningOnly(dEp, 2L, 1_100L,
+                TestEndpoints.running(401L, StateRole.DECODE, EnginePhase.RUNNING, -1L, 2_048L, 2L)));
+        ledger.observe(TestEndpoints.runningOnly(dEp, 3L, 1_200L,
+                TestEndpoints.running(401L, StateRole.DECODE, EnginePhase.RUNNING, -1L, 4_096L, 3L)));
+        DecodeEndpointCounters before = ledger.decode().endpointCounters(2);
+        assertEquals(1, before.activeTotal());
+        assertEquals(1, before.engineOwnedCount());
+        assertEquals(4_096L, before.kvTokensReportedTotal());
+        assertEquals(0, before.unconfirmedCount(), "收养即过确认临界");
+
+        ledger.observe(TestEndpoints.finishedOnly(dEp, 4L, 2_000L,
+                TestEndpoints.finished(401L, StateRole.DECODE, 0, 2_000L, 4L)));
+        assertBucketRetired(ledger, 2);
+        assertEquals(1L, ledger.snapshot().decodeTombstones());
+        assertTrue(ledger.auditAndDrift().clean(), () -> ledger.auditAndDrift().toString());
+    }
+
+    /** 推进条目到引擎执行位（引擎已见 + 过确认临界 + 事实 KV 在账）。 */
+    private static void advanceToRunning(StateLedger ledger, TestEndpoints.Endpoint dEp,
+                                         GenerationTriple dBinding, long id) {
+        assertEquals(ReserveResult.OK, ledger.decode().reserve(id, 128L, 256L, dBinding));
+        assertTrue(ledger.decode().onDispatched(id, dBinding));
+        ledger.observe(TestEndpoints.runningOnly(dEp, 1L, 1_000L,
+                TestEndpoints.running(id, StateRole.DECODE, EnginePhase.RECEIVED, -1L, 0L, 1L)));
+        ledger.observe(TestEndpoints.runningOnly(dEp, 2L, 1_100L,
+                TestEndpoints.running(id, StateRole.DECODE, EnginePhase.KV_ALLOCATED, -1L, 5_120L, 2L)));
+        ledger.observe(TestEndpoints.runningOnly(dEp, 3L, 1_200L,
+                TestEndpoints.running(id, StateRole.DECODE, EnginePhase.RUNNING, -1L, 10_559L, 3L)));
+    }
+
+    /** 断言端点桶全字段归零（活跃/未确认双轨/引擎已见/事实 KV/各相位人口）。 */
+    private static void assertBucketRetired(StateLedger ledger, int endpointId) {
+        DecodeEndpointCounters c = ledger.decode().endpointCounters(endpointId);
+        assertEquals(0, c.activeTotal(), "桶活跃归零");
+        assertEquals(0, c.unconfirmedCount());
+        assertEquals(0L, c.unconfirmedExpectedKv());
+        assertEquals(0L, c.unconfirmedSeqKv());
+        assertEquals(0, c.engineOwnedCount());
+        assertEquals(0L, c.kvTokensReportedTotal());
+        for (int p = 0; p < c.phaseCounts().size(); p++) {
+            assertEquals(0L, c.phaseCounts().get(p), "phase[" + p + "] 归零");
+        }
+    }
 }

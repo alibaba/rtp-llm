@@ -22,7 +22,9 @@ import org.flexlb.state.internal.TombstoneStore;
  * 的 mutator 仅在本类固定位置调用——advance 的 CAS 胜者分支（含计费
  * 归属移交撤预占）/ reserve / settleRemove / releaseRemove /
  * adoptEngineOwned / noteEngineObserved；全局账与端点账在同一临界区内
- * 同步更新（单一写者纪律，两套账天然一致）。</p>
+ * 同步更新（单一写者纪律，两套账天然一致）。移除类操作（settleRemove/
+ * releaseRemove）以条目级 tryMarkRemoved 一次性 CAS 为唯一移除胜者
+ * 裁决——并发释放与终局竞争时恰一次减账（败者让位，不落墓碑）。</p>
  */
 @InternalApi
 public final class DecodeSideStore {
@@ -138,19 +140,28 @@ public final class DecodeSideStore {
     }
 
     /**
-     * 终局移除（CAS 单出口）：finishTransition 守卫 + 移除 + 计数归位（含预占/引擎事实 KV 归位）+ 墓碑吸收。
+     * 终局移除（CAS 单出口）：finishTransition 守卫 + 移除胜者裁决 + 移除 +
+     * 计数归位（含预占/引擎事实 KV 归位）+ 墓碑吸收。
      *
-     * @return 是否本调用完成终局（false = 已终局或不存在）
+     * <p><b>移除胜者裁决</b>：{@link DecodeRequestState#tryMarkRemoved()} 一次性
+     * CAS——条目已被并发 {@link #releaseRemove} 移除（释放不置终态标志，
+     * entries 归属无法区分胜者）时本调用为败者，直接返回 false（不进墓碑、
+     * 不减账）：释放语义允许同 requestId 重新入账，终局归属以移除胜者为准
+     * ——败者落墓碑会把后续重新 reserve 的同 requestId 误判为墓碑重复。</p>
+     *
+     * @return 是否本调用完成终局（false = 已终局、不存在或已被并发释放移除）
      */
     public boolean settleRemove(DecodeRequestState entry, TerminalOutcome outcome, long nowMs) {
         if (!entry.finishTransition(outcome.state(), nowMs)) {
             return false;
         }
+        if (!entry.tryMarkRemoved()) {
+            return false; // 并发释放已移除条目：终局对账（墓碑/减账）整体让位
+        }
         // 墓碑先落、条目后移：若先移除条目再吸收墓碑，两者之间存在观察窗口——
         // 并发的迟到 finished/settle 读到“条目不在且墓碑未落”会误记 unknown。
-        // 先吸收墓碑可闭合该窗口（absorb 幂等，CAS 守卫保证唯一胜者）：
-        // 条目仍在时 CAS 守卫拦截双重结算，条目移除后迟到事件被墓碑吸收。
-        // 墓碑携带终局时刻的 trace 环快照（诊断端点故事线，保留期内可查）。
+        // 先吸收墓碑可闭合该窗口（absorb 幂等，移除胜者已由 tryMarkRemoved
+        // 唯一裁决）。墓碑携带终局时刻的 trace 环快照（诊断端点故事线，保留期内可查）。
         tombstones.absorb(entry.requestId(), outcome, nowMs, entry.traceSnapshot());
         entries.remove(entry.requestId(), entry);
         unindexEndpoint(entry);
@@ -169,11 +180,20 @@ public final class DecodeSideStore {
     /**
      * 释放预约（未终态主动放弃）：撤预占账并移除条目——<b>不进墓碑</b>
      * （释放不是终局，同 requestId 可重新 reserve）。
+     *
+     * <p><b>移除胜者裁决</b>：与 {@link #settleRemove} 对称——
+     * {@link DecodeRequestState#tryMarkRemoved()} CAS 失败（条目已被并发
+     * 释放/终局移除）时本调用为败者，直接返回 false 不减账。否则并发重复
+     * 释放会对同一条目双重 {@code onRemoved}，计数簿恒小于全量重算
+     * （端点账与全局账同打穿）。</p>
      */
     public boolean releaseRemove(DecodeRequestState entry, long nowMs) {
         synchronized (entry) {
             if (entry.isFinished()) {
                 return false;
+            }
+            if (!entry.tryMarkRemoved()) {
+                return false; // 并发移除已发生（重复释放/终局抢先）：败者不减账
             }
             entries.remove(entry.requestId(), entry);
             unindexEndpoint(entry);
