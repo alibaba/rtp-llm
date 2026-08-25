@@ -22,6 +22,7 @@ class LinearBase(nn.Module, ABC):
 
     supports_deferred_bias = False
     supports_fused_bias_gelu_quant = False
+    supports_prequantized_activation = False
 
     @classmethod
     @abstractmethod
@@ -121,6 +122,11 @@ class LinearBase(nn.Module, ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not accept pre-quantized activations"
         )
+
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        return None
 
     def __repr__(self) -> str:
         """Return string representation of the strategy"""

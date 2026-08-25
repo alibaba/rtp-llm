@@ -98,9 +98,18 @@ class CausalAttention(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,
+        quantized_hidden_states: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
-        qkv = self.qkv_proj(hidden_states)
+        if (
+            quantized_hidden_states is not None
+            and self.qkv_proj.supports_prequantized_activation
+        ):
+            qkv = self.qkv_proj.forward_quantized(
+                *quantized_hidden_states, apply_bias=True
+            )
+        else:
+            qkv = self.qkv_proj(hidden_states)
         if self.qk_fuse_norm is not None:
             qkv = self.qk_fuse_norm(qkv)
         attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)

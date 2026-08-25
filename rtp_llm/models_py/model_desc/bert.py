@@ -68,7 +68,9 @@ class BertDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
-    ) -> torch.Tensor:
+        quantized_hidden_states: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        quantize_output: bool = False,
+    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         empty_bias = torch.empty(
             0, device=hidden_states.device, dtype=hidden_states.dtype
         )
@@ -78,25 +80,45 @@ class BertDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
+            quantized_hidden_states=quantized_hidden_states,
         )
-        hidden_states = self.input_layernorm(
-            hidden_states,
-            residual,
-            (
-                attention_bias.to(hidden_states.dtype)
-                if attention_bias is not None
-                else empty_bias
-            ),
+        attention_bias_tensor = (
+            attention_bias.to(hidden_states.dtype)
+            if attention_bias is not None
+            else empty_bias
         )
+        use_quantized_mlp_input = self.mlp.up_proj.supports_prequantized_activation
+        if use_quantized_mlp_input:
+            hidden_states, mlp_input, mlp_input_scales = (
+                self.input_layernorm.forward_quantized(
+                    hidden_states, residual, attention_bias_tensor
+                )
+            )
+            quantized_mlp_input = (mlp_input, mlp_input_scales)
+        else:
+            hidden_states = self.input_layernorm(
+                hidden_states, residual, attention_bias_tensor
+            )
+            quantized_mlp_input = None
 
         residual = hidden_states
-        hidden_states, ffn_bias = self.mlp.forward_without_output_bias(hidden_states)
-        hidden_states = self.post_attention_layernorm(
-            hidden_states,
-            residual,
-            ffn_bias.to(hidden_states.dtype) if ffn_bias is not None else empty_bias,
+        hidden_states, ffn_bias = self.mlp.forward_without_output_bias(
+            hidden_states, quantized_mlp_input
         )
-        return hidden_states
+        ffn_bias_tensor = (
+            ffn_bias.to(hidden_states.dtype) if ffn_bias is not None else empty_bias
+        )
+        if quantize_output and self.self_attn.qkv_proj.supports_prequantized_activation:
+            hidden_states, output_fp8, output_scales = (
+                self.post_attention_layernorm.forward_quantized(
+                    hidden_states, residual, ffn_bias_tensor
+                )
+            )
+            return hidden_states, (output_fp8, output_scales)
+        hidden_states = self.post_attention_layernorm(
+            hidden_states, residual, ffn_bias_tensor
+        )
+        return hidden_states, None
 
 
 class BertModel(GptModelBase):
@@ -196,10 +218,19 @@ class BertModel(GptModelBase):
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        quantized_hidden_states = None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            hidden_states = decoder_layer(
+            next_layer_uses_quantized_input = (
+                i + 1 < self.layer_num
+                and self.layers[
+                    i + 1
+                ].self_attn.qkv_proj.supports_prequantized_activation
+            )
+            hidden_states, quantized_hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                quantized_hidden_states=quantized_hidden_states,
+                quantize_output=next_layer_uses_quantized_input,
             )
         return PyModelOutputs(hidden_states)
