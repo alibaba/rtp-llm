@@ -148,7 +148,7 @@ class CacheAwareServiceTest {
                 "127.0.0.1", 8080, "running", 200, 64, 100, 120, 20);
         CacheHitComparisonResult expected = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
-                "127.0.0.1", "running", 200,
+                "127.0.0.1:8080@0", "127.0.0.1@0", "running", 200,
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
                 new CacheHitComparisonResult.HitComparison(0, 120),

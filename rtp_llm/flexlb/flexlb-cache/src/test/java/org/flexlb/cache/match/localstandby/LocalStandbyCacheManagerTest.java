@@ -37,16 +37,16 @@ class LocalStandbyCacheManagerTest {
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
-        manager.addRoutedRequestBlocks(worker1.getIpPort(), List.of(11L, 22L, 33L));
-        manager.addRoutedRequestBlocks(worker2.getIpPort(), List.of(11L, 33L));
+        manager.addRoutedRequestBlocks(worker1.getLogicalIpPort(), List.of(11L, 22L, 33L));
+        manager.addRoutedRequestBlocks(worker2.getLogicalIpPort(), List.of(11L, 33L));
 
         Map<String, Integer> matches =
                 manager.findMatchingEngines(List.of(11L, 22L, 33L), RoleType.PREFILL, "default");
 
-        assertEquals(3, matches.get(worker1.getIpPort()));
-        assertEquals(1, matches.get(worker2.getIpPort()));
+        assertEquals(3, matches.get(worker1.getLogicalIpPort()));
+        assertEquals(1, matches.get(worker2.getLogicalIpPort()));
         assertEquals(
-                Map.of(worker1.getIpPort(), 1, worker2.getIpPort(), 1),
+                Map.of(worker1.getLogicalIpPort(), 1, worker2.getLogicalIpPort(), 1),
                 manager.findMatchingEngines(List.of(11L), RoleType.PREFILL, "default"));
         manager.shutdown();
     }
@@ -63,18 +63,61 @@ class LocalStandbyCacheManagerTest {
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L, 22L, 33L));
 
         assertEquals(
                 2,
                 manager.findMatchingEngines(
                                 List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
         assertEquals(
                 0,
                 manager.findMatchingEngines(
                                 List.of(11L), RoleType.PDFUSION, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
+        manager.shutdown();
+    }
+
+    @Test
+    void isolatesMatchesBetweenSiblingEngineIndexes() {
+        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
+        WorkerStatus engine0 = worker("10.0.0.1", 8080, 0, 2);
+        WorkerStatus engine1 = worker("10.0.0.1", 8080, 1, 2);
+        when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
+                .thenReturn(List.of(engine0, engine1));
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                new CacheMatchConfiguration(modelMetaConfig(300_000)),
+                workerStatusProvider,
+                mock(CacheMetricsReporter.class));
+
+        manager.addRoutedRequestBlocks(engine1.getLogicalIpPort(), List.of(11L));
+
+        assertEquals(
+                Map.of(engine0.getLogicalIpPort(), 0, engine1.getLogicalIpPort(), 1),
+                manager.findMatchingEngines(List.of(11L), RoleType.PREFILL, "default"));
+        manager.shutdown();
+    }
+
+    @Test
+    void appliesCacheMatchRollbackOnlyToMatchingSiblingIndex() {
+        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
+        WorkerStatus engine0 = worker("10.0.0.1", 8080, 0, 2);
+        WorkerStatus engine1 = worker("10.0.0.1", 8080, 1, 2);
+        engine1.setCacheMatchRollbackBlocks(1);
+        when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
+                .thenReturn(List.of(engine0, engine1));
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                new CacheMatchConfiguration(modelMetaConfig(300_000)),
+                workerStatusProvider,
+                mock(CacheMetricsReporter.class));
+
+        manager.addRoutedRequestBlocks(engine0.getLogicalIpPort(), List.of(11L, 22L));
+        manager.addRoutedRequestBlocks(engine1.getLogicalIpPort(), List.of(11L, 22L));
+
+        assertEquals(
+                Map.of(engine0.getLogicalIpPort(), 2, engine1.getLogicalIpPort(), 1),
+                manager.findMatchingEngines(
+                        List.of(11L, 22L), RoleType.PREFILL, "default"));
         manager.shutdown();
     }
 
@@ -88,13 +131,13 @@ class LocalStandbyCacheManagerTest {
                 new CacheMatchConfiguration(modelMetaConfig(300_000)),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L, 22L, 33L));
 
         assertEquals(
                 3,
                 manager.findMatchingEngines(
                                 List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
         manager.shutdown();
     }
 
@@ -108,14 +151,14 @@ class LocalStandbyCacheManagerTest {
                 new CacheMatchConfiguration(modelMetaConfig(20)),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L));
 
         Thread.sleep(30);
 
         assertEquals(
                 0,
                 manager.findMatchingEngines(List.of(11L), RoleType.PREFILL, "default")
-                        .get(worker.getIpPort()));
+                        .get(worker.getLogicalIpPort()));
         assertEquals(0, manager.mappingCount());
         manager.shutdown();
     }
@@ -138,7 +181,7 @@ class LocalStandbyCacheManagerTest {
                 mock(CacheMetricsReporter.class));
 
         manager.refreshCapacityLimits();
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
+        manager.addRoutedRequestBlocks(worker.getLogicalIpPort(), List.of(11L));
 
         assertEquals(1_000, manager.maximumEntryCount());
         manager.shutdown();
@@ -196,7 +239,7 @@ class LocalStandbyCacheManagerTest {
                 cacheMetricsReporter);
 
         manager.addRoutedRequestBlocks(
-                worker.getIpPort(),
+                worker.getLogicalIpPort(),
                 List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
 
         manager.reportMappingCount();
@@ -206,9 +249,15 @@ class LocalStandbyCacheManagerTest {
     }
 
     private WorkerStatus worker(String ip, int port) {
+        return worker(ip, port, 0, 1);
+    }
+
+    private WorkerStatus worker(String ip, int port, int engineIndex, int multiEngineNum) {
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setIp(ip);
         workerStatus.setPort(port);
+        workerStatus.setEngineIndex(engineIndex);
+        workerStatus.setMultiEngineNum(multiEngineNum);
         return workerStatus;
     }
 

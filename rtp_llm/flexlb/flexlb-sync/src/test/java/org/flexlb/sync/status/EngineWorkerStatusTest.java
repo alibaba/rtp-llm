@@ -114,4 +114,66 @@ class EngineWorkerStatusTest {
 
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
+
+    @Test
+    void returnsAllLogicalWorkersOnlyWhenPhysicalGroupIsHealthy() {
+        var statuses = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        statuses.clear();
+        WorkerStatus engine0 = multiEngineWorker(0, true);
+        WorkerStatus engine1 = multiEngineWorker(1, true);
+        statuses.put(engine0.getLogicalIpPort(), engine0);
+        statuses.put(engine1.getLogicalIpPort(), engine1);
+
+        var healthy = engineWorkerStatus.selectRoutableModelWorkerStatus(RoleType.PREFILL, "group1");
+
+        assertEquals(2, healthy.size());
+
+        engine1.setAlive(false);
+        var unhealthy = engineWorkerStatus.selectRoutableModelWorkerStatus(RoleType.PREFILL, "group1");
+
+        assertTrue(unhealthy.isEmpty());
+        statuses.clear();
+    }
+
+    @Test
+    void failsClosedUntilEveryConfiguredLogicalWorkerExists() {
+        var statuses = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        statuses.clear();
+        WorkerStatus engine0 = multiEngineWorker(0, true);
+        statuses.put(engine0.getLogicalIpPort(), engine0);
+
+        var result = engineWorkerStatus.selectRoutableModelWorkerStatus(RoleType.PREFILL, "group1");
+
+        assertTrue(result.isEmpty());
+        statuses.clear();
+    }
+
+    @Test
+    void physicalHealthGateDoesNotMergeResourceAvailability() {
+        var statuses = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        statuses.clear();
+        WorkerStatus engine0 = multiEngineWorker(0, true);
+        WorkerStatus engine1 = multiEngineWorker(1, true);
+        engine1.getResourceAvailable().set(false);
+        statuses.put(engine0.getLogicalIpPort(), engine0);
+        statuses.put(engine1.getLogicalIpPort(), engine1);
+
+        var result = engineWorkerStatus.selectRoutableModelWorkerStatus(RoleType.PREFILL, "group1");
+
+        assertEquals(2, result.size());
+        assertFalse(result.get(engine1.getLogicalIpPort()).getResourceAvailable().get());
+        statuses.clear();
+    }
+
+    private WorkerStatus multiEngineWorker(int engineIndex, boolean alive) {
+        WorkerStatus worker = new WorkerStatus();
+        worker.setIp("127.0.0.1");
+        worker.setPort(8080);
+        worker.setGroup("group1");
+        worker.setEndpointAddress("service-a");
+        worker.setEngineIndex(engineIndex);
+        worker.setMultiEngineNum(2);
+        worker.setAlive(alive);
+        return worker;
+    }
 }

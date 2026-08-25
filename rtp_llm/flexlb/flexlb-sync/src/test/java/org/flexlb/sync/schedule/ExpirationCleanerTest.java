@@ -8,6 +8,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskStateEnum;
+import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ExpirationCleanerTest {
@@ -43,7 +45,8 @@ class ExpirationCleanerTest {
         WorkerStatus workerStatus = workerStatusWithLocalTask();
         TaskInfo task = workerStatus.getLocalTaskMap().get("request-1");
         task.setLastActiveTimeUs(System.nanoTime() / 1000 - TimeUnit.SECONDS.toMicros(301));
-        ExpirationCleaner cleaner = expirationCleaner(new FlexlbConfig());
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        ExpirationCleaner cleaner = expirationCleaner(new FlexlbConfig(), monitor);
         ch.qos.logback.classic.Logger pvLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         ListAppender<ILoggingEvent> pvEvents = new ListAppender<>();
@@ -63,6 +66,11 @@ class ExpirationCleanerTest {
         assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
         assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
         assertEquals(1, pvEvents.list.size());
+        verify(monitor).report(
+                "task.removed",
+                FlexMetricTags.of(
+                        "role", RoleType.PREFILL.getCode(), "engineIp", "127.0.0.1@0", "type", "timeout"),
+                1);
         String pvEvent = pvEvents.list.getFirst().getFormattedMessage();
         assertTrue(pvEvent.contains("\"eventType\":\"task_confirmation_timeout\""));
         assertTrue(pvEvent.contains("\"requestId\":\"request-1\""));
@@ -99,9 +107,13 @@ class ExpirationCleanerTest {
     }
 
     private ExpirationCleaner expirationCleaner(FlexlbConfig config) {
+        return expirationCleaner(config, mock(FlexMonitor.class));
+    }
+
+    private ExpirationCleaner expirationCleaner(FlexlbConfig config, FlexMonitor monitor) {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        return new ExpirationCleaner(mock(FlexMonitor.class), configService);
+        return new ExpirationCleaner(monitor, configService);
     }
 
     private WorkerStatus workerStatusWithLocalTask() {
@@ -123,7 +135,7 @@ class ExpirationCleanerTest {
 
     private Map<String, WorkerStatus> workerStatusMap(WorkerStatus workerStatus) {
         Map<String, WorkerStatus> workerStatuses = new HashMap<>();
-        workerStatuses.put(workerStatus.getIpPort(), workerStatus);
+        workerStatuses.put(workerStatus.getLogicalIpPort(), workerStatus);
         return workerStatuses;
     }
 }

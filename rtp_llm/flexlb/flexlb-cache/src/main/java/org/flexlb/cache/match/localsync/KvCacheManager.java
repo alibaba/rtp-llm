@@ -18,6 +18,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -52,6 +53,8 @@ public class KvCacheManager {
      * Performance statistics
      */
     private final LongAdder totalUpdates = new LongAdder();
+    private final Map<String, String> physicalIpPortByLogicalIpPort =
+            new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -70,7 +73,7 @@ public class KvCacheManager {
      * @param blockCacheKeys List of cache block hash values to query
      * @param roleType       Engine role to query
      * @param group          Engine group to query
-     * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
+     * @return prefix match lengths keyed by logical {@code ip:port@engineIndex} identity
      */
     public Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys,
         RoleType roleType, String group) {
@@ -81,7 +84,7 @@ public class KvCacheManager {
 
         // Use candidate engine list
         List<String> enginesIpPorts = workerStatusProvider.getWorkerStatuses(roleType, group).stream()
-                .map(WorkerStatus::getIpPort)
+                .map(WorkerStatus::getLogicalIpPort)
                 .toList();
 
         // Batch calculate prefix match length
@@ -91,18 +94,31 @@ public class KvCacheManager {
     /**
      * Update engine cache status
      *
-     * @param engineIPort    Engine IP:Port
+     * @param engineIPort    logical worker identity in {@code ip:port@engineIndex} format; the
+     *                       index identifies one independently routable engine behind the physical
+     *                       frontend
+     * @param physicalIpPort shared frontend identity in {@code ip:port} format
+     * @param ipIndex        metrics identity in {@code ip@engineIndex} format
      * @param role           Engine role
      * @param newCacheBlocks New cache block set (blockCacheKeys)
      */
-    public void updateEngineCache(String engineIPort, String role, Set<Long> newCacheBlocks) {
+    public void updateEngineCache(
+            String engineIPort,
+            String physicalIpPort,
+            String ipIndex,
+            String role,
+            Set<Long> newCacheBlocks) {
         if (engineIPort == null || newCacheBlocks == null) {
             DiffResult.empty(engineIPort);
             return;
         }
+        if (physicalIpPort != null) {
+            physicalIpPortByLogicalIpPort.put(engineIPort, physicalIpPort);
+        }
 
         // Calculate diff
-        DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks, role);
+        DiffResult diffResult = engineLocalView.calculateDiff(
+                engineIPort, ipIndex, newCacheBlocks, role);
         if (!diffResult.hasChanges()) {
             return;
         }
@@ -128,24 +144,31 @@ public class KvCacheManager {
 
         totalUpdates.increment();
         // Report metrics
-        cacheMetricsReporter.reportEngineLocalMetrics(engineIPort, role, engineLocalView.size(engineIPort));
+        cacheMetricsReporter.reportEngineLocalMetrics(
+                ipIndex, role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
 
     /**
      * Remove cache metadata for engines that are no longer present in service discovery.
+     *
+     * @param activeEngineIpPorts active physical engine addresses in {@code ip:port} format
      */
     public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
         if (activeEngineIpPorts == null) {
             return;
         }
+        Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
         Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
-        staleEngineIpPorts.removeAll(new HashSet<>(activeEngineIpPorts));
+        staleEngineIpPorts.removeIf(engineIpPort ->
+                activePhysicalIpPorts.contains(
+                        physicalIpPortByLogicalIpPort.getOrDefault(engineIpPort, engineIpPort)));
         for (String staleEngineIpPort : staleEngineIpPorts) {
             long startTime = System.nanoTime() / 1000;
             engineLocalView.removeAllCacheBlockOfEngine(staleEngineIpPort);
             globalCacheIndex.removeAllCacheBlockOfEngine(staleEngineIpPort);
+            physicalIpPortByLogicalIpPort.remove(staleEngineIpPort);
             log.info("Removed stale engine cache: {}, cost={}us",
                     staleEngineIpPort, System.nanoTime() / 1000 - startTime);
         }
@@ -158,6 +181,7 @@ public class KvCacheManager {
 
         globalCacheIndex.clear();
         engineLocalView.clear();
+        physicalIpPortByLogicalIpPort.clear();
 
         totalUpdates.reset();
         // Report

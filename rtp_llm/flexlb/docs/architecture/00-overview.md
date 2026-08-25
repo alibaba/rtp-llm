@@ -87,8 +87,12 @@ LoadBalancer 策略选 worker（读 EngineWorkerStatus 共享状态 + CacheAware
 ## 核心不变量
 
 - **路由读、同步写**：`EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS`（静态单例，四个角色各一个
-  `ConcurrentHashMap<ip:port, WorkerStatus>`）由后台同步线程写、路由线程读；`WorkerStatus`
-  内所有计数为 Atomic 字段，原子性是**字段级**而非快照级。
+  `ConcurrentHashMap<ip:httpPort@index, WorkerStatus>`）由后台同步线程写、路由线程读；
+  `WorkerStatus` 内所有计数为 Atomic 字段，原子性是**字段级**而非快照级。
+- **内部逻辑地址、外部物理地址**：worker 身份内部一律用逻辑 `ip:httpPort@index`
+  （map key、cache 匹配、回滚、feedback，N=1 也是 `@0`）；对外（schedule 响应、gRPC 拨号）
+  一律用物理地址，线上协议不出现 `@index`，仅 N>1 时 schedule 响应附加 wire
+  `engine_index`。
 - **选中即记账，失败必回滚**：策略 `select()` 成功即 `putLocalTask()` 预扣队列时间与 KV
   token；多阶段路由部分失败必须经 `rollBackRoutingFailure()` → `removeLocalTask()` 撤销。
 - **本地预测 + 引擎对账**：`localTaskMap` 记录 IN_TRANSIT 任务；引擎状态返回后

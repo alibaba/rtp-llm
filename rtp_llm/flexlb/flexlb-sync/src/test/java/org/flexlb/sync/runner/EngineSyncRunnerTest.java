@@ -18,6 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.LongAdder;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -136,5 +138,67 @@ class EngineSyncRunnerTest {
         kvcmRunner.run();
 
         verify(statusCheckExecutor, times(1)).submit(any(Runnable.class));
+    }
+
+    @Test
+    void submitsCacheStatusCheckForLogicalWorkerWhenKvcmIsDisabled() {
+        WorkerHost engine0 = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002,
+                "site-a", "group-a", "deployment-a", 0, 2, "service-a");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(java.util.List.of(engine0));
+        EngineSyncRunner localSyncRunner = new EngineSyncRunner(
+                modelName,
+                new ConcurrentHashMap<>(),
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                RoleType.PREFILL,
+                cacheAwareService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                false);
+
+        localSyncRunner.run();
+
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+    }
+
+    @Test
+    void createsIndependentStatusEntriesForEachLogicalEngine() {
+        WorkerHost engine0 = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002,
+                "site-a", "group-a", "deployment-a", 0, 2, "service-a");
+        WorkerHost engine1 = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18003,
+                "site-a", "group-a", "deployment-a", 1, 2, "service-a");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(java.util.List.of(engine0, engine1));
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName,
+                statuses,
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                RoleType.PREFILL,
+                cacheAwareService,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                true);
+
+        runner.run();
+
+        assertEquals(2, statuses.size());
+        assertTrue(statuses.containsKey("127.0.0.1:8080@0"));
+        assertTrue(statuses.containsKey("127.0.0.1:8080@1"));
+        assertEquals(0, statuses.get("127.0.0.1:8080@0").getEngineIndex());
+        assertEquals(1, statuses.get("127.0.0.1:8080@1").getEngineIndex());
+        assertEquals(2, statuses.get("127.0.0.1:8080@1").getMultiEngineNum());
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
     }
 }

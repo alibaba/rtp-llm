@@ -13,6 +13,8 @@ import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 import java.util.Map;
@@ -60,8 +62,10 @@ class LocalStandbyCacheMatchProviderTest {
         }
     }
 
-    @Test
-    void updatesRequestDerivedCacheMetadataAsynchronously() {
+    @ParameterizedTest
+    @CsvSource({"0, 1, 10.0.0.1:8080@0", "1, 2, 10.0.0.1:8080@1"})
+    void updatesRequestDerivedCacheMetadataAsynchronously(
+            int engineIndex, int multiEngineNum, String logicalIpPort) {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyHashService hashService = mock(LocalStandbyHashService.class);
         LocalStandbyCacheMatchProvider provider =
@@ -83,6 +87,7 @@ class LocalStandbyCacheMatchProviderTest {
         selectedWorker.setHttpPort(8080);
         selectedWorker.setRole(RoleType.PREFILL);
         selectedWorker.setGroup("default");
+        selectedWorker.setSelectedEngineIndex(engineIndex, multiEngineNum);
 
         try {
             provider.updateFromRoutedRequest(request, List.of(selectedWorker));
@@ -91,7 +96,7 @@ class LocalStandbyCacheMatchProviderTest {
             pendingHash.complete(new LocalStandbyHashResult(List.of(11L, 22L), 4096));
 
             verify(cacheManager, timeout(1_000))
-                    .addRoutedRequestBlocks("10.0.0.1:8080", List.of(11L));
+                    .addRoutedRequestBlocks(logicalIpPort, List.of(11L));
         } finally {
             provider.shutdown();
         }

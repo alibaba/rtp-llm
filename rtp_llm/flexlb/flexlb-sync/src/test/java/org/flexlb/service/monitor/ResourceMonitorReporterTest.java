@@ -58,8 +58,8 @@ class ResourceMonitorReporterTest {
         when(resourceMeasureFactory.getMeasure(ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE))
                 .thenReturn(decodeMeasure);
 
-        WorkerStatus prefill = worker("10.0.0.1");
-        WorkerStatus decode = worker("10.0.0.2");
+        WorkerStatus prefill = worker("10.0.0.1", 0);
+        WorkerStatus decode = worker("10.0.0.2", 1);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("10.0.0.1:8080", prefill);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("10.0.0.2:8080", decode);
         when(prefillMeasure.calculateWorkerWaterLevel(prefill)).thenReturn(25.0);
@@ -74,16 +74,18 @@ class ResourceMonitorReporterTest {
         assertEquals(FlexPriorityType.PRECISE, monitor.registeredPriorities.get(WORKER_RESOURCE_WATER_LEVEL));
         assertEquals(List.of(
                 new Report(WORKER_RESOURCE_WATER_LEVEL,
-                        FlexMetricTags.of("engineIp", "10.0.0.2", "role", RoleType.DECODE.getCode()),
+                        FlexMetricTags.of("engineIp", "10.0.0.2@1", "role", RoleType.DECODE.getCode()),
                         60.0),
                 new Report(WORKER_RESOURCE_WATER_LEVEL,
-                        FlexMetricTags.of("engineIp", "10.0.0.1", "role", RoleType.PREFILL.getCode()),
+                        FlexMetricTags.of("engineIp", "10.0.0.1@0", "role", RoleType.PREFILL.getCode()),
                         25.0)), monitor.reports);
     }
 
-    private static WorkerStatus worker(String ip) {
+    private static WorkerStatus worker(String ip, int engineIndex) {
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setIp(ip);
+        workerStatus.setPort(8080);
+        workerStatus.setEngineIndex(engineIndex);
         return workerStatus;
     }
 

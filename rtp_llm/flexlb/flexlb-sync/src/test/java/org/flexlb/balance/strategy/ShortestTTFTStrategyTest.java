@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import ch.qos.logback.classic.Level;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
@@ -100,7 +101,7 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
                 .thenReturn(new CacheMatchResult(
-                        Map.of("127.0.0.2:8080", HostCacheMatch.local(3)), CacheMatchSource.KVCM, 123, 256));
+                        Map.of("127.0.0.2:8080@0", HostCacheMatch.local(3)), CacheMatchSource.KVCM, 123, 256));
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
@@ -114,6 +115,10 @@ class ShortestTTFTStrategyTest {
         }
         Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
         Assertions.assertEquals("127.0.0.2", result.getServerIp());
+        Assertions.assertNull(result.getEngineIndex());
+        Assertions.assertEquals(0, result.getRoutingEngineIndex());
+        Assertions.assertEquals("127.0.0.2:8080@0", result.getLogicalIpPort());
+        Assertions.assertFalse(new ObjectMapper().valueToTree(result).has("engine_index"));
         Assertions.assertEquals("request-12345", result.getRequestId());
         Assertions.assertEquals("KVCM", balanceContext.getCacheMatchSource());
         Assertions.assertEquals(123, balanceContext.getCacheMatchQueryTimeUs());
@@ -183,9 +188,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, cacheLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        cacheLeader.getIpPort(), 17,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        cacheLeader.getLogicalIpPort(), 17,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "cache-lead-two-blocks");
@@ -215,9 +220,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        oneBlockLeader.getIpPort(), 16,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        oneBlockLeader.getLogicalIpPort(), 16,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "cache-lead-one-block");
@@ -235,9 +240,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, oneBlockLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        oneBlockLeader.getIpPort(), 16,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        oneBlockLeader.getLogicalIpPort(), 16,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "shortest-cache-preference");
@@ -255,9 +260,9 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, busyCacheLeader, thirdWorker),
                 Map.of(
-                        shortestTtftWorker.getIpPort(), 15,
-                        busyCacheLeader.getIpPort(), 20,
-                        thirdWorker.getIpPort(), 15),
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        busyCacheLeader.getLogicalIpPort(), 20,
+                        thirdWorker.getLogicalIpPort(), 15),
                 config,
                 50000,
                 "busy-cache-leader");
@@ -275,7 +280,7 @@ class ShortestTTFTStrategyTest {
 
         SelectionResult selection = select(
                 List.of(overThresholdWorker, eligibleWorker),
-                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                Map.of(overThresholdWorker.getLogicalIpPort(), 3, eligibleWorker.getLogicalIpPort(), 0),
                 config,
                 50_000,
                 "outstanding-over-threshold");
@@ -304,7 +309,7 @@ class ShortestTTFTStrategyTest {
 
         SelectionResult selection = select(
                 List.of(shortestTtftWorker, cachePreferredWorker),
-                Map.of(cachePreferredWorker.getIpPort(), 3),
+                Map.of(cachePreferredWorker.getLogicalIpPort(), 3),
                 config,
                 50_000,
                 "all-outstanding-over-threshold");
@@ -387,7 +392,7 @@ class ShortestTTFTStrategyTest {
         SelectionResult selection = select(
                 RoleType.PDFUSION,
                 List.of(overThresholdWorker, eligibleWorker),
-                Map.of(overThresholdWorker.getIpPort(), 3, eligibleWorker.getIpPort(), 0),
+                Map.of(overThresholdWorker.getLogicalIpPort(), 3, eligibleWorker.getLogicalIpPort(), 0),
                 config,
                 50_000,
                 "pdfusion-outstanding-over-threshold");
@@ -395,6 +400,43 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals(eligibleWorker.getIp(), selection.serverStatus().getServerIp());
         Assertions.assertFalse(overThresholdWorker.getLocalTaskMap().containsKey("pdfusion-outstanding-over-threshold"));
         Assertions.assertTrue(eligibleWorker.getLocalTaskMap().containsKey("pdfusion-outstanding-over-threshold"));
+    }
+
+    @Test
+    void shouldRouteResourcesPerIndexButFailPhysicalHealthTogether() {
+        WorkerStatus engine0 = createWorkerStatus("127.0.0.1", 1_000, 256);
+        engine0.setEndpointAddress("service-a");
+        engine0.setMultiEngineNum(2);
+        WorkerStatus engine1 = createWorkerStatus("127.0.0.1", 0, 256);
+        engine1.setEndpointAddress("service-a");
+        engine1.setEngineIndex(1);
+        engine1.setMultiEngineNum(2);
+        FlexlbConfig config = cacheFocusedConfig();
+
+        SelectionResult healthy = select(
+                List.of(engine0, engine1),
+                Map.of(engine0.getLogicalIpPort(), 0, engine1.getLogicalIpPort(), 0),
+                config,
+                1_000,
+                "request-index-1");
+
+        Assertions.assertTrue(healthy.serverStatus().isSuccess());
+        Assertions.assertEquals(1, healthy.serverStatus().getEngineIndex());
+        Assertions.assertEquals(
+                1,
+                new ObjectMapper()
+                        .valueToTree(healthy.serverStatus())
+                        .get("engine_index")
+                        .asInt());
+        engine0.setAlive(false);
+
+        SelectionResult unhealthy = select(
+                List.of(engine0, engine1),
+                Map.of(engine0.getLogicalIpPort(), 0, engine1.getLogicalIpPort(), 0),
+                config,
+                1_000,
+                "request-unhealthy-group");
+        Assertions.assertFalse(unhealthy.serverStatus().isSuccess());
     }
 
     private FlexlbConfig cacheFocusedConfig() {
@@ -423,7 +465,7 @@ class ShortestTTFTStrategyTest {
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType);
         for (WorkerStatus worker : workers) {
             worker.setRole(roleType.getCode());
-            workerStatusMap.put(worker.getIpPort(), worker);
+            workerStatusMap.put(worker.getLogicalIpPort(), worker);
         }
 
         Request request = new Request();

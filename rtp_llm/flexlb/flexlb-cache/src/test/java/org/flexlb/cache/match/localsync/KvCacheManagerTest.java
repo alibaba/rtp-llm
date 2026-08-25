@@ -1,5 +1,6 @@
 package org.flexlb.cache.match.localsync;
 
+import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.junit.jupiter.api.Test;
@@ -44,6 +45,40 @@ class KvCacheManagerTest {
         verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080");
         verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080");
         verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.2:8080");
+    }
+
+    @Test
+    void keepsLogicalCacheWhenItsPhysicalEngineRemainsDiscoverable() {
+        when(engineLocalView.getAllEngineIpPorts())
+                .thenReturn(Set.of("10.0.0.1:8080@0"));
+        when(engineLocalView.calculateDiff(
+                "10.0.0.1:8080@0", "10.0.0.1@0", Set.of(), "PREFILL"))
+                .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
+        kvCacheManager.updateEngineCache(
+                "10.0.0.1:8080@0", "10.0.0.1:8080", "10.0.0.1@0",
+                "PREFILL", Set.of());
+
+        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.1:8080"));
+
+        verify(engineLocalView, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex, never()).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+    }
+
+    @Test
+    void removesLogicalCacheWhenItsPhysicalEngineDisappears() {
+        when(engineLocalView.getAllEngineIpPorts())
+                .thenReturn(Set.of("10.0.0.1:8080@0"));
+        when(engineLocalView.calculateDiff(
+                "10.0.0.1:8080@0", "10.0.0.1@0", Set.of(), "PREFILL"))
+                .thenReturn(DiffResult.empty("10.0.0.1:8080@0"));
+        kvCacheManager.updateEngineCache(
+                "10.0.0.1:8080@0", "10.0.0.1:8080", "10.0.0.1@0",
+                "PREFILL", Set.of());
+
+        kvCacheManager.removeStaleEngineCaches(List.of("10.0.0.2:8080"));
+
+        verify(engineLocalView).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
+        verify(globalCacheIndex).removeAllCacheBlockOfEngine("10.0.0.1:8080@0");
     }
 
     @Test

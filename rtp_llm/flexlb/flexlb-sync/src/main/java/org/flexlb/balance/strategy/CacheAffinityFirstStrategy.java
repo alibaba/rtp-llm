@@ -98,14 +98,15 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                         ? StrategySelectionReason.CACHE_AFFINITY_FALLBACK
                         : StrategySelectionReason.SHORTEST_TTFT_FALLBACK;
 
-        reportCacheAffinityDecision(roleType, selectedWorker.worker().getIp(), selectionReason.name());
+        reportCacheAffinityDecision(
+                roleType, selectedWorker.worker().getIpIndex(), selectionReason.name());
 
         // Preserve the decision path in the request PV snapshot, including a concurrent fallback.
         recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, eligibleWorkers, List.of(),
                 shortestTtftWorker.ttft(), 0, roleType, group, seqLen, selectionReason.name(),
                 new CacheAffinityDecision(
-                        cacheLeader.worker().getIpPort(),
-                        shortestTtftWorker.worker().getIpPort(),
+                        cacheLeader.worker().getLogicalIpPort(),
+                        shortestTtftWorker.worker().getLogicalIpPort(),
                         decision.cacheLeadTokens(),
                         decision.extraWorkTokens(),
                         decision.toleratedExtraWorkTokens(),
@@ -130,12 +131,13 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         ScoredWorker selectedWorker = selectFirstWorkerWithoutConcurrentConflict(workersByTtft, shortestTtftWorker);
         StrategySelectionReason selectionReason = StrategySelectionReason.SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK;
 
-        reportCacheAffinityDecision(roleType, selectedWorker.worker().getIp(), selectionReason.name());
+        reportCacheAffinityDecision(
+                roleType, selectedWorker.worker().getIpIndex(), selectionReason.name());
         recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, List.of(), List.of(),
                 shortestTtftWorker.ttft(), 0, roleType, group, seqLen, selectionReason.name(),
                 new CacheAffinityDecision(
-                        cacheLeader.worker().getIpPort(),
-                        shortestTtftWorker.worker().getIpPort(),
+                        cacheLeader.worker().getLogicalIpPort(),
+                        shortestTtftWorker.worker().getLogicalIpPort(),
                         Math.max(0, cacheLeader.hitCacheTokens() - shortestTtftWorker.hitCacheTokens()),
                         cacheLeader.ttft() - shortestTtftWorker.ttft(),
                         configuredMaxExtraWorkTokens(config),

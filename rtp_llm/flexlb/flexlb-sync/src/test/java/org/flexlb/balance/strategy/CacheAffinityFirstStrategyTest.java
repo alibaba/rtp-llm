@@ -74,9 +74,9 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker, thirdWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 16,
-                        shortestTtftWorker.getIpPort(), 15,
-                        thirdWorker.getIpPort(), 15));
+                        cacheLeader.getLogicalIpPort(), 16,
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        thirdWorker.getLogicalIpPort(), 15));
 
         ServerStatus selected = select(strategy, cacheAffinityConfig(), "cache-affinity");
 
@@ -95,9 +95,9 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker, thirdWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 16,
-                        shortestTtftWorker.getIpPort(), 15,
-                        thirdWorker.getIpPort(), 15));
+                        cacheLeader.getLogicalIpPort(), 16,
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        thirdWorker.getLogicalIpPort(), 15));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(0);
 
@@ -114,9 +114,9 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(overloadedCacheLeader, shortestTtftWorker, thirdWorker),
                 Map.of(
-                        overloadedCacheLeader.getIpPort(), 17,
-                        shortestTtftWorker.getIpPort(), 15,
-                        thirdWorker.getIpPort(), 15));
+                        overloadedCacheLeader.getLogicalIpPort(), 17,
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        thirdWorker.getLogicalIpPort(), 15));
 
         ServerStatus selected = select(strategy, cacheAffinityConfig(), "queue-spillover");
 
@@ -202,9 +202,9 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker, thirdWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 16,
-                        shortestTtftWorker.getIpPort(), 15,
-                        thirdWorker.getIpPort(), 15));
+                        cacheLeader.getLogicalIpPort(), 16,
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        thirdWorker.getLogicalIpPort(), 15));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(12_000);
 
@@ -221,9 +221,9 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker, thirdWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 16,
-                        shortestTtftWorker.getIpPort(), 15,
-                        thirdWorker.getIpPort(), 15));
+                        cacheLeader.getLogicalIpPort(), 16,
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        thirdWorker.getLogicalIpPort(), 15));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(10_000);
 
@@ -240,9 +240,9 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(workerA, shortestQueueWorker, workerC),
                 Map.of(
-                        workerA.getIpPort(), 15,
-                        shortestQueueWorker.getIpPort(), 15,
-                        workerC.getIpPort(), 15));
+                        workerA.getLogicalIpPort(), 15,
+                        shortestQueueWorker.getLogicalIpPort(), 15,
+                        workerC.getLogicalIpPort(), 15));
 
         ServerStatus selected = select(strategy, cacheAffinityConfig(), "common-prefix");
 
@@ -260,9 +260,9 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker, coldWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 17,
-                        shortestTtftWorker.getIpPort(), 15,
-                        coldWorker.getIpPort(), 0));
+                        cacheLeader.getLogicalIpPort(), 17,
+                        shortestTtftWorker.getLogicalIpPort(), 15,
+                        coldWorker.getLogicalIpPort(), 0));
 
         ServerStatus selected = select(strategy, cacheAffinityConfig(), "no-cold-warmup");
 
@@ -297,8 +297,8 @@ class CacheAffinityFirstStrategyTest {
         Assertions.assertSame(cacheFallback, selectedWorker.worker());
         var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
         Assertions.assertEquals("CACHE_AFFINITY_FALLBACK", decision.selectionReason());
-        Assertions.assertEquals("127.0.0.1:8080", decision.cacheAffinityDecision().cacheLeaderIpPort());
-        Assertions.assertEquals("127.0.0.3:8080", decision.cacheAffinityDecision().shortestTtftWorkerIpPort());
+        Assertions.assertEquals("127.0.0.1:8080@0", decision.cacheAffinityDecision().cacheLeaderIpPort());
+        Assertions.assertEquals("127.0.0.3:8080@0", decision.cacheAffinityDecision().shortestTtftWorkerIpPort());
     }
 
     @Test
@@ -360,8 +360,8 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 3,
-                        shortestTtftWorker.getIpPort(), 0));
+                        cacheLeader.getLogicalIpPort(), 3,
+                        shortestTtftWorker.getLogicalIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
@@ -387,7 +387,7 @@ class CacheAffinityFirstStrategyTest {
         putPendingTask(cacheLeader, "existing", 960_000, 0);
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker),
-                Map.of(cacheLeader.getIpPort(), 3, shortestTtftWorker.getIpPort(), 0));
+                Map.of(cacheLeader.getLogicalIpPort(), 3, shortestTtftWorker.getLogicalIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setOutstandingUncachedTokensThreshold(1_000_000L);
@@ -430,7 +430,7 @@ class CacheAffinityFirstStrategyTest {
         putPendingTask(shortestTtftWorker, "shortest-existing", 970_000, 0);
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker),
-                Map.of(cacheLeader.getIpPort(), 3, shortestTtftWorker.getIpPort(), 0));
+                Map.of(cacheLeader.getLogicalIpPort(), 3, shortestTtftWorker.getLogicalIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
@@ -449,7 +449,7 @@ class CacheAffinityFirstStrategyTest {
         putPendingTask(cacheLeader, "existing", 956_000, 0);
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker),
-                Map.of(cacheLeader.getIpPort(), 3, shortestTtftWorker.getIpPort(), 0));
+                Map.of(cacheLeader.getLogicalIpPort(), 3, shortestTtftWorker.getLogicalIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
@@ -469,8 +469,8 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 3,
-                        shortestTtftWorker.getIpPort(), 0));
+                        cacheLeader.getLogicalIpPort(), 3,
+                        shortestTtftWorker.getLogicalIpPort(), 0));
         FlexlbConfig config = cacheAffinityConfig();
         config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
         config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
@@ -498,7 +498,7 @@ class CacheAffinityFirstStrategyTest {
         Map<String, WorkerStatus> prefillWorkers =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         for (WorkerStatus worker : workers) {
-            prefillWorkers.put(worker.getIpPort(), worker);
+            prefillWorkers.put(worker.getLogicalIpPort(), worker);
         }
 
         ResourceMeasure resourceMeasure = Mockito.mock(ResourceMeasure.class);

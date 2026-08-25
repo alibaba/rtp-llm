@@ -25,6 +25,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
@@ -108,6 +109,7 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+        LoadBalanceStrategyFactory.clear();
     }
 
     @Test
@@ -334,7 +336,7 @@ class DefaultRouterTest {
     }
 
     @Test
-    void should_log_error_when_master_request_is_null() {
+    void should_return_invalid_request_when_master_request_is_null() {
         // Setup
         when(balanceContext.getRequest()).thenReturn(null);
 
@@ -342,7 +344,9 @@ class DefaultRouterTest {
         Response response = defaultRouter.route(balanceContext);
 
         // Verify
-        assertNotNull(response, "Response should not be null");
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorMsg(), response.getErrorMessage());
     }
 
     @Test
@@ -383,6 +387,7 @@ class DefaultRouterTest {
         decodeServerStatus.setSuccess(true);
         decodeServerStatus.setServerIp("192.168.1.2");
         decodeServerStatus.setHttpPort(8081);
+        decodeServerStatus.setSelectedEngineIndex(1, 2);
         decodeServerStatus.setGroup("group1");
         decodeServerStatus.setRole(RoleType.DECODE);
         when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
@@ -398,7 +403,45 @@ class DefaultRouterTest {
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081"), anyString());
+        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081@1"), anyString());
+    }
+
+    @Test
+    void should_rollback_index_zero_when_single_engine_response_omits_wire_index() {
+        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyDecodeWorker.setIp("192.168.1.2");
+        dummyDecodeWorker.setPort(8081);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+                .put("192.168.1.2:8081@0", dummyDecodeWorker);
+
+        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyPrefillWorker.setIp("192.168.1.1");
+        dummyPrefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap()
+                .put("192.168.1.1:8080@0", dummyPrefillWorker);
+
+        ServerStatus decodeServerStatus = new ServerStatus();
+        decodeServerStatus.setSuccess(true);
+        decodeServerStatus.setServerIp("192.168.1.2");
+        decodeServerStatus.setHttpPort(8081);
+        decodeServerStatus.setSelectedEngineIndex(0, 1);
+        decodeServerStatus.setGroup("group1");
+        decodeServerStatus.setRole(RoleType.DECODE);
+        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any()))
+                .thenReturn(decodeServerStatus);
+
+        ServerStatus prefillServerStatus = new ServerStatus();
+        prefillServerStatus.setSuccess(false);
+        prefillServerStatus.setMessage("No prefill worker available");
+        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), any()))
+                .thenReturn(prefillServerStatus);
+
+        Response response = defaultRouter.route(balanceContext);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
+        assertNull(decodeServerStatus.getEngineIndex());
+        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081@0"), anyString());
     }
 
     @Test

@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 
 class RoutingServiceDiscoveryTest {
 
@@ -46,6 +47,10 @@ class RoutingServiceDiscoveryTest {
         assertEquals("site-a", normalizedHost.getSite());
         assertEquals("group-a", normalizedHost.getGroup());
         assertEquals("deployment-a", normalizedHost.getDeploymentName());
+        assertEquals(0, normalizedHost.getEngineIndex());
+        assertEquals(1, normalizedHost.getMultiEngineNum());
+        assertEquals("10.0.0.1:8080", normalizedHost.getPhysicalIpPort());
+        assertEquals("10.0.0.1:8080@0", normalizedHost.getLogicalIpPort());
     }
 
     @Test
@@ -62,6 +67,29 @@ class RoutingServiceDiscoveryTest {
         assertEquals(8080, normalizedHost.getHttpPort());
         assertEquals(8081, normalizedHost.getGrpcPort());
         assertEquals(18002, normalizedHost.getWorkerStatusPort());
+    }
+
+    @Test
+    void expandsDiscoveredHostIntoIndexedLogicalWorkers() {
+        WorkerHost discoveredHost = WorkerHost.of("10.0.0.1", 8080);
+        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
+        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
+        Endpoint endpoint = endpoint();
+        endpoint.setProtocol("http");
+        endpoint.setWorkerStatusPort(18002);
+        endpoint.setMultiEngineNum(2);
+
+        List<WorkerHost> hosts = discovery.getHosts(endpoint);
+
+        assertEquals(2, hosts.size());
+        assertIterableEquals(List.of(0, 1), hosts.stream().map(WorkerHost::getEngineIndex).toList());
+        assertIterableEquals(List.of(18002, 18003),
+                hosts.stream().map(WorkerHost::getWorkerStatusPort).toList());
+        assertIterableEquals(List.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"),
+                hosts.stream().map(WorkerHost::getLogicalIpPort).toList());
+        assertIterableEquals(List.of("10.0.0.1:8080", "10.0.0.1:8080"),
+                hosts.stream().map(WorkerHost::getPhysicalIpPort).toList());
+        assertIterableEquals(List.of(2, 2), hosts.stream().map(WorkerHost::getMultiEngineNum).toList());
     }
 
     private Endpoint endpoint() {

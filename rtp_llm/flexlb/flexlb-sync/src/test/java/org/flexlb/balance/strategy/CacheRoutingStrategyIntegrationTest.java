@@ -52,13 +52,13 @@ class CacheRoutingStrategyIntegrationTest {
         SelectionResult shortestSelection = select(
                 LoadBalanceStrategyEnum.SHORTEST_TTFT,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 2_500)),
-                Map.of("127.0.0.1:8080", 15, "127.0.0.2:8080", 16),
+                Map.of("127.0.0.1:8080@0", 15, "127.0.0.2:8080@0", 16),
                 config,
                 "shortest-ignores-cache-limit");
         SelectionResult cacheAffinitySelection = select(
                 LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 2_500)),
-                Map.of("127.0.0.1:8080", 15, "127.0.0.2:8080", 16),
+                Map.of("127.0.0.1:8080@0", 15, "127.0.0.2:8080@0", 16),
                 config,
                 "cache-affinity-uses-cache-limit");
 
@@ -78,7 +78,7 @@ class CacheRoutingStrategyIntegrationTest {
         SelectionResult shortestSelection = select(
                 LoadBalanceStrategyEnum.SHORTEST_TTFT,
                 List.of(shortestWorker, overloadedCacheLeader),
-                Map.of(shortestWorker.getIpPort(), 15, overloadedCacheLeader.getIpPort(), 17),
+                Map.of(shortestWorker.getLogicalIpPort(), 15, overloadedCacheLeader.getLogicalIpPort(), 17),
                 config,
                 "shortest-outstanding-threshold");
 
@@ -89,8 +89,8 @@ class CacheRoutingStrategyIntegrationTest {
                 LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST,
                 List.of(cacheAffinityShortestWorker, cacheAffinityOverloadedLeader),
                 Map.of(
-                        cacheAffinityShortestWorker.getIpPort(), 15,
-                        cacheAffinityOverloadedLeader.getIpPort(), 17),
+                        cacheAffinityShortestWorker.getLogicalIpPort(), 15,
+                        cacheAffinityOverloadedLeader.getLogicalIpPort(), 17),
                 config,
                 "cache-affinity-outstanding-threshold");
 
@@ -109,13 +109,13 @@ class CacheRoutingStrategyIntegrationTest {
         SelectionResult shortestSelection = select(
                 LoadBalanceStrategyEnum.SHORTEST_TTFT,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 5_000)),
-                Map.of("127.0.0.2:8080", 1),
+                Map.of("127.0.0.2:8080@0", 1),
                 config,
                 "shortest-low-hit-cache-preference");
         SelectionResult cacheAffinitySelection = select(
                 LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST,
                 List.of(worker("127.0.0.1", 0), worker("127.0.0.2", 5_000)),
-                Map.of("127.0.0.2:8080", 1),
+                Map.of("127.0.0.2:8080@0", 1),
                 config,
                 "cache-affinity-low-hit-rejected");
 
@@ -132,7 +132,7 @@ class CacheRoutingStrategyIntegrationTest {
                                    String requestId) {
         workers.forEach(worker -> EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
                 .getPrefillStatusMap()
-                .put(worker.getIpPort(), worker));
+                .put(worker.getLogicalIpPort(), worker));
 
         ResourceMeasure resourceMeasure = Mockito.mock(ResourceMeasure.class);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);

@@ -91,7 +91,10 @@ Nacos 中使用对象字段 `modelServiceConfig`。缺省**启动失败**。配�
 - `service_id`（必填）、`role_endpoints: List<GroupRoleEndPoint>`（必填非空）、`kvcm`。
 - `GroupRoleEndPoint`：`group` + `prefill_endpoint` / `decode_endpoint` / `vit_endpoint` /
   `pd_fusion_endpoint`（各为 `Endpoint{address, protocol, path, worker_status_port,
-  discovery}`）。
+  multi_engine_num=1, discovery}`）。显式配置的 `worker_status_port` 在 N=1 时也必须处于
+  `[1, 65535]`；`multi_engine_num < 1` 启动失败；N>1 要求显式 `worker_status_port`，并校验
+  完整 `base..base+N-1` 端口段不超过 65535。protocol 只解释 frontend discovery port，
+  不参与 worker-status offset。
 - `DiscoveryConfig`：`type`（`vipserver` / `dashscope` / `static-env`）、`base_url`
   （默认 `http://127.0.0.1:8880`）、connect/read timeout 500ms、poll 1000ms、`hosts`。
 - `KvcmConfig`：`enabled`、`address`、`namespace`、`port=6381`、`discovery`、
@@ -161,6 +164,11 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
   Prometheus exporter 端口 4142。opensource 构建没有 spring-boot-starter-actuator，
   application.yml 里的 management 配置不生效。
 - 指标名集中在 `MetricConstant`（flexlb-common），主要族：
+  - 所有可归属具体逻辑引擎的 `engineIp` tag 统一使用 `ip@engineIndex`，不包含 frontend
+    port；N=1 也使用 `@0`。服务发现或同步框架在尚未定位具体 worker 前发生的全局错误使用空
+    `engineIp`。路由、KVCM、cache key 和 cache-hit PV 的 worker 字段继续使用完整
+    `ip:port@engineIndex`；metric tag 不使用 `engineIpPort` 表示 worker。通用 `grpc.*` 传输
+    指标的 `ip` 表示远端网络目标（同时覆盖引擎和 KVCM），不属于逻辑 worker identity；
   - `app.engine.health.*` / `app.engine.worker.*`：同步成功周期、worker 数、并发、RT/QPS、
     队列时间、任务表大小；worker status 状态转变耗时——FlexLB 观测值
     （`app.engine.worker.status.observed.decision.to.waiting.ms`、
@@ -171,6 +179,8 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`。环境变量
   - `app.routing.*`：队列长度/入队/超时/拒绝/取消 QPS、排队等待、路由执行耗时、
     单次路由尝试耗时（`app.routing.route.attempt.execution.time.ms`，不含 retry sleep）、
     成功/失败（tag `code`）/每次实际 retry 的重试 QPS（`RoutingQueueReporter`，全 PRECISE）；
+    selected-worker detail 的 `engineIndex` 使用内部 routing index，因此 N=1 schedule 虽省略
+    wire `engine_index`，观测仍记录 index 0；
   - `app.cache.*`：两级索引规模、命中数/率、预测 vs 实际对比（`hit.comparison.*`）、
     Local Standby 默认生效 block size（`app.cache.local.standby.block.size`）、容量/拒绝/映射数、
     `cache.match.active.source`、`standby.fallback.qps`、
