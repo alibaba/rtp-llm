@@ -23,9 +23,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * Lightweight HTTP control server for the Java mock engine cluster.
  *
- * <p>Provides 11 endpoints mirroring the legacy Python mock control API:
+ * <p>Provides 13 endpoints mirroring the legacy Python mock control API:
  * snapshot, inject, clear_inject, health, requests, set_perf, set_kv_pressure,
- * set_queue_depth, stop_engine, start_engine, and metrics.
+ * set_queue_depth, stop_engine, start_engine, add_engine, remove_engine, and
+ * metrics. add_engine/remove_engine back runtime scale-out/in and keep the
+ * optional --discovery-file mapping in sync (see {@link DynamicEngineManager}).
  *
  * <p>Python compatibility layer (Phase 2): all POST endpoints accept dual
  * addressing — either {@code {"engine": "<name>"}} resolved by engine name
@@ -50,6 +52,8 @@ final class MockControlServer {
     private final Map<Integer, Server> serversByPort;
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
+    /** Runtime scale-out/in backend for /add_engine + /remove_engine; null disables them. */
+    private final DynamicEngineManager engineManager;
 
     MockControlServer(Map<Integer, JavaMockEngineCluster.FastRpcService> services,
                       Map<Integer, Server> serversByPort,
@@ -57,10 +61,21 @@ final class MockControlServer {
                       EventLoopGroup workerGroup,
                       String host,
                       int httpPort) throws IOException {
+        this(services, serversByPort, bossGroup, workerGroup, host, httpPort, null);
+    }
+
+    MockControlServer(Map<Integer, JavaMockEngineCluster.FastRpcService> services,
+                      Map<Integer, Server> serversByPort,
+                      EventLoopGroup bossGroup,
+                      EventLoopGroup workerGroup,
+                      String host,
+                      int httpPort,
+                      DynamicEngineManager engineManager) throws IOException {
         this.services = services;
         this.serversByPort = serversByPort;
         this.bossGroup = bossGroup;
         this.workerGroup = workerGroup;
+        this.engineManager = engineManager;
         this.httpServer = HttpServer.create(new InetSocketAddress(host, httpPort), 0);
         httpServer.createContext("/snapshot", this::handleSnapshot);
         httpServer.createContext("/inject", this::handleInject);
@@ -72,6 +87,8 @@ final class MockControlServer {
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
         httpServer.createContext("/stop_engine", this::handleStopEngine);
         httpServer.createContext("/start_engine", this::handleStartEngine);
+        httpServer.createContext("/add_engine", this::handleAddEngine);
+        httpServer.createContext("/remove_engine", this::handleRemoveEngine);
         httpServer.createContext("/metrics", this::handleMetrics);
         httpServer.setExecutor(Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r, "mock-control-http");
@@ -504,6 +521,88 @@ final class MockControlServer {
             // Guarantee a response for any failure (e.g. malformed/empty JSON
             // body raising MismatchedInputException) instead of leaving the
             // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
+        }
+    }
+
+    /**
+     * POST /add_engine {"role": "prefill"|"decode", "port": <grpcPort, optional>} —
+     * create and start a NEW engine (dynamic scale-out). Port is auto-allocated
+     * (current max + 1) when omitted; an explicit port already in use is a 409.
+     * When the cluster runs with --discovery-file the mapping file is updated
+     * atomically so a file-discovery master picks the engine up.
+     */
+    private void handleAddEngine(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            if (engineManager == null) {
+                sendJson(exchange, 501, Map.of("error",
+                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                return;
+            }
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+            String role = body.path("role").asText(null);
+            Integer explicitPort = body.hasNonNull("port") ? body.path("port").asInt() : null;
+            DynamicEngineManager.AddedEngine added = engineManager.addEngine(role, explicitPort);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "ok");
+            response.put("engine", added.engineName());
+            response.put("port", added.grpcPort());
+            response.put("http_port", added.grpcPort() - 1);
+            response.put("action", "added");
+            sendJson(exchange, 200, response);
+        } catch (DynamicEngineManager.EngineOperationException e) {
+            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
+        }
+    }
+
+    /**
+     * POST /remove_engine {"port": <grpcPort>} or {"engine": "<name>"} —
+     * PERMANENTLY detach an engine: stop_engine semantics (stopped flag +
+     * shutdownNow cutting in-flight RPC streams) plus removal from the services
+     * map and the discovery file. Unlike /stop_engine, the engine never comes
+     * back on this port within this process.
+     */
+    private void handleRemoveEngine(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            if (engineManager == null) {
+                sendJson(exchange, 501, Map.of("error",
+                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                return;
+            }
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+            DynamicEngineManager.RemovedEngine removed = engineManager.removeEngine(service);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "ok");
+            response.put("engine", removed.engineName());
+            response.put("port", removed.grpcPort());
+            response.put("action", "removed");
+            response.put("running_at_removal", removed.runningAtRemoval());
+            response.put("waiting_at_removal", removed.waitingAtRemoval());
+            sendJson(exchange, 200, response);
+        } catch (DynamicEngineManager.EngineOperationException e) {
+            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (ApiException e) {
+            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
             try {
                 sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
             } catch (IOException ignored) {

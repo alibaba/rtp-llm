@@ -96,6 +96,15 @@ OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_eval_master}"
 
+# Optional file-based service discovery (dynamic engine add/remove).
+# Empty (default) = disabled: mock engine keeps the env-file (NoOp discovery)
+# path, master falls back to NoOpServiceDiscovery — behavior unchanged.
+# Set to a path (or "auto"/"1" = ${RUN_DIR}/discovery.json when START_MOCK=1)
+# to enable: the mock engine writes the domain→hosts mapping via
+# --discovery-file (kept in sync by /add_engine + /remove_engine) and the
+# master consumes it via FLEXLB_DISCOVERY_FILE (→ flexlb.discovery.file).
+FLEXLB_DISCOVERY_FILE="${FLEXLB_DISCOVERY_FILE:-}"
+
 # ========== Thread Pool Size Configuration ==========
 # These defaults keep total threads <1000 on high-core machines.
 export GRPC_CLIENT_EXECUTOR_CORE_SIZE="${GRPC_CLIENT_EXECUTOR_CORE_SIZE:-32}"
@@ -354,6 +363,23 @@ fi
 ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 
+JAVA_MOCK_DISCOVERY_ARGS=()
+MASTER_DISCOVERY_ENV=()
+FLEXLB_DISCOVERY_FILE_PATH=""
+if [[ -n "${FLEXLB_DISCOVERY_FILE}" ]]; then
+  if [[ "${FLEXLB_DISCOVERY_FILE}" == "auto" || "${FLEXLB_DISCOVERY_FILE}" == "1" ]]; then
+    if [[ "${START_MOCK}" != "1" ]]; then
+      echo "FLEXLB_DISCOVERY_FILE=auto requires START_MOCK=1 (mock engine writes the file); set an explicit path instead" >&2
+      exit 1
+    fi
+    FLEXLB_DISCOVERY_FILE_PATH="${RUN_DIR}/discovery.json"
+  else
+    FLEXLB_DISCOVERY_FILE_PATH="${FLEXLB_DISCOVERY_FILE}"
+  fi
+  JAVA_MOCK_DISCOVERY_ARGS=(--discovery-file "${FLEXLB_DISCOVERY_FILE_PATH}")
+  MASTER_DISCOVERY_ENV=("FLEXLB_DISCOVERY_FILE=${FLEXLB_DISCOVERY_FILE_PATH}")
+fi
+
 if [[ "${START_MOCK}" == "1" ]]; then
   mapfile -t JAVA_MOCK_PORTS < <(seq "${MOCK_BASE_GRPC_PORT}" \
     "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))")
@@ -382,10 +408,14 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
     --endpoint-file "${ENDPOINT_FILE}" \
     --env-file "${FLEXLB_ENV_FILE}" \
+    "${JAVA_MOCK_DISCOVERY_ARGS[@]}" \
     >"${RUN_DIR}/mock_engine.log" 2>&1 &
   MOCK_PID="$!"
   echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
   echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
+  if [[ -n "${FLEXLB_DISCOVERY_FILE_PATH}" ]]; then
+    echo "File service discovery: engine maintains ${FLEXLB_DISCOVERY_FILE_PATH} (add_engine/remove_engine keep it in sync)"
+  fi
   # The Java process writes discovery files only after every gRPC port is bound.
   wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
   if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
@@ -541,6 +571,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
   fi
   if [[ -n "${FLEXLB_START_CMD:-}" ]]; then
     env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
+      "${MASTER_DISCOVERY_ENV[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
       "STRATEGY_CONFIGS=${STRATEGY_CONFIGS}" \
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
@@ -555,6 +586,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-api -am package -DskipTests)
     fi
     env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
+      "${MASTER_DISCOVERY_ENV[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
       "STRATEGY_CONFIGS=${STRATEGY_CONFIGS}" \
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
