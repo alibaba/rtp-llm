@@ -1,8 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/StoreTaskRunner.h"
 
+#include <exception>
+
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -36,45 +39,62 @@ bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<Grou
     return true;
 }
 
-bool StoreTaskRunner::runTransfer(Task&                          task,
+void StoreTaskRunner::runTransfer(TaskPtr                         task,
                                   const BlockTransferDispatcher& transfer_dispatcher,
                                   BlockTreeCacheMetricsReporter& metrics_reporter,
                                   int                            host_timeout_ms,
-                                  int                            disk_timeout_ms) {
-    const int     timeout_ms = task.target_tier == Tier::DISK ? disk_timeout_ms : host_timeout_ms;
-    const int64_t transfer_begin_time_us =
-        metrics_reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task.target_tier);
-    const std::vector<TransferDescriptor> empty_descriptors;
-    bool                                  copy_success   = false;
-    const auto                            finish_metrics = [&]() {
-        metrics_reporter.reportTransferFinished(CacheTransferOperation::STORE,
-                                                Tier::DEVICE,
-                                                task.target_tier,
-                                                task.descriptors.size(),
-                                                transfer_begin_time_us,
-                                                copy_success,
-                                                copy_success ? task.descriptors : empty_descriptors,
-                                                group_sets_);
-    };
-
+                                  int                            disk_timeout_ms,
+                                  TransferDoneCallback           callback) {
     try {
-        std::vector<std::shared_ptr<AsyncContext>> contexts;
-        if (task.target_tier == Tier::DISK) {
-            contexts.reserve(task.descriptors.size());
-            for (const auto& descriptor : task.descriptors) {
-                contexts.push_back(transfer_dispatcher.executeMultiRank({descriptor}, timeout_ms));
+        const int timeout_ms = task->target_tier == Tier::DISK ? disk_timeout_ms : host_timeout_ms;
+        task->phase = Task::Phase::TRANSFERRING;
+        task->transfer_begin_time_us =
+            metrics_reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task->target_tier);
+
+        auto stage_state = std::make_shared<TransferStageState>(
+            [this, task, &metrics_reporter, callback](ErrorInfo error) mutable {
+                try {
+                    static const std::vector<TransferDescriptor> empty_descriptors;
+                    metrics_reporter.reportTransferFinished(CacheTransferOperation::STORE,
+                                                            Tier::DEVICE,
+                                                            task->target_tier,
+                                                            task->descriptors.size(),
+                                                            task->transfer_begin_time_us,
+                                                            error.ok(),
+                                                            error.ok() ? task->descriptors : empty_descriptors,
+                                                            group_sets_);
+                    task->phase = Task::Phase::FINISHED;
+                    callback(std::move(error));
+                } catch (const std::exception& exception) {
+                    task->phase = Task::Phase::FINISHED;
+                    callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what()));
+                } catch (...) {
+                    task->phase = Task::Phase::FINISHED;
+                    callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store completion exception"));
+                }
+            });
+
+        const auto submit_batch = [&](const std::vector<TransferDescriptor>& descriptors) {
+            stage_state->addBatch();
+            transfer_dispatcher.runTransfer(
+                descriptors,
+                timeout_ms,
+                [stage_state](ErrorInfo error) { stage_state->completeBatch(std::move(error)); });
+        };
+        if (task->target_tier == Tier::DISK) {
+            for (const auto& descriptor : task->descriptors) {
+                submit_batch({descriptor});
             }
-        } else {
-            contexts.push_back(transfer_dispatcher.executeMultiRank(task.descriptors, timeout_ms));
+        } else if (!task->descriptors.empty()) {
+            submit_batch(task->descriptors);
         }
-        FusedAsyncContext context(contexts);
-        context.waitDone();
-        copy_success = context.success();
-        finish_metrics();
-        return copy_success;
+        stage_state->finishSubmitting();
+    } catch (const std::exception& error) {
+        task->phase = Task::Phase::FINISHED;
+        callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
     } catch (...) {
-        finish_metrics();
-        throw;
+        task->phase = Task::Phase::FINISHED;
+        callback(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown store submission exception"));
     }
 }
 

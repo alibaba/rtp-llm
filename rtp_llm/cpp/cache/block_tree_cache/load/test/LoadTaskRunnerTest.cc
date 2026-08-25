@@ -1,15 +1,21 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 
 #include <deque>
+#include <atomic>
+#include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {
@@ -34,29 +40,6 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
         group_set_id, topology, {0}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool));
 }
 
-class SubmissionOrderContext final: public AsyncContext {
-public:
-    SubmissionOrderContext(std::vector<std::string>& events, std::string wait_event, bool succeed):
-        events_(events), wait_event_(std::move(wait_event)), succeed_(succeed) {}
-
-    void waitDone() override {
-        events_.push_back(wait_event_);
-        done_ = true;
-    }
-    bool done() const override {
-        return done_;
-    }
-    bool success() const override {
-        return done_ && succeed_;
-    }
-
-private:
-    std::vector<std::string>& events_;
-    std::string               wait_event_;
-    bool                      succeed_;
-    bool                      done_{false};
-};
-
 class RecordingPerRankEngine final: public PerRankBlockTransferEngine {
 public:
     explicit RecordingPerRankEngine(std::deque<bool> results):
@@ -70,12 +53,51 @@ public:
         events_.push_back("submit_" + suffix);
         const bool result = results_.front();
         results_.pop_front();
-        return std::make_shared<SubmissionOrderContext>(events_, "wait_" + suffix, result);
+        if (result) {
+            return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+        }
+        return std::make_shared<CompletedAsyncContext>(
+            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
     }
 
     std::vector<std::vector<TransferDescriptor>> batches_;
     std::deque<bool>                             results_;
     std::vector<std::string>                     events_;
+};
+
+class PendingPerRankEngine final: public PerRankBlockTransferEngine {
+public:
+    PendingPerRankEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
+
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        batches_.push_back(descriptors);
+        auto context = std::make_shared<TransferBatchAsyncContext>();
+        contexts_.push_back(context);
+        return context;
+    }
+
+    size_t contextCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return contexts_.size();
+    }
+
+    void completeAll() {
+        std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            contexts = contexts_;
+        }
+        for (const auto& context : contexts) {
+            context->complete(ErrorInfo::OkStatus());
+        }
+    }
+
+    std::vector<std::vector<TransferDescriptor>>         batches_;
+    std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts_;
+
+private:
+    mutable std::mutex mutex_;
 };
 
 TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
@@ -115,16 +137,19 @@ TEST(LoadTaskRunnerTest, HostBatchCompletesBeforeDiskBatchIsSubmitted) {
     auto engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true});
     BlockTransferDispatcher dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
-    LoadTaskRunner::Task task;
-    task.load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
-                       TransferDescriptor::diskToDevice(0, 2, {2})};
+    auto task = std::make_shared<LoadTaskRunner::Task>();
+    task->load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
+                        TransferDescriptor::diskToDevice(0, 2, {2})};
+    std::optional<ErrorInfo> result;
 
-    EXPECT_TRUE(runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100));
+    runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100,
+                       [&](ErrorInfo error) { result.emplace(std::move(error)); });
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->ok());
     ASSERT_EQ(engine->batches_.size(), 2u);
     EXPECT_EQ(engine->batches_[0].front().source_tier, Tier::HOST);
     EXPECT_EQ(engine->batches_[1].front().source_tier, Tier::DISK);
-    EXPECT_EQ(engine->events_,
-              (std::vector<std::string>{"submit_host_0", "wait_host_0", "submit_disk_0", "wait_disk_0"}));
+    EXPECT_EQ(engine->events_, (std::vector<std::string>{"submit_host_0", "submit_disk_0"}));
 }
 
 TEST(LoadTaskRunnerTest, HostFailureSkipsDiskBatch) {
@@ -134,12 +159,16 @@ TEST(LoadTaskRunnerTest, HostFailureSkipsDiskBatch) {
     auto engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{false});
     BlockTransferDispatcher dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
-    LoadTaskRunner::Task task;
-    task.load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
-                       TransferDescriptor::diskToDevice(0, 2, {2})};
+    auto task = std::make_shared<LoadTaskRunner::Task>();
+    task->load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
+                        TransferDescriptor::diskToDevice(0, 2, {2})};
+    std::optional<ErrorInfo> result;
 
-    EXPECT_FALSE(runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100));
-    EXPECT_EQ(engine->events_, (std::vector<std::string>{"submit_host_0", "wait_host_0"}));
+    runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100,
+                       [&](ErrorInfo error) { result.emplace(std::move(error)); });
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(result->ok());
+    EXPECT_EQ(engine->events_, (std::vector<std::string>{"submit_host_0"}));
 }
 
 TEST(LoadTaskRunnerTest, DiskFailureFailsLoadAfterHostSuccess) {
@@ -149,13 +178,16 @@ TEST(LoadTaskRunnerTest, DiskFailureFailsLoadAfterHostSuccess) {
     auto engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, false});
     BlockTransferDispatcher dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
-    LoadTaskRunner::Task task;
-    task.load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
-                       TransferDescriptor::diskToDevice(0, 2, {2})};
+    auto task = std::make_shared<LoadTaskRunner::Task>();
+    task->load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
+                        TransferDescriptor::diskToDevice(0, 2, {2})};
+    std::optional<ErrorInfo> result;
 
-    EXPECT_FALSE(runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100));
-    EXPECT_EQ(engine->events_,
-              (std::vector<std::string>{"submit_host_0", "wait_host_0", "submit_disk_0", "wait_disk_0"}));
+    runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100,
+                       [&](ErrorInfo error) { result.emplace(std::move(error)); });
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(result->ok());
+    EXPECT_EQ(engine->events_, (std::vector<std::string>{"submit_host_0", "submit_disk_0"}));
 }
 
 TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
@@ -164,15 +196,19 @@ TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
     auto engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true, true, true});
     BlockTransferDispatcher dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
-    LoadTaskRunner::Task task;
-    task.load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
-                       TransferDescriptor::hostToDevice(0, 2, {2}),
-                       TransferDescriptor::hostToDevice(1, 3, {3}),
-                       TransferDescriptor::diskToDevice(0, 4, {4}),
-                       TransferDescriptor::diskToDevice(1, 5, {5}),
-                       TransferDescriptor::diskToDevice(1, 6, {6})};
+    auto task = std::make_shared<LoadTaskRunner::Task>();
+    task->load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
+                        TransferDescriptor::hostToDevice(0, 2, {2}),
+                        TransferDescriptor::hostToDevice(1, 3, {3}),
+                        TransferDescriptor::diskToDevice(0, 4, {4}),
+                        TransferDescriptor::diskToDevice(1, 5, {5}),
+                        TransferDescriptor::diskToDevice(1, 6, {6})};
+    std::optional<ErrorInfo> result;
 
-    ASSERT_TRUE(runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100));
+    runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100,
+                       [&](ErrorInfo error) { result.emplace(std::move(error)); });
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->ok());
     ASSERT_EQ(engine->batches_.size(), 4u);
     EXPECT_EQ(engine->batches_[0].size(), 2u);
     EXPECT_EQ(engine->batches_[1].size(), 1u);
@@ -185,14 +221,81 @@ TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
         }
     }
     EXPECT_EQ(engine->events_,
-              (std::vector<std::string>{"submit_host_0",
-                                        "submit_host_1",
-                                        "wait_host_0",
-                                        "wait_host_1",
-                                        "submit_disk_0",
-                                        "submit_disk_1",
-                                        "wait_disk_0",
-                                        "wait_disk_1"}));
+              (std::vector<std::string>{"submit_host_0", "submit_host_1", "submit_disk_0", "submit_disk_1"}));
+}
+
+TEST(LoadTaskRunnerTest, PendingTransferDoesNotRetainOuterWorker) {
+    const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
+    LoadTaskRunner runner(group_sets);
+    auto engine = std::make_shared<PendingPerRankEngine>();
+    BlockTransferDispatcher dispatcher(engine);
+    BlockTreeCacheMetricsReporter metrics_reporter;
+    BlockTreeTaskPool outer_pool(1, 8, "AsyncLoadOuter");
+    ASSERT_TRUE(outer_pool.start());
+
+    auto first  = std::make_shared<LoadTaskRunner::Task>();
+    auto second = std::make_shared<LoadTaskRunner::Task>();
+    first->load_descs  = {TransferDescriptor::hostToDevice(0, 1, {1})};
+    second->load_descs = {TransferDescriptor::hostToDevice(0, 2, {2})};
+    std::atomic<size_t> started{0};
+    std::atomic<size_t> settled{0};
+    const auto submit_task = [&](const LoadTaskRunner::TaskPtr& task) {
+        return outer_pool.submit([&, task] {
+            runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100, [&](ErrorInfo) {
+                EXPECT_TRUE(outer_pool.submitCompletion([&] { settled.fetch_add(1); }));
+            });
+            started.fetch_add(1);
+        });
+    };
+
+    ASSERT_TRUE(submit_task(first));
+    ASSERT_TRUE(submit_task(second));
+    for (size_t attempt = 0; attempt < 100 && started.load() != 2; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(started.load(), 2u);
+    ASSERT_EQ(engine->contexts_.size(), 2u);
+    EXPECT_EQ(settled.load(), 0u);
+
+    engine->contexts_[0]->complete(ErrorInfo::OkStatus());
+    engine->contexts_[1]->complete(ErrorInfo::OkStatus());
+    outer_pool.waitForIdle();
+    EXPECT_EQ(settled.load(), 2u);
+}
+
+TEST(LoadTaskRunnerTest, HundredPendingTransfersAreNotCappedByFourOuterWorkers) {
+    constexpr size_t kBusinessCount = 100;
+    const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
+    LoadTaskRunner runner(group_sets);
+    auto engine = std::make_shared<PendingPerRankEngine>();
+    BlockTransferDispatcher dispatcher(engine);
+    BlockTreeCacheMetricsReporter metrics_reporter;
+    BlockTreeTaskPool outer_pool(/*thread_count=*/4, /*queue_size=*/128, "AsyncLoadOuter");
+    ASSERT_TRUE(outer_pool.start());
+
+    std::atomic<size_t> started{0};
+    std::atomic<size_t> settled{0};
+    for (size_t index = 0; index < kBusinessCount; ++index) {
+        auto task = std::make_shared<LoadTaskRunner::Task>();
+        task->load_descs = {TransferDescriptor::hostToDevice(0, index + 1, {index + 1})};
+        ASSERT_TRUE(outer_pool.submit([&, task] {
+            runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100, [&](ErrorInfo) {
+                EXPECT_TRUE(outer_pool.submitCompletion([&] { settled.fetch_add(1); }));
+            });
+            started.fetch_add(1);
+        }));
+    }
+
+    for (size_t attempt = 0; attempt < 200 && started.load() != kBusinessCount; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_EQ(started.load(), kBusinessCount);
+    EXPECT_EQ(engine->contextCount(), kBusinessCount);
+    EXPECT_EQ(settled.load(), 0u);
+
+    engine->completeAll();
+    outer_pool.waitForIdle();
+    EXPECT_EQ(settled.load(), kBusinessCount);
 }
 
 }  // namespace

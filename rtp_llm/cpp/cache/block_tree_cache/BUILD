@@ -114,6 +114,7 @@ cc_library(
         "transfer/MultiRankBlockTransferEngine.h",
         "transfer/PerRankBlockTransferEngine.h",
         "transfer/TransferBatchAsyncContext.h",
+        "transfer/TransferStageState.h",
         "transfer/DeviceHostCopyStrategy.h",
         "transfer/DeviceHostTransferExecutor.h",
         "transfer/HostDiskTransferExecutor.h",

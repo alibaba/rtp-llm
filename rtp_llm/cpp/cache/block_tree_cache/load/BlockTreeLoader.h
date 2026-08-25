@@ -66,6 +66,7 @@ private:
                                          uint64_t                               context_id,
                                          bool                                   release_transferred_refs);
     void                 runLoadTask(const LoadTaskRunner::TaskPtr& task);
+    void                 scheduleLoadSettlement(const LoadTaskRunner::TaskPtr& task, ErrorInfo error);
     bool                 settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success);
 
     bool changeTransferState(TreeNode*             node,

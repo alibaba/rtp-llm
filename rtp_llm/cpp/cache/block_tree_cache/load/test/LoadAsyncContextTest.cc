@@ -260,6 +260,31 @@ TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit
     coordinator->shutdown();
 }
 
+TEST(LoadAsyncContextTest, OnDoneRunsOnceWhenCommittedTransferCompletes) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    TransferDescriptor descriptor;
+    descriptor.source_tier = Tier::HOST;
+    auto context = coordinator->create({descriptor}, {false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    size_t callback_count = 0;
+    context->onDone([&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        ++callback_count;
+    });
+
+    ASSERT_TRUE(context->commit());
+    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->completeOne(true));
+    EXPECT_TRUE(context->done());
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}
+
 TEST(LoadAsyncContextTest, BackendMatchFailureAbortsWithoutRunningAllocatorCallback) {
     size_t commits     = 0;
     size_t aborts      = 0;

@@ -57,10 +57,7 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
         }
 
         const int transfer_timeout_ms = selectTransferTimeoutMs(task, memory_timeout_ms_, disk_timeout_ms_);
-        auto      primary_context =
-            transfer_dispatcher_->executeMultiRank({task.primary_desc}, transfer_timeout_ms);
-        primary_context->waitDone();
-        task_result.primary_success = primary_context->success();
+        task_result.primary_success = transfer_dispatcher_->runTransfer({task.primary_desc}, transfer_timeout_ms);
         if (!task_result.primary_success) {
             task_result.cascade_success.assign(task.cascade_descs.size(), false);
             finish_metrics();
@@ -70,9 +67,7 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
         overall_success = true;
         task_result.cascade_success.reserve(task.cascade_descs.size());
         for (const TransferDescriptor& cascade_desc : task.cascade_descs) {
-            auto cascade_context = transfer_dispatcher_->executeMultiRank({cascade_desc}, transfer_timeout_ms);
-            cascade_context->waitDone();
-            const bool cascade_success = cascade_context->success();
+            const bool cascade_success = transfer_dispatcher_->runTransfer({cascade_desc}, transfer_timeout_ms);
             task_result.cascade_success.push_back(cascade_success);
             overall_success = overall_success && cascade_success;
         }
