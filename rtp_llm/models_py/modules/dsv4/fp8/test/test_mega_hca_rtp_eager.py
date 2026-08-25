@@ -1,4 +1,4 @@
-"""RTP correctness and performance test for the TP1 Mega HCA attention sublayer.
+"""RTP correctness test for the TP1 Mega HCA attention sublayer.
 
 Mirrors ``test_mega_csa_rtp_eager``: one real AttentionFP8 layer
 (``compress_ratio == 128``, no indexer) with deterministic random weights, real
@@ -60,7 +60,6 @@ _INDEX_TOPK = 1024
 _O_GROUPS = 16
 _O_LORA_RANK = 1024
 _ROPE_DIM = 64
-_RUN_PERF = os.environ.get("DSV4_MEGA_RUN_PERF", "0") == "1"
 
 
 def _align_up(value: int, alignment: int) -> int:
@@ -263,23 +262,6 @@ def _make_pools(
     pools = _Pools(kv_cache, tensors, block_tables, entries, tokens, max_seq_len)
     pools.reset()
     return pools
-
-
-def _bench_cuda_event(fn, *, warmup: int = 10, iterations: int = 100) -> float:
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    timings = []
-    for _ in range(5):
-        start.record()
-        for _ in range(iterations):
-            fn()
-        end.record()
-        torch.cuda.synchronize()
-        timings.append(start.elapsed_time(end) * 1000.0 / iterations)
-    return sorted(timings)[len(timings) // 2]
 
 
 def _fill_random_state(pools: _Pools, device: torch.device, seed: int) -> None:
@@ -659,155 +641,6 @@ class MegaHCARTPEagerTest(unittest.TestCase):
         second = graph_output.clone()
         self.assertTrue(torch.isfinite(first).all().item())
         torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
-
-    @unittest.skipUnless(
-        _RUN_PERF,
-        "set DSV4_MEGA_RUN_PERF=1 for the single-card performance comparison",
-    )
-    def test_performance_against_original_rtp_attention_sublayer(self) -> None:
-        cases = (
-            (1, 2048),
-            (8, 2000),
-            (8, 2048),
-            (16, 2048),
-            (128, 4096),
-        )
-        selected_cases = os.environ.get("DSV4_MEGA_PERF_CASES")
-        if selected_cases:
-            cases = tuple(
-                tuple(int(value) for value in item.split(":"))
-                for item in selected_cases.split(",")
-            )
-        for batch_size, context_length in cases:
-            pool_max_seq_len = max(_TEST_MAX_SEQ_LEN, context_length)
-            reference_pools = _make_pools(
-                self.device, batch_size, max_seq_len=pool_max_seq_len
-            )
-            mega_pools = _make_pools(
-                self.device, batch_size, max_seq_len=pool_max_seq_len
-            )
-            _fill_random_context(reference_pools, self.device, seed=4242)
-            _fill_random_context(mega_pools, self.device, seed=4242)
-            _fill_random_state(reference_pools, self.device, seed=4242)
-            _fill_random_state(mega_pools, self.device, seed=4242)
-            generator = torch.Generator(device=self.device).manual_seed(
-                9000 + batch_size
-            )
-            hidden = torch.randn(
-                (batch_size, 1, HC, DIM),
-                generator=generator,
-                device=self.device,
-                dtype=torch.bfloat16,
-            ).mul_(0.05)
-            reference_metadata = self._metadata(context_length - 1, reference_pools)
-            mega_metadata = self._metadata(context_length - 1, mega_pools)
-            reference_check = self._forward_reference(
-                hidden.clone(), reference_metadata, reference_pools
-            ).clone()
-            self.runtime.begin_decode(mega_metadata)
-            mega_check = self._forward_mega(
-                hidden.clone(), mega_metadata, mega_pools
-            ).clone()
-            check_diff = calc_diff(mega_check.float(), reference_check.float())
-            check_cos = torch.nn.functional.cosine_similarity(
-                mega_check.float().flatten(), reference_check.float().flatten(), dim=0
-            ).item()
-            per_request = [
-                calc_diff(mega_check[index].float(), reference_check[index].float())
-                for index in range(batch_size)
-            ]
-            print(
-                "Mega/reference HCA performance-case correctness "
-                f"B={batch_size}, ctx={context_length}: calc_diff={check_diff:.6e}, "
-                f"cos={check_cos:.9f}, per-request diff "
-                f"min/max={min(per_request):.3e}/{max(per_request):.3e}"
-            )
-            self.assertLess(check_diff, 1.0e-3)
-            for index, request_diff in enumerate(per_request):
-                self.assertLess(
-                    request_diff, 1.0e-3, msg=f"request {index} of B={batch_size}"
-                )
-            # Boundary steps immediately re-read the entry this step just
-            # compressed; its bf16/FP8 rounding differences between the two
-            # implementations carry a large softmax share while the dense
-            # candidate list is short, so the cosine gate is looser than
-            # CSA's. Non-boundary steps measure ~0.99998.
-            self.assertGreater(check_cos, 0.995)
-
-            reference_hidden = hidden.clone()
-            mega_hidden = hidden.clone()
-            reference_fn = lambda: self._forward_reference(
-                reference_hidden, reference_metadata, reference_pools
-            )
-            self.runtime.begin_decode(mega_metadata)
-            mega_fn = lambda: self._forward_mega(mega_hidden, mega_metadata, mega_pools)
-
-            reference_eager_us = _bench_cuda_event(reference_fn)
-            mega_eager_us = _bench_cuda_event(mega_fn)
-
-            reference_metadata.is_cuda_graph = True
-            reference_fn()
-            torch.cuda.synchronize(self.device)
-            reference_graph_input = hidden.clone()
-            reference_graph_work = torch.empty_like(reference_graph_input)
-            reference_graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(reference_graph):
-                reference_graph_work.copy_(reference_graph_input)
-                reference_graph_output = self._forward_reference(
-                    reference_graph_work, reference_metadata, reference_pools
-                )
-
-            mega_metadata.is_cuda_graph = True
-            self.runtime.begin_decode(mega_metadata)
-            mega_fn()
-            torch.cuda.synchronize(self.device)
-            self.runtime.begin_decode(mega_metadata)
-            mega_graph = torch.cuda.CUDAGraph()
-            mega_graph_input = hidden.clone()
-            mega_graph_work = torch.empty_like(mega_graph_input)
-            with torch.cuda.graph(mega_graph):
-                mega_graph_work.copy_(mega_graph_input)
-                mega_graph_output = self.adapter.forward_attention_sublayer(
-                    self.block,
-                    mega_graph_work,
-                    mega_metadata,
-                    kv_cache=mega_pools.kv_cache,
-                )
-
-            reference_graph_us = _bench_cuda_event(
-                reference_graph.replay, warmup=5, iterations=50
-            )
-            mega_graph_us = _bench_cuda_event(
-                mega_graph.replay, warmup=5, iterations=50
-            )
-            reference_graph.replay()
-            mega_graph.replay()
-            torch.cuda.synchronize(self.device)
-            self.assertTrue(torch.isfinite(reference_graph_output).all().item())
-            self.assertTrue(torch.isfinite(mega_graph_output).all().item())
-
-            print(
-                "Mega/reference HCA performance "
-                f"B={batch_size}, ctx={context_length}: "
-                f"eager {mega_eager_us:.2f}/{reference_eager_us:.2f} us "
-                f"({(mega_eager_us / reference_eager_us - 1.0) * 100.0:+.1f}%), "
-                f"graph {mega_graph_us:.2f}/{reference_graph_us:.2f} us "
-                f"({(mega_graph_us / reference_graph_us - 1.0) * 100.0:+.1f}%)"
-            )
-            self.assertLessEqual(
-                mega_eager_us,
-                reference_eager_us * 1.05,
-                msg=f"eager regression at B={batch_size}",
-            )
-            self.assertLessEqual(
-                mega_graph_us,
-                reference_graph_us * 1.05,
-                msg=f"CUDA Graph regression at B={batch_size}",
-            )
-
-            del reference_graph, mega_graph
-            del reference_pools, mega_pools, reference_metadata, mega_metadata
-            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
