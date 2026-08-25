@@ -32,6 +32,11 @@ FLEXLB_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar}"
 TRACE_FILE="${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl"
 
+# Shared Java mock cluster / JavaLoadClient helpers (start_java_mock_cluster,
+# wait_mock_cluster_ready, mock_http, stop_java_mock_cluster,
+# run_java_load_client). lib_load_client.sh requires FLEXLB_DIR, defined above.
+source "${SCRIPT_DIR}/lib_load_client.sh"
+
 # -- Java setup ------------------------------------------------------------
 
 export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
@@ -59,6 +64,12 @@ FLEXLB_HTTP_PORT="${FLEXLB_HTTP_PORT:-18080}"
 FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-18081}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+# Java mock engine cluster tuning (read by start_java_mock_cluster from
+# lib_load_client.sh). MOCK_PERFORMANCE_FILE is set per-run to the generated
+# perf config below; MOCK_JVM_XMS/MOCK_JVM_XMX default to 4g inside the lib.
+MOCK_MASTER_CONFIG="${MOCK_MASTER_CONFIG:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
+MOCK_EVENT_LOOP_THREADS="${MOCK_EVENT_LOOP_THREADS:-8}"
+MOCK_COMPLETION_THREADS="${MOCK_COMPLETION_THREADS:-4}"
 
 # Load client parameters
 LOAD_CLIENT_LIMIT="${LOAD_CLIENT_LIMIT:-0}"
@@ -123,8 +134,9 @@ cleanup() {
     FLEXLB_PID=""
   fi
   if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" >/dev/null 2>&1 || true
-    wait "${MOCK_PID}" 2>/dev/null || true
+    # stop_java_mock_cluster is idempotent and reaps the JVM recorded in
+    # ${RUN_DIR}/mock_engine.pid (SIGTERM, then SIGKILL after grace).
+    stop_java_mock_cluster "${RUN_DIR}"
     MOCK_PID=""
   fi
   if [[ -n "${LOAD_CLIENT_PID}" ]]; then
@@ -149,7 +161,14 @@ if [[ ! -f "${TRACE_FILE}" ]]; then
   exit 1
 fi
 java -version 2>&1 | head -1
+# Fail fast on JDK < 21 before launching the mock engine jar / load client.
+require_java21
+if [[ ! -f "${MOCK_MASTER_CONFIG}" ]]; then
+  echo "ERROR: mock master config not found: ${MOCK_MASTER_CONFIG}" >&2
+  exit 1
+fi
 echo "  JAR: ${FLEXLB_JAR}"
+echo "  Mock master config: ${MOCK_MASTER_CONFIG}"
 echo "  Trace: ${TRACE_FILE} ($(wc -l < "${TRACE_FILE}") lines)"
 echo "  All prerequisites OK."
 
@@ -199,20 +218,19 @@ start_master() {
 # ===========================================================================
 
 echo ""
-echo "=== Step 1: Start mock engine cluster (${N_PREFILL}P + ${N_DECODE}D) ==="
-ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
-  --n-prefill "${N_PREFILL}" \
-  --n-decode "${N_DECODE}" \
-  --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-  --performance "${PERF_CONFIG_FILE}" \
-  --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-  --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-  --endpoint-file "${ENDPOINT_FILE}" \
-  --env-file "${RUN_DIR}/flexlb_env.txt" \
-  >"${RUN_DIR}/mock_engine.log" 2>&1 &
-MOCK_PID="$!"
-wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+echo "=== Step 1: Start Java mock engine cluster (${N_PREFILL}P + ${N_DECODE}D) ==="
+# start_java_mock_cluster (lib_load_client.sh) launches the single-JVM
+# JavaMockEngineCluster: engines on MOCK_BASE_GRPC_PORT..base+n-1, HTTP
+# control server on base-1, discovery files endpoints.json/flexlb_env.txt.
+MOCK_N_PREFILL="${N_PREFILL}"
+MOCK_N_DECODE="${N_DECODE}"
+MOCK_PERFORMANCE_FILE="${PERF_CONFIG_FILE}"
+MOCK_PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS}"
+MOCK_DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS}"
+start_java_mock_cluster "${RUN_DIR}"
+MOCK_PID="$(cat "${RUN_DIR}/mock_engine.pid")"
+ENDPOINT_FILE="${MOCK_ENDPOINT_FILE}"
+wait_mock_cluster_ready "${MOCK_BASE_GRPC_PORT}" "$((N_PREFILL + N_DECODE))" 60
 echo "  mock cluster started (pid=${MOCK_PID}, http=${MOCK_HTTP_PORT})"
 
 # ===========================================================================
@@ -244,17 +262,19 @@ MASTER_PID_INITIAL="${FLEXLB_PID}"
 # ===========================================================================
 
 echo ""
-echo "=== Step 4: Start load client ==="
+echo "=== Step 4: Start load client (JavaLoadClient) ==="
 LOAD_CLIENT_DIR="${RUN_DIR}/load_client"
 mkdir -p "${LOAD_CLIENT_DIR}"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${TRACE_FILE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
-  --limit "${LOAD_CLIENT_LIMIT}" \
-  --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \
-  --timeout-ms "${LOAD_CLIENT_TIMEOUT_MS}" \
-  --output-dir "${LOAD_CLIENT_DIR}" \
+# run_java_load_client execs the JVM, so the background pid is the JVM itself
+# and kill/STOP/CONT behave exactly like the old Python client.
+run_java_load_client \
+  "TRACE_FILE=${TRACE_FILE}" \
+  "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+  "REPLAY_SPEED=${LOAD_CLIENT_REPLAY_SPEED}" \
+  "LIMIT=${LOAD_CLIENT_LIMIT}" \
+  "MAX_CONCURRENCY=${LOAD_CLIENT_CONCURRENCY}" \
+  "TIMEOUT_MS=${LOAD_CLIENT_TIMEOUT_MS}" \
+  "OUTPUT_DIR=${LOAD_CLIENT_DIR}" \
   >"${RUN_DIR}/load_client.log" 2>&1 &
 LOAD_CLIENT_PID="$!"
 echo "  load client started (pid=${LOAD_CLIENT_PID})"
@@ -269,7 +289,7 @@ if [[ "${KILL_TIMING}" == "decode" ]]; then
   DECODE_WAIT_TIMEOUT=30
   DECODE_WAIT_ELAPSED=0
   while [[ ${DECODE_WAIT_ELAPSED} -lt ${DECODE_WAIT_TIMEOUT} ]]; do
-    DECODE_RUNNING=$(curl -s "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" 2>/dev/null | \
+    DECODE_RUNNING=$(mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" | \
       python3 -c "
 import sys, json
 try:
@@ -310,12 +330,10 @@ curl -s -o "${RUN_DIR}/baseline_inflight.json" \
   "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
   || echo "  WARNING: inflight_status request failed"
 echo "  - mock snapshot ..."
-curl -s -o "${RUN_DIR}/baseline_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
+mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" > "${RUN_DIR}/baseline_snapshot.json" \
   || echo "  WARNING: snapshot request failed"
 echo "  - mock requests ..."
-curl -s -o "${RUN_DIR}/baseline_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
+mock_http GET "${MOCK_HTTP_PORT}" "/requests" > "${RUN_DIR}/baseline_requests.json" \
   || echo "  WARNING: requests request failed"
 cp "${RUN_DIR}/baseline_requests.json" "${RUN_DIR}/pre_kill_requests.json" 2>/dev/null \
   || echo "  NOTE: baseline_requests.json not available for pre_kill copy"
@@ -358,12 +376,10 @@ fi
 echo ""
 echo "=== Step 9: Collect kill-period data ==="
 echo "  - mock snapshot ..."
-curl -s -o "${RUN_DIR}/kill_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
+mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" > "${RUN_DIR}/kill_snapshot.json" \
   || echo "  WARNING: snapshot request failed"
 echo "  - mock requests ..."
-curl -s -o "${RUN_DIR}/kill_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
+mock_http GET "${MOCK_HTTP_PORT}" "/requests" > "${RUN_DIR}/kill_requests.json" \
   || echo "  WARNING: requests request failed"
 echo "  - master inflight_status (expected to fail) ..."
 curl -s -o "${RUN_DIR}/kill_inflight_attempt.json" \
@@ -433,15 +449,17 @@ echo "  recovery trace: ${RECOVERY_TRACE_LINES} short-output requests (ol <= 200
 
 RECOVERY_VERIFY_DIR="${RUN_DIR}/recovery_verify"
 mkdir -p "${RECOVERY_VERIFY_DIR}"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${RECOVERY_TRACE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed 0 \
-  --limit 100 \
-  --max-concurrency 10 \
-  --timeout-ms 10000 \
-  --output-dir "${RECOVERY_VERIFY_DIR}" \
-  >"${RUN_DIR}/recovery_verify.log" 2>&1
+# Run in a subshell: run_java_load_client uses exec, so without the subshell
+# the exec would replace this script and the EXIT cleanup trap would never run.
+( run_java_load_client \
+  "TRACE_FILE=${RECOVERY_TRACE}" \
+  "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+  "REPLAY_SPEED=0" \
+  "LIMIT=100" \
+  "MAX_CONCURRENCY=10" \
+  "TIMEOUT_MS=10000" \
+  "OUTPUT_DIR=${RECOVERY_VERIFY_DIR}" \
+  >"${RUN_DIR}/recovery_verify.log" 2>&1 )
 echo "  recovery verification completed"
 cat "${RECOVERY_VERIFY_DIR}/summary.json" 2>/dev/null || echo "  NOTE: recovery summary not available"
 sleep 5  # drain wait for recovery verification in-flight to settle
@@ -457,12 +475,10 @@ curl -s -o "${RUN_DIR}/post_restart_inflight.json" \
   "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
   || echo "  WARNING: inflight_status request failed"
 echo "  - mock snapshot ..."
-curl -s -o "${RUN_DIR}/post_restart_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
+mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" > "${RUN_DIR}/post_restart_snapshot.json" \
   || echo "  WARNING: snapshot request failed"
 echo "  - mock requests ..."
-curl -s -o "${RUN_DIR}/post_restart_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
+mock_http GET "${MOCK_HTTP_PORT}" "/requests" > "${RUN_DIR}/post_restart_requests.json" \
   || echo "  WARNING: requests request failed"
 echo "  - load client outputs ..."
 cp "${LOAD_CLIENT_DIR}/summary.json" "${RUN_DIR}/final_summary.json" 2>/dev/null \
@@ -477,6 +493,9 @@ cp "${LOAD_CLIENT_DIR}/report.md" "${RUN_DIR}/load_client_report.md" 2>/dev/null
 
 echo ""
 echo "=== Step 14: Generate test report ==="
+# The report python exits 1 when the pass/fail verdict is FAIL; propagate it
+# as this script's exit code (data collection above is already complete).
+REPORT_STATUS=0
 KILL_TS="${KILL_TS}" \
 RESTART_TS="${RESTART_TS}" \
 MASTER_PID_INITIAL="${MASTER_PID_INITIAL}" \
@@ -484,7 +503,7 @@ MASTER_PID_RESTART="${MASTER_PID_RESTART}" \
 MOCK_PID="${MOCK_PID}" \
 LOAD_CLIENT_PID="${LOAD_CLIENT_PID:-exited}" \
 KILL_TIMING="${KILL_TIMING}" \
-python3 - "${RUN_DIR}" <<'PYEOF'
+python3 - "${RUN_DIR}" <<'PYEOF' || REPORT_STATUS=$?
 import json
 import os
 import sys
@@ -966,6 +985,7 @@ report = "\n".join(lines)
 report_path = run_dir / "test_report.md"
 report_path.write_text(report, encoding="utf-8")
 print(report)
+sys.exit(0 if test_passed else 1)
 PYEOF
 
 # ===========================================================================
@@ -983,3 +1003,7 @@ echo "  Master log (restart): ${RUN_DIR}/flexlb_master_restart.log"
 echo "  Mock log:  ${RUN_DIR}/mock_engine.log"
 echo "  Load client log: ${RUN_DIR}/load_client.log"
 echo "=========================================="
+if [[ "${REPORT_STATUS}" -ne 0 ]]; then
+  echo "  NOTE: test report verdict is FAIL, exiting with ${REPORT_STATUS}"
+fi
+exit "${REPORT_STATUS}"

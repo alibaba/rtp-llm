@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Orchestrate inflight-vs-QPS experiment: start system, sweep speeds, save results."""
+"""Orchestrate inflight-vs-QPS experiment: start system, sweep speeds, save results.
+
+Java mock stack: the mock engine cluster is started from the Java
+mock-engine fat jar (JavaMockEngineCluster) and the load client is the
+JavaLoadClient from the same jar.  Control-plane queries go through the
+Java mock's HTTP compatibility layer (/snapshot on base gRPC port - 1).
+The external interface (CLI args, output files) is unchanged, and the
+master keeps this branch's strict FLEXLB_CONFIG (schemaVersion 2) with
+the PREFILL_EXECUTION_TIME_EXPRESSION formula estimator — the v2
+baseline's flat env-var config (LOAD_BALANCE_STRATEGY / STRATEGY_CONFIGS
+/ ...) is deliberately NOT used here.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +32,17 @@ PERFORMANCE_FILE = str(
     SCRIPT_DIR / "data/performance/dsv4_flash_performance.sample.json"
 )
 PROCESS_CONFIG_FILE = str(SCRIPT_DIR / "data/config/master_fixed_window_4g.json")
+MOCK_MASTER_CONFIG = str(SCRIPT_DIR / "data/config/master_fixed_window.json")
 FLEXLB_JAR = str(FLEXLB_DIR / "flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar")
+# Java mock engine fat jar (bundles JavaMockEngineCluster + JavaLoadClient).
+JAVA_MOCK_ENGINE_JAR = os.environ.get(
+    "JAVA_MOCK_ENGINE_JAR",
+    str(
+        FLEXLB_DIR
+        / "flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar"
+    ),
+)
+JAVA_LOAD_CLIENT_MAIN_CLASS = "org.flexlb.mockengine.JavaLoadClient"
 
 EXPERIMENT_DIR = SCRIPT_DIR / "run" / "inflight_experiment"
 
@@ -37,6 +58,9 @@ FLEXLB_MGMT_PORT = 7002
 
 SPEEDS = [3, 5, 7]
 
+# Prefill execution-time formula consumed by the strict FLEXLB_CONFIG below
+# (router.roles.prefill.executionTimeEstimator.expression). Kept verbatim
+# from this branch's HEAD.
 PREFILL_EXECUTION_TIME_EXPRESSION = (
     "max(300, 244.865367146 + 37.2748283785*log(batchSize + 1) "
     "+ 0*2048*log(1 + exp((sum(computeTokens) - 8192)/2048)) "
@@ -48,6 +72,7 @@ PREFILL_EXECUTION_TIME_EXPRESSION = (
     "+ 14.6526667921*(sum(hitCacheTokens/(inputTokens + 1))/batchSize))"
 )
 
+# Strict FLEXLB_CONFIG (schemaVersion 2) — this branch's HEAD semantics.
 DEFAULT_FLEXLB_CONFIG = json.dumps(
     {
         "schemaVersion": 2,
@@ -81,9 +106,7 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                     },
                     "selector": {
                         "type": "ESTIMATED_TTFT",
-                        "candidateChoice": {
-                            "type": "RANDOM_WITHIN_TOLERANCE"
-                        },
+                        "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"},
                     },
                 },
                 "decode": {
@@ -197,21 +220,38 @@ def wait_inflight_drain(timeout_s: float = 120.0) -> bool:
 
 
 def start_mock_engine(experiment_dir: Path) -> subprocess.Popen:
+    if not Path(JAVA_MOCK_ENGINE_JAR).exists():
+        raise RuntimeError(
+            f"Java mock engine jar not found: {JAVA_MOCK_ENGINE_JAR} "
+            "(build with: ./mvnw -P'opensource,!internal' -pl flexlb-mock-engine "
+            "-am package -DskipTests in the flexlb directory)"
+        )
     endpoint_file = str(experiment_dir / "endpoints.json")
     env_file = str(experiment_dir / "flexlb_env.txt")
     log_file = open(str(experiment_dir / "mock_engine.log"), "w")
 
+    heap_size = os.environ.get("JAVA_MOCK_ENGINE_HEAP_SIZE", "4g")
     cmd = [
-        sys.executable,
-        str(SCRIPT_DIR / "mock_engine_cluster.py"),
+        "java",
+        f"-Xms{heap_size}",
+        f"-Xmx{heap_size}",
+        "-XX:+ExitOnOutOfMemoryError",
+        "-jar",
+        JAVA_MOCK_ENGINE_JAR,
         "--n-prefill",
         str(N_PREFILL),
         "--n-decode",
         str(N_DECODE),
         "--base-grpc-port",
         str(MOCK_BASE_GRPC_PORT),
+        "--event-loop-threads",
+        os.environ.get("JAVA_MOCK_EVENT_LOOP_THREADS", "8"),
+        "--completion-threads",
+        os.environ.get("JAVA_MOCK_COMPLETION_THREADS", "4"),
         "--performance",
         PERFORMANCE_FILE,
+        "--master-config",
+        MOCK_MASTER_CONFIG,
         "--prefill-cache-blocks",
         str(PREFILL_CACHE_BLOCKS),
         "--decode-cache-blocks",
@@ -223,8 +263,6 @@ def start_mock_engine(experiment_dir: Path) -> subprocess.Popen:
     ]
 
     env = os.environ.copy()
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTHONPATH"] = str(SCRIPT_DIR)
 
     proc = subprocess.Popen(
         cmd,
@@ -234,15 +272,25 @@ def start_mock_engine(experiment_dir: Path) -> subprocess.Popen:
         preexec_fn=os.setsid,
     )
     print(
-        f"mock engine cluster PID={proc.pid}, waiting for port {MOCK_BASE_GRPC_PORT}..."
+        f"Java mock engine cluster PID={proc.pid}, waiting for port "
+        f"{MOCK_BASE_GRPC_PORT}..."
     )
-    if not wait_for_port("127.0.0.1", MOCK_BASE_GRPC_PORT, 20):
+    if not wait_for_port("127.0.0.1", MOCK_BASE_GRPC_PORT, 60):
         proc.kill()
         raise RuntimeError("mock engine failed to start")
     if not wait_for_http(f"http://127.0.0.1:{MOCK_HTTP_PORT}/snapshot", 15):
         proc.kill()
         raise RuntimeError("mock engine HTTP API not ready")
-    print("mock engine cluster started")
+    # Wait until the discovery files are written (mirrors the shell scripts).
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        p = Path(endpoint_file)
+        if p.exists() and p.stat().st_size > 0:
+            break
+        if proc.poll() is not None:
+            raise RuntimeError("mock engine exited before writing discovery files")
+        time.sleep(0.2)
+    print("Java mock engine cluster started")
     return proc
 
 
@@ -269,6 +317,7 @@ def start_flexlb_master(experiment_dir: Path) -> subprocess.Popen:
     full_env = os.environ.copy()
     full_env.update(endpoint_env)
     full_env.update(process_env)  # process config overrides endpoint env
+    # Strict FLEXLB_CONFIG (schemaVersion 2) — never the v2 flat env vars.
     full_env["FLEXLB_CONFIG"] = DEFAULT_FLEXLB_CONFIG
     full_env["OTEL_TRACE_SKIP_PATTERN"] = ".*"
     full_env["OTEL_EXPORTER_OTLP_ENDPOINT"] = "none"
@@ -342,46 +391,111 @@ def run_sweep(speed: int, experiment_dir: Path) -> dict:
     )
     print(f"  monitor started PID={monitor_proc.pid}")
 
-    # Run load client
-    client_cmd = [
-        sys.executable,
-        str(SCRIPT_DIR / "flexlb_load_client.py"),
-        TRACE_FILE,
-        "--flexlb-http-addr",
-        f"127.0.0.1:{FLEXLB_HTTP_PORT}",
-        "--replay-speed",
-        str(speed),
-        "--max-concurrency",
-        os.environ.get("MAX_CONCURRENCY", "16384"),
-        "--timeout-ms",
-        "3600000",
-        "--zero-output-policy",
-        "one",
-        "--output-dir",
-        load_client_dir,
-    ]
-    client_env = os.environ.copy()
-    client_env["PYTHONDONTWRITEBYTECODE"] = "1"
-    client_env["PYTHONPATH"] = str(SCRIPT_DIR)
-    print(f"  running load client at {speed}x...")
-    client_log = open(str(sweep_dir / "client.stdout"), "w")
-    client_proc = subprocess.run(
-        client_cmd,
-        stdout=client_log,
-        stderr=subprocess.STDOUT,
-        env=client_env,
-    )
-    print(f"  load client exited with code {client_proc.returncode}")
-
-    # Stop monitor
-    time.sleep(3)  # let monitor capture final state
+    # Run the load client with the monitor teardown in a finally block: if
+    # anything in the sweep raises mid-flight (trace preprocessing, client
+    # spawn, ...), the monitor process group is still torn down instead of
+    # leaking past this script's exit.
     try:
-        os.killpg(os.getpgid(monitor_proc.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    monitor_proc.wait(timeout=10)
-    monitor_log.close()
-    print(f"  monitor stopped")
+        # Run load client (JavaLoadClient from the mock-engine fat jar)
+        client_cmd = [
+            "java",
+            f"-Xms{os.environ.get('JAVA_LOAD_CLIENT_JVM_XMS', '4g')}",
+            f"-Xmx{os.environ.get('JAVA_LOAD_CLIENT_JVM_XMX', '4g')}",
+            "-cp",
+            JAVA_MOCK_ENGINE_JAR,
+            JAVA_LOAD_CLIENT_MAIN_CLASS,
+        ]
+        client_env = os.environ.copy()
+        # Clear every JavaLoadClient env var so no ambient value leaks in
+        # (mirrors run_java_load_client in lib_load_client.sh, including
+        # PRIORITY / SEND_MODE / SEND_MODE_QPS).
+        for var in (
+            "TRACE_FILE",
+            "TARGET_ADDR",
+            "GRPC_TARGET",
+            "DURATION_S",
+            "MAX_CONCURRENCY",
+            "REPLAY_SPEED",
+            "LOAD_CLIENT_WORKERS",
+            "OUTPUT_DIR",
+            "NUM_SHARDS",
+            "SHARD_INDEX",
+            "LIMIT",
+            "TIMEOUT_MS",
+            "SLA_TTFT_MS",
+            "ZERO_OUTPUT_POLICY",
+            "SCHEDULE_ONLY",
+            "LOOP",
+            "N_CHANNELS",
+            "EVENT_LOOP_THREADS",
+            "START_AT_EPOCH_MS",
+            "RESPONSE_TIMEOUT",
+            "SKIP_SERVER_LATENCY",
+            "MODEL",
+            "API_KEY",
+            "FLEXLB_EXPECT_FETCH_RESPONSE",
+            "GRADIENT",
+            "GRADIENT_START_SPEED",
+            "GRADIENT_MAX_SPEED",
+            "MAX_INPUT_LEN",
+            "MAX_OUTPUT_LEN",
+            "PUSHGATEWAY_URL",
+            "ENABLE_FALLBACK",
+            "ENDPOINTS_FILE",
+            "DRY_RUN",
+            "PRIORITY",
+            "SEND_MODE",
+            "SEND_MODE_QPS",
+        ):
+            client_env[var] = ""
+        # Per-sweep trace: tag each record with a sweep-unique marker.  The
+        # master keeps terminal-state tombstones per request_id, and every sweep
+        # replays the same trace against the same master instance, so without a
+        # marker the second sweep would be rejected wholesale with
+        # "duplicate request_id" (both Java and Python load clients derive the
+        # id from the raw record content).
+        sweep_trace = str(sweep_dir / "trace.jsonl")
+        with open(TRACE_FILE, encoding="utf-8") as src, open(sweep_trace, "w") as dst:
+            for line in src:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                rec["_sweep"] = f"{speed}x"
+                dst.write(json.dumps(rec))
+                dst.write("\n")
+
+        client_env.update(
+            {
+                "TRACE_FILE": sweep_trace,
+                "TARGET_ADDR": f"127.0.0.1:{FLEXLB_HTTP_PORT}",
+                "REPLAY_SPEED": str(speed),
+                "LIMIT": "0",
+                "MAX_CONCURRENCY": os.environ.get("MAX_CONCURRENCY", "16384"),
+                "TIMEOUT_MS": "3600000",
+                "ZERO_OUTPUT_POLICY": "one",
+                "OUTPUT_DIR": load_client_dir,
+            }
+        )
+        print(f"  running load client at {speed}x...")
+        client_log = open(str(sweep_dir / "client.stdout"), "w")
+        client_proc = subprocess.run(
+            client_cmd,
+            stdout=client_log,
+            stderr=subprocess.STDOUT,
+            env=client_env,
+        )
+        print(f"  load client exited with code {client_proc.returncode}")
+    finally:
+        # Stop monitor
+        time.sleep(3)  # let monitor capture final state
+        try:
+            os.killpg(os.getpgid(monitor_proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        monitor_proc.wait(timeout=10)
+        monitor_log.close()
+        print(f"  monitor stopped")
 
     # Load summary
     summary_path = Path(load_client_dir) / "summary.json"

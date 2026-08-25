@@ -1040,6 +1040,26 @@ public final class JavaMockEngineCluster {
                 EngineRpcService.TaskPhase phase = cancel(requestId, false, false);
                 EngineRpcService.TaskPhase observedPhase = phase != null
                         ? phase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING;
+                // Terminate the client-facing stream: after the P->D hand-off the
+                // response queue the client's FetchResponse / GenerateStreamCall
+                // poller hangs on lives on the ORIGINAL PREFILL (startDecode passed
+                // it to this Decode). cancel() above only offers into this
+                // Decode's own responseQueues, which never contained the request,
+                // so without this delivery the cancelled request's stream hangs
+                // until the 60s poll timeout (Python mock terminates the stream
+                // from its async cancel finalizer instead).
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> prefillQueue =
+                        expectedPrefill.responseQueues.get(requestId);
+                if (prefillQueue != null) {
+                    prefillQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                            .setRequestId(requestId)
+                            .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                    .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED)
+                                    .setErrorMessage("cancelled by client")
+                                    .build())
+                            .build());
+                    expectedPrefill.responseQueues.remove(requestId);
+                }
                 // Decode retains its ordinary CANCELLED terminal for local
                 // accounting. The original Prefill is the authoritative
                 // producer of the typed priority-preemption completion.
@@ -1636,6 +1656,38 @@ public final class JavaMockEngineCluster {
                                 StreamObserver<EngineRpcService.CheckHealthResponsePB> observer) {
             observer.onNext(EngineRpcService.CheckHealthResponsePB.newBuilder().setHealth("OK").build());
             observer.onCompleted();
+        }
+
+        /**
+         * gRPC Cancel (proto {@code RpcService/Cancel}, the priority-preemption
+         * engine contract). Mirrors the in-process MockEngineCancelChannel and
+         * the HTTP control-plane {@code /cancel_request}: a live request and its
+         * accepted-cancel tombstone both return ACCEPTED (idempotent retry,
+         * matching the Python mock's {@code _cancelled} fast path), a request
+         * unknown to — or already finished on — this specifically addressed
+         * Prefill returns NOT_FOUND, and Decode rejects the RPC with
+         * UNIMPLEMENTED (production role contract). TOMBSTONED stays reserved
+         * for the production engine; every mock cancel channel (in-process,
+         * HTTP, and this gRPC handler) maps the three-branch CancelResult with
+         * found -> accepted so the Master-side settlement semantics stay
+         * identical across transports.
+         */
+        @Override
+        public void cancel(EngineRpcService.CancelRequestPB request,
+                           StreamObserver<EngineRpcService.CancelResponsePB> observer) {
+            try {
+                CancelResult result = cancelRequest(request.getRequestId());
+                observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                        .setStatus(result.found()
+                                ? EngineRpcService.CancelStatusPB.CANCEL_STATUS_ACCEPTED
+                                : EngineRpcService.CancelStatusPB.CANCEL_STATUS_NOT_FOUND)
+                        .build());
+                observer.onCompleted();
+            } catch (UnsupportedOperationException e) {
+                observer.onError(io.grpc.Status.UNIMPLEMENTED
+                        .withDescription(e.getMessage())
+                        .asException());
+            }
         }
 
         void checkLeakDrain(long graceWindowNanos) {

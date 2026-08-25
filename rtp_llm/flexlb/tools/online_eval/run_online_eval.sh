@@ -22,6 +22,16 @@ if [[ "${FLEXLB_NETWORK_ISOLATED}" == "1" \
 fi
 FLEXLB_FAIL_ON_CONCURRENT_TEST="${FLEXLB_FAIL_ON_CONCURRENT_TEST:-1}"
 
+# Fail fast on the removed Python implementation switches: the Python mock
+# engine and Python load client no longer exist on this branch (Java-only),
+# so a stale ambient value must be a loud error instead of a silent
+# fallback to the Java stack. The switch definitions themselves were
+# deleted, hence the ":-" reads to stay safe under set -u.
+if [[ "${LOAD_CLIENT_IMPL:-}" == "python" || "${MOCK_ENGINE_IMPL:-}" == "python" ]]; then
+  echo "ERROR: LOAD_CLIENT_IMPL/MOCK_ENGINE_IMPL=python is no longer supported: the Python mock engine and Python load client implementations have been removed on this branch (Java-only). Unset the variable(s) to run the Java stack." >&2
+  exit 1
+fi
+
 TRACE_FILE="${TRACE_FILE:-${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl}"
 PERFORMANCE_FILE="${PERFORMANCE_FILE:-${SCRIPT_DIR}/data/performance/dsv4_flash_performance.sample.json}"
 PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
@@ -33,17 +43,12 @@ FLEXLB_LOG_PATH="${FLEXLB_LOG_PATH:-${RUN_DIR}/flexlb_logs}"
 N_PREFILL="${N_PREFILL:-2}"
 N_DECODE="${N_DECODE:-4}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
-MOCK_ENGINE_IMPL="${MOCK_ENGINE_IMPL:-java}"
 # NOTE: the three assignments below (JAVA_MOCK_ENGINE_JAR, JAVA_LOAD_CLIENT_JAR,
 # MAVEN_PROFILES) duplicate defaults already applied by lib_load_client.sh at
 # source time (same values), so they are no-ops here. They are kept as
 # self-documentation of this script's tunable knobs; the effective defaults
 # live in the lib.
 JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
-# Load client implementation switch: java (JavaLoadClient, carries trace
-# priority onto the wire) or python (legacy flexlb_load_client.py fallback,
-# no priority passthrough). Single env var, no other override layer.
-LOAD_CLIENT_IMPL="${LOAD_CLIENT_IMPL:-java}"
 JAVA_LOAD_CLIENT_JAR="${JAVA_LOAD_CLIENT_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"  # no-op see NOTE above
 JAVA_LOAD_CLIENT_HEAP_SIZE="${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
@@ -63,10 +68,6 @@ JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 ENDPOINT_READY_TIMEOUT_S="${ENDPOINT_READY_TIMEOUT_S:-120}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
-N_SHARDS="${N_SHARDS:-64}"  # mock engine 分片数，默认 64（多进程模式）
-# HTTP proxy port for the shard launcher.
-# Placed above the gRPC engine range to avoid ephemeral port collisions.
-MOCK_PROXY_PORT=$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE + 100 + N_SHARDS))
 
 FLEXLB_HTTP_ADDR="${FLEXLB_HTTP_ADDR:-127.0.0.1:7001}"
 FLEXLB_HTTP_PORT="${FLEXLB_HTTP_ADDR##*:}"
@@ -105,22 +106,6 @@ JFR_DURATION="${JFR_DURATION:-300s}"
 FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
 FLEXLB_MONITOR_MODE="${FLEXLB_MONITOR_MODE:-critical-only}"
 HIPPO_ROLE="${HIPPO_ROLE:-test}"
-
-if [[ -z "${PYTHON_BIN:-}" ]]; then
-  if [[ -x "${HOME}/.venvs/flexlb-eval/bin/python3" ]]; then
-    PYTHON_BIN="${HOME}/.venvs/flexlb-eval/bin/python3"
-  else
-    PYTHON_BIN="$(command -v python3 || true)"
-  fi
-fi
-# The aiohttp/grpc venv is only needed by the Python load client / mock engine.
-if [[ "${LOAD_CLIENT_IMPL}" == "python" || "${MOCK_ENGINE_IMPL}" == "python" ]]; then
-  if [[ -z "${PYTHON_BIN}" ]] \
-      || ! "${PYTHON_BIN}" -c 'import aiohttp, grpc' >/dev/null 2>&1; then
-    echo "Python with aiohttp and grpc is required; set PYTHON_BIN to the eval venv" >&2
-    exit 1
-  fi
-fi
 
 DEFAULT_FLEXLB_CONFIG='{
   "schemaVersion": 2,
@@ -297,7 +282,7 @@ PY
 
 assert_no_concurrent_flexlb_test() {
   local matches
-  matches="$(pgrep -af 'flexlb_load_client\.py|mock_engine_shard_launcher\.py|flexlb-api-[^ ]*\.jar|flexlb-mock-engine-[^ ]*\.jar' || true)"
+  matches="$(pgrep -af 'flexlb-api-[^ ]*\.jar|flexlb-mock-engine-[^ ]*\.jar' || true)"
   if [[ -n "${matches}" ]]; then
     echo "Concurrent FlexLB performance processes detected on the host:" >&2
     echo "${matches}" >&2
@@ -447,26 +432,20 @@ assert_mock_engine_healthy() {
 mkdir -p "${RUN_DIR}"
 mkdir -p "${FLEXLB_LOG_PATH}"
 echo "run_dir=${RUN_DIR}"
-echo "LOAD_CLIENT_IMPL=${LOAD_CLIENT_IMPL} (java=JavaLoadClient with trace priority passthrough, python=legacy flexlb_load_client.py)"
-if [[ "${LOAD_CLIENT_IMPL}" != "java" && "${LOAD_CLIENT_IMPL}" != "python" ]]; then
-  echo "Unsupported LOAD_CLIENT_IMPL=${LOAD_CLIENT_IMPL}; expected java or python" >&2
+echo "load client: JavaLoadClient (trace priority passthrough via lib_load_client.sh)"
+if [[ "$(java_major java)" -lt 21 ]]; then
+  echo "Java 21 is required to run JavaLoadClient. Set JAVA21_HOME or JAVA_HOME." >&2
   exit 1
 fi
-if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
-  if [[ "$(java_major java)" -lt 21 ]]; then
-    echo "Java 21 is required to run JavaLoadClient. Set JAVA21_HOME or JAVA_HOME." >&2
+if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
+  echo "Java load client jar not found, auto-building: ${JAVA_LOAD_CLIENT_JAR} (first build may take several minutes)"
+  if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
+    echo "Failed to build Java load client jar via Maven (this may take several minutes on a cold cache)" >&2
     exit 1
   fi
   if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
-    echo "Java load client jar not found, auto-building: ${JAVA_LOAD_CLIENT_JAR} (first build may take several minutes)"
-    if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
-      echo "Failed to build Java load client jar via Maven (this may take several minutes on a cold cache)" >&2
-      exit 1
-    fi
-    if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
-      echo "Failed to build Java load client jar: ${JAVA_LOAD_CLIENT_JAR}" >&2
-      exit 1
-    fi
+    echo "Failed to build Java load client jar: ${JAVA_LOAD_CLIENT_JAR}" >&2
+    exit 1
   fi
 fi
 
@@ -478,91 +457,61 @@ ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
 FLEXLB_ENV_FILE="${RUN_DIR}/flexlb_env.txt"
 
 if [[ "${START_MOCK}" == "1" ]]; then
-  if [[ "${MOCK_ENGINE_IMPL}" == "java" ]]; then
-    mapfile -t JAVA_MOCK_PORTS < <(seq "${MOCK_BASE_GRPC_PORT}" \
-      "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))")
-    assert_ports_free "${JAVA_MOCK_PORTS[@]}"
-    if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
-      echo "Java mock engine jar not found, auto-building: ${JAVA_MOCK_ENGINE_JAR} (first build may take several minutes)"
-      if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
-        echo "Failed to build Java mock engine jar via Maven (this may take several minutes on a cold cache)" >&2
-        exit 1
-      fi
-      if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
-        echo "Failed to build Java mock engine jar: ${JAVA_MOCK_ENGINE_JAR}" >&2
-        exit 1
-      fi
+  mapfile -t JAVA_MOCK_PORTS < <(seq "${MOCK_BASE_GRPC_PORT}" \
+    "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))")
+  assert_ports_free "${JAVA_MOCK_PORTS[@]}"
+  if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
+    echo "Java mock engine jar not found, auto-building: ${JAVA_MOCK_ENGINE_JAR} (first build may take several minutes)"
+    if ! (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests); then
+      echo "Failed to build Java mock engine jar via Maven (this may take several minutes on a cold cache)" >&2
+      exit 1
     fi
-    java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
-      -XX:+ExitOnOutOfMemoryError \
-      -Xlog:gc*,safepoint:"${RUN_DIR}/mock_engine_gc.log":time,uptime,level,tags:filecount=3,filesize=20m \
-      -jar "${JAVA_MOCK_ENGINE_JAR}" \
-      --n-prefill "${N_PREFILL}" \
-      --n-decode "${N_DECODE}" \
-      --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-      --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
-      --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
-      --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
-      --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
-      --performance "${PERFORMANCE_FILE}" \
-      --master-config "${PROCESS_CONFIG_FILE}" \
-      --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-      --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-      --endpoint-file "${ENDPOINT_FILE}" \
-      --env-file "${FLEXLB_ENV_FILE}" \
-      >"${RUN_DIR}/mock_engine.log" 2>&1 &
-    MOCK_PID="$!"
-    echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
-    echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
-    # The Java process writes discovery files only after every gRPC port is bound.
-    wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
+    if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
+      echo "Failed to build Java mock engine jar: ${JAVA_MOCK_ENGINE_JAR}" >&2
+      exit 1
+    fi
+  fi
+  java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
+    -XX:+ExitOnOutOfMemoryError \
+    -Xlog:gc*,safepoint:"${RUN_DIR}/mock_engine_gc.log":time,uptime,level,tags:filecount=3,filesize=20m \
+    -jar "${JAVA_MOCK_ENGINE_JAR}" \
+    --n-prefill "${N_PREFILL}" \
+    --n-decode "${N_DECODE}" \
+    --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+    --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+    --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
+    --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
+    --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
+    --performance "${PERFORMANCE_FILE}" \
+    --master-config "${PROCESS_CONFIG_FILE}" \
+    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+    --endpoint-file "${ENDPOINT_FILE}" \
+    --env-file "${FLEXLB_ENV_FILE}" \
+    >"${RUN_DIR}/mock_engine.log" 2>&1 &
+  MOCK_PID="$!"
+  echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
+  echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
+  # The Java process writes discovery files only after every gRPC port is bound.
+  wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
+  if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
+    echo "Java mock engine exited during startup" >&2
+    tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
+    exit 1
+  fi
+  for _ in $(seq 1 100); do
     if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
-      echo "Java mock engine exited during startup" >&2
+      echo "Java mock engine exited before writing discovery files" >&2
       tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
       exit 1
     fi
-    for _ in $(seq 1 100); do
-      if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
-        echo "Java mock engine exited before writing discovery files" >&2
-        tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
-        exit 1
-      fi
-      if [[ -s "${ENDPOINT_FILE}" ]]; then
-        break
-      fi
-      sleep 0.1
-    done
-    if [[ ! -s "${ENDPOINT_FILE}" ]]; then
-      echo "Java mock engine did not write endpoint file: ${ENDPOINT_FILE}" >&2
-      exit 1
+    if [[ -s "${ENDPOINT_FILE}" ]]; then
+      break
     fi
-  elif [[ "${MOCK_ENGINE_IMPL}" == "python" ]]; then
-    MOCK_ENGINE_SCRIPT="${SCRIPT_DIR}/mock_engine_cluster.py"
-    MOCK_ENGINE_EXTRA_ARGS=()
-    if [[ "${N_SHARDS}" -gt 1 ]]; then
-      MOCK_ENGINE_SCRIPT="${SCRIPT_DIR}/mock_engine_shard_launcher.py"
-      MOCK_ENGINE_EXTRA_ARGS=(--n-shards "${N_SHARDS}")
-    fi
-    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${MOCK_ENGINE_SCRIPT}" \
-      --n-prefill "${N_PREFILL}" \
-      --n-decode "${N_DECODE}" \
-      --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-      --performance "${PERFORMANCE_FILE}" \
-      --master-config "${PROCESS_CONFIG_FILE}" \
-      --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-      --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-      --endpoint-file "${ENDPOINT_FILE}" \
-      --env-file "${FLEXLB_ENV_FILE}" \
-      "${MOCK_ENGINE_EXTRA_ARGS[@]}" \
-      >"${RUN_DIR}/mock_engine.log" 2>&1 &
-    MOCK_PID="$!"
-    if [[ "${N_SHARDS}" -gt 1 ]]; then
-      wait_for_port "127.0.0.1" "${MOCK_PROXY_PORT}" 180
-    else
-      wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
-    fi
-  else
-    echo "Unsupported MOCK_ENGINE_IMPL=${MOCK_ENGINE_IMPL}; expected java or python" >&2
+    sleep 0.1
+  done
+  if [[ ! -s "${ENDPOINT_FILE}" ]]; then
+    echo "Java mock engine did not write endpoint file: ${ENDPOINT_FILE}" >&2
     exit 1
   fi
 else
@@ -723,41 +672,6 @@ echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
 # window (stopped right after all clients finish; also killed by cleanup).
 start_master_counter_poller
 
-CLIENT_ARGS=(
-  "${TRACE_FILE}"
-  --flexlb-http-addr "${FLEXLB_HTTP_ADDR}"
-  --replay-speed "${REPLAY_SPEED}"
-  --duration-s "${DURATION_S}"
-  --limit "${LIMIT}"
-  --max-concurrency "${MAX_CONCURRENCY}"
-  --timeout-ms "${TIMEOUT_MS}"
-  --sla-ttft-ms "${SLA_TTFT_MS}"
-  --zero-output-policy "${ZERO_OUTPUT_POLICY}"
-  --output-dir "${RUN_DIR}/load_client"
-  --start-at-epoch-ms "${CLIENT_START_EPOCH_MS}"
-)
-if [[ "${SCHEDULE_ONLY}" == "1" ]]; then
-  CLIENT_ARGS+=(--schedule-only)
-fi
-if [[ "${LOOP}" == "1" ]]; then
-  CLIENT_ARGS+=(--loop)
-fi
-if [[ -n "${RESPONSE_TIMEOUT:-}" ]]; then
-  CLIENT_ARGS+=(--response-timeout "${RESPONSE_TIMEOUT}")
-fi
-if [[ -n "${PUSHGATEWAY_URL}" ]]; then
-  CLIENT_ARGS+=(--pushgateway-url "${PUSHGATEWAY_URL}")
-fi
-if [[ -n "${MAX_INPUT_LEN}" && "${MAX_INPUT_LEN}" != "0" ]]; then
-  CLIENT_ARGS+=(--max-input-len "${MAX_INPUT_LEN}")
-fi
-if [[ -n "${MAX_OUTPUT_LEN}" && "${MAX_OUTPUT_LEN}" != "0" ]]; then
-  CLIENT_ARGS+=(--max-output-len "${MAX_OUTPUT_LEN}")
-fi
-if [[ "${GRADIENT}" == "1" ]]; then
-  CLIENT_ARGS+=(--gradient --gradient-max-speed "${GRADIENT_MAX_SPEED}" --gradient-start-speed "${GRADIENT_START_SPEED}")
-fi
-
 # JavaLoadClient reads its configuration exclusively from environment
 # variables (no CLI flags); lib_load_client.sh's run_java_load_client is
 # the single source of truth for that mapping — every JavaLoadClient env
@@ -810,32 +724,17 @@ launch_java_load_client() {
 }
 
 if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
-  if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
-    launch_java_load_client "${RUN_DIR}/load_client" 1 0 "${MAX_CONCURRENCY}" 0 \
-      | tee "${RUN_DIR}/client.stdout"
-  else
-    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
-  fi
+  launch_java_load_client "${RUN_DIR}/load_client" 1 0 "${MAX_CONCURRENCY}" 0 \
+    | tee "${RUN_DIR}/client.stdout"
 else
   mkdir -p "${RUN_DIR}/load_client"
   curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
   SHARD_MAX_CONCURRENCY=$(( (MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS ))
   for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
     shard_dir="${RUN_DIR}/load_client/shard_${shard}"
-    if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
-      launch_java_load_client "${shard_dir}" "${LOAD_CLIENT_WORKERS}" "${shard}" \
-        "${SHARD_MAX_CONCURRENCY}" 1 \
-        >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
-    else
-      PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" \
-        "${CLIENT_ARGS[@]}" \
-        --output-dir "${shard_dir}" \
-        --num-shards "${LOAD_CLIENT_WORKERS}" \
-        --shard-index "${shard}" \
-        --max-concurrency "${SHARD_MAX_CONCURRENCY}" \
-        --skip-server-latency \
-        >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
-    fi
+    launch_java_load_client "${shard_dir}" "${LOAD_CLIENT_WORKERS}" "${shard}" \
+      "${SHARD_MAX_CONCURRENCY}" 1 \
+      >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
     CLIENT_PIDS+=("$!")
   done
 

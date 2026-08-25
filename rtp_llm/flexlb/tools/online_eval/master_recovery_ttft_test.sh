@@ -14,7 +14,8 @@ set -euo pipefail
 #   Phase 5: RECOVERY  — 观测 Master 恢复后 TTFT 变化
 #
 # Key features:
-#   - Load client 全程持续运行（带 --enable-fallback）
+#   - Java mock engine cluster (JavaMockEngineCluster) + JavaLoadClient
+#   - Load client 全程持续运行（ENABLE_FALLBACK=1 + ENDPOINTS_FILE 直连 fallback）
 #   - stability_monitor.py 后台并行采集 JVM/inflight/mock 指标
 #   - 精确时间戳记录（epoch + human-readable）
 #   - Master 日志关键事件提取
@@ -29,6 +30,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEXLB_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar}"
 TRACE_FILE="${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl"
+
+# Shared Java mock cluster / JavaLoadClient helpers (start_java_mock_cluster,
+# wait_mock_cluster_ready, mock_http, stop_java_mock_cluster,
+# run_java_load_client). lib_load_client.sh requires FLEXLB_DIR, defined above.
+source "${SCRIPT_DIR}/lib_load_client.sh"
 
 # -- Java setup ------------------------------------------------------------
 
@@ -57,6 +63,12 @@ FLEXLB_HTTP_PORT="${FLEXLB_HTTP_PORT:-18080}"
 FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-18081}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+# Java mock engine cluster tuning (read by start_java_mock_cluster from
+# lib_load_client.sh). MOCK_PERFORMANCE_FILE is set per-run to the generated
+# perf config below; MOCK_JVM_XMS/MOCK_JVM_XMX default to 4g inside the lib.
+MOCK_MASTER_CONFIG="${MOCK_MASTER_CONFIG:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
+MOCK_EVENT_LOOP_THREADS="${MOCK_EVENT_LOOP_THREADS:-8}"
+MOCK_COMPLETION_THREADS="${MOCK_COMPLETION_THREADS:-4}"
 
 # Load client parameters
 LOAD_CLIENT_LIMIT="${LOAD_CLIENT_LIMIT:-50000}"
@@ -127,8 +139,9 @@ cleanup() {
     FLEXLB_PID=""
   fi
   if [[ -n "${MOCK_PID}" ]]; then
-    kill "${MOCK_PID}" >/dev/null 2>&1 || true
-    wait "${MOCK_PID}" 2>/dev/null || true
+    # stop_java_mock_cluster is idempotent and reaps the JVM recorded in
+    # ${RUN_DIR}/mock_engine.pid (SIGTERM, then SIGKILL after grace).
+    stop_java_mock_cluster "${RUN_DIR}"
     MOCK_PID=""
   fi
   if [[ -n "${LOAD_CLIENT_PID}" ]]; then
@@ -158,7 +171,14 @@ if [[ ! -f "${TRACE_FILE}" ]]; then
   exit 1
 fi
 java -version 2>&1 | head -1
+# Fail fast on JDK < 21 before launching the mock engine jar / load client.
+require_java21
+if [[ ! -f "${MOCK_MASTER_CONFIG}" ]]; then
+  echo "ERROR: mock master config not found: ${MOCK_MASTER_CONFIG}" >&2
+  exit 1
+fi
 echo "  JAR: ${FLEXLB_JAR}"
+echo "  Mock master config: ${MOCK_MASTER_CONFIG}"
 echo "  Trace: ${TRACE_FILE} ($(wc -l < "${TRACE_FILE}") lines)"
 echo "  All prerequisites OK."
 
@@ -211,20 +231,19 @@ start_master() {
 # ===========================================================================
 
 echo ""
-echo "=== Step 1: Start mock engine cluster (${N_PREFILL}P + ${N_DECODE}D) ==="
-ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
-  --n-prefill "${N_PREFILL}" \
-  --n-decode "${N_DECODE}" \
-  --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
-  --performance "${PERF_CONFIG_FILE}" \
-  --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
-  --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
-  --endpoint-file "${ENDPOINT_FILE}" \
-  --env-file "${RUN_DIR}/flexlb_env.txt" \
-  >"${RUN_DIR}/mock_engine.log" 2>&1 &
-MOCK_PID="$!"
-wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+echo "=== Step 1: Start Java mock engine cluster (${N_PREFILL}P + ${N_DECODE}D) ==="
+# start_java_mock_cluster (lib_load_client.sh) launches the single-JVM
+# JavaMockEngineCluster: engines on MOCK_BASE_GRPC_PORT..base+n-1, HTTP
+# control server on base-1, discovery files endpoints.json/flexlb_env.txt.
+MOCK_N_PREFILL="${N_PREFILL}"
+MOCK_N_DECODE="${N_DECODE}"
+MOCK_PERFORMANCE_FILE="${PERF_CONFIG_FILE}"
+MOCK_PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS}"
+MOCK_DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS}"
+start_java_mock_cluster "${RUN_DIR}"
+MOCK_PID="$(cat "${RUN_DIR}/mock_engine.pid")"
+ENDPOINT_FILE="${MOCK_ENDPOINT_FILE}"
+wait_mock_cluster_ready "${MOCK_BASE_GRPC_PORT}" "$((N_PREFILL + N_DECODE))" 60
 echo "  mock cluster started (pid=${MOCK_PID}, http=${MOCK_HTTP_PORT})"
 
 # ===========================================================================
@@ -280,19 +299,24 @@ MASTER_PID_INITIAL="${FLEXLB_PID}"
 # ===========================================================================
 
 echo ""
-echo "=== Step 5: Start load client (with fallback) ==="
+echo "=== Step 5: Start load client (JavaLoadClient, with fallback) ==="
 LOAD_CLIENT_DIR="${RUN_DIR}/load_client"
 mkdir -p "${LOAD_CLIENT_DIR}"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${TRACE_FILE_USE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
-  --limit "${LOAD_CLIENT_LIMIT}" \
-  --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \
-  --timeout-ms "${LOAD_CLIENT_TIMEOUT_MS}" \
-  --output-dir "${LOAD_CLIENT_DIR}" \
-  --enable-fallback \
-  --endpoints-file "${ENDPOINT_FILE}" \
+# Fallback semantics mapping: the Python client's
+#   --enable-fallback --endpoints-file <endpoints.json>
+# becomes the JavaLoadClient env pair
+#   ENABLE_FALLBACK=1 ENDPOINTS_FILE=<endpoints.json>
+# (both are exported through run_java_load_client below).
+run_java_load_client \
+  "TRACE_FILE=${TRACE_FILE_USE}" \
+  "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+  "REPLAY_SPEED=${LOAD_CLIENT_REPLAY_SPEED}" \
+  "LIMIT=${LOAD_CLIENT_LIMIT}" \
+  "MAX_CONCURRENCY=${LOAD_CLIENT_CONCURRENCY}" \
+  "TIMEOUT_MS=${LOAD_CLIENT_TIMEOUT_MS}" \
+  "OUTPUT_DIR=${LOAD_CLIENT_DIR}" \
+  "ENABLE_FALLBACK=1" \
+  "ENDPOINTS_FILE=${ENDPOINT_FILE}" \
   >"${RUN_DIR}/load_client.log" 2>&1 &
 LOAD_CLIENT_PID="$!"
 echo "  load client started (pid=${LOAD_CLIENT_PID}, fallback enabled, replay_speed=${LOAD_CLIENT_REPLAY_SPEED})"
@@ -329,11 +353,9 @@ cp "${LOAD_CLIENT_DIR}/per_request.jsonl" "${RUN_DIR}/baseline_per_request.jsonl
 curl -s -o "${RUN_DIR}/baseline_inflight.json" \
   "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
   || echo "  WARNING: inflight_status request failed"
-curl -s -o "${RUN_DIR}/baseline_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
+mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" > "${RUN_DIR}/baseline_snapshot.json" \
   || echo "  WARNING: snapshot request failed"
-curl -s -o "${RUN_DIR}/baseline_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
+mock_http GET "${MOCK_HTTP_PORT}" "/requests" > "${RUN_DIR}/baseline_requests.json" \
   || echo "  WARNING: requests request failed"
 echo "  baseline data collected"
 
@@ -365,11 +387,9 @@ sleep "${KILL_WAIT}"
 
 # Collect kill-period data
 echo "  collecting kill-period data ..."
-curl -s -o "${RUN_DIR}/kill_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
+mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" > "${RUN_DIR}/kill_snapshot.json" \
   || echo "  WARNING: snapshot request failed"
-curl -s -o "${RUN_DIR}/kill_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
+mock_http GET "${MOCK_HTTP_PORT}" "/requests" > "${RUN_DIR}/kill_requests.json" \
   || echo "  WARNING: requests request failed"
 echo "  kill-period data collected"
 
@@ -406,11 +426,9 @@ echo "  collecting recovery data ..."
 curl -s -o "${RUN_DIR}/recovery_inflight.json" \
   "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" \
   || echo "  WARNING: inflight_status request failed"
-curl -s -o "${RUN_DIR}/recovery_snapshot.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" \
+mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" > "${RUN_DIR}/recovery_snapshot.json" \
   || echo "  WARNING: snapshot request failed"
-curl -s -o "${RUN_DIR}/recovery_requests.json" \
-  "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" \
+mock_http GET "${MOCK_HTTP_PORT}" "/requests" > "${RUN_DIR}/recovery_requests.json" \
   || echo "  WARNING: requests request failed"
 echo "  recovery data collected"
 
@@ -489,9 +507,9 @@ fi
 
 echo ""
 echo "=== Mock engine final snapshots ==="
-curl -s "http://127.0.0.1:${MOCK_HTTP_PORT}/requests" > "${RUN_DIR}/mock_requests_final.json" 2>/dev/null \
+mock_http GET "${MOCK_HTTP_PORT}" "/requests" > "${RUN_DIR}/mock_requests_final.json" 2>/dev/null \
   || echo "  WARNING: requests request failed"
-curl -s "http://127.0.0.1:${MOCK_HTTP_PORT}/snapshot" > "${RUN_DIR}/mock_snapshot_final.json" 2>/dev/null \
+mock_http GET "${MOCK_HTTP_PORT}" "/snapshot" > "${RUN_DIR}/mock_snapshot_final.json" 2>/dev/null \
   || echo "  WARNING: snapshot request failed"
 echo "  mock engine snapshots saved"
 
