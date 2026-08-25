@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import torch
 
@@ -102,7 +102,8 @@ class FMHAImplBase(ABC):
     所有具体的实现类都应该继承此类并实现这些方法。
     """
 
-    accepts_fmha_config = False
+    # KV-cache writer op class; impls sharing a paged KV cache (ROCm) must set it.
+    WRITER: ClassVar[Optional[type]] = None
 
     @abstractmethod
     def forward(
