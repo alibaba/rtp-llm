@@ -333,14 +333,16 @@ public class BatcherContext {
     }
 
     /**
-     * Effective strict padded-token limit for one FlexLB batch.
+     * Effective strict padded-token limit for combining requests in one FlexLB batch.
      *
-     * <p>The Engine's FIFO scheduler rejects a group when its padded context
-     * shape ({@code maxSeqLen * batchSize}) is greater than or equal to
-     * {@code max_batch_tokens_size}. Prefer
-     * that exact worker-reported limit; {@code max_seq_len} is a conservative
-     * fallback for workers that have not populated the newer field yet. An
-     * internal safety ceiling covers the interval before either value arrives.
+     * <p>After admitting the first request as a standalone candidate, the Engine's
+     * FIFO scheduler rejects additions whose padded context shape
+     * ({@code maxSeqLen * batchSize}) is greater than or equal to
+     * {@code max_batch_tokens_size}. Prefer that exact worker-reported limit;
+     * {@code max_seq_len} is a conservative fallback for workers that have not
+     * populated the newer field yet. An internal safety ceiling covers the interval
+     * before either value arrives. This limit must not reject the singleton head;
+     * its standalone validity is governed by the Engine's max-sequence and KV checks.
      */
     long batchTokenCapacity() {
         long capacity = positiveOrUnlimited(
