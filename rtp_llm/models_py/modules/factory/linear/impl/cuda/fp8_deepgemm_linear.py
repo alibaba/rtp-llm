@@ -26,6 +26,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
     supports_deferred_bias = True
     supports_fused_bias_gelu_quant = True
+    supports_prequantized_activation = True
 
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
@@ -282,7 +283,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
         if apply_bias and self.bias is not None:
-            output.add_(self.bias.to(output.dtype))
+            if output.is_cuda:
+                from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+                rtp_llm_ops.fused_bias_add(output, self.bias.to(output.dtype))
+            else:
+                output.add_(self.bias.to(output.dtype))
         return output
 
     def forward(
@@ -312,7 +318,12 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
         if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
             return None
-        output = self._forward_impl(input, apply_bias=False)
+        output = self.forward_without_bias(input)
+        return self._bias_gelu_quantize_output(output)
+
+    def _bias_gelu_quantize_output(
+        self, output: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         output_fp8 = torch.empty_like(output, dtype=torch.float8_e4m3fn)
         output_scales = create_per_token_group_quant_fp8_output_scale(
             x_shape=output.shape,
@@ -329,28 +340,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         )
         return output_fp8, output_scales
 
-    def forward_quantized(
-        self,
-        input: torch.Tensor,
-        input_scales: torch.Tensor,
-        apply_bias: bool = True,
-    ) -> torch.Tensor:
-        if not self.scale_ue8m0:
-            raise ValueError("pre-quantized activation requires UE8M0 scales")
-        if input.dtype != torch.float8_e4m3fn or input.dim() != 2:
-            raise ValueError("pre-quantized input must be a 2D float8_e4m3fn tensor")
-        if input.shape[1] != self.K:
-            raise ValueError(f"input K must be {self.K}, got {input.shape[1]}")
-        output = torch.empty(
-            input.shape[0], self.N, dtype=torch.bfloat16, device=input.device
-        )
-        fp8_gemm_nt(
-            (input, input_scales),
-            (self.weight, self.weight_scales),
-            output,
-            c=None,
-            disable_ue8m0_cast=False,
-        )
-        if apply_bias and self.bias is not None:
-            output.add_(self.bias.to(output.dtype))
-        return output
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
+            return None
+        output = self.forward_quantized(input, input_scales, apply_bias=False)
+        return self._bias_gelu_quantize_output(output)
