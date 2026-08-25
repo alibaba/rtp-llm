@@ -1254,7 +1254,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cpu_int32_).pin_memory();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
     } else if (is_prefill_cuda_graph_mode_) {
-        // ROCm needs prefix>0 here for AiterPrefillImplPaged.support(); CUDA keeps prefix=0.
+        // MTP draft keeps its historical ROCm prefix shape. Generative full
+        // prefill remains no-prefix on both platforms; AiterPrefillImplPaged
+        // explicitly admits that graph layout.
 #if USING_ROCM
         const int prefix_init = isMtpDraftPrefillCudaGraph() ? max_seq_len_ : 0;
 #else

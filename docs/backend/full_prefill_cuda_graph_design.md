@@ -5,10 +5,10 @@
 | 状态 | Review 已通过，首版实现完成 |
 | 实现状态 | 核心逻辑、算子门槛、真实 checkpoint 端到端验证与 exact-bucket A/B 基线已完成；待长期稳定性、qps=10 和 timeline 验证 |
 | 设计基线 | `feature/beam-search-perf-bugfix-2026-08`（调研时 HEAD `de1b66746905`） |
-| 目标后端 | FlashInferTRTLLMFMHAv2PrefillImpl，非 paged、no-prefix 路径 |
+| 目标后端 | CUDA FlashInfer TRT-LLM FMHA v2 non-paged；ROCm AITER Triton unified attention + ASM shuffled paged KV；均为 no-prefix |
 | 初始运行范围 | BF16、dense 或单卡 FP8 per-block masked MoE、MHA/GQA、动态多请求纯 prefill batch，`1 <= B <= Bmax` |
 | Graph 范围 | Python model forward 的完整 prefill 主干 |
-| 明确不支持 | Prefix cache、Piecewise/Breakable Graph、Paged FMHA、分布式/非 masked MoE、MLA、prefill/decode mixed batch |
+| 明确不支持 | Prefix cache、Piecewise/Breakable Graph、CUDA Paged FMHA、分布式/非 masked MoE、MLA、prefill/decode mixed batch |
 
 > 本文档是当前首版实现的设计基线。代码默认关闭，只有显式开启独立开关并满足 allowlist 时才创建 generative prefill runner。
 
@@ -23,7 +23,7 @@ RTP-LLM 已经有 Decode CUDA Graph、Embedding Prefill Graph、MTP Draft Prefil
 - 普通 prefill 在 canRun 阶段直接回退 eager。
 - 现有 support_cuda_graph 判定只检查实现是否存在 prepare_cuda_graph，无法表达“仅支持 no-prefix Full Prefill Graph”。
 
-本设计只处理一个明确 graph-safe 的 backend：
+CUDA 首版只处理一个明确 graph-safe 的 backend：
 
 **FlashInferTRTLLMFMHAv2PrefillImpl 的 non-paged no-prefix 路径。**
 
@@ -35,11 +35,13 @@ fmha_v2_flash_attention_bf16_64_64_S_q_kv_64_causal_alibi_softmax_output_bf16_sm
 
 它是 TRT-LLM FMHA v2 的 CONTIGUOUS_Q_KV GQA prefill kernel，不是 paged KV attention。它支持在固定 capture shape 下，通过稳定地址上的 cu_seqlens、seq_lens 和 KV 写入映射更新每次 replay 的请求信息。
 
+ROCm 扩展使用 `AiterPrefillImplPaged`，但 Full Prefill HIP Graph 不 capture CK batch-prefill：当 `USE_TRITON_PA=1` 且 `USE_ASM_PA=1` 时，所有 prefill token bucket 都强制走 AITER Triton `unified_attention`，直接读取 ASM RoPE+KV writer 生成的 shuffled paged KV layout。Replay 前原地更新 packed-Q `cu_seqlens`、sequence lengths、block table 和 RoPE/KV metadata；MI308X 的 allowlist 仅开放 BF16 activation、BF16 KV、causal no-prefix。Eager 路径保持原有策略：短 query 走 Triton decode PA，长 query 走 CK batch-prefill。
+
 ## 2. 设计结论
 
 本方案采用以下约束，不实现通用 Prefill CUDA Graph：
 
-1. 只 allowlist FlashInferTRTLLMFMHAv2PrefillImpl 的 non-paged no-prefix 路径。
+1. CUDA allowlist FlashInferTRTLLMFMHAv2PrefillImpl non-paged no-prefix；ROCm allowlist AiterPrefillImplPaged no-prefix。
 2. 第一阶段支持动态多请求纯 prefill batching；真实请求数可以在 `1..Bmax` 内变化，超过配置上限时回退 eager。
 3. 每个 token bucket capture 一张完整的 prefill graph，不支持 Breakable/Piecewise Graph。
 4. 每张 graph 使用固定的 request-slot capacity：`Bmax` 个真实 request slots 加一个 padding sentinel slot。未使用的真实 slots 以零长度 sequence 填充。
@@ -155,7 +157,10 @@ PrefillCudaGraphCapability:
     FULL_NO_PREFIX
 ~~~
 
-Attention implementation 默认返回 NEVER。首版只有 FlashInferTRTLLMFMHAv2PrefillImpl 在满足自身 support 条件时返回 FULL_NO_PREFIX。
+Attention implementation 默认返回 NEVER。当前仅以下实现会在满足自身 support 条件时返回 FULL_NO_PREFIX：
+
+- CUDA：FlashInferTRTLLMFMHAv2PrefillImpl；
+- ROCm：`AiterPrefillImplPaged`，Full Prefill Graph 固定走 AITER Triton `unified_attention`，并要求 ASM shuffled KV layout。
 
 attention factory 接收明确的 graph selection mode：
 
@@ -170,7 +175,7 @@ FULL_PREFILL_NO_PREFIX_GRAPH
 - capability 等于 FULL_NO_PREFIX；
 - has_prefix 为 false；
 - backend 的常规 support 检查通过；
-- non-paged 路径；
+- backend layout 与平台 allowlist 匹配（CUDA non-paged，ROCm paged KV）；
 - 当前硬件、dtype 和 RoPE 配置在首版 allowlist 内，head dimension 只需通过 backend 的常规 support 检查。
 
 不得回退选择另一个“也有 prepare_cuda_graph 方法”的 attention implementation。找不到完全匹配的实现时，禁用该 prefill graph profile 并报告原因。
@@ -179,12 +184,12 @@ FULL_PREFILL_NO_PREFIX_GRAPH
 
 | 维度 | 首版条件 |
 | --- | --- |
-| Python implementation | FlashInferTRTLLMFMHAv2PrefillImpl |
-| Attention layout | non-paged，MHA 或 GQA |
+| Python implementation | CUDA: FlashInferTRTLLMFMHAv2PrefillImpl；ROCm: AiterPrefillImplPaged |
+| Attention layout | CUDA non-paged；ROCm ASM shuffled paged KV；MHA 或 GQA |
 | Prefix | 所有 prefix_lengths 必须为 0 |
 | Dtype | BF16 input/output，BF16 KV cache |
-| CUDA | 不低于 backend 现有最低要求 |
-| GPU | SM90、SM120 |
+| Runtime | CUDA/HIP Graph，且不低于 backend 现有最低要求 |
+| GPU | SM90、SM120、MI308X（gfx942） |
 | Model | dense causal decoder-only；或 BF16 activation 的 FP8 per-block MoE，显式选择 `fp8_per_block_no_dp_masked` |
 | MoE runtime | `PureTpRouterFp8PerBlock + DeepGemmMaskedExecutorV2`、`use_all_gather=true`、无 EPLB/额外专家/DeepEP/MoriEP |
 | Parallelism | TP=EP=DP=PP=world size=1、无 CP |
@@ -559,6 +564,8 @@ ENABLE_FULL_PREFILL_CUDA_GRAPH=0
 ~~~
 ENABLE_CUDA_GRAPH=1
 ENABLE_FULL_PREFILL_CUDA_GRAPH=1
+USE_TRITON_PA=1
+USE_ASM_PA=1
 PREFILL_CAPTURE_CONFIG=<非空 bucket 列表>
 FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS=<正整数>
 ~~~
@@ -568,6 +575,8 @@ FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS=<正整数>
 ~~~
 ENABLE_CUDA_GRAPH=1
 ENABLE_FULL_PREFILL_CUDA_GRAPH=1
+USE_TRITON_PA=1
+USE_ASM_PA=1
 PREFILL_CAPTURE_CONFIG=128,256,384,512,768,1024
 FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS=8
 FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
@@ -576,6 +585,7 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 约束：
 
 - ENABLE_FULL_PREFILL_CUDA_GRAPH 不影响 decode graph 开关。
+- ROCm Full Prefill Graph 必须同时开启 `USE_TRITON_PA` 和 `USE_ASM_PA`；其中 ASM 开关保证 KV writer 与 Triton reader 的 shuffled layout contract 一致。
 - PREFILL_CAPTURE_CONFIG 为空时，不创建 generative prefill runner。
 - `FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS` 固定每个 profile 的真实 request-slot capacity；首版所有 token buckets 共用同一个 Bmax，因此 graph 数量仍等于 token bucket 数量。
 - 配置错误时禁用 prefill graph 并给出明确日志；不影响服务 eager 启动。
@@ -592,6 +602,8 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 | fmha_impl_base.py | 增加 PrefillCudaGraphCapability |
 | attn_factory.py | 增加显式 graph selection mode 和 capability filter |
 | cuda_impl/trt.py | 为 non-paged TRT-LLM FMHA v2 声明 FULL_NO_PREFIX，并加强运行时断言 |
+| rocm_impl/aiter.py | Full Prefill Graph 在 Triton+ASM 开关下强制路由到 AITER `unified_attention`，保持 packed-Q output 与 metadata 地址稳定 |
+| FusedRopeKVCacheOp.cc | 保存 capture 时的 sequence stride，replay 动态请求布局时据此重建 padding offset，避免 KV 写入跨 request |
 | cuda_graph_base.h | 增加显式 CudaGraphRole |
 | cuda_graph_runner.h/.cc | 增加 generative no-prefix prefill role、动态真实 batch state、eligibility、profile 和 fallback reason |
 | cuda_graph_prefill.cc | 增加固定 request capacity、inactive slots 和 sentinel layout 的 capture/replay metadata 构造 |
@@ -614,9 +626,9 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 
 ### 16.1 Attention 算子级
 
-扩展 TRT-LLM FMHA v2 prefill CUDA Graph 测试：
+扩展平台 prefill CUDA/HIP Graph 测试：
 
-- BF16、SM90/SM120；
+- BF16；CUDA 覆盖 SM90/SM120，ROCm 覆盖 MI308X；
 - MHA 和 GQA；
 - 使用与目标模型一致的 RoPE，而不是 RoPE disabled；
 - 使用真实 KV cache buffer 和 block table；
@@ -823,7 +835,7 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 
 首版实现采用以下已确认决策：
 
-- [x] 首版只支持 FlashInferTRTLLMFMHAv2PrefillImpl non-paged no-prefix。
+- [x] CUDA 支持 FlashInferTRTLLMFMHAv2PrefillImpl non-paged no-prefix；ROCm 支持 AiterPrefillImplPaged no-prefix，Full Graph 固定使用 Triton unified attention + ASM shuffled paged KV。
 - [x] 首版支持 `1..Bmax` 个动态真实 prefill 请求，固定 `Bmax` 个真实 slots 并使用一个 sentinel slot。
 - [x] 为 sentinel 预留最大 bucket 对应的 scratch KV blocks。
 - [x] 普通模型使用 decode/prefill 双 runner，而不是改造现有单 runner 复用 state。
@@ -832,8 +844,8 @@ FULL_PREFILL_CUDA_GRAPH_MAX_PADDING_RATIO=0.25
 - [x] PREFILL_CAPTURE_CONFIG 继续表达一维 token buckets。
 - [x] 首版所有 buckets 共用 `FULL_PREFILL_CUDA_GRAPH_MAX_REQUESTS`，graph 数量不乘以 batch size。
 - [x] padding ratio 阈值默认值为 0.25。
-- [x] enable matrix 限定 BF16、单卡 dense 或显式 FP8 per-block masked MoE、SM90/SM120；head dim 沿用 backend 的常规 support matrix。
-- [x] Prefix、prefill/decode mixed batch、Paged backend 和 Breakable Graph 均不进入首版。
+- [x] enable matrix 限定 BF16、单卡 dense 或显式 FP8 per-block masked MoE；GPU 为 SM90/SM120/MI308X；head dim 沿用 backend 的常规 support matrix。
+- [x] Prefix、prefill/decode mixed batch、CUDA Paged backend 和 Breakable Graph 均不进入首版；ROCm 明确使用 Aiter paged KV backend。
 
 dense 真实 checkpoint 的 capture、动态多请求 replay、decode-after-prefill 与 exact-bucket A/B 基线已完成；
 新增 MoE allowlist 仍需使用匹配 checkpoint 完成相同的模型级 correctness/perf gate。长期稳定性、qps=10、
