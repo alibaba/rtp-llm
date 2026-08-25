@@ -221,6 +221,19 @@ public class BatcherContext {
     }
 
     /**
+     * Thread-confined unordered copy of the active queue. The caller must
+     * hold {@link #queueLock()} so the copy and any version capture taken
+     * under the same lock hold linearize with queue mutations. Sorting the
+     * returned copy is safe outside the lock because item ordering keys are
+     * frozen once the item is constructed ({@code enqueueSequence} is
+     * assigned at construction, before the item can enter the queue) —
+     * the same invariant {@link #snapshotActiveQueue(int)} relies on.
+     */
+    List<BatchItem> copiedItems() {
+        return new ArrayList<>(queue);
+    }
+
+    /**
      * Items in active queue order (FIFO: {@link BatchItem#enqueueSeq()};
      * PRIORITY: {@link WorkerBatcher#PRIORITY_QUEUE_ORDER}, which delegates
      * to {@link PriorityOrdering#STRICT}), suitable for greedy-fill iteration

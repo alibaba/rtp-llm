@@ -43,26 +43,44 @@ public final class PrefillQueueManager {
      * Consistent point-in-time view of the queue for eviction planning:
      * version + per-item {@link QueuedRequestSnapshot} in queue order.
      * The hard capacity comes from the QUEUE scheduler's capacity policy.
+     *
+     * <p>Only the membership copy and the version capture run under the
+     * queue lock; the O(n log n) sort runs on the thread-confined copy
+     * outside it, so the submit path's {@code offer()} and the batcher
+     * decision cycle never block behind a snapshot sort. Correctness: the
+     * copy and the version are captured atomically under the same lock
+     * hold, every queue mutation bumps the version under that lock, and
+     * item sort fields are frozen once the item is constructed
+     * ({@code enqueueSequence} is assigned at construction, before the
+     * item can enter the queue), so the "version unchanged ⇒ queue content
+     * unchanged" invariant and the output order are both preserved
+     * bit-for-bit. A stale snapshot is harmless downstream: victim
+     * replacement validates the selected victims under the queue lock
+     * ({@link #tryReplaceVictimsPresent}).
      */
     public PrefillQueueSnapshot snapshot() {
+        List<BatchItem> queued;
+        long version;
         ctx.queueLock().lock();
         try {
             // Only live queue members are actionable eviction victims. A
             // callback-owned member remains capacity-charged, but is no
             // longer an actionable queue victim.
-            List<BatchItem> queued = ctx.activeItemsInSchedulingOrder();
-            List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
-            for (BatchItem item : queued) {
-                items.add(new QueuedRequestSnapshot(
-                        item.requestId(), item.priority(), item.enqueuedAtMs(),
-                        item.seqLen(), item.hitCache(),
-                        QueuedRequestSnapshot.PREFILL_QUEUED));
-            }
-            return new PrefillQueueSnapshot(ctx.key(), batcher.queueVersion(),
-                    ctx.maxQueueCapacity(), items);
+            queued = ctx.copiedItems();
+            version = batcher.queueVersion();
         } finally {
             ctx.queueLock().unlock();
         }
+        queued.sort(ctx.queueOrder());
+        List<QueuedRequestSnapshot> items = new ArrayList<>(queued.size());
+        for (BatchItem item : queued) {
+            items.add(new QueuedRequestSnapshot(
+                    item.requestId(), item.priority(), item.enqueuedAtMs(),
+                    item.seqLen(), item.hitCache(),
+                    QueuedRequestSnapshot.PREFILL_QUEUED));
+        }
+        return new PrefillQueueSnapshot(ctx.key(), version,
+                ctx.maxQueueCapacity(), items);
     }
 
     /**
