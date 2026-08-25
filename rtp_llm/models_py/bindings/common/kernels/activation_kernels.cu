@@ -17,6 +17,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/activation_kernels.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_type_utils.cuh"
 #include "rtp_llm/models_py/bindings/cuda/reduce_kernel_utils.cuh"
+#include <algorithm>
 
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -30,6 +31,15 @@
 namespace rtp_llm {
 
 template<typename T>
+__global__ void addBias(T* output, const T* bias, size_t numel, size_t hidden_size) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < numel;
+         index += static_cast<size_t>(blockDim.x) * gridDim.x) {
+        output[index] =
+            static_cast<T>(static_cast<float>(output[index]) + static_cast<float>(bias[index % hidden_size]));
+    }
+}
+
+template<typename T>
 __global__ void addBiasGelu(T* output, const T* bias, size_t numel, size_t hidden_size) {
     const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= numel) {
@@ -40,6 +50,22 @@ __global__ void addBiasGelu(T* output, const T* bias, size_t numel, size_t hidde
 }
 
 #if USING_CUDA
+template<typename T>
+__global__ void addBiasVector2(T* output, const T* bias, size_t pair_count, size_t hidden_pairs) {
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < pair_count;
+         index += static_cast<size_t>(blockDim.x) * gridDim.x) {
+        if constexpr (std::is_same_v<T, half>) {
+            const half2 value_pair                  = reinterpret_cast<const half2*>(output)[index];
+            const half2 bias_pair                   = reinterpret_cast<const half2*>(bias)[index % hidden_pairs];
+            reinterpret_cast<half2*>(output)[index] = __hadd2(value_pair, bias_pair);
+        } else {
+            const __nv_bfloat162 value_pair = reinterpret_cast<const __nv_bfloat162*>(output)[index];
+            const __nv_bfloat162 bias_pair  = reinterpret_cast<const __nv_bfloat162*>(bias)[index % hidden_pairs];
+            reinterpret_cast<__nv_bfloat162*>(output)[index] = __hadd2(value_pair, bias_pair);
+        }
+    }
+}
+
 __device__ __forceinline__ float exactGelu(float x) {
     return 0.5f * x * (1.0f + erff(x * 0.7071067811865475f));
 }
@@ -49,44 +75,65 @@ __global__ void addBiasGeluQuantFp8Kernel(const T* __restrict__ input,
                                           const T* __restrict__ bias,
                                           __nv_fp8_e4m3* __restrict__ output,
                                           uint32_t* __restrict__ scales,
+                                          size_t group_count,
                                           size_t hidden_size,
                                           size_t scale_stride) {
-    constexpr int    group_size = 128;
-    constexpr int    threads    = 32;
-    __shared__ float values[group_size];
+    constexpr int    group_size        = 128;
+    constexpr int    threads_per_group = 8;
+    constexpr int    groups_per_block  = 32;
+    __shared__ float group_scales[groups_per_block];
 
     const size_t groups_per_row = hidden_size / group_size;
-    const size_t group_id       = blockIdx.x;
+    const int    local_group_id = threadIdx.x / threads_per_group;
+    const int    lane_id        = threadIdx.x % threads_per_group;
+    const size_t group_id       = blockIdx.x * groups_per_block + local_group_id;
+    const bool   active         = group_id < group_count;
     const size_t row            = group_id / groups_per_row;
     const size_t group_col      = group_id % groups_per_row;
     const size_t offset         = row * hidden_size + group_col * group_size;
 
+    float local_values[group_size / threads_per_group];
     float local_absmax = 1e-4f;
 #pragma unroll
-    for (int i = threadIdx.x; i < group_size; i += threads) {
-        const float value =
-            exactGelu(static_cast<float>(input[offset + i]) + static_cast<float>(bias[group_col * group_size + i]));
-        const T rounded_value = static_cast<T>(value);
-        values[i]             = static_cast<float>(rounded_value);
-        local_absmax          = fmaxf(local_absmax, fabsf(values[i]));
+    for (int item = 0; item < group_size / threads_per_group; ++item) {
+        const int i = lane_id + item * threads_per_group;
+        if (active) {
+            const float value =
+                exactGelu(static_cast<float>(input[offset + i]) + static_cast<float>(bias[group_col * group_size + i]));
+            const T rounded_value = static_cast<T>(value);
+            local_values[item]    = static_cast<float>(rounded_value);
+            local_absmax          = fmaxf(local_absmax, fabsf(local_values[item]));
+        }
     }
+    const unsigned subwarp_mask = 0xffu << ((threadIdx.x & 24));
 #pragma unroll
-    for (int delta = 16; delta > 0; delta >>= 1) {
-        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, delta));
+    for (int delta = 4; delta > 0; delta >>= 1) {
+        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(subwarp_mask, local_absmax, delta));
     }
 
-    const float scale = exp2f(ceilf(log2f(fmaxf(local_absmax / 448.0f, 1e-10f))));
-    if (threadIdx.x == 0) {
-        const size_t packed_col = group_col / 4;
-        const size_t pack_idx   = group_col % 4;
+    if (lane_id == 0 && active) {
+        const float    raw_scale       = fmaxf(local_absmax / 448.0f, 1e-10f);
+        const uint32_t scale_bits      = __float_as_uint(raw_scale);
+        const int      floor_exponent  = static_cast<int>((scale_bits >> 23) & 0xff) - 127;
+        const int      scale_exponent  = floor_exponent + ((scale_bits & 0x7fffffU) != 0U);
+        const int      biased_exponent = scale_exponent + 127;
+        group_scales[local_group_id]   = __int_as_float(biased_exponent << 23);
+        const size_t packed_col        = group_col / 4;
+        const size_t pack_idx          = group_col % 4;
         reinterpret_cast<uint8_t*>(scales)[packed_col * scale_stride * 4 + row * 4 + pack_idx] =
-            static_cast<uint8_t>(static_cast<int>(log2f(scale)) + 127);
+            static_cast<uint8_t>(biased_exponent);
     }
     __syncthreads();
 
+    if (!active) {
+        return;
+    }
+
+    const float group_scale = group_scales[local_group_id];
 #pragma unroll
-    for (int i = threadIdx.x; i < group_size; i += threads) {
-        output[offset + i] = __nv_fp8_e4m3(fminf(fmaxf(values[i] / scale, -448.0f), 448.0f));
+    for (int item = 0; item < group_size / threads_per_group; ++item) {
+        const int i        = lane_id + item * threads_per_group;
+        output[offset + i] = __nv_fp8_e4m3(fminf(fmaxf(local_values[item] / group_scale, -448.0f), 448.0f));
     }
 }
 
@@ -103,9 +150,13 @@ void invokeAddBiasGeluQuantFp8(const T*     input,
     if (rows == 0) {
         return;
     }
-    const size_t groups_per_row = hidden_size / group_size;
-    addBiasGeluQuantFp8Kernel<<<rows * groups_per_row, 32, 0, stream>>>(
-        input, bias, static_cast<__nv_fp8_e4m3*>(output), scales, hidden_size, scale_stride);
+    const size_t  groups_per_row    = hidden_size / group_size;
+    const size_t  group_count       = rows * groups_per_row;
+    constexpr int groups_per_block  = 32;
+    constexpr int threads_per_group = 8;
+    const size_t  block_count       = (group_count + groups_per_block - 1) / groups_per_block;
+    addBiasGeluQuantFp8Kernel<<<block_count, groups_per_block * threads_per_group, 0, stream>>>(
+        input, bias, static_cast<__nv_fp8_e4m3*>(output), scales, group_count, hidden_size, scale_stride);
 }
 
 template<typename T>
@@ -131,6 +182,29 @@ __global__ void addBiasGeluVector2(T* output, const T* bias, size_t pair_count, 
     }
 }
 #endif
+
+template<typename T>
+void invokeAddBias(T* output, const T* bias, size_t numel, size_t hidden_size, cudaStream_t stream) {
+    if (numel == 0) {
+        return;
+    }
+    constexpr int block_size = 256;
+    constexpr int max_blocks = 512;
+#if USING_CUDA
+    constexpr uintptr_t vector_alignment = 2 * sizeof(T);
+    const bool          pointers_aligned = (reinterpret_cast<uintptr_t>(output) % vector_alignment == 0)
+                                  && (reinterpret_cast<uintptr_t>(bias) % vector_alignment == 0);
+    if (numel % 2 == 0 && hidden_size % 2 == 0 && pointers_aligned) {
+        const size_t pair_count = numel / 2;
+        const int    grid_size =
+            static_cast<int>(std::min<size_t>((pair_count + block_size - 1) / block_size, max_blocks));
+        addBiasVector2<<<grid_size, block_size, 0, stream>>>(output, bias, pair_count, hidden_size / 2);
+        return;
+    }
+#endif
+    const int grid_size = static_cast<int>(std::min<size_t>((numel + block_size - 1) / block_size, max_blocks));
+    addBias<<<grid_size, block_size, 0, stream>>>(output, bias, numel, hidden_size);
+}
 
 template<typename T>
 void invokeAddBiasGelu(T* output, const T* bias, size_t numel, size_t hidden_size, cudaStream_t stream) {
@@ -231,6 +305,11 @@ template void invokeAddBiasGelu(half* output, const half* bias, size_t numel, si
 
 template void invokeAddBiasGelu(
     __nv_bfloat16* output, const __nv_bfloat16* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
+
+template void invokeAddBias(half* output, const half* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
+
+template void
+invokeAddBias(__nv_bfloat16* output, const __nv_bfloat16* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
 
 #if USING_CUDA
 template void invokeAddBiasGeluQuantFp8(const half*  input,
