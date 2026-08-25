@@ -22,13 +22,14 @@ rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 ```
 
 The run directory defaults to `rtp_llm/flexlb/tools/online_eval/run/<timestamp>/`.
-After completion, the important outputs are:
+After completion, the important outputs are (see the **Run output layout**
+section below for the full table):
 
-- `load_client/summary.json`
-- `load_client/per_request.jsonl`
+- `load_client/summary.json` (kept at the legacy path)
+- `run_meta.json`, `mock.json` / `mock.log`, `master.json` / `master.log`,
+  `client.json` / `client.log` (one JSON + one log per component)
+- `per_request.jsonl` (or `per_request.jsonl.gz` for larger runs)
 - `load_client/report.md`
-- `mock_engine.log`
-- `flexlb.log`
 
 Common overrides:
 
@@ -68,6 +69,61 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 - `data/online_logs/sample_access.json`: sanitized request-shape fixture with pseudonymous token IDs.
 - `data/performance/dsv4_flash_performance.sample.json`: mock latency model.
 - `data/config/master_fixed_window.json`: master process env config for the fixed-window baseline.
+
+## Run output layout
+
+`run_online_eval.sh` ends each run by consolidating the run directory
+(`consolidate_run_outputs.py`) into one JSON + one log per component:
+
+| File | Content |
+|---|---|
+| `run_meta.json` | `flexlb_env.txt` contents, endpoints summary, and the startup parameter snapshot (`--param` values incl. `FLEXLB_CONFIG`) |
+| `mock.json` | `java_mock_stats` timeline (`stats` array, source field names `ts_epoch_ms` / `prefill_waiting` / ...). Note the parsers capture 26 of the 28 fields — `decode_exec_p50` / `decode_exec_p95` carry digits in the key and are skipped; the verbatim lines stay in `mock.log`. Also holds the final cluster `/snapshot` from the control plane (when reachable) and the endpoints summary |
+| `mock.log` | The original `mock_engine.log` verbatim (tail-friendly) with the JVM GC log appended under a `=====` separator |
+| `master.json` | `master_counters_timeseries.txt` as a timeline array, `master_prometheus_after.prom` as a flat `{"name{labels}": value}` dict (HELP/TYPE skipped), `master_info_before/after.json` payloads, SLO batch summary fields |
+| `master.log` | `flexlb_logs/application.log` verbatim prefix with `flexlb.log` (structured dispatch/complete lines), `sync.log`, `sync_consistency.log` and the run-root `flexlb.log` (master stdout) appended |
+| `client.json` | `load_client/summary.json` base merged with `server_latency.json`, the full `slo_batch_analysis.json`, and a per-second aggregated timeline (`per_second`, same shape as the canvas aggregation) |
+| `client.log` | All `client_shard_*.stdout` merged with `===== client_shard_N =====` separators (single-worker runs rename `client.stdout` directly) |
+| `per_request.jsonl` / `.gz` | Merged per-request streams. Under 10 MB total the merge stays plain `per_request.jsonl` (uniform-mode runs — no unpack step needed); larger runs gzip into `per_request.jsonl.gz` (~10x smaller) |
+
+Kept in place after consolidation:
+
+- `endpoints.json`, `flexlb_env.txt` — discovery artifacts (also snapshotted into `run_meta.json`)
+- `flexlb_profile.jfr` — JFR recording, untouched
+- `load_client/summary.json` — **kept at the exact legacy path**: the flexlb-online-eval skill's `do_result` reads `run/load_client/summary.json` directly
+- `load_client/server_latency.json` — **kept at the exact legacy path**: the skill's `fetch_server_latency` reads that file
+- `load_client/report.md` — human-readable summary
+- `flexlb_logs/pv.log` — only populated with `FLEXLB_PV_LOG=on` (see below)
+
+The master's per-request `pv.log` (`pvLogger` in `logback-spring.xml`) is
+**off by default**: the master is started with
+`--logging.level.pvLogger=WARN`, so INFO-level per-request lines are
+suppressed and the file is **kept empty by default** (logback's
+FileAppender pre-creates it at startup) — only ERROR-level entries for
+failed requests still land in it. `FLEXLB_START_CMD` mode is not covered:
+a user-supplied start command does not get the property injected. Set
+`FLEXLB_PV_LOG=on` to keep the full pv log (a Spring Boot command-line
+property passed to the process under test — no production code change);
+the file then survives consolidation untouched. Note the skill-driven
+path needs `FLEXLB_PV_LOG` added to the skill script's explicit env
+export whitelist before it takes effect there.
+
+`consolidate_run_outputs.py` is idempotent and retro-runnable — it can be
+re-run on an already consolidated directory (no-op; a regenerated
+`slo_batch_analysis.json` only refreshes the `slo_batch_summary` keys) or
+applied to a legacy run directory to produce the same layout. The
+consumers (`analyze_slo_batch.py`, `aggregate_canvas_run.py`,
+`analyze_burst_results.py`, `generate_stability_report.py`) read the
+**legacy source files first** and fall back to the consolidated ones —
+a successful consolidation deletes the legacy files, so a legacy file that
+is present always means fresher data (RUN_DIR reuse), and **pre-consolidation
+run directories remain fully analyzable**.
+
+One skill caveat: `fetch_error_detail` in the current flexlb-online-eval
+skill still reads the per-shard `load_client/shard_*/per_request.jsonl`
+files, which consolidation deletes — upgrade the skill to read the run-root
+`per_request.jsonl[.gz]`; until then error-detail retrieval on consolidated
+runs degrades (summary metrics are unaffected).
 
 ## Manual flow
 

@@ -101,6 +101,19 @@ LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
 CLIENT_PACING_LAG_P99_LIMIT_MS="${CLIENT_PACING_LAG_P99_LIMIT_MS:-100}"
 SLO_BATCH_ANALYSIS="${SLO_BATCH_ANALYSIS:-1}"
 SLO_BATCH_DRAIN_SECONDS="${SLO_BATCH_DRAIN_SECONDS:-0}"
+# The master's pvLogger writes a per-request pv.log under FLEXLB_LOG_PATH
+# (logback-spring.xml "pvLogger" -> PV appender). That per-request telemetry
+# is not consumed by the consolidation flow, so by default the master is
+# started with --logging.level.pvLogger=WARN: INFO-level per-request lines
+# are suppressed and the file is kept EMPTY by default (logback's
+# FileAppender pre-creates it at startup) — only ERROR-level entries for
+# failed requests still land in it. Both effects come from a Spring Boot
+# command-line property passed to the process under test — no production
+# code change. FLEXLB_START_CMD mode is not covered: a user-supplied start
+# command does not get the property injected. Set FLEXLB_PV_LOG=on to keep
+# the full pv log; the file then survives consolidation untouched (see
+# consolidate_run_outputs.py).
+FLEXLB_PV_LOG="${FLEXLB_PV_LOG:-off}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
 FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
@@ -215,6 +228,67 @@ cleanup() {
   done
 }
 trap cleanup EXIT
+
+# Best-effort run output consolidation (runs at most once — CONSOLIDATED
+# sentinel). Called AFTER the client exit code is known and the summary=
+# line is printed: consolidation (notably the per_request gzip pass) can
+# take tens of seconds on large runs while the flexlb-online-eval skill's
+# timeout window is only DURATION+180s, so the exit code and the summary
+# line must be decided first — a slow machine then reports the correct
+# result instead of a spurious TIMEOUT with a half-written directory.
+# Two call sites: the load-client failure path (right before exit) and the
+# happy path (after the artifact echo, before the test_valid verdict).
+# Startup failures that never reach the load client do not consolidate.
+CONSOLIDATED=0
+consolidate_run_outputs_now() {
+  if [[ "${CONSOLIDATED}" == "1" ]]; then
+    return 0
+  fi
+  CONSOLIDATED=1
+  local consolidate_mock_port_args=()
+  if [[ "${START_MOCK}" == "1" ]]; then
+    consolidate_mock_port_args+=(--mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))")
+  fi
+  # Consolidate the run directory into the per-component JSON+log layout
+  # (run_meta/mock/master/client .json + .log, merged per_request.jsonl[.gz];
+  # see consolidate_run_outputs.py's docstring for the full keep/delete list).
+  # Runs while the mock cluster and master are still alive (cleanup kills them
+  # on EXIT), so the final cluster snapshot is captured from the control plane.
+  # Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr,
+  # load_client/summary.json (the flexlb-online-eval skill reads that exact
+  # path), load_client/server_latency.json (skill fetch_server_latency) and
+  # load_client/report.md.
+  python3 "${SCRIPT_DIR}/consolidate_run_outputs.py" \
+    --run-dir "${RUN_DIR}" \
+    ${consolidate_mock_port_args[@]+"${consolidate_mock_port_args[@]}"} \
+    --param "n_prefill=${N_PREFILL}" \
+    --param "n_decode=${N_DECODE}" \
+    --param "mock_base_grpc_port=${MOCK_BASE_GRPC_PORT}" \
+    --param "flexlb_http_port=${FLEXLB_HTTP_PORT}" \
+    --param "flexlb_management_port=${FLEXLB_MANAGEMENT_PORT}" \
+    --param "start_mock=${START_MOCK}" \
+    --param "start_flexlb=${START_FLEXLB}" \
+    --param "replay_speed=${REPLAY_SPEED}" \
+    --param "send_mode=${SEND_MODE:-replay}" \
+    --param "send_mode_qps=${SEND_MODE_QPS:-}" \
+    --param "limit=${LIMIT}" \
+    --param "duration_s=${DURATION_S}" \
+    --param "max_concurrency=${MAX_CONCURRENCY}" \
+    --param "load_client_workers=${LOAD_CLIENT_WORKERS}" \
+    --param "sla_ttft_ms=${SLA_TTFT_MS}" \
+    --param "zero_output_policy=${ZERO_OUTPUT_POLICY}" \
+    --param "schedule_only=${SCHEDULE_ONLY}" \
+    --param "loop=${LOOP}" \
+    --param "gradient=${GRADIENT}" \
+    --param "trace_file=${TRACE_FILE}" \
+    --param "performance_file=${PERFORMANCE_FILE}" \
+    --param "process_config_file=${PROCESS_CONFIG_FILE}" \
+    --param "java_mock_stats_interval_ms=${JAVA_MOCK_STATS_INTERVAL_MS}" \
+    --param "java_mock_decode_max_concurrency=${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
+    --param "flexlb_pv_log=${FLEXLB_PV_LOG}" \
+    --param "flexlb_config=${FLEXLB_CONFIG}" \
+    || echo "WARNING: run output consolidation failed (original files kept as-is)" >&2
+}
 
 wait_for_port() {
   local host="$1"
@@ -624,6 +698,12 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     if [[ ! -f "${FLEXLB_JAR}" ]]; then
       (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-api -am package -DskipTests)
     fi
+    # Suppress pv.log unless explicitly enabled (see the FLEXLB_PV_LOG note
+    # above). FLEXLB_START_CMD mode is caller-owned and left untouched.
+    MASTER_LOG_ARGS=()
+    if [[ "${FLEXLB_PV_LOG}" != "on" ]]; then
+      MASTER_LOG_ARGS+=(--logging.level.pvLogger=WARN)
+    fi
     env "${FLEXLB_ENV_ARGS[@]}" "${PROCESS_ENV_ARGS[@]}" "${RUNTIME_OVERRIDE_ENV_ARGS[@]}" \
       "FLEXLB_CONFIG=${FLEXLB_CONFIG}" \
       "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
@@ -635,6 +715,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
       --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
       --spring.profiles.active="${SPRING_PROFILE:-default}" \
       --flexlb.log.path="${FLEXLB_LOG_PATH}" \
+      ${MASTER_LOG_ARGS[@]+"${MASTER_LOG_ARGS[@]}"} \
       >"${RUN_DIR}/flexlb.log" 2>&1 &
   fi
   FLEXLB_PID="$!"
@@ -911,6 +992,10 @@ if priority_rows:
 print(json.dumps(summary, indent=2))
 PY
   if [[ "${CLIENT_EXIT}" -ne 0 ]]; then
+    # R12: best-effort consolidation on the load-client failure path so a
+    # failed client still leaves a consolidated (analyzable) directory; the
+    # CONSOLIDATED sentinel keeps this to one pass per script invocation.
+    consolidate_run_outputs_now
     exit "${CLIENT_EXIT}"
   fi
 fi
@@ -941,18 +1026,35 @@ if [[ "${SLO_BATCH_ANALYSIS}" == "1" ]]; then
     }
 fi
 
+# Consolidate the run directory into the per-component JSON+log layout
+# (run_meta/mock/master/client .json + .log, merged per_request.jsonl[.gz];
+# see consolidate_run_outputs.py's docstring for the full keep/delete list).
+# Runs while the mock cluster and master are still alive (cleanup kills them
+# on EXIT), so the final cluster snapshot is captured from the control plane.
+# Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr,
+# load_client/summary.json (the flexlb-online-eval skill reads that exact
+# path) and load_client/report.md.
+
 echo "summary=${RUN_DIR}/load_client/summary.json"
-if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
-  echo "per_request=${RUN_DIR}/load_client/per_request.jsonl"
+echo "run_meta=${RUN_DIR}/run_meta.json"
+echo "mock=${RUN_DIR}/mock.json (${RUN_DIR}/mock.log)"
+echo "master=${RUN_DIR}/master.json (${RUN_DIR}/master.log)"
+echo "client=${RUN_DIR}/client.json (${RUN_DIR}/client.log)"
+if [[ -f "${RUN_DIR}/per_request.jsonl" ]]; then
+  echo "per_request=${RUN_DIR}/per_request.jsonl"
 else
-  echo "per_request_shards=${RUN_DIR}/load_client/shard_*/per_request.jsonl"
+  echo "per_request=${RUN_DIR}/per_request.jsonl.gz"
 fi
 echo "report=${RUN_DIR}/load_client/report.md"
-echo "server_latency=${RUN_DIR}/load_client/server_latency.json"
-echo "slo_batch_analysis=${SLO_ANALYSIS_FILE}"
-echo "flexlb_file_log=${FLEXLB_LOG_PATH}/flexlb.log"
-echo "master_counters_timeseries=${MASTER_COUNTERS_FILE}"
 echo "jfr=${JFR_FILE}"
+
+# K1: consolidate AFTER the summary= / artifact echo above and BEFORE the
+# test_valid verdict below. The consolidation's per_request gzip pass can
+# take tens of seconds on large runs while the flexlb-online-eval skill's
+# timeout window is only DURATION+180s — printing the summary line first
+# guarantees the correct exit code and artifact paths are already visible
+# even if consolidation is slow or interrupted.
+consolidate_run_outputs_now
 
 SUMMARY_FILE="${RUN_DIR}/load_client/summary.json"
 if [[ -f "${SUMMARY_FILE}" ]]; then

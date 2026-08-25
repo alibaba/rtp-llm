@@ -3,11 +3,17 @@
 
 Run inside a run dir on the remote host:
   cd <run_dir> && python3 aggregate_canvas_run.py
-Reads: load_client/shard_*/per_request.jsonl, mock_engine.log,
-       flexlb_logs/flexlb.log*, load_client/summary.json,
-       load_client/slo_batch_analysis.json
+Reads (legacy layout first, consolidated run-root files as fallback):
+  load_client/summary.json or client.json
+  load_client/slo_batch_analysis.json or client.json's slo_batch_analysis
+  load_client/shard_*/per_request.jsonl or per_request.jsonl / per_request.jsonl.gz
+  mock_engine.log or mock.json,
+  flexlb_logs/flexlb.log* or master.log
+Legacy files win whenever they exist: a successful consolidation deletes
+them, so a legacy file that is present means fresher data (RUN_DIR reuse).
 """
 import glob
+import gzip
 import json
 import os
 import re
@@ -16,15 +22,59 @@ from collections import Counter, defaultdict
 
 run_dir = os.getcwd()
 
-summary = json.load(open("load_client/summary.json"))
-slo = json.load(open("load_client/slo_batch_analysis.json"))
+
+def load_json(path):
+    """Defensive JSON loader: missing/truncated file -> None (fall back)."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+# ---- inputs: legacy layout first, consolidated run-root fallback ----
+legacy_summary = load_json("load_client/summary.json")
+if legacy_summary:
+    summary = legacy_summary
+    client_json = {}
+else:
+    client_json = load_json("client.json") or {}
+    summary = client_json
+slo = load_json("load_client/slo_batch_analysis.json")
+if not slo and not legacy_summary:
+    # Only read the merged copy from client.json when it is the summary source;
+    # mixing a fresh legacy summary with a stale client.json slo would leak
+    # the previous run's data into this one.
+    slo = client_json.get("slo_batch_analysis")
+if not slo:
+    slo = {}
 
 # ---- per_second from per_request.jsonl (bucket by wall-clock send time) ----
+# Legacy shard files first (deleted by consolidation, so their presence means
+# fresher data), then the run-root merged file (plain or gzip).
 rows = []
-for f in sorted(glob.glob("load_client/shard_*/per_request.jsonl")):
-    for line in open(f):
-        rows.append(json.loads(line))
-epoch0 = min(d.get("send_start_epoch_ms", 0) for d in rows)
+per_request_files = sorted(glob.glob("load_client/shard_*/per_request.jsonl"))
+if not per_request_files:
+    per_request_files = sorted(glob.glob("load_client/per_request.jsonl"))
+if not per_request_files:
+    if os.path.isfile("per_request.jsonl"):
+        per_request_files = ["per_request.jsonl"]
+    elif os.path.isfile("per_request.jsonl.gz"):
+        per_request_files = ["per_request.jsonl.gz"]
+for f in per_request_files:
+    opener = gzip.open if f.endswith(".gz") else open
+    with opener(f, "rt", errors="replace") as stream:
+        for line in stream:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+epoch0 = min((d.get("send_start_epoch_ms", 0) for d in rows), default=0)
 per_sec = defaultdict(
     lambda: {
         "arrivals": 0,
@@ -97,30 +147,36 @@ for t in sorted(per_sec):
         }
     )
 
-# ---- queue_timeseries from mock_engine.log java_mock_stats lines ----
+# ---- queue_timeseries from java_mock_stats (legacy log first, mock.json) ----
+mock_stats = []
+if os.path.isfile("mock_engine.log"):
+    kv_pair_re = re.compile(r"(\w+)=([\d.]+)")
+    for line in open("mock_engine.log", errors="replace"):
+        if "java_mock_stats" not in line:
+            continue
+        mock_stats.append(dict(kv_pair_re.findall(line)))
+else:
+    mock_payload = load_json("mock.json") or {}
+    mock_stats = mock_payload.get("stats") or []
 queue_ts = []
-kv_re = re.compile(r"(\w+)=([\d.]+)")
 t0 = None
-for line in open("mock_engine.log", errors="replace"):
-    if "java_mock_stats" not in line:
-        continue
-    kv = dict(kv_re.findall(line))
-    ts = int(kv.get("ts_epoch_ms", 0))
+for kv in mock_stats:
+    ts = int(float(kv.get("ts_epoch_ms", 0)))
     if t0 is None:
         t0 = ts
     queue_ts.append(
         {
             "t_offset_s": round((ts - t0) / 1000),
-            "prefill_waiting": int(kv.get("prefill_waiting", 0)),
-            "prefill_running": int(kv.get("prefill_running", 0)),
-            "prefill_running_reqs": int(kv.get("prefill_running_reqs", 0)),
-            "max_prefill_waiting": int(kv.get("max_prefill_waiting", 0)),
-            "decode_waiting": int(kv.get("decode_waiting", 0)),
-            "decode_running": int(kv.get("decode_running", 0)),
-            "cum_prefill_batches": int(kv.get("prefill_batches", 0)),
-            "cum_enqueued_requests": int(kv.get("enqueued_requests", 0)),
+            "prefill_waiting": int(float(kv.get("prefill_waiting", 0))),
+            "prefill_running": int(float(kv.get("prefill_running", 0))),
+            "prefill_running_reqs": int(float(kv.get("prefill_running_reqs", 0))),
+            "max_prefill_waiting": int(float(kv.get("max_prefill_waiting", 0))),
+            "decode_waiting": int(float(kv.get("decode_waiting", 0))),
+            "decode_running": int(float(kv.get("decode_running", 0))),
+            "cum_prefill_batches": int(float(kv.get("prefill_batches", 0))),
+            "cum_enqueued_requests": int(float(kv.get("enqueued_requests", 0))),
             "cum_avg_batch_size": float(kv.get("avg_batch_size", 0)),
-            "heap_used_mb": int(kv.get("heap_used_mb", 0)),
+            "heap_used_mb": int(float(kv.get("heap_used_mb", 0))),
         }
     )
 
@@ -134,10 +190,15 @@ for q in queue_ts:
     prev_b, prev_r = q["cum_prefill_batches"], q["cum_enqueued_requests"]
 
 # ---- batch size histogram + dispatch reason from flexlb structured logs ----
+# Legacy flexlb_logs/flexlb.log* first; master.log (the consolidated merge)
+# carries the same flexlb_batch_dispatch lines as the fallback.
 dec_re = re.compile(r"flexlb_batch_dispatch .*?reason=(\w+) batch_size=(\d+)")
 hist = Counter()
 reason_hist = defaultdict(Counter)
-for f in glob.glob("flexlb_logs/flexlb.log*"):
+log_files = glob.glob("flexlb_logs/flexlb.log*")
+if not log_files and os.path.isfile("master.log"):
+    log_files = ["master.log"]
+for f in log_files:
     for line in open(f, errors="replace"):
         m = dec_re.search(line)
         if m:

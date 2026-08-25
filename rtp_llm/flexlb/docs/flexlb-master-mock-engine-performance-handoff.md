@@ -374,25 +374,28 @@ bash run_online_eval.sh
 
 做容量矩阵时只修改 `REPLAY_SPEED`，按 14、130、650、1400 依次运行，分别对应约 100、1K、5K、10K QPS。比较不同压力时不要改变 Master/load worker 数。
 
-脚本会在开始阶段校验 Java 21；mock engine 与 load client 均为 Java 实现，无需 Python 虚拟环境。测试结束会保存 `master_prometheus_after.prom`，`analyze_slo_batch.py` 优先使用 Prometheus counter 统计精确 dispatch reason 总量，并用 `log_coverage_ratio` 标识逐批日志覆盖率。
+脚本会在开始阶段校验 Java 21；mock engine 与 load client 均为 Java 实现，无需 Python 虚拟环境。测试结束会保存 `master_prometheus_after.prom`，随后 run 目录收尾（`consolidate_run_outputs.py`）把它并入 run 根的 `master.json`（`prometheus_after` 键）。`analyze_slo_batch.py` 优先使用 Prometheus counter 统计精确 dispatch reason 总量（legacy `.prom` 文件存在时优先，其次读 `master.json`），并用 `log_coverage_ratio` 标识逐批日志覆盖率。
 
 ## 9. 读取和校验结果
 
-每个 run 的关键文件：
+每个 run 的关键文件（`run_online_eval.sh` 收尾时会把 run 目录收编成每个组件一份 JSON + 一份日志，见 `tools/online_eval/README.md` 的 Run output layout 一节）：
 
 | 文件 | 用途 |
 |---|---|
-| `load_client/summary.json` | 合并后的 QPS、错误数和 Master 服务端延迟 |
-| `load_client/server_latency.json` | Master arrival/completion 计数和各阶段延迟原始值 |
-| `load_client/shard_*/summary.json` | 多 load worker 时每个发压分片的数据 |
-| `load_client/slo_batch_analysis.json` | Batch reason、batch size、预测时间、SLO 和 mock 汇总 |
-| `master_prometheus_after.prom` | Master 退出前的 Prometheus 快照，含精确 dispatch reason counter |
-| `flexlb_profile.jfr` | FlexLB JVM profile |
-| `flexlb.log` | Master 日志、拒绝执行、无可用 worker、GC/OOM 线索 |
-| `mock_engine.log` | mock 的 RPC 数、prefill pending 和 decode running |
-| `flexlb_env.txt` | 本次 engine endpoint 和启动环境 |
+| `load_client/summary.json` | 合并后的 QPS、错误数和 Master 服务端延迟（收编后原样保留） |
+| `load_client/server_latency.json` | Master arrival/completion 计数和各阶段延迟原始值（原样保留） |
+| `client.json` | summary.json 与 server_latency.json、`slo_batch_analysis.json`、每秒聚合时间线的合并视图 |
+| `master.json` | Master 计数时间序列、Prometheus 快照（含精确 dispatch reason counter）、master_info 前后快照、SLO 汇总 |
+| `master.log` | Master 日志（application.log 前缀 + `flexlb.log` 结构化行 + sync 日志）、拒绝执行、无可用 worker、GC/OOM 线索 |
+| `mock.json` / `mock.log` | mock 的 RPC 数、prefill pending 和 decode running 时间线（解析覆盖 26/28 字段，`decode_exec_p50`/`p95` 见 `mock.log` 原文行） |
+| `per_request.jsonl(.gz)` | 合并后的逐请求数据（run 根；10 MB 以下保持明文，更大的 run 为 gzip） |
+| `flexlb_profile.jfr` | FlexLB JVM profile（原样保留） |
+| `flexlb_env.txt` | 本次 engine endpoint 和启动环境（原样保留，同时快照进 `run_meta.json`） |
+| `run_meta.json` | 启动参数快照（含 `FLEXLB_CONFIG`）与环境 |
 
-用以下命令打印单个 run 的正式报告字段并做计数校验：
+注：`load_client/shard_*/`、`load_client/slo_batch_analysis.json`、`master_prometheus_after.prom`、run 根 `flexlb.log`、`mock_engine.log` 等中间产物在成功收编后删除（内容已并入上表对应文件）；`load_client/slo_batch_analysis.json` 仅在其内容成功并入 `client.json` 后才删除。
+
+用以下命令打印单个 run 的正式报告字段并做计数校验（`load_client/summary.json` 与 `load_client/server_latency.json` 收编后原样保留，该命令在收编前后同样可用；若更喜欢读合并视图，可将第二行换成 `json.loads((run / "client.json").read_text())` 并以 `client["server_latency"]` 取同一份数据）：
 
 ```bash
 RUN_DIR="$PWD/run/<run_id>"
@@ -403,7 +406,12 @@ import sys
 
 run = pathlib.Path(sys.argv[1])
 summary = json.loads((run / "load_client/summary.json").read_text())
-server = json.loads((run / "load_client/server_latency.json").read_text())
+server_path = run / "load_client/server_latency.json"
+if server_path.is_file():
+    server = json.loads(server_path.read_text())
+else:
+    # server_latency.json 被手动清理过的收编 run：同一份数据在 client.json
+    server = json.loads((run / "client.json").read_text())["server_latency"]
 latency = summary["schedule_latency_ms"]
 
 print(f"load_workers={summary.get('load_client_workers', 1)}")
@@ -459,7 +467,7 @@ curl -s -X POST http://127.0.0.1:7001/rtp_llm/server_latency/reset
 典型现象：
 
 - `dispatch_ack_ms` 明显上升，而 `route_submit_ms` 和 `batch_wait_ms` 正常。
-- `mock_engine.log` 中 `prefill_pending` 持续增长，或 mock CPU/event loop 饱和。
+- `mock.json` 的 stats 时间线（或 `mock.log`）中 `prefill_waiting` 持续增长，或 mock CPU/event loop 饱和。
 - 出现 `engine-grpc-client-executor` 拒绝执行、连接失败或 ACK timeout。
 
 处理：先确认使用 Java mock 和 `fast_ab`，检查 mock CPU、`JAVA_MOCK_EVENT_LOOP_THREADS`、outbound gRPC executor 和连接稳定性。若只有冷启动出现，增加预热并复测；若稳态持续出现，才属于真实容量问题。

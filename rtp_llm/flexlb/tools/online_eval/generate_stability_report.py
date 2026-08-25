@@ -146,7 +146,13 @@ def load_run_data(run_dir: Path, label: str) -> RunData:
         except (ValueError, OSError):
             data.summary = None
     data.monitor = load_monitor_records(run_dir / "monitor.jsonl")
-    data.log_errors, data.log_found, data.has_oom = analyze_log(run_dir / "flexlb.log")
+    # Legacy run-root flexlb.log wins when present (deleted by consolidation,
+    # so its presence means fresher data — RUN_DIR reuse). After consolidation
+    # the master stdout / structured logs live in the run-root master.log.
+    log_path = run_dir / "flexlb.log"
+    if not log_path.exists():
+        log_path = run_dir / "master.log"
+    data.log_errors, data.log_found, data.has_oom = analyze_log(log_path)
     return data
 
 

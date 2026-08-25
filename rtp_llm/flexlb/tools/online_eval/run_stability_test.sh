@@ -181,7 +181,7 @@ for dir in "${ROUND_DIRS[@]}"; do
   echo "      summary: ${dir}/load_client/summary.json"
   echo "      monitor: ${dir}/monitor.jsonl"
   echo "      gc log:  ${dir}/gc.log"
-  echo "      flexlb:  ${dir}/flexlb.log"
+  echo "      flexlb:  ${dir}/master.log (consolidated; pre-consolidation runs keep ${dir}/flexlb.log)"
 done
 echo ""
 echo "查看报告: cat ${REPORT_PATH}"
