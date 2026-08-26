@@ -125,6 +125,7 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
         if (descriptors.size() != 1 || device_disk_executor_ == nullptr) {
             return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
         }
+        return device_disk_executor_->executeDeviceToDisk(descriptors.front(), *group_sets.front());
     } else if (!((source == Tier::DEVICE && target == Tier::HOST)
                  || (source == Tier::HOST && target == Tier::DEVICE)
                  || (source == Tier::HOST && target == Tier::DISK)
@@ -139,13 +140,6 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
     auto context = std::make_shared<TransferBatchAsyncContext>();
     const bool accepted = transfer_task_pool_->submit([this, descriptors, group_sets, hosts, context, batch_limit] {
         try {
-            if (descriptors.front().source_tier == Tier::DEVICE
-                && descriptors.front().target_tier == Tier::DISK) {
-                const TransferStatus status =
-                    device_disk_executor_->execute(descriptors.front(), *group_sets.front());
-                context->complete(transferStatusToErrorInfo(status));
-                return;
-            }
             for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
                 const size_t end = std::min(begin + batch_limit, descriptors.size());
                 const std::vector<HostBufferView> sub_hosts(hosts.begin() + begin, hosts.begin() + end);
