@@ -35,31 +35,41 @@ def _validate_k3_mega_parallelism(
     local_expert_count: int,
     role_type: RoleType,
 ) -> str:
-    """Validate the two K3 MegaMoE token-placement contracts.
+    """Validate the supported K3 MegaMoE token-placement contracts.
 
     MegaMoE itself dispatches EP-local tokens through the world process group.
     The legacy TP8 path first slices replicated TP tokens, while Decode
-    DP8/KTP8 already supplies a disjoint owner-local token set on every rank.
-    Both therefore use the same EP8 symmetric kernel without changing expert
+    DP/KTP Decode supplies a disjoint owner-local token set on every rank.
+    Both therefore use the symmetric kernel without changing expert
     ownership or gathering the DP-local output.
     """
 
-    common = ep_size == 8 and world_size == 8 and local_expert_count == 112
-    legacy_tp8 = attn_tp_size == 8 and dp_size == 1 and ktp_size == 1
-    decode_dp8_ktp8 = (
+    legacy_tp8 = (
+        ep_size == 8
+        and world_size == 8
+        and local_expert_count == 112
+        and attn_tp_size == 8
+        and dp_size == 1
+        and ktp_size == 1
+    )
+    decode_width = dp_size
+    decode_dp_ktp = (
         os.environ.get("KIMI_K3_DECODE_KTP", "0") == "1"
         and role_type == RoleType.DECODE
         and attn_tp_size == 1
-        and dp_size == 8
-        and ktp_size == 8
+        and decode_width in (8, 16)
+        and ep_size == decode_width
+        and ktp_size == decode_width
+        and world_size == decode_width
+        and local_expert_count == 896 // decode_width
     )
-    if common and legacy_tp8:
+    if legacy_tp8:
         return "tp8_ep8"
-    if common and decode_dp8_ktp8:
-        return "dp8_ep8_ktp8"
+    if decode_dp_ktp:
+        return f"dp{decode_width}_ep{decode_width}_ktp{decode_width}"
     raise RuntimeError(
         "K3 DeepGEMM MegaMoE requires TP8/DP1/EP8 or Decode "
-        "TP1/DP8/EP8/KTP8 with 112 local experts; got "
+        "TP1/DP=EP=KTP=WORLD in {8,16} with 896/EP local experts; got "
         f"TP={attn_tp_size} DP={dp_size} EP={ep_size} KTP={ktp_size} "
         f"world={world_size} local_experts={local_expert_count} "
         f"role={role_type}"
@@ -300,9 +310,9 @@ class KimiK3LatentMoE(nn.Module):
             )
         world_size = int(dist.get_world_size())
         mega_parallel_mode = self._mega_parallel_mode(world_size)
-        if mega_parallel_mode == "dp8_ep8_ktp8" and self.shared_expert_weight_shard:
+        if mega_parallel_mode.startswith("dp") and self.shared_expert_weight_shard:
             raise RuntimeError(
-                "Decode DP8/KTP8 requires a full shared-expert weight on every "
+                "Decode DP/KTP requires a full shared-expert weight on every "
                 "request owner"
             )
 

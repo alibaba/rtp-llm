@@ -8,10 +8,6 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.models.kimi_k3.mla_cache_tp import (
-    kimi_k3_mla_cache_layout,
-    mla_cache_tp_enabled,
-)
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache
 
@@ -39,14 +35,6 @@ class MlaKVCacheWriteOp:
         # the current stream on every transient MLA implementation build.
         self.scale = torch.ones((), dtype=torch.float32, device="cuda")
         self.clear_page_on_boundary = clear_page_on_boundary
-        self.parallelism_config = parallelism_config
-        if (
-            kv_cache_dtype == KvCacheDataType.FP8
-            and mla_cache_tp_enabled(parallelism_config)
-        ):
-            raise ValueError(
-                "KIMI_K3_MLA_CACHE_TP flat-72 ABI currently supports BF16 only"
-            )
 
     def forward(
         self,
@@ -65,19 +53,6 @@ class MlaKVCacheWriteOp:
             kv_cache: MLA KV cache with compressed layout
         """
         if kv_cache is not None:
-            if mla_cache_tp_enabled(self.parallelism_config):
-                layout = kimi_k3_mla_cache_layout(self.parallelism_config)
-                full_cache = torch.cat((append_ckv_t, key_pe), dim=-1)
-                append_ckv_t = layout.shard_full_cache(full_cache)
-                key_pe = append_ckv_t.new_empty(
-                    (append_ckv_t.shape[0], 0)
-                )
-                if kv_cache.kv_cache_base.shape[-1] != layout.local_width:
-                    raise RuntimeError(
-                        "K3 MLA cache TP physical width mismatch: "
-                        f"cache={kv_cache.kv_cache_base.shape[-1]} "
-                        f"expected={layout.local_width}"
-                    )
             slot_mapping = (
                 slot_mapping_override
                 if slot_mapping_override is not None

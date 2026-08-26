@@ -447,12 +447,7 @@ TEST(HybridPoolConfigCreatorTest, KimiKdaPoolUsesExplicitBlockCount) {
     EXPECT_EQ(config.group_block_nums[1], 17u);
 }
 
-TEST(MLAKVCacheSpecTest, KimiCacheTpUsesFlatContiguousPrefillShards) {
-    const char* previous = std::getenv("KIMI_K3_MLA_CACHE_TP");
-    const std::optional<std::string> saved =
-        previous == nullptr ? std::nullopt : std::make_optional(std::string(previous));
-    ASSERT_EQ(setenv("KIMI_K3_MLA_CACHE_TP", "1", 1), 0);
-
+TEST(MLAKVCacheSpecTest, KimiPrefillReplicatesFullMlaCacheOnEveryTpRank) {
     AttentionConfigs attn;
     attn.kv_lora_rank     = 512;
     attn.rope_head_dim    = 64;
@@ -462,26 +457,21 @@ TEST(MLAKVCacheSpecTest, KimiCacheTpUsesFlatContiguousPrefillShards) {
     pc.tp_rank   = 0;
     pc.role_type = RoleType::PREFILL;
     MLAKVCacheSpec prefill(attn, pc);
-    EXPECT_EQ(prefill.kv_lora_rank, 72u);
-    EXPECT_EQ(prefill.rope_head_dim, 0u);
-    EXPECT_TRUE(prefill.cache_tp_flat_shard);
+    EXPECT_EQ(prefill.kv_lora_rank, 512u);
+    EXPECT_EQ(prefill.rope_head_dim, 64u);
+    EXPECT_EQ(prefill.block_size(), 64u * 576u);
 
     pc.tp_rank = 7;
     MLAKVCacheSpec prefill_rank7(attn, pc);
-    EXPECT_EQ(prefill_rank7.kv_lora_rank, 72u);
-    EXPECT_EQ(prefill_rank7.rope_head_dim, 0u);
-    EXPECT_TRUE(prefill_rank7.cache_tp_flat_shard);
+    EXPECT_EQ(prefill_rank7.kv_lora_rank, 512u);
+    EXPECT_EQ(prefill_rank7.rope_head_dim, 64u);
+    EXPECT_EQ(prefill_rank7.block_size(), prefill.block_size());
 
     pc.role_type = RoleType::DECODE;
     MLAKVCacheSpec decode(attn, pc);
     EXPECT_EQ(decode.kv_lora_rank, 512u);
     EXPECT_EQ(decode.rope_head_dim, 64u);
 
-    if (saved.has_value()) {
-        ASSERT_EQ(setenv("KIMI_K3_MLA_CACHE_TP", saved->c_str(), 1), 0);
-    } else {
-        ASSERT_EQ(unsetenv("KIMI_K3_MLA_CACHE_TP"), 0);
-    }
 }
 
 TEST(LinearKVCacheSpecTest, KdaUsesIndependentKtpShardShape) {
@@ -501,6 +491,11 @@ TEST(LinearKVCacheSpecTest, KdaUsesIndependentKtpShardShape) {
     LinearKVCacheSpec ktp_spec(attn, decode, linear);
     EXPECT_EQ(ktp_spec.local_num_k_heads, 8u);
     EXPECT_EQ(ktp_spec.local_num_v_heads, 8u);
+
+    decode.ktp_size = 16;
+    LinearKVCacheSpec ktp16_spec(attn, decode, linear);
+    EXPECT_EQ(ktp16_spec.local_num_k_heads, 4u);
+    EXPECT_EQ(ktp16_spec.local_num_v_heads, 4u);
 
     ParallelismConfig baseline;
     baseline.tp_size = 8;

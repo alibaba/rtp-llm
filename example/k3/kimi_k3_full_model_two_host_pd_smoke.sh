@@ -542,10 +542,7 @@ expected["KIMI_K3_DECODE_TOPOLOGY"] = decode_topology
 expected["KIMI_K3_DECODE_KTP"] = (
     "1" if role == "decode" and decode_topology == "dp8_ep8_tp1_ktp8" else "0"
 )
-if decode_topology == "dp8_ep8_tp1_ktp8":
-    expected["KIMI_K3_MLA_CACHE_TP"] = "1"
-else:
-    absent.append("KIMI_K3_MLA_CACHE_TP")
+absent.append("KIMI_K3_MLA_CACHE_TP")
 if role == "prefill":
     expected.update({
         "KV_CACHE_MEM_MB": prefill_kv_cache_mem_mb,
@@ -645,11 +642,7 @@ apply_validated_common_profile() {
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
     export KIMI_K3_DECODE_TOPOLOGY="${decode_topology}"
-    if [[ "${decode_topology}" == "dp8_ep8_tp1_ktp8" ]]; then
-        export KIMI_K3_MLA_CACHE_TP=1
-    else
-        unset KIMI_K3_MLA_CACHE_TP
-    fi
+    unset KIMI_K3_MLA_CACHE_TP
     export LOAD_METHOD=fastsafetensors
     export SEQ_SIZE_PER_BLOCK="${smoke_block_size}"
     export KERNEL_SEQ_SIZE_PER_BLOCK="${smoke_kernel_block_size}"
@@ -738,7 +731,7 @@ echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
 echo "[${role}] eagle3_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
-echo "[${role}] decode_topology=${decode_topology} mla_cache_tp=${KIMI_K3_MLA_CACHE_TP:-0}"
+echo "[${role}] decode_topology=${decode_topology} prefill_mla_width=576 replicated=1"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
 service_pid=$!

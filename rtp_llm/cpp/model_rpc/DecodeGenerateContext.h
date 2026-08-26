@@ -76,9 +76,6 @@ public:
     int32_t                  prefill_cache_dtype               = 0;
     int32_t                  prefill_ssm_state_dtype           = 0;
     int32_t                  prefill_conv_state_dtype          = 0;
-    bool                     prefill_mla_cache_tp              = false;
-    int32_t                  mla_cache_layout_version          = 0;
-    int32_t                  mla_cache_shard_count             = 0;
     int32_t                  mla_cache_owner_rank              = -1;
     uint64_t                 generation_epoch                 = 0;
 

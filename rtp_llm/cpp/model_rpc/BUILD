@@ -19,11 +19,10 @@ cc_library(
 )
 
 cc_library(
-    name = "mla_cache_tp_transfer",
-    hdrs = ["MlaCacheTpTransfer.h"],
+    name = "k3_pd_topology",
+    hdrs = ["K3PdTopology.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
-    deps = torch_deps(),
 )
 
 cc_library(
@@ -67,7 +66,7 @@ cc_library(
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
-        ":mla_cache_tp_transfer",
+        ":k3_pd_topology",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",

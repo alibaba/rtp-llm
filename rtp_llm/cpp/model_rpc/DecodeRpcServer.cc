@@ -19,7 +19,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/MlaCacheTpTransfer.h"
+#include "rtp_llm/cpp/model_rpc/K3PdTopology.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -136,60 +136,25 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     decode_context.prefill_cache_dtype               = allocate_request.prefill_cache_dtype();
     decode_context.prefill_ssm_state_dtype           = allocate_request.prefill_ssm_state_dtype();
     decode_context.prefill_conv_state_dtype          = allocate_request.prefill_conv_state_dtype();
-    decode_context.prefill_mla_cache_tp              = allocate_request.prefill_mla_cache_tp();
-    decode_context.mla_cache_layout_version          = allocate_request.mla_cache_layout_version();
-    decode_context.mla_cache_shard_count             = allocate_request.mla_cache_shard_count();
+    GRPC_RET_IF_ERROR(decode_context,
+                      !allocate_request.prefill_mla_cache_tp()
+                          && allocate_request.mla_cache_layout_version() == 0
+                          && allocate_request.mla_cache_shard_count() == 0,
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "legacy sharded MLA cache metadata is unsupported; Prefill must publish replicated width 576");
 
-    if (decode_context.prefill_mla_cache_tp) {
-        GRPC_RET_IF_ERROR(decode_context,
-                          k3MlaCacheTpEnvEnabled(),
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "Prefill sent MLA cache TP shards but Decode KIMI_K3_MLA_CACHE_TP is disabled");
-        const bool explicit_owner = allocate_request.input().generate_config().has_mla_cache_owner_rank();
-        if (kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
-            // In Decode DP8/KTP8 the RPC route is authoritative.  The explicit
-            // field remains a test/diagnostic assertion only; clients cannot use
-            // it to redirect cache payload to another DP worker.
-            decode_context.mla_cache_owner_rank = maga_init_params_.parallelism_config.dp_rank;
-            if (explicit_owner) {
-                GRPC_RET_IF_ERROR(
-                    decode_context,
-                    allocate_request.input().generate_config().mla_cache_owner_rank().value()
-                        == decode_context.mla_cache_owner_rank,
-                    grpc::StatusCode::INVALID_ARGUMENT,
-                    "explicit MLA owner must match the Decode DP route; cross-rank owner override is forbidden");
-            }
-        } else {
-            // The legacy TP8/DP1 fan-in test selects which TP worker receives
-            // the full MLA cache, so it still needs an explicit worker rank.
-            GRPC_RET_IF_ERROR(decode_context,
-                              explicit_owner,
-                              grpc::StatusCode::INVALID_ARGUMENT,
-                              "K3 MLA cache TP on Decode TP requires explicit mla_cache_owner_rank");
-            decode_context.mla_cache_owner_rank =
-                allocate_request.input().generate_config().mla_cache_owner_rank().value();
+    if (kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
+        // The RPC route is authoritative. The explicit field is only a test or
+        // diagnostic assertion and cannot redirect data across Decode DP ranks.
+        decode_context.mla_cache_owner_rank = maga_init_params_.parallelism_config.dp_rank;
+        if (allocate_request.input().generate_config().has_mla_cache_owner_rank()) {
+            GRPC_RET_IF_ERROR(
+                decode_context,
+                allocate_request.input().generate_config().mla_cache_owner_rank().value()
+                    == decode_context.mla_cache_owner_rank,
+                grpc::StatusCode::INVALID_ARGUMENT,
+                "explicit MLA owner must match the Decode DP route; cross-rank owner override is forbidden");
         }
-        GRPC_RET_IF_ERROR(decode_context,
-                          decode_context.mla_cache_layout_version == K3MlaCacheTpLayout::kLayoutVersion,
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "K3 MLA cache TP layout version mismatch");
-        try {
-            K3MlaCacheTpLayout layout(decode_context.mla_cache_shard_count);
-            (void)layout;
-        } catch (const std::invalid_argument& e) {
-            decode_context.error_status = grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
-            return;
-        }
-        GRPC_RET_IF_ERROR(decode_context,
-                          decode_context.mla_cache_shard_count
-                              == static_cast<int32_t>(decode_context.peer_addrs.size()),
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "K3 MLA cache TP shard count must equal ordered Prefill peer count");
-        GRPC_RET_IF_ERROR(decode_context,
-                          decode_context.mla_cache_owner_rank >= 0
-                              && decode_context.mla_cache_owner_rank < decode_context.mla_cache_shard_count,
-                          grpc::StatusCode::INVALID_ARGUMENT,
-                          "K3 MLA cache owner rank is outside the Decode TP group");
     }
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
@@ -232,11 +197,11 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
         const int decode_kda_tp = kdaKtpDecodeEnabled(maga_init_params_.parallelism_config) ?
                                       static_cast<int>(maga_init_params_.parallelism_config.ktp_size) :
                                       decode_attention_tp;
-        RTP_LLM_CHECK_WITH_INFO(isK3PdRankToRankContract(decode_context.prefill_attention_tp_size,
-                                                         decode_attention_tp,
-                                                         decode_kda_tp,
-                                                         decode_context.peer_addrs.size()),
-                                "request [%s] K3 PD requires P attention shards to match D KDA shards, "
+        RTP_LLM_CHECK_WITH_INFO(isK3PdTopologySupported(decode_context.prefill_attention_tp_size,
+                                                        decode_attention_tp,
+                                                        decode_kda_tp,
+                                                        decode_context.peer_addrs.size()),
+                                "request [%s] unsupported K3 PD topology, "
                                 "got P-TP%d -> D-TP%d/KTP%d peers=%zu",
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_attention_tp_size,
@@ -257,25 +222,26 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                 decode_context.prefill_conv_state_dtype,
                 static_cast<int32_t>(linear_spec->ssm_state_dtype),
                 static_cast<int32_t>(linear_spec->conv_state_dtype));
-            const uint32_t expected_local_heads = kK3TotalLinearHeads / decode_attention_tp;
-            RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == expected_local_heads
-                                        && linear_spec->local_num_v_heads == expected_local_heads,
-                                    "request [%s] P%d->D%d K3 PD requires %u local KDA heads, got k=%u v=%u",
+            constexpr uint32_t kK3TotalLinearHeads = 96;
+            const uint32_t kK3LocalLinearHeads = kK3TotalLinearHeads / static_cast<uint32_t>(decode_kda_tp);
+            RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == kK3LocalLinearHeads
+                                        && linear_spec->local_num_v_heads == kK3LocalLinearHeads,
+                                    "request [%s] K3 PD KTP%d requires %u local KDA heads, got k=%u v=%u",
                                     decode_context.request_key.c_str(),
-                                    decode_context.prefill_attention_tp_size,
-                                    decode_attention_tp,
-                                    expected_local_heads,
+                                    decode_kda_tp,
+                                    kK3LocalLinearHeads,
                                     linear_spec->local_num_k_heads,
                                     linear_spec->local_num_v_heads);
         }
         RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d peers=%zu physical_block=%zu "
-                         "KTP=%d kernel_block=%zu",
+                         "KTP=%d KDA_partition_count=%d MLA_width=576 replicated=1 kernel_block=%zu",
                          decode_context.request_key.c_str(),
                          decode_context.prefill_attention_tp_size,
                          decode_attention_tp,
                          decode_context.peer_addrs.size(),
                          cache_config.seq_size_per_block,
                          decode_kda_tp,
+                         decode_kda_tp / kK3PrefillAttentionTp,
                          cache_config.kernel_seq_size_per_block);
     }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
@@ -476,7 +442,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         LoadKVCacheContext release_context{decode_context.request_id,
                                            decode_context.request_key,
                                            decode_context.peer_addrs,
-                                           {},
                                            cache_keys,
                                            groups,
                                            generate_stream->reuseBlockSize(),
@@ -487,8 +452,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                            decode_context.prefill_cp_size,
                                            generate_stream->forceDisableSpRun(),
                                            decode_context.mla_cache_owner_rank,
-                                           decode_context.mla_cache_layout_version,
-                                           decode_context.mla_cache_shard_count,
                                            decode_context.generation_epoch,
                                            -1,
                                            generate_stream->seqLength(),
@@ -512,13 +475,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    request.set_partition_count(1);
-    request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
     request.set_force_disable_sp_run(load_context.force_disable_sp_run);
     request.set_mla_cache_owner_rank(load_context.mla_cache_owner_rank);
-    request.set_mla_cache_layout_version(load_context.mla_cache_layout_version);
-    request.set_mla_cache_shard_count(load_context.mla_cache_shard_count);
     request.set_generation_epoch(load_context.generation_epoch);
     request.set_kda_target_rank(index);
     request.set_kda_seq_len(load_context.kda_seq_len);
@@ -530,51 +489,44 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     const int  decode_kda_tp = kdaKtpDecodeEnabled(maga_init_params_.parallelism_config) ?
                                    static_cast<int>(maga_init_params_.parallelism_config.ktp_size) :
                                    decode_attention_tp;
-    const bool rank_to_rank = segmented_linear_cache
-                              && isK3PdRankToRankContract(static_cast<int>(peer_addrs.size()),
-                                                         decode_attention_tp,
-                                                         decode_kda_tp,
-                                                         peer_addrs.size());
-    // A segmented linear cache is head-sharded, so it can only be moved
-    // rank-to-rank.  The removed P8->D1 fan-in pulled every prefill peer so one
-    // decode rank could stitch all 96 segments together; with that gone an
-    // unequal mapping must fail loudly instead of silently falling through to the
-    // generic block split below, which would hand decode the wrong head slices.
-    RTP_LLM_CHECK_WITH_INFO(!segmented_linear_cache || rank_to_rank,
-                            "K3 hybrid cache PD requires rank-to-rank KDA shards, got D-TP%d/KTP%d "
+    const bool supported_k3_topology = segmented_linear_cache
+                                       && isK3PdTopologySupported(static_cast<int>(peer_addrs.size()),
+                                                                 decode_attention_tp,
+                                                                 decode_kda_tp,
+                                                                 peer_addrs.size());
+    RTP_LLM_CHECK_WITH_INFO(!segmented_linear_cache || supported_k3_topology,
+                            "unsupported K3 hybrid cache PD topology D-TP%d/KTP%d "
                             "with %zu prefill peers",
                             decode_attention_tp,
                             decode_kda_tp,
                             peer_addrs.size());
 
-    if (load_context.mla_cache_shard_count > 0) {
-        RTP_LLM_CHECK_WITH_INFO(load_context.prefill_cp_size == 1,
-                                "K3 MLA cache TP fan-in cannot be combined with Prefill CP in this stage");
-        auto plan = makeK3MlaCacheTpPeerPlan(peer_addrs, index, load_context.mla_cache_owner_rank);
-        for (const auto& addr : plan.kda_peer_addrs) {
-            request.add_peer_addrs(addr);
-        }
-        for (const auto& addr : plan.mla_peer_addrs) {
-            request.add_mla_peer_addrs(addr);
-        }
-    } else if (load_context.prefill_cp_size > 1) {
+    if (load_context.prefill_cp_size > 1) {
+        request.set_partition_count(1);
+        request.set_partition_id(0);
         // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
-    } else if (rank_to_rank) {
-        RTP_LLM_CHECK_WITH_INFO(index >= 0 && static_cast<size_t>(index) < peer_addrs.size(),
-                                "equal-TP K3 PD worker index %d outside ordered peer list size %zu",
-                                index,
-                                peer_addrs.size());
-        // P rank i and D rank i own the same KDA/MLA attention shard.
-        request.add_peer_addrs(peer_addrs[index]);
+    } else if (supported_k3_topology) {
+        const auto plan = makeK3PdPartitionPlan(static_cast<int>(peer_addrs.size()),
+                                                decode_attention_tp,
+                                                decode_kda_tp,
+                                                peer_addrs.size(),
+                                                index);
+        request.set_partition_count(plan.remote_kda_partition_count);
+        request.set_partition_id(plan.remote_kda_partition_id);
+        request.add_peer_addrs(peer_addrs[plan.prefill_peer_index]);
     } else if (resource_.workers.size() % peer_addrs.size() == 0) {
         // D >= P
         int part_cnt = resource_.workers.size() / peer_addrs.size();
+        request.set_partition_count(part_cnt);
+        request.set_partition_id(index % part_cnt);
         request.add_peer_addrs(peer_addrs[index / part_cnt]);
     } else {
         // P >= D, load multi block of prefill
+        request.set_partition_count(1);
+        request.set_partition_id(0);
         int group_num = peer_addrs.size() / resource_.workers.size();
         request.add_peer_addrs(peer_addrs[index * group_num]);
     }
@@ -618,16 +570,13 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     const int decode_kda_tp = kdaKtpDecodeEnabled(maga_init_params_.parallelism_config) ?
                                   static_cast<int>(maga_init_params_.parallelism_config.ktp_size) :
                                   decode_attention_tp;
-    const bool rank_to_rank = k3_hybrid_cache
-                              && isK3PdRankToRankContract(static_cast<int>(peer_addrs.size()),
-                                                         decode_attention_tp,
-                                                         decode_kda_tp,
-                                                         peer_addrs.size());
-    // Same reason as constructRemoteLoadRequestForMla: without the removed
-    // P8->D1 fan-in an unequal mapping would drop through to the generic block
-    // split and give decode the wrong KDA head slices, silently.
-    RTP_LLM_CHECK_WITH_INFO(!k3_hybrid_cache || load_context.prefill_cp_size > 1 || rank_to_rank,
-                            "K3 hybrid cache PD requires rank-to-rank KDA shards, got D-TP%d/KTP%d "
+    const bool supported_k3_topology = k3_hybrid_cache
+                                       && isK3PdTopologySupported(static_cast<int>(peer_addrs.size()),
+                                                                 decode_attention_tp,
+                                                                 decode_kda_tp,
+                                                                 peer_addrs.size());
+    RTP_LLM_CHECK_WITH_INFO(!k3_hybrid_cache || load_context.prefill_cp_size > 1 || supported_k3_topology,
+                            "unsupported K3 hybrid cache PD topology D-TP%d/KTP%d "
                             "with %zu prefill peers",
                             decode_attention_tp,
                             decode_kda_tp,
@@ -639,14 +588,15 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
-    } else if (rank_to_rank) {
-        RTP_LLM_CHECK_WITH_INFO(index >= 0 && static_cast<size_t>(index) < peer_addrs.size(),
-                                "equal-TP K3 PD worker index %d outside ordered peer list size %zu",
-                                index,
-                                peer_addrs.size());
-        request.set_partition_count(1);
-        request.set_partition_id(0);
-        request.add_peer_addrs(peer_addrs[index]);
+    } else if (supported_k3_topology) {
+        const auto plan = makeK3PdPartitionPlan(static_cast<int>(peer_addrs.size()),
+                                                decode_attention_tp,
+                                                decode_kda_tp,
+                                                peer_addrs.size(),
+                                                index);
+        request.set_partition_count(plan.remote_kda_partition_count);
+        request.set_partition_id(plan.remote_kda_partition_id);
+        request.add_peer_addrs(peer_addrs[plan.prefill_peer_index]);
     } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         int part_cnt = resource_.workers.size();
         int peer_cnt = peer_addrs.size();
@@ -750,7 +700,6 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
                                     decode_context.peer_addrs,
-                                    {},
                                     cache_keys,
                                     *block_ids_by_group,
                                     generate_stream->reuseBlockSize(),
@@ -761,8 +710,6 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.prefill_cp_size,
                                     generate_stream->forceDisableSpRun(),
                                     decode_context.mla_cache_owner_rank,
-                                    decode_context.mla_cache_layout_version,
-                                    decode_context.mla_cache_shard_count,
                                     decode_context.generation_epoch,
                                     -1,
                                     generate_stream->seqLength(),
@@ -1023,120 +970,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     const auto& cache_config  = cache_manager->cacheConfig();
     auto        layer_num     = maga_init_params_.model_config_.num_layers;
 
-    // MLA Cache-TP fan-in receives every Prefill rank's flat shard into a
-    // temporary contiguous CUDA tensor before repacking it into the owner's
-    // token-major full-576 cache.  Unlike BlockPool storage, torch::empty
-    // allocations are not registered by KVCacheManager::regUserMr(), so an
-    // RDMA load cannot target them until they are explicitly registered.
-    // Keep the registrations alive through load completion and repack, then
-    // deregister them on every return path via this scope guard.
-    struct ScopedMlaStagingArena {
-        explicit ScopedMlaStagingArena(std::shared_ptr<MemoryUtil> memory_util):
-            memory_util(std::move(memory_util)) {}
-
-        ~ScopedMlaStagingArena() {
-            if (memory_util && memory_util->isRdmaMode()) {
-                for (auto it = registrations.rbegin(); it != registrations.rend(); ++it) {
-                    if (!memory_util->deregUserMr(it->first, it->second)) {
-                        RTP_LLM_LOG_WARNING("failed to deregister K3 MLA fan-in staging MR at %p", it->first);
-                    }
-                }
-            }
-#if USING_CUDA
-            for (auto it = raw_allocations.rbegin(); it != raw_allocations.rend(); ++it) {
-                const auto error = cudaFree(*it);
-                if (error != cudaSuccess) {
-                    RTP_LLM_LOG_WARNING("failed to free K3 MLA fan-in staging allocation at %p: %s",
-                                        *it,
-                                        cudaGetErrorString(error));
-                }
-            }
-#endif
-        }
-
-        torch::Tensor allocate(int64_t token_count, int64_t width, const torch::TensorOptions& options) {
-            RTP_LLM_CHECK_WITH_INFO(token_count > 0 && width > 0,
-                                    "invalid K3 MLA fan-in staging shape [%ld, %ld]",
-                                    token_count,
-                                    width);
-            // Register every RDMA destination as its own raw cudaMalloc
-            // allocation.  The
-            // provider's aligned_size is an implementation-specific MR split
-            // granularity: a non-page-aligned cache shard size can be rejected,
-            // while packing several shards into a default-aligned large MR can
-            // leave one shard crossing an MR boundary.  torch::empty may return
-            // a caching-allocator suballocation that the RDMA provider refuses
-            // to register.  cudaMalloc returns a standalone, provider-aligned
-            // allocation; using the shard byte size as the split stride then
-            // guarantees one complete BlockBuffer per MR segment.
-#if USING_CUDA
-            const size_t requested_bytes = static_cast<size_t>(token_count) * static_cast<size_t>(width)
-                                           * sizeof(c10::BFloat16);
-            void*      ptr   = nullptr;
-            const auto error = cudaMalloc(&ptr, requested_bytes);
-            RTP_LLM_CHECK_WITH_INFO(error == cudaSuccess,
-                                    "failed to allocate K3 MLA fan-in staging CUDA buffer bytes=%zu: %s",
-                                    requested_bytes,
-                                    cudaGetErrorString(error));
-            raw_allocations.push_back(ptr);
-            registerBuffer(ptr, requested_bytes, true, requested_bytes);
-            return torch::from_blob(ptr, {token_count, width}, options);
-#else
-            RTP_LLM_FAIL("K3 MLA fan-in staging requires a CUDA build");
-#endif
-        }
-
-        void registerBuffer(void* ptr, size_t bytes, bool gpu, size_t aligned_bytes) {
-            if (!memory_util || !memory_util->isRdmaMode()) {
-                return;
-            }
-            RTP_LLM_CHECK_WITH_INFO(ptr != nullptr && bytes > 0 && aligned_bytes > 0 && bytes % aligned_bytes == 0,
-                                    "invalid K3 MLA fan-in staging buffer ptr=%p bytes=%zu aligned=%zu",
-                                    ptr,
-                                    bytes,
-                                    aligned_bytes);
-            RTP_LLM_CHECK_WITH_INFO(memory_util->regUserMr(ptr, bytes, gpu, aligned_bytes),
-                                    "failed to register K3 MLA fan-in staging MR ptr=%p bytes=%zu aligned=%zu gpu=%d",
-                                    ptr,
-                                    bytes,
-                                    aligned_bytes,
-                                    gpu);
-            registrations.emplace_back(ptr, gpu);
-        }
-
-        std::shared_ptr<MemoryUtil>          memory_util;
-        std::vector<std::pair<void*, bool>> registrations;
-        std::vector<void*>                   raw_allocations;
-    } mla_staging_arena(resource_.cache_store->getMemoryUtil());
-
     const int peer_cnt = static_cast<int>(load_context.peer_addrs.size());
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
-
-    const bool mla_cache_tp_fan_in = load_context.mla_cache_shard_count > 0;
-    const int decode_worker_rank = kdaKtpDecodeEnabled(maga_init_params_.parallelism_config) ?
-                                       static_cast<int>(maga_init_params_.parallelism_config.ktp_rank) :
-                                       static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_rank());
-    if (mla_cache_tp_fan_in) {
-        K3MlaCacheTpLayout layout(load_context.mla_cache_shard_count);
-        (void)layout;
-        RTP_LLM_CHECK_WITH_INFO(load_context.mla_cache_layout_version == K3MlaCacheTpLayout::kLayoutVersion,
-                                "K3 MLA cache TP layout version mismatch: got %d expected %d",
-                                load_context.mla_cache_layout_version,
-                                K3MlaCacheTpLayout::kLayoutVersion);
-        RTP_LLM_CHECK_WITH_INFO(load_context.prefill_cp_size == 1,
-                                "K3 MLA cache TP fan-in cannot be combined with Prefill CP in this stage");
-        RTP_LLM_CHECK_WITH_INFO(!engine_->isMTPEagle(),
-                                "K3 MLA cache TP P->D fan-in does not support MTP/target verify in this stage");
-        const bool is_owner = decode_worker_rank == load_context.mla_cache_owner_rank;
-        RTP_LLM_CHECK_WITH_INFO(
-            is_owner ? static_cast<int>(load_context.mla_peer_addrs.size()) == load_context.mla_cache_shard_count :
-                       load_context.mla_peer_addrs.empty(),
-            "K3 MLA cache TP routing mismatch: worker=%d owner=%d MLA peers=%zu shard_count=%d",
-            decode_worker_rank,
-            load_context.mla_cache_owner_rank,
-            load_context.mla_peer_addrs.size(),
-            load_context.mla_cache_shard_count);
-    }
 
     const bool   use_mla             = cache_config.use_mla;
     const bool   use_hybrid          = cache_config.groupNums() > 1;
@@ -1160,11 +995,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
-    struct MlaFaninRecord {
-        torch::Tensor              destination;
-        std::vector<torch::Tensor> rank_major_shards;
-    };
-    std::unordered_map<std::string, MlaFaninRecord> mla_fanin_records;
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
     // Receive-side fan-in.  This is deliberately kept even though the P8->D1
@@ -1322,15 +1152,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     struct PeerLoadRoute {
         std::string peer_addr;
         int         source_rank;
-        bool        mla_only;
     };
     std::vector<PeerLoadRoute> peer_routes;
-    peer_routes.reserve(load_context.peer_addrs.size() + load_context.mla_peer_addrs.size());
+    peer_routes.reserve(load_context.peer_addrs.size());
     for (int i = 0; i < static_cast<int>(load_context.peer_addrs.size()); ++i) {
-        peer_routes.push_back({load_context.peer_addrs[i], i, false});
-    }
-    for (int i = 0; i < static_cast<int>(load_context.mla_peer_addrs.size()); ++i) {
-        peer_routes.push_back({load_context.mla_peer_addrs[i], i, true});
+        peer_routes.push_back({load_context.peer_addrs[i], i});
     }
 
     for (const auto& route : peer_routes) {
@@ -1375,14 +1201,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 const bool segmented_linear_group =
                     use_mla && dynamic_cast<const LinearKVCacheSpec*>(cache_config.cache_specs[gid].get()) != nullptr;
 
-                if (mla_cache_tp_fan_in) {
-                    // Normal peer_addrs retain KDA rank-i ownership. The
-                    // separate owner-only route carries only MLA shards.
-                    if (route.mla_only == segmented_linear_group) {
-                        continue;
-                    }
-                }
-
                 auto block_pos_list =
                     blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, region_name, gid);
 
@@ -1415,10 +1233,20 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     auto cache_key = makeCacheKey(
                         model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, region_name);
 
-                    const int local_part_cnt = hybrid_linear_fan_in ? (segmented_linear_group ? peer_cnt : 1) :
-                                                                      (is_page_level_rr ? 1 : peer_cnt);
-                    const int local_part_id =
-                        hybrid_linear_fan_in ? (segmented_linear_group ? i : 0) : (is_page_level_rr ? 0 : i);
+                    // partition_count/id select the remote Prefill KDA source
+                    // slice. Decode KTP storage is already sized to the local
+                    // head count (12 for KTP8, 6 for KTP16), so partitioning
+                    // the destination again would incorrectly turn KTP16's
+                    // six heads into three. MLA also remains a full width-576
+                    // destination because it is not a segmented linear group.
+                    const auto kda_destination = segmented_linear_group ?
+                                                     makeK3PdDestinationPlan(load_context.partition_count,
+                                                                            load_context.partition_id) :
+                                                     K3PdDestinationPlan{0, 0};
+                    const int local_part_cnt = segmented_linear_group ? kda_destination.partition_count :
+                                                (hybrid_linear_fan_in ? 1 : (is_page_level_rr ? 1 : peer_cnt));
+                    const int local_part_id = segmented_linear_group ? kda_destination.partition_id :
+                                              (hybrid_linear_fan_in ? 0 : (is_page_level_rr ? 0 : i));
                     auto parts =
                         (region_name != KVCacheRegionName::DEFAULT) ?
                             cache_manager->convertIndexToBuffer(
@@ -1440,47 +1268,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         for (size_t segment_id = 0; segment_id < parts.size(); ++segment_id) {
                             addBufBlock(makeLinearCacheSegmentKey(segment_id, cache_key), parts[segment_id]);
                         }
-                    } else if (mla_cache_tp_fan_in && route.mla_only) {
-                        RTP_LLM_CHECK_WITH_INFO(parts.size() == 1,
-                                                "K3 MLA cache TP BF16 fan-in expects one destination part, got %zu",
-                                                parts.size());
-                        RTP_LLM_CHECK_WITH_INFO(parts[0].is_cuda,
-                                                "K3 MLA cache TP production fan-in expects CUDA cache storage");
-                        RTP_LLM_CHECK_WITH_INFO(parts[0].size_bytes %
-                                                        (K3MlaCacheTpLayout::kFullWidth * sizeof(c10::BFloat16))
-                                                    == 0,
-                                                "K3 MLA cache TP destination bytes %zu are not full-576 BF16 rows",
-                                                parts[0].size_bytes);
-                        const int64_t token_count = static_cast<int64_t>(
-                            parts[0].size_bytes / (K3MlaCacheTpLayout::kFullWidth * sizeof(c10::BFloat16)));
-                        K3MlaCacheTpLayout layout(load_context.mla_cache_shard_count);
-                        auto destination = torch::from_blob(
-                            parts[0].addr,
-                            {token_count, K3MlaCacheTpLayout::kFullWidth},
-                            torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCUDA));
-                        auto [record_it, inserted] = mla_fanin_records.emplace(
-                            cache_key,
-                            MlaFaninRecord{destination,
-                                           std::vector<torch::Tensor>(load_context.mla_cache_shard_count)});
-                        if (!inserted) {
-                            RTP_LLM_CHECK_WITH_INFO(record_it->second.destination.data_ptr() == destination.data_ptr(),
-                                                    "K3 MLA cache TP cache key maps to multiple destinations: %s",
-                                                    cache_key.c_str());
-                        }
-                        auto& shard_slot = record_it->second.rank_major_shards[route.source_rank];
-                        RTP_LLM_CHECK_WITH_INFO(!shard_slot.defined(),
-                                                "duplicate K3 MLA cache TP shard rank %d for key %s",
-                                                route.source_rank,
-                                                cache_key.c_str());
-                        shard_slot =
-                            mla_staging_arena.allocate(token_count, layout.localWidth(), destination.options());
-                        auto shard_owner = std::make_shared<torch::Tensor>(shard_slot);
-                        std::shared_ptr<void> shard_addr(shard_owner, shard_slot.data_ptr());
-                        load_layer_cache->addBlock("kv_" + cache_key,
-                                                   shard_addr,
-                                                   static_cast<uint32_t>(shard_slot.nbytes()),
-                                                   true,
-                                                   true);
                     } else if (use_mla || use_opaque_kv_store) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                 "unexpected mla convertIndexToBuffer parts size=%zu",
@@ -1701,31 +1488,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
     }
 
-    if (mla_cache_tp_fan_in) {
-        K3MlaCacheTpLayout layout(load_context.mla_cache_shard_count);
-        for (auto& [cache_key, record] : mla_fanin_records) {
-            RTP_LLM_CHECK_WITH_INFO(
-                static_cast<int>(record.rank_major_shards.size()) == load_context.mla_cache_shard_count,
-                "K3 MLA cache TP shard vector size mismatch for key %s",
-                cache_key.c_str());
-            for (int rank = 0; rank < load_context.mla_cache_shard_count; ++rank) {
-                RTP_LLM_CHECK_WITH_INFO(record.rank_major_shards[rank].defined(),
-                                        "missing K3 MLA cache TP shard rank %d for key %s",
-                                        rank,
-                                        cache_key.c_str());
-            }
-            layout.reconstruct(record.rank_major_shards, record.destination);
-        }
-#if USING_CUDA
-        if (!mla_fanin_records.empty()) {
-            // Decode may consume the cache from another stream immediately
-            // after RemoteLoad returns. Make the explicit repack part of the
-            // hand-off completion boundary in this first implementation.
-            at::cuda::getCurrentCUDAStream().synchronize();
-        }
-#endif
-    }
-
     return ErrorInfo::OkStatus();
 }
 
@@ -1757,8 +1519,12 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         kernel_block_ids_by_group.push_back(std::move(block_ids_holder));
     }
 
+    if (request->mla_peer_addrs_size() != 0 || request->mla_cache_layout_version() != 0
+        || request->mla_cache_shard_count() != 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "legacy sharded MLA load metadata is unsupported; use one replicated Prefill peer");
+    }
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
-    std::vector<std::string> mla_peer_addrs(request->mla_peer_addrs().begin(), request->mla_peer_addrs().end());
 
     if (kda_shadow_request) {
         const auto& parallelism = maga_init_params_.parallelism_config;
@@ -1813,7 +1579,6 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                     LoadKVCacheContext context{request->request_id(),
                                                request->request_key(),
                                                peer_addrs,
-                                               std::move(mla_peer_addrs),
                                                cache_keys,
                                                local_groups,
                                                request->reuse_block_size(),
@@ -1824,8 +1589,6 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                                std::max(1, request->prefill_cp_size()),
                                                request->force_disable_sp_run(),
                                                request->mla_cache_owner_rank(),
-                                               request->mla_cache_layout_version(),
-                                               request->mla_cache_shard_count(),
                                                request->generation_epoch(),
                                                request->kda_target_rank(),
                                                request->kda_seq_len()};
@@ -1872,7 +1635,6 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     auto error_info = loadCache({request->request_id(),
                                  request->request_key(),
                                  peer_addrs,
-                                 std::move(mla_peer_addrs),
                                  cache_keys,
                                  block_ids_by_group,
                                  request->reuse_block_size(),
@@ -1883,8 +1645,6 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  std::max(1, request->prefill_cp_size()),
                                  request->force_disable_sp_run(),
                                  request->mla_cache_owner_rank(),
-                                 request->mla_cache_layout_version(),
-                                 request->mla_cache_shard_count(),
                                  request->generation_epoch(),
                                  request->kda_target_rank(),
                                  request->kda_seq_len(),

@@ -1,9 +1,6 @@
 #pragma once
 
-#include <cstdlib>
-#include <cstring>
 #include <memory>
-#include <stdexcept>
 #include <sstream>
 #include <string>
 
@@ -18,7 +15,6 @@ namespace rtp_llm {
 struct MLAKVCacheSpec: public KVCacheSpec {
     uint32_t kv_lora_rank;
     uint32_t rope_head_dim;
-    bool     cache_tp_flat_shard = false;
 
     MLAKVCacheSpec() = default;
 
@@ -29,35 +25,10 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
         kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
         rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
-        const char* cache_tp = std::getenv("KIMI_K3_MLA_CACHE_TP");
-        if (cache_tp != nullptr && std::strcmp(cache_tp, "0") != 0 && std::strcmp(cache_tp, "1") != 0) {
-            throw std::runtime_error("KIMI_K3_MLA_CACHE_TP must be 0 or 1");
-        }
-        if (cache_tp != nullptr && std::strcmp(cache_tp, "1") == 0
-            && parallelism_config.role_type == RoleType::PREFILL) {
-            const auto tp = static_cast<uint32_t>(parallelism_config.get_attn_tp_size());
-            RTP_LLM_CHECK_WITH_INFO(kv_lora_rank == 512 && rope_head_dim == 64,
-                                    "KIMI_K3_MLA_CACHE_TP requires K3 MLA 512+64, got %u+%u",
-                                    kv_lora_rank,
-                                    rope_head_dim);
-            const auto full_width = kv_lora_rank + rope_head_dim;
-            RTP_LLM_CHECK_WITH_INFO(tp > 1 && full_width % tp == 0,
-                                    "KIMI_K3_MLA_CACHE_TP requires TP>1 dividing packed width 576, got TP=%u",
-                                    tp);
-            const auto local_width = full_width / tp;
-            // The physical cache is one opaque flat shard.  Keeping all 72
-            // values in the first component also guarantees the generic BF16
-            // concat kernel always launches with a non-zero primary width.
-            kv_lora_rank       = local_width;
-            rope_head_dim      = 0;
-            cache_tp_flat_shard = true;
-        }
     }
 
     size_t block_size() const override {
         auto is_fp8      = (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0);
-        RTP_LLM_CHECK_WITH_INFO(!(cache_tp_flat_shard && is_fp8),
-                                "KIMI_K3_MLA_CACHE_TP flat-72 ABI currently supports BF16 only");
         auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
         if (is_fp8) {
             // First 512 bytes: The "quantized NoPE" part, containing 512 float8_e4m3 values.

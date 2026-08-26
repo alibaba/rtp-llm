@@ -39,6 +39,19 @@ from rtp_llm.ops import (
 )
 
 
+def _reject_legacy_k3_mla_cache_tp() -> None:
+    legacy_mla_cache_tp = os.environ.get("KIMI_K3_MLA_CACHE_TP")
+    if legacy_mla_cache_tp == "1":
+        raise ValueError(
+            "KIMI_K3_MLA_CACHE_TP=1 selects the retired 576/TP cache ABI; "
+            "Prefill MLA cache is now replicated at physical width 576"
+        )
+    if legacy_mla_cache_tp not in (None, "0"):
+        raise ValueError(
+            "KIMI_K3_MLA_CACHE_TP must be unset or 0; the sharded MLA cache ABI is retired"
+        )
+
+
 @dataclass
 class EngineConfig:
     """Engine configuration collection created from py_env_configs.
@@ -227,6 +240,8 @@ class EngineConfig:
         Returns:
             Initialized EngineConfig instance
         """
+        _reject_legacy_k3_mla_cache_tp()
+
         server_config = py_env_configs.server_config
         distribute_config = py_env_configs.distribute_config
 

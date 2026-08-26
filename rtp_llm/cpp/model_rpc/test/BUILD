@@ -103,11 +103,11 @@ cc_test(
 )
 
 cc_test(
-    name = "mla_cache_tp_transfer_test",
-    srcs = ["MlaCacheTpTransferTest.cc"],
+    name = "k3_pd_topology_test",
+    srcs = ["K3PdTopologyTest.cc"],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/model_rpc:mla_cache_tp_transfer",
+        "//rtp_llm/cpp/model_rpc:k3_pd_topology",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.engine_config import _reject_legacy_k3_mla_cache_tp
 from rtp_llm.models.kimi_k3.decode_ktp import (
     DecodeOwnerLayout,
     KdaParallelContext,
@@ -99,13 +100,13 @@ class DecodeOwnerLayoutTest(unittest.TestCase):
             )
 
 
-def _target_parallelism(rank: int = 3) -> ParallelismConfig:
+def _target_parallelism(rank: int = 3, world_size: int = 8) -> ParallelismConfig:
     config = ParallelismConfig()
     config.tp_size = 1
-    config.dp_size = 8
-    config.ep_size = 8
-    config.ktp_size = 8
-    config.world_size = 8
+    config.dp_size = world_size
+    config.ep_size = world_size
+    config.ktp_size = world_size
+    config.world_size = world_size
     config.world_rank = rank
     config.tp_rank = 0
     config.dp_rank = rank
@@ -116,6 +117,13 @@ def _target_parallelism(rank: int = 3) -> ParallelismConfig:
 
 
 class KdaParallelContextTest(unittest.TestCase):
+    def test_legacy_mla_cache_tp_environment_fails_fast(self):
+        with patch.dict(os.environ, {"KIMI_K3_MLA_CACHE_TP": "1"}):
+            with self.assertRaisesRegex(ValueError, "retired 576/TP"):
+                _reject_legacy_k3_mla_cache_tp()
+        with patch.dict(os.environ, {"KIMI_K3_MLA_CACHE_TP": "0"}):
+            _reject_legacy_k3_mla_cache_tp()
+
     def test_mega_moe_accepts_decode_dp8_ktp8_owner_local_tokens(self):
         with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}):
             mode = _validate_k3_mega_parallelism(
@@ -128,6 +136,18 @@ class KdaParallelContextTest(unittest.TestCase):
                 role_type=RoleType.DECODE,
             )
         self.assertEqual(mode, "dp8_ep8_ktp8")
+
+        with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}):
+            mode16 = _validate_k3_mega_parallelism(
+                attn_tp_size=1,
+                dp_size=16,
+                ep_size=16,
+                ktp_size=16,
+                world_size=16,
+                local_expert_count=56,
+                role_type=RoleType.DECODE,
+            )
+        self.assertEqual(mode16, "dp16_ep16_ktp16")
 
         fake_moe = SimpleNamespace(
             attn_tp_size=1,
@@ -145,7 +165,7 @@ class KdaParallelContextTest(unittest.TestCase):
 
     def test_mega_moe_rejects_dp8_without_ktp_contract(self):
         with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "0"}):
-            with self.assertRaisesRegex(RuntimeError, "TP1/DP8/EP8/KTP8"):
+            with self.assertRaisesRegex(RuntimeError, "TP1/DP=EP=KTP=WORLD"):
                 _validate_k3_mega_parallelism(
                     attn_tp_size=1,
                     dp_size=8,
@@ -165,6 +185,11 @@ class KdaParallelContextTest(unittest.TestCase):
         kda_config = context.parallelism_config(config)
         self.assertEqual((kda_config.tp_size, kda_config.tp_rank), (8, 3))
         self.assertEqual((config.tp_size, config.tp_rank), (1, 0))
+
+        config16 = _target_parallelism(rank=15, world_size=16)
+        with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}):
+            context16 = KdaParallelContext.from_parallelism(config16)
+        self.assertEqual((context16.size, context16.rank), (16, 15))
 
     def test_disabled_path_keeps_existing_tp_contract(self):
         config = ParallelismConfig()
@@ -207,6 +232,26 @@ class KdaParallelContextTest(unittest.TestCase):
             self.assertNotIn(Group.TP, collective_torch._group_map)
             new_group.assert_called_once()
             self.assertEqual(new_group.call_args.kwargs["ranks"], list(range(8)))
+        finally:
+            collective_torch._group_map = saved
+
+    def test_world16_process_group_contains_all_ktp_ranks(self):
+        config = _target_parallelism(rank=8, world_size=16)
+        ktp_group = object()
+        saved = collective_torch._group_map
+        collective_torch._group_map = {}
+        try:
+            with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}), patch.object(
+                collective_torch.torch.distributed,
+                "new_group",
+                return_value=ktp_group,
+            ) as new_group, patch.object(
+                collective_torch.torch.distributed, "barrier"
+            ):
+                collective_torch._create_process_groups(config, "nccl", None)
+            self.assertIs(collective_torch._group_map[Group.KTP], ktp_group)
+            new_group.assert_called_once()
+            self.assertEqual(new_group.call_args.kwargs["ranks"], list(range(16)))
         finally:
             collective_torch._group_map = saved
 
