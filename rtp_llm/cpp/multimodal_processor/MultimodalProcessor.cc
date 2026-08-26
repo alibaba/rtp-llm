@@ -104,7 +104,8 @@ ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::T
 ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vector<torch::Tensor>& mm_embedding,
                                                                 const torch::Tensor&              token_ids,
                                                                 const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                                torch::Tensor token_type_ids) {
+                                                                torch::Tensor token_type_ids,
+                                                                bool          hash_features) {
     if (mm_embedding.size() == 0) {
         return ExpandedOutput(token_ids, token_type_ids);
     }
@@ -152,9 +153,12 @@ ErrorResult<ExpandedOutput> MultimodalProcessor::expandTokenIds(const std::vecto
         }
         *(new_locs.data_ptr<int32_t>() + i) = copy_len + new_loc_idx;
 
-        auto hash_status = getFeatureHash(expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, mm_embedding[i]);
-        if (!hash_status.ok()) {
-            return hash_status;
+        if (hash_features) {
+            auto hash_status =
+                getFeatureHash(expanded_ids.data_ptr<int32_t>() + new_loc_idx + copy_len, mm_embedding[i]);
+            if (!hash_status.ok()) {
+                return hash_status;
+            }
         }
 
         new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
@@ -301,13 +305,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     return ErrorInfo::OkStatus();
 }
 
-ErrorResult<MultimodalFeature>
-MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                         input_ids,
-                                           const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
+ErrorResult<MultimodalFeature> MultimodalProcessor::getMultimodalFeatures(
+    const torch::Tensor& input_ids, const std::vector<rtp_llm::MultimodalInput>& mm_inputs, bool hash_features) {
     MultimodalFeature mm_features;
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
     mm_features.features = std::move(mm_embedding_res.mm_features);
-    CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(mm_features.features, input_ids, mm_inputs));
+    CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(mm_features.features, input_ids, mm_inputs, {}, hash_features));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;
