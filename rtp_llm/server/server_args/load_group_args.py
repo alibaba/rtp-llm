@@ -43,8 +43,12 @@ def init_load_group_args(parser, load_config, model_args):
         env_name="USE_NEW_LOADER",
         bind_to=(model_args, "use_new_loader"),
         type=str2bool,
-        default=False,
-        help="启用 NewLoader；置假回滚到 legacy loader",
+        default=None,
+        help=(
+            "默认按模型注册表和加载能力选择：已适配且当前配置受支持时使用 "
+            "NewLoader，否则回退 legacy loader；显式置真强制 NewLoader，置假强制 "
+            "legacy loader"
+        ),
     )
     load_group.add_argument(
         "--keep_mla_checkpoint_weights",

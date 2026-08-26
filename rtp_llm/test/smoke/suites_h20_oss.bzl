@@ -59,6 +59,34 @@ def h20_oss_suites():
                 envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="h20_bert_embedding_newloader",
+                task_info="data/model/bert/q_r.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 16 --act_type FP16",
+                envs=["LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_roberta_embedding_newloader",
+                task_info="data/model/bert/roberta_q_r.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 16 --act_type FP16",
+                envs=["LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_bert_classifier_newloader",
+                task_info="data/model/bert/bert_classifier_q_r.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 16 --act_type FP16",
+                envs=["LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_roberta_reranker_newloader",
+                task_info="data/model/bert/reranker_q_r.json",
+                smoke_args="--warm_up 0 --max_context_batch_size 10 --seq_size_per_block 16 --act_type FP16 --task_type RERANKER",
+                envs=["LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+            ),
         ],
     )
 
@@ -76,8 +104,8 @@ def h20_oss_suites():
                 name="mla_cp_pd",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
                 envs={
-                    "prefill": [],
-                    "decode": []},
+                    "prefill": ["USE_NEW_LOADER=0"],
+                    "decode": ["USE_NEW_LOADER=0"]},
                 smoke_args={
                     "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --use_all_gather=0",
                     "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather=0"
@@ -88,8 +116,8 @@ def h20_oss_suites():
                 name="mla_pure_cp_pd",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
                 envs={
-                    "prefill": [],
-                    "decode": []},
+                    "prefill": ["USE_NEW_LOADER=0"],
+                    "decode": ["USE_NEW_LOADER=0"]},
                 smoke_args={
                     "prefill": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 0 --use_all_gather 1 --moe_strategy fp8_per_block_pure_cp --cp_rotate_method ALL_GATHER",
                     "decode": "--fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --use_all_gather 0"
@@ -114,24 +142,28 @@ def h20_oss_suites():
                 name="moe_masked_fp8_tp2",
                 task_info="data/model/qwen3_moe/q_r_30b_py_masked_without_deepep_tp2.json",
                 smoke_args="--moe_strategy fp8_per_block_no_dp_masked --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                envs=["USE_NEW_LOADER=0"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="moe_pure_dp_fp8_dp2",
                 task_info="data/model/qwen3_moe/q_r_30b_py_pure_dp_tp1_dp2.json",
                 smoke_args="--moe_strategy fp8_per_block_pure_dp --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --use_deepep_moe 0 --use_all_gather 1 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                envs=["USE_NEW_LOADER=0"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="moe_w4a8_int4",
                 task_info="data/model/qwen3_moe/q_r_30b_py_w4a8_int4_ptpc.json",
                 smoke_args="--quantization W4A8_INT4_PER_CHANNEL --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                envs=["USE_NEW_LOADER=0"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="moe_w4a8_int4_compressed",
                 task_info="data/model/qwen3_moe/q_r_30b_py_w4a8_int4_ptpc_compressed.json",
                 smoke_args="--quantization W4A8_INT4_PER_CHANNEL_COMPRESSED --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                envs=["USE_NEW_LOADER=0"],
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -212,14 +244,15 @@ def h20_oss_suites():
                 name="moe_fp8pt_load_quant",
                 task_info="data/model/qwen3_moe/q_r_fp8_per_tensor_30b_load_quant.json",
                 smoke_args="--warm_up 0 --act_type BF16 --quantization FP8_DYNAMIC_PER_TENSOR --use_deepep_moe 1 --use_deepep_low_latency 0 --force_cpu_load_weights 1 --dp_size 2 --ep_size 2",
+                envs=["USE_NEW_LOADER=0"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="moe_cp_pd",
                 task_info="data/model/qwen3_moe/q_r_30b_fp8_py_cp2.json",
                 envs={
-                    "prefill": [],
-                    "decode": ["ACCL_LOW_LATENCY_OPTIMIZE=1"]},
+                    "prefill": ["USE_NEW_LOADER=0"],
+                    "decode": ["USE_NEW_LOADER=0", "ACCL_LOW_LATENCY_OPTIMIZE=1"]},
                 smoke_args={
                     "prefill": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type PREFILL --seq_size_per_block 64 --dp_size 1 --tp_size 2 --ep_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER",
                     "decode": "--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --reserver_runtime_mem_mb 8192 --role_type DECODE --seq_size_per_block 64 --ep_size 2 --dp_size 2 --world_size 2 --warm_up 0 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP",
@@ -473,14 +506,14 @@ def h20_oss_suites():
                 name="kimi_bf16_basic_legacy",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
-                envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                envs=["USE_NEW_LOADER=0", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="kimi_bf16_basic",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
-                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                envs=["LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -611,6 +644,10 @@ def h20_oss_suites():
                     "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1",
                     "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1"
                 },
+                envs = {
+                    "llm": ["USE_NEW_LOADER=0"],
+                    "vit": ["USE_NEW_LOADER=0"],
+                },
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*.jpg']),
             ),
@@ -621,6 +658,10 @@ def h20_oss_suites():
                     "prefill": "--warm_up 0 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --use_local_preprocess 1 --role_type PREFILL --tp_size 2 --world_size 2 --dp_size 1 --reuse_cache 1 --enable_cuda_graph 0 --cp_rotate_method ALL_GATHER",
                     "decode": "--warm_up 0 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 2 --world_size 2 --dp_size 1 --reuse_cache 1 --enable_cuda_graph 0 --cp_rotate_method PREFILL_CP"
                 },
+                envs = {
+                    "prefill": ["USE_NEW_LOADER=0"],
+                    "decode": ["USE_NEW_LOADER=0"],
+                },
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*.jpg']),
             ),
@@ -630,6 +671,10 @@ def h20_oss_suites():
                 smoke_args = {
                     "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 0",
                     "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1 --gpu_batch_wait_ms 500 --gpu_max_batch_size 8 --mm_cache_item_num 0"
+                },
+                envs = {
+                    "llm": ["USE_NEW_LOADER=0"],
+                    "vit": ["USE_NEW_LOADER=0"],
                 },
                 concurrency_test=True,
                 gpu_type=["H20"],
@@ -643,8 +688,8 @@ def h20_oss_suites():
                     "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1"
                 },
                 envs = {
-                    "llm": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
-                    "vit": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                    "llm": ["LOAD_METHOD=scratch"],
+                    "vit": ["LOAD_METHOD=scratch"],
                 },
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*.jpg']),

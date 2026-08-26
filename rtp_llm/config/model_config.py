@@ -566,7 +566,8 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
-        self.use_new_loader: bool = False
+        # None selects the model registry default; bool is an explicit override.
+        self.use_new_loader: Optional[bool] = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -871,7 +872,7 @@ def build_model_config(
     model_config.tokenizer_path = model_args.tokenizer_path
     model_config.model_type = model_args.model_type
     model_config.use_new_loader = model_args.use_new_loader
-    logging.info("use_new_loader: %s", model_config.use_new_loader)
+    logging.info("use_new_loader override: %s", model_config.use_new_loader)
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
         model_config.local_extra_data_path = vit_config.local_extra_data_path

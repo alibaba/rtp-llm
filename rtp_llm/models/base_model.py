@@ -28,6 +28,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
@@ -41,7 +42,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import sp_0_pad8_size
+from rtp_llm.utils.model_weight import identity, sp_0_pad8_size, sp_id
 from rtp_llm.utils.new_loader import is_new_loader_enabled
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -191,7 +192,7 @@ class BaseModel(object):
 
         self._configure_deep_gemm_remote_cache()
 
-        if self._use_new_loader():
+        if self._use_new_loader(skip_python_model=skip_python_model):
             if skip_python_model:
                 raise ValueError("newloader requires the Python model runtime")
             self._load_with_new_loader()
@@ -495,8 +496,88 @@ class BaseModel(object):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
 
-    def _use_new_loader(self) -> bool:
-        return is_new_loader_enabled(self.model_config)
+    def _new_loader_unsupported_reason(
+        self, *, skip_python_model: bool = False
+    ) -> Optional[str]:
+        """Return why this load configuration cannot use NewLoader yet."""
+        if skip_python_model:
+            return "newloader requires the Python model runtime"
+        if self.force_cpu_load_weights:
+            return "force_cpu_load_weights is not supported by this newloader slice"
+        if self.model_config.enable_output_vocab_pruning:
+            return (
+                "output vocabulary pruning is not supported by this newloader "
+                "slice"
+            )
+        if self.model_config.eplb_config.enable_eplb():
+            return "EPLB is not supported by this newloader slice"
+        if self.model_config.ptuning_path:
+            return "p-tuning is not supported by this newloader slice"
+        if self.model_config.lora_infos:
+            return "LoRA loading is not supported by this newloader slice"
+        if (
+            self.device_resource_config is not None
+            and self.device_resource_config.enable_layer_micro_batch != 0
+        ):
+            return "layer micro-batch is not supported by this newloader slice"
+
+        parallelism = self.parallelism_config
+        attn_tp = (
+            parallelism.get_attn_tp_size(),
+            parallelism.get_attn_tp_rank(),
+        )
+        ffn_tp = (
+            parallelism.get_ffn_tp_size(),
+            parallelism.get_ffn_tp_rank(),
+        )
+        physical_tp = (parallelism.tp_size, parallelism.tp_rank)
+        if parallelism.prefill_cp_config.is_enabled() or attn_tp != physical_tp:
+            return "Context parallelism is not supported by this newloader slice"
+        if ffn_tp != attn_tp:
+            return (
+                "Independent FFN TP/sequence parallelism is not supported by "
+                "this newloader slice"
+            )
+        if parallelism.ffn_disaggregate_config.enable_ffn_disaggregate:
+            return "FFN disaggregation is not supported by this newloader slice"
+        return None
+
+    def _use_new_loader(self, *, skip_python_model: bool = False) -> bool:
+        from rtp_llm.models_py.registry import is_model_registered
+
+        default_enabled = is_model_registered(self.model_config.model_type)
+        enabled = is_new_loader_enabled(
+            self.model_config, default_enabled=default_enabled
+        )
+        unsupported_reason = None
+        if enabled and self.model_config.use_new_loader is None:
+            unsupported_reason = self._new_loader_unsupported_reason(
+                skip_python_model=skip_python_model
+            )
+            if unsupported_reason is not None:
+                enabled = False
+                logging.warning(
+                    "NewLoader is registered for model_type=%s but the current "
+                    "configuration is not supported (%s); using the legacy loader",
+                    self.model_config.model_type,
+                    unsupported_reason,
+                )
+        source = (
+            "explicit override"
+            if self.model_config.use_new_loader is not None
+            else (
+                "automatic compatibility fallback"
+                if unsupported_reason is not None
+                else "NewLoader registry default"
+            )
+        )
+        logging.info(
+            "loader route for model_type=%s: %s (%s)",
+            self.model_config.model_type,
+            "newloader" if enabled else "legacy",
+            source,
+        )
+        return enabled
 
     def _new_loader_quant_type(self) -> str:
         quant_config = self.model_config.quant_config
@@ -510,6 +591,35 @@ class BaseModel(object):
             )
         return runtime_method.strip()
 
+    def _new_loader_custom_weight_mappings(self):
+        if self.custom_module is None:
+            return ()
+        mappings = []
+        for weight_info in self.custom_module.get_custom_weight_info():
+            if not isinstance(weight_info, CustomAtomicWeight):
+                raise TypeError(
+                    "NewLoader custom weights must use CustomAtomicWeight, got "
+                    f"{type(weight_info).__name__}"
+                )
+            if len(weight_info.weights) != 1:
+                raise NotImplementedError(
+                    f"NewLoader custom weight {weight_info.name!r} must map from "
+                    "exactly one checkpoint tensor"
+                )
+            checkpoint_weight = weight_info.weights[0]
+            if (
+                weight_info.process_fun is not identity
+                or checkpoint_weight.merge_fun is not identity
+                or weight_info.split_func is not sp_id
+                or weight_info.data_type is not None
+            ):
+                raise NotImplementedError(
+                    f"NewLoader custom weight {weight_info.name!r} uses a legacy "
+                    "transform, split, or dtype override that has not been adapted"
+                )
+            mappings.append((weight_info.name, checkpoint_weight.tensor_name(None)))
+        return tuple(mappings)
+
     def _load_with_new_loader(self) -> None:
         from rtp_llm.models_py.model_loader import (
             NewLoaderConfig,
@@ -518,31 +628,9 @@ class BaseModel(object):
         )
         from rtp_llm.models_py.quant_methods import QuantizationConfig
 
-        if self.force_cpu_load_weights:
-            raise ValueError(
-                "force_cpu_load_weights is not supported by this newloader slice"
-            )
-        if self.model_config.enable_output_vocab_pruning:
-            raise ValueError(
-                "output vocabulary pruning is not supported by this newloader "
-                "slice; disable newloader and use the legacy loader"
-            )
-        if self.model_config.eplb_config.enable_eplb():
-            raise ValueError(
-                "EPLB is not supported by this newloader slice; disable EPLB "
-                "or use the legacy loader"
-            )
-        if self.model_config.ptuning_path:
-            raise ValueError("p-tuning is not supported by this newloader slice")
-        if self.model_config.lora_infos:
-            raise ValueError("LoRA loading is not supported by this newloader slice")
-        if (
-            self.device_resource_config is not None
-            and self.device_resource_config.enable_layer_micro_batch != 0
-        ):
-            raise ValueError(
-                "layer micro-batch is not supported by this newloader slice"
-            )
+        unsupported_reason = self._new_loader_unsupported_reason()
+        if unsupported_reason is not None:
+            raise ValueError(unsupported_reason)
 
         parallelism = self.parallelism_config
         attn_tp = (
@@ -554,26 +642,8 @@ class BaseModel(object):
             parallelism.get_ffn_tp_rank(),
         )
         physical_tp = (parallelism.tp_size, parallelism.tp_rank)
-        cp_enabled = parallelism.prefill_cp_config.is_enabled()
-        if cp_enabled or attn_tp != physical_tp:
-            raise ValueError(
-                "Context parallelism is not supported by this newloader slice"
-            )
-        if ffn_tp != attn_tp:
-            raise ValueError(
-                "Independent FFN TP/sequence parallelism is not supported by the "
-                "registered newloader path"
-            )
-        if parallelism.ffn_disaggregate_config.enable_ffn_disaggregate:
-            raise ValueError(
-                "FFN disaggregation is not supported by the registered newloader path"
-            )
-
         self.custom_module = self._init_custom_module()
-        if self.custom_module is not None:
-            raise ValueError(
-                "Custom downstream modules are not supported by this newloader slice"
-            )
+        custom_weight_mappings = self._new_loader_custom_weight_mappings()
 
         configured_method = getattr(self.load_method, "value", self.load_method)
         load_method = NewLoaderLoadMethod(str(configured_method).lower())
@@ -602,6 +672,7 @@ class BaseModel(object):
             fmha_config=self.fmha_config,
             device_resource_config=self.device_resource_config,
             keep_mla_checkpoint_weights=self.keep_mla_checkpoint_weights,
+            custom_weight_mappings=custom_weight_mappings,
         )
         loader = NewModelLoader(
             model_config=self.model_config,
@@ -612,6 +683,7 @@ class BaseModel(object):
         self.py_model = loader.load()
         self.weight = self._build_new_loader_weight_view(self.py_model)
         self.py_model.weight = self.weight
+        self._load_custom_module()
         self.model_weights_loader = loader
         self.weight_manager = None
         self.py_eplb = None
