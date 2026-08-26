@@ -416,7 +416,7 @@ public final class JavaMockEngineCluster {
             throw new IllegalArgumentException(
                     "engine index " + engineIndex + " exceeds the unique loopback IP space (max 63749)");
         }
-        return "127." + thirdOctet + "." + (engineIndex % 250);
+        return "127." + thirdOctet + "." + (engineIndex % 250) + ".1";
     }
 
     /** Parses a strict true/false CLI value for {@code flag}. */
