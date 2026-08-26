@@ -4911,6 +4911,12 @@ public class PriorityScheduler implements DecisionGroupHandler,
             return;
         }
         reporter.reportSchedulerInflightSize(inflight.size());
+        // Age of the oldest scheduler-ledger inflight entry. With a healthy
+        // TTL the size gauge alone cannot distinguish "busy" from "leaking";
+        // a max age creeping toward the TTL window is the leak signature.
+        // Tagged role=SCHEDULER so one role='*' grouping compares this ledger
+        // against the per-worker endpoint ledgers on the same series.
+        reporter.reportSchedulerInflightMaxAgeMs(schedulerInflightMaxAgeMs());
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
@@ -4928,6 +4934,22 @@ public class PriorityScheduler implements DecisionGroupHandler,
             admissionScheduler.reportPrefillQueueDepths();
             admissionScheduler.reportDecodeAdmissionGauges();
         }
+    }
+
+    /**
+     * Age (ms) of the oldest entry in the scheduler's own inflight ledger,
+     * 0 when the ledger is empty. Single traversal of the concurrent map;
+     * per-entry {@code createdAtMs()} reads the lifecycle snapshot without
+     * holding the entry monitor (same access pattern as the TTL cleanup
+     * scan).
+     */
+    private long schedulerInflightMaxAgeMs() {
+        long oldest = Long.MAX_VALUE;
+        for (InflightEntry entry : inflight.values()) {
+            oldest = Math.min(oldest, entry.createdAtMs());
+        }
+        return oldest == Long.MAX_VALUE ? 0L
+                : Math.max(0L, System.currentTimeMillis() - oldest);
     }
 
     @PreDestroy

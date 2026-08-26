@@ -52,6 +52,12 @@ public class BatchSchedulerReporter {
             "batch_full", "fixed_window_timeout", "predicted_execution_cap"
     };
 
+    /** role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers). */
+    public static final String SCHEDULER_ROLE = "SCHEDULER";
+
+    /** engineIp tag value for scheduler-ledger series (no real engine behind them). */
+    public static final String SCHEDULER_ENGINE_IP = "scheduler";
+
     private final FlexMonitor monitor;
 
     @Autowired
@@ -260,16 +266,36 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report the count of inflight requests expired and cleaned up by the TTL task
-     * via {@code app.flexlb.inflight.ttl.expired.qps}.
-     * <p>Scheduler-level metric tagged by role only (no engineIp), because the TTL
-     * cleanup is a scheduler-wide operation not tied to a specific engine.
+     * Report the count of inflight entries evicted from the scheduler's own
+     * ledger by the TTL cleanup task via {@code app.flexlb.inflight.ttl.expired.qps}.
+     * <p>Tagged role=SCHEDULER + engineIp="scheduler" — the ledger that evicted.
+     * The former hardcoded role=PREFILL tag mislabelled these scheduler-level
+     * evictions as an endpoint series.
      *
      * @param count number of inflight entries expired in this cleanup cycle
      */
     public void reportInflightTtlExpired(int count) {
-        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+        FlexMetricTags tags = FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
+                "role", SCHEDULER_ROLE);
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report the age (ms) of the oldest entry in the scheduler's own inflight
+     * ledger via the unified {@code app.flexlb.inflight.max.age.ms} series
+     * with role=SCHEDULER + engineIp="scheduler" — same metric name and tag
+     * schema as the per-worker reportInflightMaxAgeMs, so a single role='*'
+     * grouping compares the scheduler ledger against the PREFILL/DECODE
+     * endpoint ledgers. Immune to per-endpoint ledger releases, it exposes
+     * master-side leaks (fenced or unobserved entries) that keep the
+     * scheduler ledger pinned: max age approaching the TTL window is the
+     * leak signature.
+     *
+     * @param ageMs age of the oldest scheduler inflight entry, 0 when empty
+     */
+    public void reportSchedulerInflightMaxAgeMs(long ageMs) {
+        monitor.report(INFLIGHT_MAX_AGE_MS,
+                FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP, "role", SCHEDULER_ROLE), ageMs);
     }
 
     // ==================== Decode inflight metrics ====================

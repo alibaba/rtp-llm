@@ -93,14 +93,18 @@ public class MetricConstant {
             "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
 
     /**
-     * FlexLB scheduler inflight max age (ms) — age of the oldest inflight entry, tagged by role and engineIp.
+     * FlexLB scheduler inflight max age (ms) — age of the oldest inflight entry,
+     * tagged by role and engineIp. role=SCHEDULER + engineIp="scheduler" marks
+     * the scheduler's own ledger (leak signature: max age creeping toward the
+     * TTL window); PREFILL/DECODE + real engineIp mark per-worker ledgers.
      */
     public static final String INFLIGHT_MAX_AGE_MS =
             "app.flexlb.inflight.max.age.ms";
 
     /**
-     * FlexLB scheduler inflight TTL expired count — number of inflight requests
-     * cleaned up by the TTL cleanup task. Reported as QPS, tagged by role.
+     * FlexLB scheduler inflight TTL expired count — number of inflight entries
+     * evicted by the scheduler's own TTL cleanup task. Reported as QPS, tagged
+     * role=SCHEDULER + engineIp="scheduler" (the ledger that evicted).
      */
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
