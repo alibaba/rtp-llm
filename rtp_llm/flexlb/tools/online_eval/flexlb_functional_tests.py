@@ -110,7 +110,7 @@ def main():
     # Teardown
     if not args.keep:
         ctx.close()
-        env_mgr.cleanup()
+        env_mgr.teardown()
 
     # Summary
     print(f"\n{'='*60}")

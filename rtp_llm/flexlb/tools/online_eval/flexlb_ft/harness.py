@@ -177,15 +177,10 @@ def _java_major(java_bin: str) -> int:
         ).stderr
     except Exception:
         return 0
-    for part in out.split():
-        if part.startswith("version"):
-            v = part.split('"')[-1].rstrip('"').split(".")
-            try:
-                major = int(v[0])
-                return int(v[1]) if major == 1 else major
-            except (ValueError, IndexError):
-                continue
-    return 0
+    import re as _re
+
+    m = _re.search(r'version "(\d+)', out)
+    return int(m.group(1)) if m else 0
 
 
 def resolve_java21() -> str:
@@ -1151,14 +1146,14 @@ def _generate_proto(proto_name: str) -> tuple:
 def ensure_proto_modules() -> tuple:
     """Engine-side protos (rpc_service.proto)."""
     if "rpc" not in _PROTO_CACHE:
-        _PROTO_CACHE["rpc"] = _generate_proto("rpc_service.proto")
+        _PROTO_CACHE["rpc"] = _generate_proto("model_rpc_service.proto")
     return _PROTO_CACHE["rpc"]
 
 
 def ensure_schedule_proto_modules() -> tuple:
     """Master-side protos (flexlb_service.proto)."""
     if "schedule" not in _PROTO_CACHE:
-        _PROTO_CACHE["schedule"] = _generate_proto("flexlb_service.proto")
+        _PROTO_CACHE["schedule"] = _generate_proto("flexlb_schedule_service.proto")
     return _PROTO_CACHE["schedule"]
 
 
