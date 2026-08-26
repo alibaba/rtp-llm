@@ -79,11 +79,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Match java_mock_stats key=value pairs (same shape as the MOCK_STAT_RE used by
-# the analyzers, kept local so this tool has no cross-module import). This
-# deliberately shares the analyzers' 26/28-field surface: decode_exec_p50 /
-# decode_exec_p95 carry digits in the key and are not captured — the verbatim
-# lines stay available in mock.log.
-STAT_KV_RE = re.compile(r"([a-z_]+)=(-?\d+(?:\.\d+)?)")
+# the analyzers, kept local so this tool has no cross-module import). Keys may
+# carry digits (decode_exec_p50 / prefill_exec_p95 from mock-engine 4b14e05+);
+# dropping them here used to zero out the exec-window percentiles in mock.json
+# (aggregate reads mock.json once the legacy mock_engine.log is consolidated
+# away, so the five-latency chart would silently degrade to all-zero exec
+# series). The verbatim lines also stay available in mock.log.
+STAT_KV_RE = re.compile(r"([a-z_][a-z_0-9]*)=(-?\d+(?:\.\d+)?)")
 PROMETHEUS_SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?P<labels>\{[^}]*\})?\s+"
     r"(?P<value>[-+\deE.]+)(\s+\d+)?\s*$"

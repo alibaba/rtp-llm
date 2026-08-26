@@ -751,6 +751,7 @@ def main():
             ("err_no_decode", "no worker", "danger"),
             ("err_queue_full", "queue full", "warning"),
             ("err_deadline", "deadline", "info"),
+            ("err_priority", "priority ahead", "warning"),
             ("err_preempted", "preempted", None),
             ("err_yielded", "yielded", None),
             ("err_other", "other", "neutral"),

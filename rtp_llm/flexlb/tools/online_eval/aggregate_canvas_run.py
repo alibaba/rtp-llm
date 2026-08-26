@@ -102,6 +102,7 @@ per_sec = defaultdict(
         "err_no_decode": 0,
         "err_queue_full": 0,
         "err_deadline": 0,
+        "err_priority": 0,
         "err_preempted": 0,
         "err_yielded": 0,
         "err_other": 0,
@@ -132,6 +133,11 @@ for d in rows:
             b["err_preempted"] += 1
         elif "yielded to higher-priority" in err:
             b["err_yielded"] += 1
+        elif "requests are ahead" in err:
+            # Priority-admission queueing rejection ("higher-priority requests
+            # are ahead" / "same-priority requests are ahead"): the overload
+            # terminal of the fixed-window balancer, not a transport failure.
+            b["err_priority"] += 1
         elif "NO_DECODE_WORKER" in err or "NO_AVAILABLE_WORKER" in err:
             b["err_no_decode"] += 1
         elif "queue full" in err:
@@ -161,6 +167,7 @@ for t in sorted(per_sec):
             "err_no_decode": b["err_no_decode"],
             "err_queue_full": b["err_queue_full"],
             "err_deadline": b["err_deadline"],
+            "err_priority": b["err_priority"],
             "err_preempted": b["err_preempted"],
             "err_yielded": b["err_yielded"],
             "err_other": b["err_other"],
