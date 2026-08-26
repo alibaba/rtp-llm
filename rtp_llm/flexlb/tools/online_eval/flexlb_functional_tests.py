@@ -17,11 +17,12 @@ from pathlib import Path
 # Allow running from online_eval/ directly
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from flexlb_ft.chaos_cases import CHAOS_CASES
 from flexlb_ft.context import SMOKE_LABEL_PERF, CaseContext, CaseDef
 from flexlb_ft.harness import EnvManager
 from flexlb_ft.smoke_cases import SMOKE_CASES
 
-ALL_CASES: list[CaseDef] = SMOKE_CASES  # chaos cases will be appended in phase 2
+ALL_CASES: list[CaseDef] = SMOKE_CASES + CHAOS_CASES
 
 
 def main():

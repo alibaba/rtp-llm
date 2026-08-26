@@ -122,6 +122,7 @@ class EngineOps:
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict = {}
         self._request_counter = 20000
+        self._rid_lock = threading.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -143,11 +144,14 @@ class EngineOps:
     def next_request_id(self, base: Optional[int] = None) -> int:
         # Only raise the counter when base exceeds it: repeated calls with the
         # same base (multi-request cases passing base each time) must yield
-        # distinct ids, not restart from the same value.
-        if base is not None and base > self._request_counter:
-            self._request_counter = base
-        self._request_counter += 1
-        return self._request_counter
+        # distinct ids, not restart from the same value.  Locked — concurrent
+        # callers (background-flow threads, ThreadPoolExecutor bursts) share
+        # one EngineOps instance.
+        with self._rid_lock:
+            if base is not None and base > self._request_counter:
+                self._request_counter = base
+            self._request_counter += 1
+            return self._request_counter
 
     # -- proto builders ----------------------------------------------------
 
@@ -412,23 +416,66 @@ class EngineOps:
             raise RuntimeError(f"start_engine({engine_name}) failed: {status} {body}")
         return body or {}
 
-    def add_engine(self, role: str, grpc_port: int) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/add_engine",
-            {"role": role, "grpc_port": grpc_port},
-        )
-        if status != 200:
-            raise RuntimeError(f"add_engine failed: {status} {body}")
-        return body or {}
+    def add_engine(
+        self, role: str, port: Optional[int] = None
+    ) -> tuple[int, Optional[dict]]:
+        """POST /add_engine {"role": ..., "port": optional} — dynamic scale-out.
 
-    def remove_engine(self, engine_name: str) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/remove_engine",
-            {"engine": engine_name},
+        The Java mock's field name is ``port`` (gRPC port; auto-allocated as
+        current max + 1 when omitted).  Returns (status, body) WITHOUT raising:
+        200 → body carries ``engine`` (name) + ``port`` (gRPC) + ``http_port``;
+        409 port-in-use / 400 bad role / 501 (cluster started without
+        --discovery-file) are surfaced to the caller (chaos cases exercise
+        concurrent add/remove and treat those as expected outcomes).
+        """
+        body: dict = {"role": role}
+        if port is not None:
+            body["port"] = port
+        return http_post_json(
+            f"http://127.0.0.1:{self.mock_http_port}/add_engine", body
         )
-        if status != 200:
-            raise RuntimeError(f"remove_engine failed: {status} {body}")
-        return body or {}
+
+    def remove_engine(
+        self, engine_name: Optional[str] = None, port: Optional[int] = None
+    ) -> tuple[int, Optional[dict]]:
+        """POST /remove_engine {"engine": name} or {"port": grpcPort}.
+
+        Permanently detaches the engine (stop semantics + removal from the
+        services map and the discovery file).  Returns (status, body) without
+        raising — 404 (unknown engine) is an expected outcome under concurrent
+        add/remove racing.
+        """
+        body: dict = {}
+        if engine_name:
+            body["engine"] = engine_name
+        if port is not None:
+            body["port"] = port
+        if not body:
+            raise ValueError("remove_engine needs engine_name or port")
+        return http_post_json(
+            f"http://127.0.0.1:{self.mock_http_port}/remove_engine", body
+        )
+
+    def master_info(self) -> Optional[dict]:
+        """POST /rtp_llm/master/info {} → response payload (None on failure)."""
+        status, data = http_post_json(
+            f"http://127.0.0.1:{self.master_http_port}/rtp_llm/master/info",
+            {},
+            timeout=5,
+        )
+        return data if status == 200 else None
+
+    def master_alive_count(self, role: str) -> int:
+        """Alive worker count for "PREFILL"/"DECODE" from master info (-1 unknown)."""
+        data = self.master_info()
+        if not data:
+            return -1
+        summary = data.get("worker_summary", {}) or {}
+        entry = summary.get(role, {}) or {}
+        try:
+            return int(entry.get("alive", -1))
+        except (TypeError, ValueError):
+            return -1
 
     # -- engine verification helpers ---------------------------------------
 
@@ -461,6 +508,24 @@ class EngineOps:
             timeout=5,
         )
 
+    def master_scheduler_inflight(self) -> int:
+        """Global scheduler inflight request count (-1 on endpoint failure).
+
+        Unlike the per-endpoint view, this survives engine eviction: when a
+        dead engine is 3-strike-evicted its endpoint row disappears from
+        ``prefill_endpoints`` (per-endpoint lookups return -1) while the
+        scheduler-level inflight bookkeeping lingers until the stale-inflight
+        TTL / eviction cleanup drains it — which is exactly what the TTL
+        cleanup cases need to observe.
+        """
+        data = self.master_inflight()
+        if data is None:
+            return -1
+        try:
+            return int(data.get("scheduler_inflight", -1))
+        except (TypeError, ValueError):
+            return -1
+
     # -- composite request helper ------------------------------------------
 
     def run_one_request(
@@ -492,13 +557,22 @@ class EngineOps:
             return "", repr(exc)
 
     def inflight_count_for_port(self, grpc_port: int) -> int:
-        """Master-side prefill inflight_batches for the endpoint at grpc_port."""
+        """Master-side prefill inflight_batches for the endpoint at grpc_port.
+
+        The master identifies prefill endpoints by their *control-plane*
+        (HTTP) port, which in the mock's base-port layout is grpc_port - 1
+        (e.g. base 57051 → mock http 57050). Match either form — the strict
+        grpc match alone returns -1 on the first engine of every environment
+        (its http port collides with nothing) and mis-attributes the count on
+        multi-prefill environments (prefill-1's http port == base).
+        """
         data = self.master_inflight()
         if data is None:
             return -1
+        suffixes = (f":{grpc_port}", f":{grpc_port - 1}")
         for ep in data.get("prefill_endpoints", []) or []:
             ip_port = ep.get("ip_port", "")
-            if ip_port.endswith(f":{grpc_port}"):
+            if ip_port.endswith(suffixes):
                 batches = ep.get("inflight_batches", 0)
                 return len(batches) if isinstance(batches, list) else int(batches)
         return -1

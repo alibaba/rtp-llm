@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -97,10 +98,15 @@ RID_BASES = {
     "cancel": {"batch": 10000, "direct": 40000, "queue": 70000},
     "scheduling": {"batch": 20000, "direct": 50000, "queue": 80000},
     "anomaly": {"batch": 30000, "direct": 60000, "queue": 90000},
+    "chaos": {"batch": 110000, "direct": 120000, "queue": 130000},
 }
 
 
 def rid_base(ctx: CaseContext, family: str) -> int:
     # ctx.case_seq makes each invocation of a case use a distinct id range
     # (RID_BASES cover batch/direct/queue, case_seq lifts per re-run).
-    return RID_BASES[family][ctx.mode] + ctx.case_seq * 1_000_000
+    # pid offset: sibling framework processes share the same case_seq
+    # sequence, so two agents hammering the same (reused) master would
+    # generate colliding ids — the pid term keeps id spaces disjoint.
+    pid_offset = (os.getpid() % 100) * 100_000_000
+    return RID_BASES[family][ctx.mode] + ctx.case_seq * 1_000_000 + pid_offset
