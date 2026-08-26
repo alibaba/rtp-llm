@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from functools import cache
 from typing import Optional
@@ -11,6 +12,10 @@ from libth_transformer_config import (
     check_rope_cache,
     get_rope_cache_once,
 )
+
+
+class DecodeRopeContractError(RuntimeError):
+    """Decode RoPE input/state invariant violation that must not fall back."""
 
 
 @cache
@@ -177,6 +182,7 @@ class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
         self._dummy_scale: Optional[torch.Tensor] = None
+        self._sequence_lengths_device: Optional[torch.Tensor] = None
 
     def _get_kv_scale(self, kv_cache: LayerKVCache) -> Optional[torch.Tensor]:
         # FP8 KV cache uses direct cast (no dynamic scaling), so the kernel always writes
@@ -199,34 +205,102 @@ class FusedRopeKVCacheDecodeOp:
             return self._dummy_scale
         return None
 
-    @staticmethod
-    def _get_sequence_lengths_device(
-        attn_inputs: PyAttentionInputs, device: torch.device
+    def refresh_sequence_lengths(
+        self,
+        attn_inputs: PyAttentionInputs,
+        device: Optional[torch.device] = None,
+        *,
+        forbid_reallocation: bool = False,
     ) -> torch.Tensor:
+        """Refresh the stable CUDA buffer consumed by decode RoPE.
+
+        CUDA graphs capture ``data_ptr()`` from the first prepared params, so
+        the buffer is allocated once and updated in place for every replay. The
+        authoritative ``sequence_lengths`` mirror is used instead of
+        ``sequence_lengths_plus_1_device`` because RoPE needs the current token
+        position rather than the plus-one KV length, and the graph runner zeros
+        padded rows only in the former. CUDA graph callers must pass
+        ``forbid_reallocation=True`` and enqueue this refresh on the same stream
+        as the subsequent graph replay.
+        """
         sequence_lengths = attn_inputs.sequence_lengths
-        if sequence_lengths.is_cuda:
-            return sequence_lengths
-
-        # The decode RoPE kernel dereferences this tensor from every head CTA.
-        # Reading the pinned host mirror through UVA turns each access into a
-        # fine-grained PCIe transaction (about 200 us at batch 64 on Pro 5000).
-        # CudaGraphRunner already maintains this device buffer and refreshes it
-        # before every replay, so derive the current lengths from it in-graph.
-        sequence_lengths_plus_1 = attn_inputs.sequence_lengths_plus_1_device
-        if (
-            sequence_lengths_plus_1 is not None
-            and sequence_lengths_plus_1.is_cuda
+        if sequence_lengths is None or sequence_lengths.numel() == 0:
+            raise DecodeRopeContractError(
+                "decode sequence_lengths must be a non-empty tensor"
+            )
+        if sequence_lengths.dtype != torch.int32:
+            raise DecodeRopeContractError(
+                f"decode sequence_lengths must use torch.int32, got {sequence_lengths.dtype}"
+            )
+        source_supports_async_copy = (
+            sequence_lengths.is_cuda or sequence_lengths.is_pinned()
+        )
+        if not source_supports_async_copy and (
+            forbid_reallocation or attn_inputs.is_cuda_graph
         ):
-            return sequence_lengths_plus_1 - 1
+            raise DecodeRopeContractError(
+                "CUDA graph decode sequence_lengths must be CUDA or pinned CPU memory"
+            )
 
-        # Keep direct/unit-test callers safe even when they do not construct
-        # the C++-managed device mirror used by the production decode path.
-        assert sequence_lengths.is_pinned(), (
-            "CPU sequence_lengths must be pinned for an asynchronous device copy"
+        if device is None:
+            if self._sequence_lengths_device is not None:
+                device = self._sequence_lengths_device.device
+            elif sequence_lengths.is_cuda:
+                device = sequence_lengths.device
+            else:
+                sequence_lengths_plus_1 = (
+                    attn_inputs.sequence_lengths_plus_1_device
+                )
+                if (
+                    sequence_lengths_plus_1 is None
+                    or not sequence_lengths_plus_1.is_cuda
+                ):
+                    raise DecodeRopeContractError(
+                        "a CUDA target device is required when sequence_lengths is on CPU"
+                    )
+                device = sequence_lengths_plus_1.device
+
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise DecodeRopeContractError(
+                f"decode sequence_lengths target must be CUDA, got {device}"
+            )
+        if device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+
+        needs_allocation = (
+            self._sequence_lengths_device is None
+            or self._sequence_lengths_device.shape != sequence_lengths.shape
+            or self._sequence_lengths_device.device != device
         )
-        return sequence_lengths.to(
-            device=device, dtype=torch.int32, non_blocking=True
+        if needs_allocation:
+            if (
+                self._sequence_lengths_device is not None
+                and (forbid_reallocation or attn_inputs.is_cuda_graph)
+            ):
+                raise DecodeRopeContractError(
+                    "CUDA graph replay cannot resize or move the captured sequence_lengths buffer"
+                )
+            if self._sequence_lengths_device is not None:
+                logging.warning(
+                    "Reallocating decode RoPE sequence_lengths buffer outside CUDA graph: "
+                    "shape %s on %s -> shape %s on %s",
+                    tuple(self._sequence_lengths_device.shape),
+                    self._sequence_lengths_device.device,
+                    tuple(sequence_lengths.shape),
+                    device,
+                )
+            self._sequence_lengths_device = torch.empty(
+                sequence_lengths.shape,
+                dtype=torch.int32,
+                device=device,
+            )
+
+        self._sequence_lengths_device.copy_(
+            sequence_lengths,
+            non_blocking=source_supports_async_copy,
         )
+        return self._sequence_lengths_device
 
     def forward(
         self,
@@ -234,10 +308,18 @@ class FusedRopeKVCacheDecodeOp:
         kv_cache: LayerKVCache,
         params: FusedRopeAttnParams,
     ) -> torch.Tensor:
+        if params.kv_cache_offset is None:
+            raise DecodeRopeContractError("decode RoPE requires kv_cache_offset")
+        if not params.sequence_lengths.is_cuda:
+            raise DecodeRopeContractError(
+                "decode RoPE sequence_lengths must be on CUDA"
+            )
+        if params.sequence_lengths is not self._sequence_lengths_device:
+            raise DecodeRopeContractError(
+                "decode RoPE params lost the op-owned sequence_lengths buffer"
+            )
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
-        assert params.kv_cache_offset is not None
-        assert params.sequence_lengths.is_cuda, "sequence_lengths must be on CUDA"
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
@@ -272,7 +354,12 @@ class FusedRopeKVCacheDecodeOp:
             rope_mrope_dim3=rope_config.mrope_dim3,
         )
 
-    def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
+    def prepare(
+        self,
+        attn_inputs: PyAttentionInputs,
+        *,
+        forbid_reallocation: bool = False,
+    ) -> FusedRopeAttnParams:
         assert (
             attn_inputs.kv_cache_kernel_block_id_device is not None
             and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
@@ -281,9 +368,16 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.kv_cache_kernel_block_id_device
         )
         kv_cache_offset_h = None  # not used
-        sequence_lengths_device = self._get_sequence_lengths_device(
-            attn_inputs, kv_cache_offset.device
-        )
+        if self.attn_configs.need_rope_kv_cache:
+            sequence_lengths_device = self.refresh_sequence_lengths(
+                attn_inputs,
+                kv_cache_offset.device,
+                forbid_reallocation=forbid_reallocation,
+            )
+        else:
+            # The params object is retained by attention implementations even
+            # when RoPE is disabled, but its sequence lengths are never consumed.
+            sequence_lengths_device = attn_inputs.sequence_lengths
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,

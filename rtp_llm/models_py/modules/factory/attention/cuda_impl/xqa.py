@@ -7,13 +7,14 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
-from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfig
+from rtp_llm.ops import AttentionConfigs, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     LayerKVCache,
     PyAttentionInputs,
     XQAAttnOp,
 )
+from rtp_llm.ops.fused_rope_kvcache_op import DecodeRopeContractError
 
 # Constants
 DEFAULT_XQA_WORKSPACE_SIZE_MB = 248
@@ -70,9 +71,9 @@ class XQAImpl(FMHAImplBase):
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-        # Keep the CUDA-resident storage referenced by the captured RoPE
-        # kernel alive and update it in place during graph preparation.
-        self._captured_seq_lens = self.rope_params.sequence_lengths
+        # C++ XQAParams keeps the host pinned sequence-length mirror captured
+        # here. CudaGraphRunner refreshes this exact storage before each replay.
+        self._fmha_sequence_lengths_ptr = attn_inputs.sequence_lengths.data_ptr()
 
     @classmethod
     def support(
@@ -106,6 +107,11 @@ class XQAImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
+        if attn_inputs.sequence_lengths.data_ptr() != self._fmha_sequence_lengths_ptr:
+            raise DecodeRopeContractError(
+                "XQA CUDA graph replay must reuse the captured host sequence_lengths buffer"
+            )
+
         update_params = getattr(self.fmha_impl, "update", None)
         # The C++ fast-path update consumes device-resident inputs published by
         # the RTP_LLM_DEVICE_INPUT pipeline; fall back to the host update when
@@ -134,20 +140,23 @@ class XQAImpl(FMHAImplBase):
                     attn_inputs.kv_cache_kernel_block_id_device,
                 )
             else:
-                new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+                new_rope_params = self.rope_kvcache_impl.prepare(
+                    attn_inputs, forbid_reallocation=True
+                )
                 common.copy_kv_cache_offset(
                     self.rope_params.kv_cache_offset,
                     new_rope_params.kv_cache_offset,
                 )
 
-        # CUDA graph replay keeps the sequence-length pointer captured during
-        # initialization, so update that storage rather than replacing it.
-        new_seq_lens = self.rope_kvcache_impl._get_sequence_lengths_device(
-            attn_inputs, self._captured_seq_lens.device
-        )
-        n = min(self._captured_seq_lens.numel(), new_seq_lens.numel())
-        self._captured_seq_lens[:n].copy_(new_seq_lens[:n], non_blocking=True)
-        self.rope_params.sequence_lengths = self._captured_seq_lens
+        if self.need_rope_kv_cache:
+            # Idempotent even when prepare() above already refreshed it. Keeping
+            # the explicit call here makes every update branch honor the same
+            # RoPE replay invariant.
+            self.rope_params.sequence_lengths = (
+                self.rope_kvcache_impl.refresh_sequence_lengths(
+                    attn_inputs, forbid_reallocation=True
+                )
+            )
 
 
 class XQADecodeImpl(FMHAImplBase):
@@ -220,10 +229,14 @@ class XQADecodeImpl(FMHAImplBase):
         self.fmha_params.batch_size = new_fmha_params.batch_size
         self.fmha_params.max_seq_len = new_fmha_params.max_seq_len
 
-        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        new_offset = new_rope_params.kv_cache_offset
-        old_offset = self.rope_params.kv_cache_offset
-        common.copy_kv_cache_offset(old_offset, new_offset)
+        if self.need_rope_kv_cache:
+            new_rope_params = self.rope_kvcache_impl.prepare(
+                attn_inputs, forbid_reallocation=True
+            )
+            new_offset = new_rope_params.kv_cache_offset
+            old_offset = self.rope_params.kv_cache_offset
+            common.copy_kv_cache_offset(old_offset, new_offset)
+            self.rope_params.sequence_lengths = new_rope_params.sequence_lengths
 
 
 def _load_xqa_fn():

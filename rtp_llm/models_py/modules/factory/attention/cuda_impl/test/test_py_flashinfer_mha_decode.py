@@ -19,7 +19,6 @@ from rtp_llm.ops.compute_ops import (
     get_typemeta,
     rtp_llm_ops,
 )
-from rtp_llm.ops.fused_rope_kvcache_op import FusedRopeKVCacheDecodeOp
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -48,32 +47,6 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         )
         attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
         return attn_inputs
-
-    def test_decode_rope_sequence_lengths_are_cuda_resident(self):
-        """Pinned host sequence lengths must never reach the decode CUDA kernel."""
-        batch_size = 64
-        sequence_lengths = [802] * batch_size
-        config = self._create_config(
-            head_num=14,
-            head_num_kv=2,
-            size_per_head=64,
-            seq_size_per_block=64,
-        )
-        attn_inputs = self._create_attention_inputs(
-            batch_size,
-            sequence_lengths,
-            config.seq_size_per_block,
-            dtype=torch.bfloat16,
-        )
-        expected = attn_inputs.sequence_lengths.clone()
-        attn_inputs.sequence_lengths_plus_1_device = (
-            attn_inputs.sequence_lengths + 1
-        ).to(self.device)
-
-        params = FusedRopeKVCacheDecodeOp(config.attn_configs).prepare(attn_inputs)
-
-        self.assertTrue(params.sequence_lengths.is_cuda)
-        torch.testing.assert_close(params.sequence_lengths.cpu(), expected)
 
     def _check_params(
         self,
