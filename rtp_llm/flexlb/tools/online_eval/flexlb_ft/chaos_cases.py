@@ -871,3 +871,108 @@ def elastic_concurrent_ops(ctx: CaseContext):
             _cleanup_dynamic(ops, env)
         except Exception:
             pass
+
+
+# ===========================================================================
+# Cold-start probe — intake defect regression baseline
+# ===========================================================================
+
+
+def coldstart_spec(ctx: CaseContext) -> EnvSpec:
+    """Cold-start probe env: mirrors the smoke topology (2P+4D, static file
+    discovery, default config) but disables the master stability window so
+    traffic hits the master during the first-connect storm."""
+    return EnvSpec(
+        label=f"chaos_coldstart_{ctx.mode}",
+        n_prefill=2,
+        n_decode=4,
+        perf=default_perf(),
+        master_mode=ctx.mode,
+        master_stable_window_s=0.0,
+    )
+
+
+@case(
+    "chaos_coldstart_burst",
+    modes=["batch"],
+    source="intake defect regression probe (cold-start first-connect storm)",
+)
+def coldstart_burst(ctx: CaseContext):
+    """Fire 20 requests the instant the master reports ready.
+
+    Regression probe for the three intake defects: CONNECT_TIMEOUT 20ms,
+    3-strike dead marking on first connect, non-atomic getOrCreateWorkerStatus.
+    Expected to FAIL or pass marginally today — the failure rate and the
+    marked-dead sample count are recorded as the baseline for the intake fix.
+    """
+    env = ctx.env_manager.ensure(coldstart_spec(ctx))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "chaos")
+    expected = {"PREFILL": env.spec.n_prefill, "DECODE": env.spec.n_decode}
+    try:
+        # Sample worker_summary every 0.5s while the burst runs and for 10s
+        # after — the cold-start window where engines get marked dead.
+        samples: list[tuple[float, dict]] = []
+        stop = threading.Event()
+
+        def sample() -> Optional[dict]:
+            info = ops.master_info()
+            if not info:
+                return None
+            summary = info.get("worker_summary", {}) or {}
+            return {
+                role: (
+                    int((summary.get(role) or {}).get("discovered", -1)),
+                    int((summary.get(role) or {}).get("alive", -1)),
+                )
+                for role in ("PREFILL", "DECODE")
+            }
+
+        def sampler() -> None:
+            t0 = time.monotonic()
+            while not stop.is_set():
+                s = sample()
+                if s is not None:
+                    samples.append((round(time.monotonic() - t0, 1), s))
+                stop.wait(0.5)
+
+        poller = threading.Thread(target=sampler, name="coldstart-sampler", daemon=True)
+        poller.start()
+
+        # Burst: 20 requests (10-way concurrent) immediately after ready.
+        def run(rid: int):
+            _, err = ops.run_one_request(
+                rid,
+                output_len=2,
+                block_keys=[rid * 100 + 1],
+                stream_timeout_s=STREAM_TIMEOUT_S,
+            )
+            return err
+
+        rids = [ops.next_request_id(base) for _ in range(20)]
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            errs = list(pool.map(run, rids))
+        ok = sum(1 for e in errs if e is None)
+        error_types = sorted({str(e)[:60] for e in errs if e is not None})
+
+        # Keep sampling 10s past the burst: transient 3-strike marks recover,
+        # permanent ones stay dead (that is the S10-class regression).
+        time.sleep(10.0)
+        stop.set()
+        poller.join(timeout=2.0)
+
+        final = sample()
+        dead_samples = sum(1 for _, s in samples if any(a < d for d, a in s.values()))
+        final_ok = bool(
+            final
+            and all(d == expected[role] and a == d for role, (d, a) in final.items())
+        )
+        success_rate = ok / 20 * 100.0
+        passed = ok >= 16 and final_ok  # >=80% success + no permanent eviction
+        return passed, (
+            f"burst_ok={ok}/20 ({success_rate:.0f}%), "
+            f"dead_samples={dead_samples}/{len(samples)}, final={final}, "
+            f"error_types={error_types[:3]}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
