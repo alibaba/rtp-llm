@@ -515,6 +515,19 @@ class BaseModel(object):
             return "p-tuning is not supported by this newloader slice"
         if self.model_config.lora_infos:
             return "LoRA loading is not supported by this newloader slice"
+        if self.model_config.require_weight_update:
+            return (
+                "online UpdateWeights is required but is not supported by "
+                "NewLoader; use --use_new_loader false"
+            )
+        quant_config = self.model_config.quant_config
+        if quant_config is not None:
+            runtime_method = quant_config.get_runtime_method_key()
+            if not isinstance(runtime_method, str) or not runtime_method.strip():
+                return (
+                    f"quantization config {type(quant_config).__name__} does not "
+                    "provide a supported NewLoader runtime method"
+                )
         if (
             self.device_resource_config is not None
             and self.device_resource_config.enable_layer_micro_batch != 0
@@ -687,6 +700,10 @@ class BaseModel(object):
         self.model_weights_loader = loader
         self.weight_manager = None
         self.py_eplb = None
+        logging.warning(
+            "NewLoader does not support the online UpdateWeights RPC. Restart "
+            "with --use_new_loader false when online weight updates are required."
+        )
         logging.info("NewModelLoader: model loaded successfully")
 
     def _build_new_loader_weight_view(self, module: torch.nn.Module) -> ModelWeights:

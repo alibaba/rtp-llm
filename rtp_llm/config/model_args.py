@@ -31,6 +31,7 @@ class ModelArgs:
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
         "use_new_loader",
+        "require_weight_update",
     ]
 
     def __init__(self):
@@ -64,3 +65,5 @@ class ModelArgs:
         self.enable_output_vocab_pruning: bool = False
         # None selects the model registry default; bool is an explicit override.
         self.use_new_loader: Optional[bool] = None
+        # Route to a loader that supports the online UpdateWeights RPC.
+        self.require_weight_update: bool = False
