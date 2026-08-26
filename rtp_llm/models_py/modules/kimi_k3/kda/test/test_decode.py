@@ -72,7 +72,7 @@ class KimiK3KDATargetVerifyTest(TestCase):
         self.assertEqual(tuple(projected.shape), (2, 2))
         all_reduce.assert_called_once()
 
-    def test_batch_steps_use_contiguous_inputs_and_distinct_pages(self) -> None:
+    def test_target_verify_dispatches_one_fused_conv_and_recurrence(self) -> None:
         batch = 2
         steps = 2
         projection_size = 2
@@ -92,9 +92,11 @@ class KimiK3KDATargetVerifyTest(TestCase):
         )
 
         def rows(values: list[int]) -> torch.Tensor:
-            return torch.tensor(values, dtype=torch.float32).repeat_interleave(
-                projection_size
-            ).reshape(batch * steps, projection_size)
+            return (
+                torch.tensor(values, dtype=torch.float32)
+                .repeat_interleave(projection_size)
+                .reshape(batch * steps, projection_size)
+            )
 
         q = rows([10, 11, 20, 21])
         k = rows([30, 31, 40, 41])
@@ -107,8 +109,6 @@ class KimiK3KDATargetVerifyTest(TestCase):
         conv = conv.expand(-1, 1, 3 * projection_size).clone()
         ssm = torch.arange(block_count, dtype=torch.float32).reshape(-1, 1, 1, 1)
         ssm = ssm.expand(-1, 1, projection_size, projection_size).clone()
-        initial_conv = conv.clone()
-        initial_ssm = ssm.clone()
         cache = _PagedDecodeCache(
             ssm=ssm,
             conv=conv,
@@ -117,53 +117,51 @@ class KimiK3KDATargetVerifyTest(TestCase):
             page_size=page_size,
         )
 
-        conv_calls: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        def fake_target_conv(
+            q_sequence: torch.Tensor,
+            k_sequence: torch.Tensor,
+            v_sequence: torch.Tensor,
+            _fused_conv: torch.Tensor,
+            _conv_cache: torch.Tensor,
+            fused_block_map: torch.Tensor,
+            fused_lengths: torch.Tensor,
+            _page_size: int,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            self.assertEqual(tuple(q_sequence.shape), (batch, steps, projection_size))
+            torch.testing.assert_close(fused_block_map, block_map)
+            torch.testing.assert_close(fused_lengths, sequence_lengths)
+            return q_sequence, k_sequence, v_sequence
+
         recurrent_calls: list[
             tuple[tuple[torch.Tensor, ...], torch.Tensor, torch.Tensor]
         ] = []
 
-        def fake_short_conv(
-            q_step: torch.Tensor,
-            k_step: torch.Tensor,
-            v_step: torch.Tensor,
-            _fused_conv: torch.Tensor,
-            _conv_cache: torch.Tensor,
-            step_block_map: torch.Tensor,
-            step_lengths: torch.Tensor,
-            _page_size: int,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            conv_calls.append(
-                (q_step.clone(), step_block_map.clone(), step_lengths.clone())
-            )
-            return q_step, k_step, v_step
-
         def fake_recurrent(
-            q_step: torch.Tensor,
-            k_step: torch.Tensor,
-            v_step: torch.Tensor,
-            gate_step: torch.Tensor,
-            beta_step: torch.Tensor,
+            fused_q: torch.Tensor,
+            fused_k: torch.Tensor,
+            fused_v: torch.Tensor,
+            fused_gate: torch.Tensor,
+            fused_beta: torch.Tensor,
             _cu_seqlens: torch.Tensor,
             _ssm_cache: torch.Tensor,
-            step_block_map: torch.Tensor,
-            step_lengths: torch.Tensor,
+            fused_block_map: torch.Tensor,
+            fused_lengths: torch.Tensor,
             _page_size: int,
         ) -> torch.Tensor:
-            tensors = (q_step, k_step, v_step, gate_step, beta_step)
+            tensors = (fused_q, fused_k, fused_v, fused_gate, fused_beta)
             recurrent_calls.append(
                 (
                     tuple(t.clone() for t in tensors),
-                    step_block_map.clone(),
-                    step_lengths.clone(),
+                    fused_block_map.clone(),
+                    fused_lengths.clone(),
                 )
             )
-            self.assertTrue(all(t.is_contiguous() for t in tensors))
-            return q_step.reshape(1, batch, 1, projection_size)
+            return fused_q.reshape(1, batch * steps, 1, projection_size)
 
         with patch.object(
             kda_decode,
-            "kimi_kda_short_conv_paged_decode",
-            side_effect=fake_short_conv,
+            "kimi_kda_short_conv_paged_target_verify",
+            side_effect=fake_target_conv,
         ), patch.object(decoder, "_recurrent", side_effect=fake_recurrent):
             output = decoder._target_verify(
                 q,
@@ -175,27 +173,15 @@ class KimiK3KDATargetVerifyTest(TestCase):
                 cache,
             )
 
-        expected_maps = (
-            block_map,
-            torch.tensor([[2, 2, 3], [4, 6, 6]], dtype=torch.int32),
-        )
         sources = (q, k, v, gate, beta)
-        for step, indexes in enumerate(([0, 2], [1, 3])):
-            expected_lengths = sequence_lengths + step
-            torch.testing.assert_close(conv_calls[step][0], q[indexes])
-            torch.testing.assert_close(conv_calls[step][1], expected_maps[step])
-            torch.testing.assert_close(conv_calls[step][2], expected_lengths)
-            tensors, call_map, call_lengths = recurrent_calls[step]
-            for actual, source in zip(tensors, sources):
-                torch.testing.assert_close(actual, source[indexes])
-            torch.testing.assert_close(call_map, expected_maps[step])
-            torch.testing.assert_close(call_lengths, expected_lengths)
+        self.assertEqual(len(recurrent_calls), 1)
+        tensors, call_map, call_lengths = recurrent_calls[0]
+        for actual, source in zip(tensors, sources):
+            torch.testing.assert_close(actual, source)
+        torch.testing.assert_close(call_map, block_map)
+        torch.testing.assert_close(call_lengths, sequence_lengths)
 
         torch.testing.assert_close(output.reshape(batch * steps, -1), q)
-        torch.testing.assert_close(cache.conv[2], initial_conv[1])
-        torch.testing.assert_close(cache.conv[6], initial_conv[5])
-        torch.testing.assert_close(cache.ssm[2], initial_ssm[1])
-        torch.testing.assert_close(cache.ssm[6], initial_ssm[5])
 
 
 if __name__ == "__main__":

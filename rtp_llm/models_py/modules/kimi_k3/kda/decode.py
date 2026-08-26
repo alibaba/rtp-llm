@@ -13,6 +13,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     fused_recurrent_kda,
     is_kimi_kda_short_conv_paged_decode_supported,
     kimi_kda_short_conv_paged_decode,
+    kimi_kda_short_conv_paged_target_verify,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -68,9 +69,7 @@ class KimiK3KDADecode(nn.Module):
         # LINEAR cache groups use one kernel block per physical state block;
         # select_block_map_for_layer therefore exposes the physical KDA IDs
         # through the existing kernel-map field.
-        block_map = getattr(
-            attention_inputs, "kv_cache_kernel_block_id_device", None
-        )
+        block_map = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
         if (
             sequence_lengths_plus_one is None
             or block_map is None
@@ -163,9 +162,9 @@ class KimiK3KDADecode(nn.Module):
             seq_size_per_block=page_size,
             sequence_lengths=sequence_lengths_plus_one,
         )
-        return output.reshape(
-            1, token_count, self.local_heads, self.head_dim
-        ).to(dtype=q.dtype)
+        return output.reshape(1, token_count, self.local_heads, self.head_dim).to(
+            dtype=q.dtype
+        )
 
     def _short_conv(
         self,
@@ -221,101 +220,31 @@ class KimiK3KDADecode(nn.Module):
         q_steps = q_projected.reshape(batch, sequence_length, -1)
         k_steps = k_projected.reshape(batch, sequence_length, -1)
         v_steps = v_projected.reshape(batch, sequence_length, -1)
-        conv_steps: list[torch.Tensor] = []
-        for step in range(sequence_length):
-            reserve_base = torch.div(
-                cache.sequence_lengths_plus_one - 1,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            reserve_col = reserve_base + step
-            # Kernels read state at ``length - 2`` and write at ``length - 1``;
-            # reserve from the write column to avoid aliasing across pages.
-            logical_col = torch.div(
-                cache.sequence_lengths_plus_one + step - 1,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            batch_idx = torch.arange(batch, device=cache.block_map.device)
-            dest_ids = cache.block_map[batch_idx, reserve_col].to(torch.long)
-            if step > 0:
-                src_ids = cache.block_map[batch_idx, reserve_col - 1].to(torch.long)
-                cache.conv[dest_ids] = cache.conv[src_ids]
-            step_block_map = cache.block_map.clone()
-            step_block_map[batch_idx, logical_col] = dest_ids.to(step_block_map.dtype)
-            q_step, k_step, v_step = kimi_kda_short_conv_paged_decode(
-                q_steps[:, step, :].contiguous(),
-                k_steps[:, step, :].contiguous(),
-                v_steps[:, step, :].contiguous(),
-                self.fused_conv,
-                cache.conv,
-                step_block_map,
-                cache.sequence_lengths_plus_one + step,
-                cache.page_size,
-            )
-            conv_steps.append(torch.cat((q_step, k_step, v_step), dim=-1))
-        conv_output = torch.stack(conv_steps, dim=1).reshape(token_count, -1)
-        q, k, v = torch.split(conv_output, self.projection_size, dim=-1)
-
-        if sequence_length == 1:
-            return self._recurrent(
-                q.contiguous(),
-                k.contiguous(),
-                v.contiguous(),
-                raw_gate,
-                raw_beta,
-                cu_seqlens,
-                cache.ssm,
-                cache.block_map,
-                cache.sequence_lengths_plus_one,
-                cache.page_size,
-            )
-
-        q_seq = q.reshape(batch, sequence_length, -1)
-        k_seq = k.reshape(batch, sequence_length, -1)
-        v_seq = v.reshape(batch, sequence_length, -1)
-        gate_seq = raw_gate.reshape(batch, sequence_length, -1)
-        beta_seq = raw_beta.reshape(batch, sequence_length, -1)
-        one_token_cu = torch.arange(
-            batch + 1, device=cu_seqlens.device, dtype=cu_seqlens.dtype
+        q, k, v = kimi_kda_short_conv_paged_target_verify(
+            q_steps,
+            k_steps,
+            v_steps,
+            self.fused_conv,
+            cache.conv,
+            cache.block_map,
+            cache.sequence_lengths_plus_one,
+            cache.page_size,
         )
-        output_steps: list[torch.Tensor] = []
-        for step in range(sequence_length):
-            reserve_base = torch.div(
-                cache.sequence_lengths_plus_one - 1,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            reserve_col = reserve_base + step
-            logical_col = torch.div(
-                cache.sequence_lengths_plus_one + step - 1,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            batch_idx = torch.arange(batch, device=cache.block_map.device)
-            dest_ids = cache.block_map[batch_idx, reserve_col].to(torch.long)
-            if step > 0:
-                src_ids = cache.block_map[batch_idx, reserve_col - 1].to(torch.long)
-                cache.ssm[dest_ids] = cache.ssm[src_ids]
-            step_block_map = cache.block_map.clone()
-            step_block_map[batch_idx, logical_col] = dest_ids.to(step_block_map.dtype)
-            step_output = self._recurrent(
-                # Selecting one step from [batch, steps, hidden] leaves a strided
-                # view; the Triton recurrence needs packed token rows.
-                q_seq[:, step, :].contiguous(),
-                k_seq[:, step, :].contiguous(),
-                v_seq[:, step, :].contiguous(),
-                gate_seq[:, step, :].contiguous(),
-                beta_seq[:, step, :].contiguous(),
-                one_token_cu,
-                cache.ssm,
-                step_block_map,
-                cache.sequence_lengths_plus_one + step,
-                cache.page_size,
-            )
-            output_steps.append(step_output.squeeze(0))
-        return torch.stack(output_steps, dim=1).reshape(
-            1, token_count, self.local_heads, self.head_dim
+        # Both target-verify kernels consume the original request block map.
+        # They derive read/write pages in-kernel and publish every speculative
+        # checkpoint directly, so no layer-local page-index tensors, cloned
+        # block maps, cache copies, or per-step packing launches are required.
+        return self._recurrent(
+            q.reshape(token_count, self.projection_size),
+            k.reshape(token_count, self.projection_size),
+            v.reshape(token_count, self.projection_size),
+            raw_gate,
+            raw_beta,
+            cu_seqlens,
+            cache.ssm,
+            cache.block_map,
+            cache.sequence_lengths_plus_one,
+            cache.page_size,
         )
 
     def forward(
@@ -342,9 +271,7 @@ class KimiK3KDADecode(nn.Module):
                 cu_seqlens,
                 cache,
             )
-        q, k, v = self._short_conv(
-            q_projected, k_projected, v_projected, cache
-        )
+        q, k, v = self._short_conv(q_projected, k_projected, v_projected, cache)
         return self._recurrent(
             q,
             k,
