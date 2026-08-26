@@ -7,13 +7,20 @@ Reads (legacy layout first, consolidated run-root files as fallback):
   load_client/summary.json or client.json
   load_client/slo_batch_analysis.json or client.json's slo_batch_analysis
   load_client/shard_*/per_request.jsonl or per_request.jsonl / per_request.jsonl.gz
-  mock_engine.log or mock.json,
-  flexlb_logs/flexlb.log* or master.log
+  mock_engine.log or mock.json (stats + final_snapshot),
+  flexlb_logs/flexlb.log* or master.log (dispatch lines + server-schedule-latency rows),
+  master.json (inflight_timeseries G4 / prometheus_timeseries G3),
+  run_meta.json (process_usage G5).
 Legacy files win whenever they exist: a successful consolidation deletes
 them, so a legacy file that is present means fresher data (RUN_DIR reuse).
-Outputs meta/summary/batch/per_second/queue_timeseries plus engine_dist
-(per-engine routing distribution: requests/Gini/CV/Lorenz/window Gini,
-computed from per_request.jsonl ok rows).
+Outputs meta/summary/batch/per_second (schedule + e2e/ttft percentiles)/
+queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
+per-engine Gini/CV/Lorenz/window Gini) plus compact time series:
+stage_latency_ts (master 10s stage p95 rows), engine_exec_ts (mock
+prefill/decode execution windows), process_ts (mock/master/client CPU+RSS),
+inflight_ts (G4 scheduler/prefill/decode), inflight_age_ts / kv_ts /
+batcher_ts (G3 master prometheus). All series are rebased to the first
+per-request send time (negative t = pre-send warmup).
 """
 import glob
 import gzip
@@ -22,6 +29,7 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime
 
 run_dir = os.getcwd()
 
@@ -98,6 +106,8 @@ per_sec = defaultdict(
         "err_yielded": 0,
         "err_other": 0,
         "sched": [],
+        "e2e": [],
+        "ttft": [],
     }
 )
 for d in rows:
@@ -108,6 +118,10 @@ for d in rows:
     if is_ok(d):
         b["success"] += 1
         b["sched"].append(d.get("schedule_ms", 0))
+        if d.get("total_ms"):
+            b["e2e"].append(d["total_ms"])
+        if d.get("ttft_ms"):
+            b["ttft"].append(d["ttft_ms"])
     else:
         b["errors"] += 1
         # Auto-TPM eviction terminals (checked first so they never fall into
@@ -153,10 +167,15 @@ for t in sorted(per_sec):
             "sched_p50": pct(b["sched"], 0.5),
             "sched_p95": pct(b["sched"], 0.95),
             "sched_p99": pct(b["sched"], 0.99),
+            "e2e_p50": pct(b["e2e"], 0.5),
+            "e2e_p95": pct(b["e2e"], 0.95),
+            "ttft_p50": pct(b["ttft"], 0.5),
+            "ttft_p95": pct(b["ttft"], 0.95),
         }
     )
 
 # ---- queue_timeseries from java_mock_stats (legacy log first, mock.json) ----
+mock_payload = load_json("mock.json") or {}
 mock_stats = []
 if os.path.isfile("mock_engine.log"):
     kv_pair_re = re.compile(r"(\w+)=([\d.]+)")
@@ -165,7 +184,6 @@ if os.path.isfile("mock_engine.log"):
             continue
         mock_stats.append(dict(kv_pair_re.findall(line)))
 else:
-    mock_payload = load_json("mock.json") or {}
     mock_stats = mock_payload.get("stats") or []
 queue_ts = []
 t0 = None
@@ -267,14 +285,15 @@ def lorenz_pct(values):
 
 
 ed_notes = [
-    "prefill_util_pct/decode_util_pct/decode_kv: mock java_mock_stats is "
-    "cluster-aggregate only -> omitted"
+    "tokens: prefill = input_len sum, decode = output_len sum (engine workload)",
+    "busy utilization needs mock final_snapshot busy_ms (mock-engine 4b14e05+)",
 ]
 engine_dist = {"notes": ed_notes}
 if rows:
     p_count = Counter()
     d_count = Counter()
     p_tokens = defaultdict(float)
+    d_tokens = defaultdict(float)
     win_p = defaultdict(Counter)
     win_d = defaultdict(Counter)
     for d in rows:
@@ -287,6 +306,7 @@ if rows:
             p_tokens[p] += d.get("input_len", 0) or 0
         if de:
             d_count[de] += 1
+            d_tokens[de] += d.get("output_len", 0) or 0
         t_ms = d.get("send_start_epoch_ms")
         if t_ms is not None:
             w = int((t_ms - epoch0) // 3000)
@@ -297,12 +317,17 @@ if rows:
 
     p_vals = sorted(p_count.values(), reverse=True)
     d_vals = sorted(d_count.values(), reverse=True)
+    p_tok_vals = sorted(p_tokens.values(), reverse=True)
+    d_tok_vals = sorted(d_tokens.values(), reverse=True)
     engine_dist["prefill"] = {
         "engine_count": len(p_count),
         "requests_per_engine": p_vals,
         "total": sum(p_vals),
         "gini_cum": gini_coeff(p_vals),
         "cv": cv_coeff(p_vals),
+        "tokens_per_engine": [round(v, 1) for v in p_tok_vals],
+        "tokens_gini_cum": gini_coeff(p_tok_vals),
+        "tokens_cv": cv_coeff(p_tok_vals),
     }
     engine_dist["decode"] = {
         "engine_count": len(d_count),
@@ -310,6 +335,9 @@ if rows:
         "total": sum(d_vals),
         "gini_cum": gini_coeff(d_vals),
         "cv": cv_coeff(d_vals),
+        "tokens_per_engine": [round(v, 1) for v in d_tok_vals],
+        "tokens_gini_cum": gini_coeff(d_tok_vals),
+        "tokens_cv": cv_coeff(d_tok_vals),
     }
     all_w = sorted(set(win_p) | set(win_d))
     engine_dist["window_gini"] = {
@@ -325,13 +353,393 @@ if rows:
         "x_pct": list(range(0, 101, 5)),
         "prefill_y_pct": lorenz_pct(p_vals),
         "decode_y_pct": lorenz_pct(d_vals),
+        "prefill_tokens_y_pct": lorenz_pct(p_tok_vals),
+        "decode_tokens_y_pct": lorenz_pct(d_tok_vals),
     }
     if p_tokens:
-        engine_dist["prefill_tokens_per_engine"] = [
-            round(v, 1) for v in sorted(p_tokens.values(), reverse=True)
-        ]
+        engine_dist["prefill_tokens_per_engine"] = [round(v, 1) for v in p_tok_vals]
+
+    # busy-time utilization: per-engine busy_ms from the mock final_snapshot
+    # divided by the effective run window. Elapsed spans the first activity
+    # seen by the mock (first stats row with enqueued_requests > 0) through
+    # the last stats row, so warmup traffic on both sides of the send window
+    # is covered on numerator and denominator alike.
+    fs_engines = (mock_payload.get("final_snapshot") or {}).get("engines") or []
+    stat_ts = []
+    first_active_ts = None
+    for kv in mock_stats:
+        try:
+            ts = int(float(kv.get("ts_epoch_ms", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        stat_ts.append(ts)
+        try:
+            if int(float(kv.get("enqueued_requests", 0) or 0)) > 0:
+                if first_active_ts is None:
+                    first_active_ts = ts
+        except (TypeError, ValueError):
+            pass
+    send_max = max((d.get("send_start_epoch_ms", 0) or 0) for d in rows)
+    first_ms = (
+        min([x for x in (epoch0, first_active_ts) if x])
+        if (epoch0 or first_active_ts)
+        else None
+    )
+    last_ms = max([x for x in (send_max, stat_ts[-1] if stat_ts else 0) if x])
+    busy_p, busy_d = [], []
+    if first_ms and last_ms and last_ms > first_ms and fs_engines:
+        elapsed_s = (last_ms - first_ms) / 1000.0
+        for eng in fs_engines:
+            if not isinstance(eng, dict):
+                continue
+            busy = eng.get("busy_ms")
+            if not isinstance(busy, (int, float)):
+                continue  # old mock build without busy_ms
+            role = str(eng.get("role") or "").lower()
+            pct_v = round(100.0 * float(busy) / (elapsed_s * 1000.0), 2)
+            if role == "prefill":
+                busy_p.append(pct_v)
+            elif role == "decode":
+                busy_d.append(pct_v)
+        if busy_p or busy_d:
+            busy_p.sort(reverse=True)
+            busy_d.sort(reverse=True)
+            engine_dist["utilization"] = {
+                "elapsed_s": round(elapsed_s, 1),
+                "prefill": {
+                    "per_engine_pct": busy_p,
+                    "gini_cum": gini_coeff(busy_p),
+                    "cv": cv_coeff(busy_p),
+                },
+                "decode": {
+                    "per_engine_pct": busy_d,
+                    "gini_cum": gini_coeff(busy_d),
+                    "cv": cv_coeff(busy_d),
+                },
+                "note": (
+                    "prefill: busy= batch exec ms (maxPrefillConcurrency=1, "
+                    "<=100%); decode: busy= request exec ms summed under soft "
+                    "concurrency (value = avg concurrent requests, may exceed "
+                    "100%)"
+                ),
+            }
+        else:
+            ed_notes.append(
+                "final_snapshot engines carry no busy_ms (old mock build): "
+                "utilization omitted"
+            )
 else:
     ed_notes.append("per_request.jsonl not found/empty: engine_dist omitted")
+
+# ---- compact time series: G3/G4/G5 + log rows, rebased to epoch0 ----------
+# All new series share one time axis: seconds since the first per-request
+# send (epoch0). Negative t = pre-send warmup. A series whose source file is
+# missing comes out empty; the generator renders charts conditionally.
+
+master_json = load_json("master.json") or {}
+run_meta = load_json("run_meta.json") or {}
+prom_ts = master_json.get("prometheus_timeseries") or []
+
+
+def rel_axis(pts):
+    """[(epoch_ms, value)] -> [(t_s, value)] on the per-request send axis.
+
+    Falls back to each series' own first sample when per_request rows are
+    absent (epoch0 == 0).
+    """
+    if not pts:
+        return []
+    anchor = epoch0 or pts[0][0]
+    return [(round((ts - anchor) / 1000.0, 1), v) for ts, v in pts]
+
+
+def prom_ts_extract(base_name, agg="sum"):
+    """G3 prometheus timeline -> [(epoch_ms, value)] for one metric.
+
+    Label variants of base_name are folded per sample by agg: "sum" for
+    per-engine gauges (queue depth, KV tokens), "avg" for ratios, "max" for
+    max-age gauges.
+    """
+    pts = []
+    for grp in prom_ts:
+        if not isinstance(grp, dict):
+            continue
+        metrics = grp.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        try:
+            ts = float(grp.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        vals = [
+            float(v)
+            for k, v in metrics.items()
+            if isinstance(v, (int, float)) and str(k).split("{", 1)[0] == base_name
+        ]
+        if not vals:
+            continue
+        if agg == "max":
+            v = max(vals)
+        elif agg == "avg":
+            v = sum(vals) / len(vals)
+        else:
+            v = sum(vals)
+        pts.append((ts, v))
+    pts.sort(key=lambda p: p[0])
+    return pts
+
+
+# master 10s ServerScheduleLatencyRecorder rows (SERVER_LAT). The row itself
+# carries no ts: parse the log-line datetime prefix (written by the same host
+# the aggregation runs on, so local tz matches). Prefix-less rows are stapled
+# onto the 10s grid around their anchored neighbours, then the whole set is
+# re-sorted by ts (sorted glob order puts the current flexlb.log first).
+LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[.,](\d{3})")
+SERVER_LAT_LINE_RE = re.compile(
+    r"flexlb_server_schedule_latency count=\d+ arrival_qps=[\d.]+ "
+    r"completion_qps=[\d.]+ server_p50_ms=([\d.]+) server_p95_ms=([\d.]+) "
+    r"server_p99_ms=([\d.]+) grpc_queue_p95_ms=([\d.]+) "
+    r"route_submit_p95_ms=([\d.]+) batch_wait_p95_ms=([\d.]+) "
+    r"dispatch_ack_p95_ms=([\d.]+) ack_response_p95_ms=([\d.]+)"
+)
+stage_rows = []
+for f in log_files:
+    with open(f, errors="replace") as stream:
+        for line in stream:
+            if "flexlb_server_schedule_latency" not in line:
+                continue
+            m = SERVER_LAT_LINE_RE.search(line)
+            if not m:
+                continue
+            ts = None
+            tm = LOG_TS_RE.match(line)
+            if tm:
+                try:
+                    ts = (
+                        datetime.strptime(tm.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                        + int(tm.group(2)) / 1000.0
+                    ) * 1000.0
+                except ValueError:
+                    ts = None
+            stage_rows.append((ts, [float(m.group(i)) for i in range(1, 9)]))
+if stage_rows:
+    anchored = [(i, ts) for i, (ts, _) in enumerate(stage_rows) if ts is not None]
+    if anchored:
+        first_i, first_ts = anchored[0]
+        for i in range(first_i):
+            stage_rows[i] = (first_ts - (first_i - i) * 10_000.0, stage_rows[i][1])
+        prev_i, prev_ts = anchored[0]
+        for i, ts in anchored[1:]:
+            span = i - prev_i
+            step = (ts - prev_ts) / span if span else 10_000.0
+            for k in range(prev_i + 1, i):
+                stage_rows[k] = (prev_ts + (k - prev_i) * step, stage_rows[k][1])
+            prev_i, prev_ts = i, ts
+        for i in range(prev_i + 1, len(stage_rows)):
+            stage_rows[i] = (prev_ts + (i - prev_i) * 10_000.0, stage_rows[i][1])
+        stage_rows.sort(key=lambda r: r[0])
+    else:
+        stage_rows = [
+            ((i + 1) * 10_000.0, fields) for i, (_, fields) in enumerate(stage_rows)
+        ]
+stage_latency_ts = [
+    {
+        "t": t,
+        "server_p50_ms": round(f[0], 1),
+        "server_p95_ms": round(f[1], 1),
+        "server_p99_ms": round(f[2], 1),
+        "grpc_queue_p95_ms": round(f[3], 1),
+        "route_submit_p95_ms": round(f[4], 1),
+        "batch_wait_p95_ms": round(f[5], 1),
+        "dispatch_ack_p95_ms": round(f[6], 1),
+        "ack_response_p95_ms": round(f[7], 1),
+    }
+    for t, f in rel_axis(stage_rows)
+]
+
+# mock engine execution windows (java_mock_stats): decode_exec_* has always
+# been there; prefill_exec_* only exists on builds >= 4b14e05 (columns are
+# dropped wholesale on old runs instead of zero-filling).
+exec_pts = []
+any_prefill_exec = False
+for kv in mock_stats:
+    try:
+        ts = int(float(kv.get("ts_epoch_ms", 0) or 0))
+    except (TypeError, ValueError):
+        continue
+    if not ts:
+        continue
+    if "prefill_exec_p50" in kv:
+        any_prefill_exec = True
+    exec_pts.append(
+        (
+            ts,
+            (
+                int(float(kv.get("decode_exec_p50", 0) or 0)),
+                int(float(kv.get("decode_exec_p95", 0) or 0)),
+                int(float(kv.get("prefill_exec_p50", 0) or 0)),
+                int(float(kv.get("prefill_exec_p95", 0) or 0)),
+            ),
+        )
+    )
+engine_exec_ts = []
+for t, (d50, d95, p50, p95) in rel_axis(exec_pts):
+    row = {"t": t, "decode_exec_p50_ms": d50, "decode_exec_p95_ms": d95}
+    if any_prefill_exec:
+        row["prefill_exec_p50_ms"] = p50
+        row["prefill_exec_p95_ms"] = p95
+    engine_exec_ts.append(row)
+
+# G5 process usage (run_meta.json process_usage; legacy raw poller file as
+# fallback): client_* shard pollers are averaged into one client series per
+# whole second; a role missing at a given second simply omits its keys.
+proc_entries = []
+for entry in run_meta.get("process_usage") or []:
+    if not isinstance(entry, dict):
+        continue
+    label = str(entry.get("label", ""))
+    if label == "mock":
+        group = "mock"
+    elif label == "master":
+        group = "master"
+    elif label.startswith("client"):
+        group = "client"
+    else:
+        continue
+    try:
+        proc_entries.append(
+            (
+                int(float(entry.get("ts_epoch_ms", 0) or 0)),
+                group,
+                float(entry.get("cpu_pct", 0) or 0),
+                float(entry.get("rss_kb", 0) or 0),
+            )
+        )
+    except (TypeError, ValueError):
+        continue
+if not proc_entries and os.path.isfile("process_usage_timeseries.txt"):
+    kv_re = re.compile(
+        r"ts_epoch_ms=(\d+) label=(\S+) pid=\d+ " r"cpu_pct=(-?[\d.]+) rss_kb=(-?\d+)"
+    )
+    for line in open("process_usage_timeseries.txt", errors="replace"):
+        m = kv_re.search(line)
+        if not m:
+            continue
+        label = m.group(2)
+        group = (
+            "mock"
+            if label == "mock"
+            else (
+                "master"
+                if label == "master"
+                else "client" if label.startswith("client") else None
+            )
+        )
+        if group:
+            proc_entries.append(
+                (int(m.group(1)), group, float(m.group(3)), float(m.group(4)))
+            )
+process_ts = []
+if proc_entries:
+    anchor = epoch0 or min(e[0] for e in proc_entries)
+    by_t = defaultdict(lambda: defaultdict(list))
+    for ts, group, cpu, rss in proc_entries:
+        by_t[int((ts - anchor) // 1000)][group].append((cpu, rss))
+    for t in sorted(by_t):
+        row = {"t": t}
+        for group in ("mock", "master", "client"):
+            samples = by_t[t][group]
+            if samples:
+                row[group + "_cpu_pct"] = round(
+                    sum(s[0] for s in samples) / len(samples), 1
+                )
+                row[group + "_rss_mb"] = round(
+                    sum(s[1] for s in samples) / len(samples) / 1024.0, 1
+                )
+        if len(row) > 1:
+            process_ts.append(row)
+
+# G4 inflight snapshots: scheduler in-flight plus per-endpoint batch/request
+# counts summed cluster-wide.
+inflight_pts = []
+for grp in master_json.get("inflight_timeseries") or []:
+    if not isinstance(grp, dict):
+        continue
+    try:
+        ts = int(float(grp.get("ts_epoch_ms", 0) or 0))
+    except (TypeError, ValueError):
+        continue
+    if not ts:
+        continue
+    infl = grp.get("inflight")
+    if not isinstance(infl, dict):
+        continue
+    try:
+        sched = int(infl.get("scheduler_inflight", 0) or 0)
+        p_batches = sum(
+            int(e.get("inflight_batches", 0) or 0)
+            for e in infl.get("prefill_endpoints") or []
+            if isinstance(e, dict)
+        )
+        d_reqs = sum(
+            int(e.get("inflight_requests", 0) or 0)
+            for e in infl.get("decode_endpoints") or []
+            if isinstance(e, dict)
+        )
+    except (TypeError, ValueError):
+        continue
+    inflight_pts.append((ts, (sched, p_batches, d_reqs)))
+inflight_ts = [
+    {"t": t, "scheduler": s, "prefill_batches": pb, "decode_requests": dr}
+    for t, (s, pb, dr) in rel_axis(inflight_pts)
+]
+
+# master-side queue depth + inflight age from the G3 prometheus timeline
+# (needs FLEXLB_MONITOR_MODE=all; per-priority label variants summed).
+age_pts = prom_ts_extract("flexlb_app_flexlb_inflight_max_age_ms", agg="max")
+inflight_age_ts = [{"t": t, "age_ms": int(round(v))} for t, v in rel_axis(age_pts)]
+
+kv_used = prom_ts_extract("flexlb_app_cache_used_kv_cache_tokens", agg="sum")
+kv_total = prom_ts_extract("flexlb_app_cache_total_kv_cache_tokens", agg="sum")
+kv_ts = []
+if kv_used:
+    used_by_ts = {ts: v for ts, v in kv_used}
+    total_by_ts = {ts: v for ts, v in kv_total}
+    kv_rows = []
+    last_total = None
+    for ts in sorted(set(used_by_ts) | set(total_by_ts)):
+        if ts in total_by_ts:
+            last_total = total_by_ts[ts]
+        used = used_by_ts.get(ts)
+        if used is None or not last_total:
+            continue
+        kv_rows.append(
+            (
+                ts,
+                {
+                    "used_tokens": int(round(used)),
+                    "total_tokens": int(round(last_total)),
+                    "used_pct": round(100.0 * used / last_total, 1),
+                },
+            )
+        )
+    kv_ts = [{"t": t, **row} for t, row in rel_axis(kv_rows)]
+
+batcher_pts = prom_ts_extract("flexlb_app_flexlb_batcher_queue_size", agg="sum")
+routing_pts = prom_ts_extract("flexlb_app_routing_queue_length", agg="sum")
+batcher_ts = []
+if batcher_pts or routing_pts:
+    b_by_ts = {ts: v for ts, v in batcher_pts}
+    r_by_ts = {ts: v for ts, v in routing_pts}
+    b_rows = []
+    for ts in sorted(set(b_by_ts) | set(r_by_ts)):
+        row = {}
+        if ts in b_by_ts:
+            row["batcher_queue"] = int(round(b_by_ts[ts]))
+        if ts in r_by_ts:
+            row["routing_queue"] = int(round(r_by_ts[ts]))
+        b_rows.append((ts, row))
+    batcher_ts = [{"t": t, **row} for t, row in rel_axis(b_rows)]
 
 out = {
     "meta": {"run_dir": os.path.basename(run_dir)},
@@ -364,5 +772,12 @@ out = {
     "per_second": per_second,
     "queue_timeseries": queue_ts,
     "engine_dist": engine_dist,
+    "stage_latency_ts": stage_latency_ts,
+    "engine_exec_ts": engine_exec_ts,
+    "process_ts": process_ts,
+    "inflight_ts": inflight_ts,
+    "inflight_age_ts": inflight_age_ts,
+    "kv_ts": kv_ts,
+    "batcher_ts": batcher_ts,
 }
 json.dump(out, sys.stdout)
