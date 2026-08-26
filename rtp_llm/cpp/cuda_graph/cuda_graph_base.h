@@ -37,10 +37,6 @@ struct GraphParams {
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
     std::vector<std::string> kv_cache_group_tags;
-    // Physical owner-row token coverage aligned with kv_cache_group_tags.
-    std::vector<int> kv_cache_group_tokens_per_block;
-    // Kernel-row token coverage aligned with kv_cache_group_tags.
-    std::vector<int> kv_cache_group_kernel_tokens_per_block;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from
