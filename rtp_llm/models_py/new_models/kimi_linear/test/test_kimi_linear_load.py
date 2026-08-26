@@ -419,6 +419,7 @@ class KimiLinearNewLoaderTest(unittest.TestCase):
         self.assertTrue(should_load("model.layers.0.self_attn.q_proj.weight"))
         self.assertFalse(should_load("model.layers.1.self_attn.q_proj.weight"))
         self.assertTrue(should_load("model.layers.2.self_attn.q_proj.weight"))
+        self.assertTrue(should_load("unexpected_top_level.weight"))
 
     def test_single_head_a_log_preserves_vector_shape(self):
         cfg = {
