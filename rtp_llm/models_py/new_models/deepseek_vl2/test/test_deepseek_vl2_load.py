@@ -1328,7 +1328,7 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
         model.model_config = types.SimpleNamespace(
             attn_config=types.SimpleNamespace(use_mla=True)
         )
-        with self.assertRaisesRegex(RuntimeError, "USE_NEW_LOADER=1"):
+        with self.assertRaisesRegex(RuntimeError, "USE_NEW_LOADER=0"):
             model._create_python_model()
 
     @unittest.skipUnless(_RUN_LEGACY_TESTS, "legacy compatibility target only")

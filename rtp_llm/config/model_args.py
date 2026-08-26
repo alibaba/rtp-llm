@@ -62,4 +62,5 @@ class ModelArgs:
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
         self.enable_output_vocab_pruning: bool = False
-        self.use_new_loader: bool = False
+        # None selects the model registry default; bool is an explicit override.
+        self.use_new_loader: Optional[bool] = None
