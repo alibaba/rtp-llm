@@ -31,7 +31,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.config.SingleDecisionConfig;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -88,6 +87,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
@@ -121,6 +122,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final int REAL_REQUEST_TEMPLATE_COUNT = 128;
     private static final int DISPATCH_THREADS = 32;
     private static final int DISPATCH_QUEUE_CAPACITY = 2_048;
+    private static final int MAX_RECORDED_DELIVERY_WAIT_MS = 1_000;
     private static final DeliveryMode DELIVERY_MODE = DeliveryMode.parse(
             System.getProperty("flexlb.perf.delivery-mode", "BATCH"));
     private static final int MASTER_GRPC_EXECUTOR_CORE_THREADS =
@@ -236,6 +238,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static Level previousPvLogLevel;
     private static Level previousRandomStrategyLogLevel;
     private final Map<String, LongAdder> dispatchReasonCounts = new ConcurrentHashMap<>();
+    private final MillisecondHistogram deliveryWaitHistogram =
+            new MillisecondHistogram(MAX_RECORDED_DELIVERY_WAIT_MS);
 
     @BeforeAll
     static void loadLogDerivedRequests() throws IOException {
@@ -276,11 +280,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = super.createConfig();
-        if (DELIVERY_MODE == DeliveryMode.BATCH) {
-            cfg.fixedWindowDecision().setMaxCollectionWaitMs(10L);
-            cfg.fixedWindowDecision().setMaxRequests(16);
-        } else {
-            cfg.queueScheduler().setDecision(new SingleDecisionConfig());
+        cfg.fixedWindowDecision().setMaxCollectionWaitMs(10L);
+        cfg.fixedWindowDecision().setMaxRequests(16);
+        if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
             // This scheduling-only fixture does not replay terminal worker status,
             // so route leases cannot be retired. Leave the per-worker admission
             // limit disabled; the matrix still exercises the production binding
@@ -308,7 +310,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     @Override
     protected BatchSchedulerReporter createBatchSchedulerReporter() {
-        return new CountingBatchSchedulerReporter(dispatchReasonCounts);
+        return new CountingBatchSchedulerReporter(
+                dispatchReasonCounts, deliveryWaitHistogram);
     }
 
     @Override
@@ -528,6 +531,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     void masterMeetsRateSloAcrossEngineScaleMatrix(int prefillEngineCount,
                                                    int decodeEngineCount,
                                                    int targetQps) throws Exception {
+        assertTrue(config.isFixedWindowDecision(),
+                "engine-scale perf must exercise FIXED_WINDOW decisions");
         provisionPrefillEndpoints(prefillEngineCount);
         while (endpointRegistry.getEndpointCount(RoleType.DECODE) < decodeEngineCount) {
             addLogicalDecodeEndpoint(endpointRegistry.getEndpointCount(RoleType.DECODE));
@@ -544,6 +549,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 targetQps);
         assertSuccessful(warmup);
         awaitCompletionCount(warmupRequests);
+        awaitDeliveryWaitCount(warmupRequests);
         resetMeasurementState();
 
         double minimumQpsRatio = Double.parseDouble(
@@ -568,6 +574,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         TrafficResult result = runTraffic(requestCount, firstRequestId, targetQps);
         assertSuccessful(result);
         Map<String, Object> masterSnapshot = awaitCompletionCount(requestCount);
+        awaitDeliveryWaitCount(requestCount);
+        MillisecondHistogram.Snapshot deliveryWait = deliveryWaitHistogram.snapshot();
         BatchSummary batches = summarizeEngineBatches(firstRequestId, allPrefillWorkers());
         double masterQps = number(masterSnapshot, "completion_qps").doubleValue();
         Map<String, Object> serverLatency = nestedMap(masterSnapshot, "server_total_ms");
@@ -586,9 +594,19 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 + windowTimeoutCount + predictedExecutionCapCount;
         int activePrefillRoutes = activeScheduledEngineCount(result, RoleType.PREFILL);
         int activeDecodeRoutes = activeScheduledEngineCount(result, RoleType.DECODE);
+        boolean batchDelivery = DELIVERY_MODE == DeliveryMode.BATCH;
+        String batchFullLabel = batchDelivery ? Long.toString(batchFullCount) : "N/A";
+        String windowTimeoutLabel = batchDelivery ? Long.toString(windowTimeoutCount) : "N/A";
+        String predictedCapLabel = batchDelivery
+                ? Long.toString(predictedExecutionCapCount) : "N/A";
+        String averageBatchLabel = batchDelivery
+                ? String.format("%.2f", batches.averageBatchSize()) : "N/A";
+        String maximumBatchLabel = batchDelivery
+                ? Integer.toString(batches.maxBatchSize()) : "N/A";
 
         System.out.printf(
-                "FlexLB Master engine-scale E2E: delivery=%s prefill=%d decode=%d "
+                "FlexLB Master engine-scale E2E: delivery=%s decision=FIXED_WINDOW "
+                        + "prefill=%d decode=%d "
                         + "target_qps=%d requests=%d client_qps=%.1f master_qps=%.1f "
                         + "client_p50=%.3fms client_p90=%.3fms client_p95=%.3fms "
                         + "client_p99=%.3fms "
@@ -597,9 +615,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         + "active_prefill_route=%d active_decode_route=%d "
                         + "batch_wait_count=%d batch_wait_p50=%s batch_wait_p90=%s "
                         + "batch_wait_p95=%s batch_wait_p99=%s "
+                        + "delivery_wait_count=%d delivery_wait_p50=%s "
+                        + "delivery_wait_p90=%s delivery_wait_p95=%s "
+                        + "delivery_wait_p99=%s "
                         + "dispatch_ack_count=%d dispatch_ack_p99=%s "
-                        + "engine_batches=%d batch_full=%d window_timeout=%d "
-                        + "predicted_execution_cap=%d avg_batch=%.2f max_batch=%d "
+                        + "engine_batches=%d batch_full=%s window_timeout=%s "
+                        + "predicted_execution_cap=%s avg_batch=%s max_batch=%s "
                         + "grpc_queue_p99=%s route_submit_p99=%s "
                         + "ack_response_p99=%s%n",
                 DELIVERY_MODE, prefillEngineCount, decodeEngineCount, targetQps,
@@ -616,11 +637,15 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 latencyBucketLabel(batchWait, "p90"),
                 latencyBucketLabel(batchWait, "p95"),
                 latencyBucketLabel(batchWait, "p99"),
+                deliveryWait.count(), millisecondBucketLabel(deliveryWait.count(), deliveryWait.p50()),
+                millisecondBucketLabel(deliveryWait.count(), deliveryWait.p90()),
+                millisecondBucketLabel(deliveryWait.count(), deliveryWait.p95()),
+                millisecondBucketLabel(deliveryWait.count(), deliveryWait.p99()),
                 number(dispatchAck, "count").longValue(),
                 latencyBucketLabel(dispatchAck, "p99"),
-                batches.batchCount(), batchFullCount, windowTimeoutCount,
-                predictedExecutionCapCount, batches.averageBatchSize(),
-                batches.maxBatchSize(), latencyBucketLabel(grpcQueue, "p99"),
+                batches.batchCount(), batchFullLabel, windowTimeoutLabel,
+                predictedCapLabel, averageBatchLabel, maximumBatchLabel,
+                latencyBucketLabel(grpcQueue, "p99"),
                 latencyBucketLabel(routeSubmit, "p99"),
                 latencyBucketLabel(ackResponse, "p99"));
 
@@ -634,6 +659,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "every request must record route-submit latency");
         assertEquals(requestCount, number(ackResponse, "count").longValue(),
                 "every request must record response-publication latency");
+        assertEquals(requestCount, deliveryWait.count(),
+                "every request must record enqueue-to-delivery wait");
         assertEquals(prefillEngineCount, activePrefillRoutes,
                 "every prefill engine must appear in measured routing decisions");
         assertEquals(decodeEngineCount, activeDecodeRoutes,
@@ -650,9 +677,29 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         assertTrue(result.p99Ms() <= maximumClientP99Ms,
                 () -> String.format("client E2E P99 %.3f ms exceeds ceiling %.3f ms",
                         result.p99Ms(), maximumClientP99Ms));
+        double sparseWindowArrivalsPerPrefill = targetQps
+                * config.fixedWindowDecision().getMaxCollectionWaitMs()
+                / 1_000.0 / prefillEngineCount;
+        if (sparseWindowArrivalsPerPrefill < 0.5) {
+            double minimumObservedWindowMs =
+                    config.fixedWindowDecision().getMaxCollectionWaitMs() * 0.5;
+            assertTrue(result.p50Ms() >= minimumObservedWindowMs,
+                    () -> String.format(
+                            "client E2E P50 %.3f ms did not observe the %d ms fixed window",
+                            result.p50Ms(),
+                            config.fixedWindowDecision().getMaxCollectionWaitMs()));
+            assertTrue(deliveryWait.p50() >= minimumObservedWindowMs,
+                    () -> String.format(
+                            "delivery wait P50 %d ms did not observe the %d ms fixed window",
+                            deliveryWait.p50(),
+                            config.fixedWindowDecision().getMaxCollectionWaitMs()));
+        }
         assertTrue(serverP99Ms <= maximumServerP99Ms,
                 () -> String.format("Master server P99 %d ms exceeds ceiling %d ms",
                         serverP99Ms, maximumServerP99Ms));
+        assertTrue(deliveryWait.p99() <= maximumBatchWaitP99Ms,
+                () -> String.format("delivery wait P99 %d ms exceeds ceiling %d ms",
+                        deliveryWait.p99(), maximumBatchWaitP99Ms));
 
         if (DELIVERY_MODE == DeliveryMode.BATCH) {
             assertEquals(requestCount, number(batchWait, "count").longValue(),
@@ -1018,9 +1065,20 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "all Master gRPC requests must release their active-request token");
     }
 
+    private void awaitDeliveryWaitCount(long expectedCount) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (deliveryWaitHistogram.count() < expectedCount
+                && System.nanoTime() < deadlineNanos) {
+            TimeUnit.MILLISECONDS.sleep(1);
+        }
+        assertEquals(expectedCount, deliveryWaitHistogram.count(),
+                "enqueue-to-delivery telemetry must cover every request");
+    }
+
     private void resetMeasurementState() {
         latencyRecorder.reset();
         dispatchReasonCounts.clear();
+        deliveryWaitHistogram.reset();
         for (MockPrefillWorker worker : allPrefillWorkers()) {
             worker.resetRecords();
         }
@@ -1353,6 +1411,13 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return millis == 0L ? "<1ms" : millis + "ms";
     }
 
+    private static String millisecondBucketLabel(long count, long millis) {
+        if (count == 0L) {
+            return "N/A";
+        }
+        return millis == 0L ? "<1ms" : millis + "ms";
+    }
+
     private static long percentileNanos(long[] sortedValues, double percentile) {
         int index = Math.max(0, (int) Math.ceil(sortedValues.length * percentile) - 1);
         return sortedValues[index];
@@ -1405,15 +1470,81 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private static final class CountingBatchSchedulerReporter extends BatchSchedulerReporter {
         private final Map<String, LongAdder> dispatchReasonCounts;
+        private final MillisecondHistogram deliveryWaitHistogram;
 
-        private CountingBatchSchedulerReporter(Map<String, LongAdder> dispatchReasonCounts) {
+        private CountingBatchSchedulerReporter(
+                Map<String, LongAdder> dispatchReasonCounts,
+                MillisecondHistogram deliveryWaitHistogram) {
             super(new NoOpFlexMonitor());
             this.dispatchReasonCounts = dispatchReasonCounts;
+            this.deliveryWaitHistogram = deliveryWaitHistogram;
         }
 
         @Override
         public void reportDispatchReason(String role, String engineIp, String reason) {
             dispatchReasonCounts.computeIfAbsent(reason, ignored -> new LongAdder()).increment();
+        }
+
+        @Override
+        public void reportBatchWaitTimeMs(
+                String role, String engineIp, long waitMs, int priority) {
+            deliveryWaitHistogram.record(waitMs);
+        }
+    }
+
+    private static final class MillisecondHistogram {
+        private final int maximumBucketMs;
+        private final AtomicLongArray buckets;
+        private final AtomicLong count = new AtomicLong();
+
+        private MillisecondHistogram(int maximumBucketMs) {
+            this.maximumBucketMs = maximumBucketMs;
+            this.buckets = new AtomicLongArray(maximumBucketMs + 2);
+        }
+
+        private void record(long millis) {
+            int bucket = (int) Math.min(maximumBucketMs + 1L, Math.max(0L, millis));
+            buckets.incrementAndGet(bucket);
+            count.incrementAndGet();
+        }
+
+        private long count() {
+            return count.get();
+        }
+
+        private Snapshot snapshot() {
+            long sampleCount = count();
+            return new Snapshot(
+                    sampleCount,
+                    percentile(sampleCount, 0.50),
+                    percentile(sampleCount, 0.90),
+                    percentile(sampleCount, 0.95),
+                    percentile(sampleCount, 0.99));
+        }
+
+        private long percentile(long sampleCount, double quantile) {
+            if (sampleCount == 0L) {
+                return 0L;
+            }
+            long target = Math.max(1L, (long) Math.ceil(sampleCount * quantile));
+            long cumulative = 0L;
+            for (int bucket = 0; bucket < buckets.length(); bucket++) {
+                cumulative += buckets.get(bucket);
+                if (cumulative >= target) {
+                    return bucket;
+                }
+            }
+            throw new IllegalStateException("delivery-wait histogram sample count drifted");
+        }
+
+        private void reset() {
+            count.set(0L);
+            for (int bucket = 0; bucket < buckets.length(); bucket++) {
+                buckets.set(bucket, 0L);
+            }
+        }
+
+        private record Snapshot(long count, long p50, long p90, long p95, long p99) {
         }
     }
 }
