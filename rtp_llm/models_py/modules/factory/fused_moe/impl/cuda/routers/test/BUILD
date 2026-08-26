@@ -40,3 +40,12 @@ py_test (
     # test still runs in the CUDA image where the runtime library is present.
     exec_properties = {'gpu':'A10'},
 )
+
+py_test (
+    name = "deepep_low_latency_row_scatter_test",
+    srcs = ["deepep_low_latency_row_scatter_test.py"],
+    deps = py_test_deps,
+    # CPU tensors, but importing the CUDA router needs librtp_compute_ops.
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)
