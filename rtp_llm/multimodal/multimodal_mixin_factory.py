@@ -9,6 +9,7 @@ from rtp_llm.multimodal.multimodal_mixin_register import (
     get_multimodal_mixin_cls,
 )
 from rtp_llm.multimodal.multimodal_mixins import BaseMultiModalMixin
+from rtp_llm.models_py.registry import is_model_registered
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.new_loader import is_new_loader_enabled
 
@@ -25,6 +26,10 @@ class MultimodalMixinFactory:
             logging.info("No multimodal model, skip create multimodal mixin")
             return None
         multimodal_mixin_cls = get_multimodal_mixin_cls(model_config.model_type)
+        use_new_loader = is_new_loader_enabled(
+            model_config,
+            default_enabled=is_model_registered(model_config.model_type),
+        )
         return multimodal_mixin_cls(
             model_config.compute_dtype,
             device,
@@ -32,7 +37,7 @@ class MultimodalMixinFactory:
             engine_config.load_config.load_method,
             vit_config,
             model_config.ckpt_path,
-            use_new_loader=is_new_loader_enabled(model_config),
+            use_new_loader=use_new_loader,
         )
 
     @staticmethod

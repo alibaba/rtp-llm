@@ -108,6 +108,36 @@ def _weights():
 
 
 class Qwen3BaseModelIntegrationTest(unittest.TestCase):
+    def test_base_model_loader_route_uses_registry_default_and_explicit_override(self):
+        model = object.__new__(BaseModel)
+        model.model_config = types.SimpleNamespace(
+            model_type="qwen_3", use_new_loader=None
+        )
+        model._new_loader_unsupported_reason = lambda **kwargs: None
+
+        self.assertTrue(model._use_new_loader())
+        model.model_config.model_type = "legacy_only_test_model"
+        self.assertFalse(model._use_new_loader())
+
+        model.model_config.use_new_loader = True
+        self.assertTrue(model._use_new_loader())
+        model.model_config.model_type = "qwen_3"
+        model.model_config.use_new_loader = False
+        self.assertFalse(model._use_new_loader())
+
+    def test_registry_default_falls_back_but_explicit_newloader_stays_strict(self):
+        model = object.__new__(BaseModel)
+        model.model_config = types.SimpleNamespace(
+            model_type="qwen_3", use_new_loader=None
+        )
+        model._new_loader_unsupported_reason = (
+            lambda **kwargs: "unsupported test configuration"
+        )
+
+        self.assertFalse(model._use_new_loader())
+        model.model_config.use_new_loader = True
+        self.assertTrue(model._use_new_loader())
+
     def test_source_configs_preserve_ignore_and_exclude(self):
         ignored = ["model.layers.0.self_attn.o_proj"]
         excluded = "model.layers.0.mlp.down_proj"
