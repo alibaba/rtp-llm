@@ -107,13 +107,14 @@ def build_paged_pool_specs(
     stride on layer 0 (all layers share the same allocator geometry per
     cache tag).
 
-    ``max_blocks_per_req`` MUST cover each pool's own block-table geometry
-    plus the decode-step slack required by ``gen_num_per_cycle``. Under-sizing
-    here truncates the framework block_table on copy in
-    ``update_decode_metadata_in_place``, leaving zero block-ids in the
-    unfilled tail; the captured graph then reads block_id=0 for real decode
-    positions, computes a slot in pool block 0, and overruns ``pool_view`` →
-    ``index_copy_`` OOB.
+    ``max_blocks_per_req`` MUST match the framework's runtime block_table
+    width — the framework uniformly allocates
+    ``ceil(max_seq_len / kernel_seq_size_per_block) + 1`` columns for
+    every pool. Under-sizing here truncates the framework block_table
+    on copy in ``update_decode_metadata_in_place``, leaving zero block-
+    ids in the unfilled tail; the captured graph then reads block_id=0
+    for real decode positions, computes a slot in pool block 0, and
+    overruns ``pool_view`` → ``index_copy_`` OOB.
     """
     if kv_cache is None or not v4.layers:
         return {}
@@ -126,12 +127,11 @@ def build_paged_pool_specs(
                 "build_paged_pool_specs: max_seq_len required to size paged "
                 "block tables to match the framework allocator."
             )
-    # The framework exposes a different raw-token coverage for each pool.
-    # In particular INDEXER_KV uses 256 raw tokens per kernel row while
-    # the common/SWA table can use 1024.  Sizing every persistent metadata
-    # table with the common geometry silently truncated the tagged indexer
-    # table during CUDA-graph preparation and eventually caused an illegal
-    # GPU access.  Compute the width per pool below from its own geometry.
+    # Framework's block_table width per pool. Add +1 slack for the same
+    # reason the C++ allocator does (last-token-of-prefill + first-decode
+    # may bridge a block boundary mid-step).
+    ksb = _dsv4_kernel_tokens_per_block(kv_cache)
+    max_blocks_per_req = (max_seq_len + ksb - 1) // ksb + 1
     # ``_pool_entries_per_block`` reads ``self._kv_cache`` which is only
     # bound during ``Attention.forward_decode``'s try/finally. Caller
     # (decode/forward.forward_decode) invokes us BEFORE the layer forward
@@ -144,9 +144,6 @@ def build_paged_pool_specs(
     # layer that has the pool — per-tag geometry is uniform across
     # the layers that own it.
     specs: Dict[str, Tuple[int, int, int]] = {}
-    graph_table_slack = max(
-        1, int(getattr(getattr(v4, "args", None), "gen_num_per_cycle", 1))
-    )
     saved_kv: Dict[int, Any] = {}
     try:
         # #50: STATE pool block tables must also flow through metadata so
@@ -165,19 +162,6 @@ def build_paged_pool_specs(
                         kv_cache,
                         tag,
                     )
-                    # INDEXER_KV stores one entry per four raw tokens.  Its
-                    # shared physical owner may report the wider owner-row
-                    # coverage here, while the indexer block table advances
-                    # after exactly ``entries_per_block * 4`` raw tokens.
-                    # Metadata must follow the table's kernel geometry.
-                    table_tokens_per_block = (
-                        entries_per_block * 4
-                        if tag == INDEXER_KV
-                        else tokens_per_block
-                    )
-                    max_blocks_per_req = (
-                        max_seq_len + table_tokens_per_block - 1
-                    ) // table_tokens_per_block + graph_table_slack
                     specs[tag] = (
                         entries_per_block,
                         tokens_per_block,

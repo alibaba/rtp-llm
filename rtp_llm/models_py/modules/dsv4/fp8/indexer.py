@@ -48,7 +48,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_paged_indexer_score,
     has_fp8_mqa_logits,
     has_fp8_paged_mqa_logits,
-    validate_indexer_paged_layout,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
@@ -642,10 +641,10 @@ class IndexerFP8(PoolBackedModule):
             # kernels run. Do not derive this from live positions via a GPU
             # scalar read: that would synchronize the device and is
             # illegal during CUDA graph capture.
-            raw_table_capacity = self._kv_block_table.shape[1] * self._kv_eb
-            T_static = (
-                self._kv_cache_t if self._kv_cache_t > 0 else raw_table_capacity
-            )
+            T_cache = self._kv_block_table.shape[1] * self._kv_eb
+            T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
+            T_max = max(32, min(T_cache, T_static))
+
             q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
                 _as_bf16_contig(q),
                 _as_bf16_contig(weights),
@@ -653,31 +652,23 @@ class IndexerFP8(PoolBackedModule):
                 self.rope_head_dim,
             )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
-            kernel_bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
-            # The framework publishes kernel-row ids and must expose a
-            # DeepGEMM-supported row width. Validate only host-visible geometry;
-            # never read live CUDA scalars in this per-layer decode hot path.
-            owner_tpb = (
-                self._kv_owner_tokens_per_block
-                if self._kv_owner_tokens_per_block > 0
-                else self._kv_eb * ratio
+            bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
+            # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
+            # (set by ``Attention._set_compressor_pool_context``); standalone
+            # tests still pass flat 2D. Flatten to ``[total_slots, 132]``
+            # (no copy — INDEXER pool is contiguous, no padding) for DeepGEMM.
+            pool_2d = (
+                self._kv_pool_view.flatten(0, 1)
+                if self._kv_pool_view.dim() == 3
+                else self._kv_pool_view
             )
-            pool_2d, bt_i32, deepgemm_block_size = validate_indexer_paged_layout(
-                self._kv_pool_view,
-                kernel_bt_i32,
-                self._kv_eb,
-                owner_tpb,
-                ratio,
-            )
-            T_cache = int(bt_i32.shape[1]) * int(deepgemm_block_size)
-            T_max = max(32, min(T_cache, T_static))
             logits = fp8_paged_indexer_score(
                 q_fp8,
                 w_fold.view(bsz * q_len, self.n_heads),
                 pool_2d,
                 bt_i32,
                 ctx_lens_2d,
-                block_size=deepgemm_block_size,
+                block_size=self._kv_eb,
                 max_ctx_len=T_max,
             )  # [B*q_len, T_max] fp32
             score = logits.view(bsz, q_len, T_max)
