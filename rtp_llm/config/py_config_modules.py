@@ -386,29 +386,29 @@ class MasterConfig:
         # Session total timeout in seconds. If < 0: auto (3600 when queue mode, 0.5 otherwise).
         self.master_session_timeout_s: float = -1
         # Keep disabled by default so existing FlexLB/domain routing is unchanged.
-        self.master_kvcm_fallback_enabled: bool = False
+        self.master_client_fallback: bool = False
         self.master_kvcm_service_id: str = ""
         self.master_kvcm_bootstrap_port: int = 6381
         # Exact KVCM instance_id/namespace, for example <prefill-deployment>_128.
         self.master_kvcm_instance_id: str = ""
         self.master_kvcm_block_size: int = 0
         self.master_kvcm_request_timeout_ms: int = 100
-        self.master_kvcm_worker_grpc_port_override: int = 0
-        self.master_kvcm_worker_status_port: int = 0
-        self.master_kvcm_candidate_pool_size: int = 3
+        self.master_client_fallback_worker_grpc_port_override: int = 0
+        self.master_client_fallback_worker_status_port: int = 0
+        self.master_client_fallback_candidate_pool_size: int = 3
         self.master_kvcm_hot_candidate_pool_size: int = 2
-        self.master_kvcm_worker_status_concurrency: int = 3
+        self.master_client_fallback_worker_status_concurrency: int = 3
         # Keep these values aligned with the colocated FlexLB configuration.
-        self.master_sync_request_timeout_ms: int = 200
-        self.master_prefill_queue_size_threshold: int = 1024
-        self.master_p2p_hit_discount: float = 0.2
-        self.master_cache_affinity_first_max_extra_work_tokens: int = 0
-        self.master_outstanding_uncached_tokens_threshold: int = 0
-        self.master_cache_affinity_first_min_hit_rate: float = 5.0
+        self.master_client_fallback_worker_status_timeout_ms: int = 200
+        self.master_client_fallback_prefill_queue_size_threshold: int = 1024
+        self.master_client_fallback_p2p_hit_discount: float = 0.2
+        self.master_client_fallback_cache_affinity_first_max_extra_work_tokens: int = 0
+        self.master_client_fallback_outstanding_uncached_tokens_threshold: int = 0
+        self.master_client_fallback_cache_affinity_first_min_hit_rate: float = 5.0
         # Static IP:port lists used by tests may opt out of VIP discovery.
         self.master_kvcm_use_local: bool = False
         # Zero preserves the legacy behavior of using the request TTFT timeout.
-        self.master_flexlb_transport_timeout_ms: int = 0
+        self.master_client_fallback_flexlb_transport_timeout_ms: int = 0
 
     def to_string(self):
         return (
@@ -416,33 +416,37 @@ class MasterConfig:
             f"master_default_timeout_ms: {self.master_default_timeout_ms}\n"
             f"master_max_connect_pool_size: {self.master_max_connect_pool_size}\n"
             f"master_session_timeout_s: {self.master_session_timeout_s}\n"
-            f"master_kvcm_fallback_enabled: {self.master_kvcm_fallback_enabled}\n"
+            f"master_client_fallback: {self.master_client_fallback}\n"
             f"master_kvcm_service_id: {self.master_kvcm_service_id}\n"
             f"master_kvcm_bootstrap_port: {self.master_kvcm_bootstrap_port}\n"
             f"master_kvcm_instance_id: {self.master_kvcm_instance_id}\n"
             f"master_kvcm_block_size: {self.master_kvcm_block_size}\n"
             f"master_kvcm_request_timeout_ms: {self.master_kvcm_request_timeout_ms}\n"
-            "master_kvcm_worker_grpc_port_override: "
-            f"{self.master_kvcm_worker_grpc_port_override}\n"
-            f"master_kvcm_worker_status_port: {self.master_kvcm_worker_status_port}\n"
-            f"master_kvcm_candidate_pool_size: {self.master_kvcm_candidate_pool_size}\n"
+            "master_client_fallback_worker_grpc_port_override: "
+            f"{self.master_client_fallback_worker_grpc_port_override}\n"
+            "master_client_fallback_worker_status_port: "
+            f"{self.master_client_fallback_worker_status_port}\n"
+            "master_client_fallback_candidate_pool_size: "
+            f"{self.master_client_fallback_candidate_pool_size}\n"
             "master_kvcm_hot_candidate_pool_size: "
             f"{self.master_kvcm_hot_candidate_pool_size}\n"
-            "master_kvcm_worker_status_concurrency: "
-            f"{self.master_kvcm_worker_status_concurrency}\n"
-            f"master_sync_request_timeout_ms: {self.master_sync_request_timeout_ms}\n"
-            "master_prefill_queue_size_threshold: "
-            f"{self.master_prefill_queue_size_threshold}\n"
-            f"master_p2p_hit_discount: {self.master_p2p_hit_discount}\n"
-            "master_cache_affinity_first_max_extra_work_tokens: "
-            f"{self.master_cache_affinity_first_max_extra_work_tokens}\n"
-            "master_outstanding_uncached_tokens_threshold: "
-            f"{self.master_outstanding_uncached_tokens_threshold}\n"
-            "master_cache_affinity_first_min_hit_rate: "
-            f"{self.master_cache_affinity_first_min_hit_rate}\n"
+            "master_client_fallback_worker_status_concurrency: "
+            f"{self.master_client_fallback_worker_status_concurrency}\n"
+            "master_client_fallback_worker_status_timeout_ms: "
+            f"{self.master_client_fallback_worker_status_timeout_ms}\n"
+            "master_client_fallback_prefill_queue_size_threshold: "
+            f"{self.master_client_fallback_prefill_queue_size_threshold}\n"
+            "master_client_fallback_p2p_hit_discount: "
+            f"{self.master_client_fallback_p2p_hit_discount}\n"
+            "master_client_fallback_cache_affinity_first_max_extra_work_tokens: "
+            f"{self.master_client_fallback_cache_affinity_first_max_extra_work_tokens}\n"
+            "master_client_fallback_outstanding_uncached_tokens_threshold: "
+            f"{self.master_client_fallback_outstanding_uncached_tokens_threshold}\n"
+            "master_client_fallback_cache_affinity_first_min_hit_rate: "
+            f"{self.master_client_fallback_cache_affinity_first_min_hit_rate}\n"
             f"master_kvcm_use_local: {self.master_kvcm_use_local}\n"
-            "master_flexlb_transport_timeout_ms: "
-            f"{self.master_flexlb_transport_timeout_ms}"
+            "master_client_fallback_flexlb_transport_timeout_ms: "
+            f"{self.master_client_fallback_flexlb_transport_timeout_ms}"
         )
 
 

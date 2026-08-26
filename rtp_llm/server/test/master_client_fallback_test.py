@@ -116,8 +116,8 @@ def _config(enabled=True):
         master_max_connect_pool_size=10,
         master_session_timeout_s=-1,
         master_default_timeout_ms=1_000,
-        master_kvcm_fallback_enabled=enabled,
-        master_flexlb_transport_timeout_ms=50,
+        master_client_fallback=enabled,
+        master_client_fallback_flexlb_transport_timeout_ms=50,
     )
 
 

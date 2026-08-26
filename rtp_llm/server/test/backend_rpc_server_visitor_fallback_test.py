@@ -177,7 +177,7 @@ class _HostService:
 
 class _MasterClient:
     def __init__(self, enabled):
-        self.kvcm_fallback_enabled = enabled
+        self.client_fallback_enabled = enabled
         self.calls = 0
 
     async def get_backend_role_addrs(self, **_kwargs):
@@ -187,7 +187,7 @@ class _MasterClient:
         )
 
 
-def _visitor(kvcm_enabled):
+def _visitor(client_fallback_enabled):
     visitor = visitor_module.BackendRPCServerVisitor.__new__(
         visitor_module.BackendRPCServerVisitor
     )
@@ -195,7 +195,7 @@ def _visitor(kvcm_enabled):
     visitor.backend_role_list = [RoleType.PREFILL]
     visitor.master_config = types.SimpleNamespace(master_queue_reject_threshold=100)
     visitor.host_service = _HostService()
-    visitor.master_client = _MasterClient(kvcm_enabled)
+    visitor.master_client = _MasterClient(client_fallback_enabled)
     return visitor
 
 
@@ -207,8 +207,10 @@ def _input():
     )
 
 
-class BackendVisitorKvcmEntryTest(unittest.IsolatedAsyncioTestCase):
-    async def test_no_master_address_still_enters_master_client_when_kvcm_enabled(self):
+class BackendVisitorClientFallbackEntryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_no_master_address_still_enters_master_client_when_fallback_enabled(
+        self,
+    ):
         visitor = _visitor(True)
         generate_input = _input()
 

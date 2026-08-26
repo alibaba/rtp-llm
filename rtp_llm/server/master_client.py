@@ -140,12 +140,12 @@ class MasterClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self.latest_queue_length: int = 0
         self.session_timeout_s = self._get_session_timeout_s()
-        self.kvcm_fallback_enabled = bool(
-            getattr(master_config, "master_kvcm_fallback_enabled", False)
+        self.client_fallback_enabled = bool(
+            getattr(master_config, "master_client_fallback", False)
         )
         self._kvcm_vip = None
         self._kvcm_fallback_client = kvcm_fallback_client
-        if self.kvcm_fallback_enabled and self._kvcm_fallback_client is None:
+        if self.client_fallback_enabled and self._kvcm_fallback_client is None:
             self._kvcm_fallback_client = self._create_kvcm_fallback_client()
 
     def _create_kvcm_fallback_client(self):
@@ -169,12 +169,16 @@ class MasterClient:
         grpc_port_override = int(
             getattr(
                 self.master_config,
-                "master_kvcm_worker_grpc_port_override",
+                "master_client_fallback_worker_grpc_port_override",
                 0,
             )
         )
         worker_status_port = int(
-            getattr(self.master_config, "master_kvcm_worker_status_port", 0)
+            getattr(
+                self.master_config,
+                "master_client_fallback_worker_status_port",
+                0,
+            )
         )
         if not service_id:
             raise ValueError(
@@ -210,7 +214,11 @@ class MasterClient:
                 worker_grpc_port_override=(grpc_port_override or None),
                 worker_status_port_override=(worker_status_port or None),
                 candidate_pool_size=int(
-                    getattr(self.master_config, "master_kvcm_candidate_pool_size", 3)
+                    getattr(
+                        self.master_config,
+                        "master_client_fallback_candidate_pool_size",
+                        3,
+                    )
                 ),
                 hot_candidate_pool_size=int(
                     getattr(
@@ -222,41 +230,49 @@ class MasterClient:
                 worker_status_concurrency=int(
                     getattr(
                         self.master_config,
-                        "master_kvcm_worker_status_concurrency",
+                        "master_client_fallback_worker_status_concurrency",
                         3,
                     )
                 ),
                 worker_status_timeout_ms=int(
-                    getattr(self.master_config, "master_sync_request_timeout_ms", 200)
+                    getattr(
+                        self.master_config,
+                        "master_client_fallback_worker_status_timeout_ms",
+                        200,
+                    )
                 ),
                 prefill_queue_size_threshold=int(
                     getattr(
                         self.master_config,
-                        "master_prefill_queue_size_threshold",
+                        "master_client_fallback_prefill_queue_size_threshold",
                         1024,
                     )
                 ),
                 p2p_hit_discount=float(
-                    getattr(self.master_config, "master_p2p_hit_discount", 0.2)
+                    getattr(
+                        self.master_config,
+                        "master_client_fallback_p2p_hit_discount",
+                        0.2,
+                    )
                 ),
                 cache_affinity_first_max_extra_work_tokens=int(
                     getattr(
                         self.master_config,
-                        "master_cache_affinity_first_max_extra_work_tokens",
+                        "master_client_fallback_cache_affinity_first_max_extra_work_tokens",
                         0,
                     )
                 ),
                 outstanding_uncached_tokens_threshold=int(
                     getattr(
                         self.master_config,
-                        "master_outstanding_uncached_tokens_threshold",
+                        "master_client_fallback_outstanding_uncached_tokens_threshold",
                         0,
                     )
                 ),
                 cache_affinity_first_min_hit_rate=float(
                     getattr(
                         self.master_config,
-                        "master_cache_affinity_first_min_hit_rate",
+                        "master_client_fallback_cache_affinity_first_min_hit_rate",
                         5.0,
                     )
                 ),
@@ -323,7 +339,7 @@ class MasterClient:
         request_id: int,
         local_fallback_addr: Optional[RoleAddr] = None,
     ) -> Optional[FlexlbResponse]:
-        if not self.kvcm_fallback_enabled or self._kvcm_fallback_client is None:
+        if not self.client_fallback_enabled or self._kvcm_fallback_client is None:
             return None
 
         local_candidate = None
@@ -331,7 +347,11 @@ class MasterClient:
             from rtp_llm.server.kvcm_fallback import KvcmCacheCandidate
 
             status_port = int(
-                getattr(self.master_config, "master_kvcm_worker_status_port", 0)
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_worker_status_port",
+                    0,
+                )
             ) or int(local_fallback_addr.grpc_port)
             local_candidate = KvcmCacheCandidate(
                 host_ip=str(local_fallback_addr.ip),
@@ -549,7 +569,7 @@ class MasterClient:
         configured_transport_timeout_ms = int(
             getattr(
                 self.master_config,
-                "master_flexlb_transport_timeout_ms",
+                "master_client_fallback_flexlb_transport_timeout_ms",
                 0,
             )
             if self.master_config
