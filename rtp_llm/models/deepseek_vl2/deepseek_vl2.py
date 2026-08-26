@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from transformers import AutoTokenizer
 
@@ -12,6 +12,14 @@ from rtp_llm.utils.model_weight import yarn_get_mscale
 
 
 class DeepSeekVLV2(BaseModel):
+    def _legacy_loader_unsupported_reason(self) -> Optional[str]:
+        if self.model_config.attn_config.use_mla:
+            return (
+                "DeepSeek-VL2 MLA checkpoints require the NewLoader runtime "
+                "layout and do not support online UpdateWeights"
+            )
+        return None
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = ModelConfig()
