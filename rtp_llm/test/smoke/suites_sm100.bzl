@@ -22,7 +22,10 @@ def sm100_suites():
             ),
             smoke_test(
                 name="fp8_attention_sm100",
-                task_info="data/model/qwen3/q_r_block_fp8.json",
+                # Separate golden from the H20 suite's q_r_block_fp8.json: the same
+                # prompt yields a different completion on SM100, so one shared file
+                # cannot satisfy both architectures.
+                task_info="data/model/qwen3/q_r_block_fp8_sm100_arm.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 64 --fp8_kv_cache 1 --reserver_runtime_mem_mb 178125 --warm_up 0",
                 gpu_type=["SM100_ARM"],
             ),
