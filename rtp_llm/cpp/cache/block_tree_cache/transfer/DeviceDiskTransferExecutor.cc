@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
 
 #include <algorithm>
-#include <chrono>
 #include <exception>
 #include <string>
 #include <utility>
@@ -18,11 +17,15 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr std::chrono::milliseconds kStagingAcquireTimeout{1000};
-
 size_t alignedStride(size_t payload_bytes) {
     const size_t alignment = HostStagingBlockPool::kAlignment;
     return ((payload_bytes + alignment - 1) / alignment) * alignment;
+}
+
+ErrorInfo deviceToDiskError(TransferStatus status, const char* stage) {
+    const ErrorCode code = status == TransferStatus::INVALID_ARGS ? ErrorCode::INVALID_PARAMS :
+                                                                        ErrorCode::EXECUTION_EXCEPTION;
+    return ErrorInfo(code, std::string("device-to-disk ") + stage + " failed");
 }
 
 ErrorInfo transferError(TransferStatus status, size_t begin, size_t end) {
@@ -185,25 +188,53 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
     return context;
 }
 
-TransferStatus DeviceDiskTransferExecutor::execute(const TransferDescriptor& descriptor,
-                                                   const GroupSet&           group_set) {
+std::shared_ptr<AsyncContext>
+DeviceDiskTransferExecutor::executeDeviceToDisk(const TransferDescriptor& descriptor, const GroupSet& group_set) {
+    auto context = std::make_shared<TransferBatchAsyncContext>();
     HostStagingBlockPool* pool = stagingPool(group_set.groupType());
     if (pool == nullptr) {
-        return TransferStatus::INVALID_ARGS;
+        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported device-to-disk cache group type"));
+        return context;
     }
-    auto lease = pool->mallocWithBackoff(kStagingAcquireTimeout);
-    if (!lease.has_value()) {
-        return TransferStatus::RESOURCE_EXHAUSTED;
-    }
+    const GroupSet* group_set_ptr = &group_set;
+    pool->requestBatch(1, [this, context, descriptor, group_set_ptr](
+                              std::optional<HostStagingBlockPool::HostStagingBlockBatch> leases) {
+        if (!leases.has_value()) {
+            context->complete(
+                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device-to-disk staging admission cancelled"));
+            return;
+        }
 
-    const std::vector<HostBufferView> hosts{lease->blockBuffer(group_set.payloadBytes())};
-    const std::vector<TransferDescriptor> descriptors{descriptor};
-    const std::vector<const GroupSet*> group_sets{&group_set};
-    const TransferStatus stage_one = device_host_executor_.execute(hosts, descriptors, group_sets);
-    if (stage_one != TransferStatus::OK) {
-        return stage_one;
-    }
-    return host_disk_executor_.execute(hosts, descriptors, group_sets);
+        auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
+        const bool accepted = transfer_task_pool_.submit([this, context, descriptor, group_set_ptr, batch_leases] {
+            try {
+                const std::vector<HostBufferView> hosts{
+                    batch_leases->front().blockBuffer(group_set_ptr->payloadBytes())};
+                const std::vector<TransferDescriptor> descriptors{descriptor};
+                const std::vector<const GroupSet*> group_sets{group_set_ptr};
+                TransferStatus status = device_host_executor_.execute(hosts, descriptors, group_sets);
+                if (status != TransferStatus::OK) {
+                    context->complete(deviceToDiskError(status, "device-to-staging"));
+                    return;
+                }
+                status = host_disk_executor_.execute(hosts, descriptors, group_sets);
+                if (status != TransferStatus::OK) {
+                    context->complete(deviceToDiskError(status, "staging-to-disk"));
+                    return;
+                }
+                context->complete(ErrorInfo::OkStatus());
+            } catch (const std::exception& error) {
+                context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+            } catch (...) {
+                context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown device-to-disk exception"));
+            }
+        });
+        if (!accepted) {
+            context->complete(ErrorInfo(
+                ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: device-to-disk queue is full or stopped"));
+        }
+    });
+    return context;
 }
 
 HostStagingBlockPool* DeviceDiskTransferExecutor::stagingPool(CacheGroupType group_type) const {

@@ -30,7 +30,8 @@ public:
     std::shared_ptr<AsyncContext> execute(const std::vector<TransferDescriptor>& descriptors,
                                           const std::vector<const GroupSet*>&    group_sets);
 
-    TransferStatus execute(const TransferDescriptor& descriptor, const GroupSet& group_set);
+    std::shared_ptr<AsyncContext> executeDeviceToDisk(const TransferDescriptor& descriptor,
+                                                      const GroupSet&           group_set);
 
     void cancelPendingTransfers();
 
