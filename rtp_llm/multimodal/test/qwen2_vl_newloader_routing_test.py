@@ -23,16 +23,22 @@ from rtp_llm.utils.new_loader import is_new_loader_enabled
 
 class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
     def test_newloader_switch_matches_language_loader_semantics(self):
-        model_config = types.SimpleNamespace(use_new_loader=False)
+        model_config = types.SimpleNamespace(use_new_loader=None)
         self.assertFalse(is_new_loader_enabled(model_config))
+        self.assertTrue(is_new_loader_enabled(model_config, default_enabled=True))
+        model_config.use_new_loader = False
+        self.assertFalse(is_new_loader_enabled(model_config, default_enabled=True))
         model_config.use_new_loader = True
-        self.assertTrue(is_new_loader_enabled(model_config))
+        self.assertTrue(is_new_loader_enabled(model_config, default_enabled=False))
         del model_config.use_new_loader
         with self.assertRaises(AttributeError):
             is_new_loader_enabled(model_config)
         model_config.use_new_loader = "1"
-        with self.assertRaisesRegex(TypeError, "use_new_loader must be a bool"):
+        with self.assertRaisesRegex(TypeError, "use_new_loader must be a bool or None"):
             is_new_loader_enabled(model_config)
+        model_config.use_new_loader = None
+        with self.assertRaisesRegex(TypeError, "default_enabled must be a bool"):
+            is_new_loader_enabled(model_config, default_enabled=1)
 
     def test_qwen2_vl_mixin_uses_standalone_newloader_vision(self):
         vision_config = {
