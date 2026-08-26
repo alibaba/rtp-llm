@@ -521,6 +521,10 @@ public class PriorityScheduler implements DecisionGroupHandler,
                         }
                     }
                 }
+                // The commit-critical section above may have staged a
+                // deferred permit release (queue-reject terminal); flush it
+                // now that both the generation and entry monitors are dropped.
+                releaseDeferredOutstandingPermit(entry);
                 if (offerException != null) {
                     String detail = "Worker scheduling queue offer failed: "
                             + offerException.getMessage();
@@ -532,6 +536,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                             finishEntry(entry, failed);
                         }
                     }
+                    releaseDeferredOutstandingPermit(entry);
                     Logger.error("PriorityScheduler queue offer failed: request_id={}",
                             ctx.getRequestId(), offerException);
                     submitResponseCompletion(offerExceptionPublication);
@@ -1079,6 +1084,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
         if (localCleanup != null) {
             releaseLocalAdmissionCleanup(localCleanup, detail);
         }
+        releaseDeferredOutstandingPermit(entry);
         if (startedFence != null) {
             reconcileEngineFence(entry, startedFence, 0);
         }
@@ -1090,7 +1096,9 @@ public class PriorityScheduler implements DecisionGroupHandler,
         try {
             releaseLocallyOwnedResources(entry, detail);
         } finally {
-            removeInflightGeneration(entry);
+            // The caller holds no entry monitor here, so the permit release
+            // runs inline instead of through the deferred path.
+            removeInflightGenerationAndRelease(entry);
         }
     }
 
@@ -1209,6 +1217,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                 publication = reduceOrdinaryTerminalLocked(entry,
                         DeferredTerminal.failure(errorType, detail, false));
             }
+            releaseDeferredOutstandingPermit(entry);
             submitResponseCompletion(publication);
         } else if (!victim.future().isDone() && !terminalStates.containsKey(victim.requestId())) {
             rollback(victim);
@@ -1287,6 +1296,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                 publication = replayAfterReleasedClaimLocked(entry, registration);
             }
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
         if (started != null) {
             reconcileEngineFence(entry, started, 0);
@@ -1341,6 +1351,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                         entry, attemptToken, false);
             }
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
         if (started != null) {
             reconcileEngineFence(entry, started, 0);
@@ -1368,6 +1379,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
             // a later typed CANCELED observation.
             publication = replayAfterNegativeCancelLocked(entry, attemptToken, true);
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
         return true;
     }
@@ -1407,6 +1419,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
             }
             publication = settlePriorityEntryLocked(entry, detail);
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
         return true;
     }
@@ -1432,6 +1445,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
             }
             publication = settlePriorityEntryLocked(entry, detail);
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
         return true;
     }
@@ -1736,6 +1750,10 @@ public class PriorityScheduler implements DecisionGroupHandler,
             }
         }
 
+        // Deferred permit release: the delivery fence and entry monitor are
+        // both dropped here. finishLocalCancellation flushes again internally;
+        // the flush is idempotent.
+        releaseDeferredOutstandingPermit(entry);
         if (finishLocally) {
             return finishLocalCancellation(entry);
         }
@@ -1894,6 +1912,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                             entry.deadlineErrorType), terminal.detail());
             finishEntry(entry, terminal);
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
         return terminal;
     }
@@ -1991,6 +2010,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                         entry, task, observation, isPrefill, isDecode);
               }
             }
+            releaseDeferredOutstandingPermit(entry);
             submitResponseCompletion(publication.completion());
             publishPriorityCanceled(publication);
         }
@@ -2507,6 +2527,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                     expired = true;
                 }
             }
+            releaseDeferredOutstandingPermit(entry);
             submitResponseCompletion(publication);
             if (startedFence != null) {
                 reconcileEngineFence(entry, startedFence, 0);
@@ -3261,6 +3282,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                         "Worker scheduling queue rejected request: " + failureDetail,
                         false));
             }
+            releaseDeferredOutstandingPermit(entry);
             submitResponseCompletion(publication);
         } else if (!item.future().isDone() && !terminalStates.containsKey(item.requestId())) {
             rollback(item);
@@ -3708,6 +3730,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                     "Delivery preparation failed: " + error.getMessage(),
                     true));
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
     }
 
@@ -3766,6 +3789,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                 }
             }
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
     }
 
@@ -3987,6 +4011,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                         StrategyErrorType.BATCH_DISPATCH_FAILED,
                         failureMessage, true));
             }
+            releaseDeferredOutstandingPermit(entry);
             submitResponseCompletion(publication);
             return;
         }
@@ -4015,6 +4040,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
             publication = reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
                     "EnqueueBatch deadline exceeded: " + error.getMessage()));
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
     }
 
@@ -4363,6 +4389,7 @@ public class PriorityScheduler implements DecisionGroupHandler,
                 enteredQuarantine = false;
             }
         }
+        releaseDeferredOutstandingPermit(entry);
         submitResponseCompletion(publication);
         if (enteredQuarantine) {
             reportEngineFenceQuarantine(entry, registration, attempt + 1, outcome);
@@ -4723,11 +4750,24 @@ public class PriorityScheduler implements DecisionGroupHandler,
         }
     }
 
-    /** Detach exactly one inflight/future generation; stale cleanup cannot remove a reuse. */
+    /**
+     * Detach exactly one inflight/future generation; stale cleanup cannot
+     * remove a reuse. Called with the request entry monitor held: only
+     * lock-free map removals happen here. The generation's outstanding-permit
+     * release takes the generation monitor and is therefore deferred onto
+     * {@code entry.deferredPermitRelease}; the caller must flush it with
+     * {@link #releaseDeferredOutstandingPermit} after dropping the entry
+     * monitor. This keeps the scheduler-wide lock order generation -> entry:
+     * entering the generation monitor while holding the entry monitor
+     * deadlocked against cancelRequest, which takes them in the opposite
+     * order.
+     */
     private void removeInflightGeneration(InflightEntry entry) {
         inflight.remove(entry.item.requestId(), entry);
         if (entry.item.future() instanceof RequestGenerationGate generation) {
-            generation.releaseOutstandingPermit();
+            if (entry.deferredPermitRelease == null) {
+                entry.deferredPermitRelease = generation;
+            }
             // An incomplete future is still the generation's publication
             // owner. Retain its gate until whenComplete (or the mutation
             // handoff) observes the completion; this prevents a late planner
@@ -4735,6 +4775,35 @@ public class PriorityScheduler implements DecisionGroupHandler,
             // If the future is already terminal, no new mutation can pass
             // RequestGenerationGate.isOpen(), so this exact removal is race-free
             // without taking the gate monitor while the entry lock is held.
+            if (generation.isDone()
+                    && !generation.admissionMutationInProgress) {
+                generationGates.remove(entry.item.requestId(), generation);
+            }
+        }
+    }
+
+    /**
+     * Flush the outstanding-permit release deferred by
+     * {@link #removeInflightGeneration}. Idempotent: the gate itself keeps an
+     * exact-once release guard, so invoking this after every entry-monitor
+     * exit is safe even when no deferral was staged.
+     */
+    private static void releaseDeferredOutstandingPermit(InflightEntry entry) {
+        RequestGenerationGate generation = entry.deferredPermitRelease;
+        if (generation != null) {
+            generation.releaseOutstandingPermit();
+        }
+    }
+
+    /**
+     * Lock-free sibling of {@link #removeInflightGeneration} for admission
+     * cleanup paths that never held the entry monitor: the permit release can
+     * run inline because no entry -> generation lock nesting exists here.
+     */
+    private void removeInflightGenerationAndRelease(InflightEntry entry) {
+        inflight.remove(entry.item.requestId(), entry);
+        if (entry.item.future() instanceof RequestGenerationGate generation) {
+            generation.releaseOutstandingPermit();
             if (generation.isDone()
                     && !generation.admissionMutationInProgress) {
                 generationGates.remove(entry.item.requestId(), generation);
@@ -5119,6 +5188,15 @@ public class PriorityScheduler implements DecisionGroupHandler,
         EngineFenceRegistration engineFence;
         /** Non-null only when the frontend-facing Cancel reducer won first cause. */
         CancelReason cancellationReason;
+        /**
+         * Generation whose outstanding-permit release was deferred by
+         * {@code removeInflightGeneration} while this entry's monitor was
+         * held. Terminal reducers flush it with
+         * {@code releaseDeferredOutstandingPermit} after dropping the entry
+         * monitor; the scheduler-wide lock order is generation -> entry,
+         * never the reverse.
+         */
+        RequestGenerationGate deferredPermitRelease;
 
         InflightEntry(BatchItem item, boolean priorityAdmission) {
             this.item = Objects.requireNonNull(item);
