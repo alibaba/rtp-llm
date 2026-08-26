@@ -19,6 +19,7 @@ import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -34,6 +35,8 @@ import java.util.function.Function;
 public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.GrpcStubWrapper> {
 
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
+    public static final String CONNECT_TIMEOUT_PROPERTY =
+            "flexlb.engine-grpc.connect-timeout-ms";
 
     @Getter
     private final Executor executor;
@@ -45,16 +48,10 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     public EngineGrpcClient(CustomNameResolver nameResolver,
                             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
                             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
-                            GrpcReporter grpcReporter) {
-        this(nameResolver, executor, eventLoopGroup, grpcReporter,
-                DEFAULT_CONNECT_TIMEOUT_MILLIS);
-    }
-
-    EngineGrpcClient(CustomNameResolver nameResolver,
-                     ThreadPoolExecutor executor,
-                     EventLoopGroup eventLoopGroup,
-                     GrpcReporter grpcReporter,
-                     int connectTimeoutMillis) {
+                            GrpcReporter grpcReporter,
+                            @Value("${" + CONNECT_TIMEOUT_PROPERTY + ":"
+                                    + DEFAULT_CONNECT_TIMEOUT_MILLIS + "}")
+                            int connectTimeoutMillis) {
         super(grpcReporter);
         if (connectTimeoutMillis <= 0) {
             throw new IllegalArgumentException(

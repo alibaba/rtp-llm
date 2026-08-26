@@ -24,7 +24,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
-import org.flexlb.engine.grpc.EngineGrpcClientTestAccess;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
@@ -160,7 +159,7 @@ public abstract class FlexLBMockTestBase {
 
         CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
         GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
-        grpcClient = EngineGrpcClientTestAccess.create(
+        grpcClient = new EngineGrpcClient(
                 nameResolver, grpcExecutor, eventLoopGroup,
                 grpcReporter, 1_000);
 

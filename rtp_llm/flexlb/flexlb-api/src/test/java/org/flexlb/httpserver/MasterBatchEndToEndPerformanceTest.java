@@ -34,7 +34,6 @@ import org.flexlb.config.RoutingConfig;
 import org.flexlb.config.SingleDecisionConfig;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClientTestAccess;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
@@ -536,10 +535,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         assertEquals(prefillEngineCount, endpointRegistry.getEndpointCount(RoleType.PREFILL));
         assertEquals(decodeEngineCount, endpointRegistry.getEndpointCount(RoleType.DECODE));
 
-        if (DELIVERY_MODE == DeliveryMode.BATCH) {
-            prewarmBatchChannels(allPrefillWorkers());
-        }
-
         int warmupRequests = Math.max(
                 WARMUP_REQUESTS,
                 prefillEngineCount * ENGINE_MATRIX_WARMUP_REQUESTS_PER_PREFILL);
@@ -775,22 +770,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             } else {
                 addLogicalPrefillEndpoint(additionalIndex + 1);
             }
-        }
-    }
-
-    /**
-     * Establish every lazy BATCH_ENQUEUE channel before scheduling traffic.
-     * Serial connection setup avoids a 750-channel connect storm against the
-     * production client's deliberately short connection timeout.
-     */
-    private void prewarmBatchChannels(List<MockPrefillWorker> workers) throws Exception {
-        for (MockPrefillWorker worker : workers) {
-            EngineGrpcClientTestAccess.awaitBatchEnqueueReady(
-                    grpcClient,
-                    "127.0.0.1",
-                    worker.getPort(),
-                    10L,
-                    TimeUnit.SECONDS);
         }
     }
 
