@@ -26,15 +26,6 @@ torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync)
 
     auto cpu_tensor = torch::empty(
         tensor.sizes(), torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true));
-#if USING_CUDA
-    // The sampler may produce the tensor on the CUDA graph stream while
-    // Tensor::copy_ enqueues this D2H copy on the ATen current stream. Ensure
-    // the producer has finished before a different stream consumes its output.
-    const auto producer_stream = cuda_graph::graphGetCurrentStream().stream();
-    if (producer_stream != at::cuda::getCurrentCUDAStream().stream()) {
-        cuda_graph::graphGetCurrentStream().synchronize();
-    }
-#endif
     cpu_tensor.copy_(tensor, /*non_blocking=*/true);
     need_sync = true;
     return cpu_tensor;
@@ -47,13 +38,7 @@ void syncPinnedCpuCopies(bool need_sync) {
     // Keep D2H waiting explicit here instead of hiding it inside Tensor::cpu().
     // The copy launch returns quickly; only this worker thread blocks on its
     // stream while the main engine thread can continue issuing CUDA work.
-#if USING_CUDA
-    // copy_(non_blocking=true) is enqueued on the ATen current stream, which is
-    // not guaranteed to be the CUDA graph stream.
-    at::cuda::getCurrentCUDAStream().synchronize();
-#else
     cuda_graph::graphGetCurrentStream().synchronize();
-#endif
 }
 
 }  // namespace
