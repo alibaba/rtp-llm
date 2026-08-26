@@ -27,6 +27,7 @@ class ModelArgs:
         "max_seq_len",
         "mla_ops_type",
         "json_model_override_args",
+        "hidden_state_capture_fail_open",
         "phy2log_path",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
@@ -54,6 +55,7 @@ class ModelArgs:
 
         # Model override args
         self.json_model_override_args: str = "{}"
+        self.hidden_state_capture_fail_open: Optional[bool] = None
 
         # EPLB config
         self.phy2log_path: str = ""

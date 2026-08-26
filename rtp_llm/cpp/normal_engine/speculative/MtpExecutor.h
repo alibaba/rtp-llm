@@ -112,9 +112,8 @@ protected:
     // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
     // row count"; target verify passes the explicit combo row count because a
     // graph replay does not advance the Python-side row counter.
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
-                                              ModelBase&       source,
-                                              int64_t          hidden_rows = 0);
+    void
+    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
@@ -132,6 +131,7 @@ protected:
     void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     void            launchDraftPrefillPrepareAsync(const GptModelInputs& model_input);
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    absl::Status    runDecodeAlignmentOnly(GptModelInputs& model_input);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
@@ -215,24 +215,32 @@ protected:
                                    const MergedOutput&                          draft_prefill_output);
 
     void releaseAllModelBuffers();
+
 private:
+    static bool canEarlyReturnTargetOnlyPrefill(int64_t dp_size, bool enable_ffn_disaggregate);
+    static bool shouldSkipEmptyDecode(bool streams_empty, bool enable_ffn_disaggregate);
+
+    void collectPrefillMetrics(const StreamGroups&  stream_groups,
+                               MtpMetricsCollector& metrics_collector,
+                               int64_t              schedule_time_us,
+                               int64_t              model_forward_us);
+
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
-    std::unique_ptr<ModelBase>               model_;
-    std::unique_ptr<Sampler>                 sampler_;
-    std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
-    std::shared_ptr<KVCacheManager>          cache_manager_;
-    std::shared_ptr<ModelInputsLogger>       model_inputs_logger_;
-    bool                                     enable_ffn_disaggregate_ = false;
-    bool                                     enable_detail_log_       = false;
-    int                                      tp_rank_                 = 0;
-    ParallelismConfig                        parallelism_config_;
-    kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
+    std::unique_ptr<ModelBase>                                               model_;
+    std::unique_ptr<Sampler>                                                 sampler_;
+    std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
+    std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
+    bool                                                                     enable_ffn_disaggregate_ = false;
+    bool                                                                     enable_detail_log_       = false;
+    int                                                                      tp_rank_                 = 0;
+    ParallelismConfig                                                        parallelism_config_;
+    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    size_t                                                                   vocab_size_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
+    size_t                                                                                     vocab_size_;
 
     // for mtp
     DataType data_type_;

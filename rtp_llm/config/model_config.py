@@ -14,7 +14,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
-from rtp_llm.ops import DataType, KvCacheDataType
+from rtp_llm.ops import DataType, HiddenStateCaptureDtype, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.base_model_datatypes import VitParameters
@@ -87,6 +87,9 @@ class ModelConfig(CppModelConfig):
         "max_seq_len",
         "vocab_size",
         "hidden_size",
+        "hidden_state_capture_layer_ids",
+        "hidden_state_capture_dtype",
+        "hidden_state_capture_fail_open",
         "attn_config",
         "special_tokens",
         "quant_algo",
@@ -573,9 +576,63 @@ class ModelConfig(CppModelConfig):
             json_model_override_args: JSON string with model override arguments
         """
         model_override_args = json.loads(json_model_override_args)
-        if model_override_args:
-            # Apply rope_scaling override via model_config
-            self.apply_rope_scaling_override(model_override_args)
+        if not model_override_args:
+            return
+
+        layer_ids = None
+        if "hidden_state_capture_layer_ids" in model_override_args:
+            layer_ids = model_override_args["hidden_state_capture_layer_ids"]
+            if not isinstance(layer_ids, list) or any(
+                isinstance(layer_id, bool) or not isinstance(layer_id, int)
+                for layer_id in layer_ids
+            ):
+                raise ValueError(
+                    "hidden_state_capture_layer_ids must be a list of integers"
+                )
+            if len(set(layer_ids)) != len(layer_ids):
+                raise ValueError("hidden_state_capture_layer_ids must be unique")
+            invalid_layer_ids = [
+                layer_id
+                for layer_id in layer_ids
+                if layer_id < 0 or layer_id >= self.num_layers
+            ]
+            if invalid_layer_ids:
+                raise ValueError(
+                    "hidden_state_capture_layer_ids contains out-of-range values "
+                    f"{invalid_layer_ids}; expected 0 <= layer_id < {self.num_layers}"
+                )
+
+        capture_dtype = None
+        if "hidden_state_capture_dtype" in model_override_args:
+            capture_dtype_name = model_override_args["hidden_state_capture_dtype"]
+            capture_dtype_by_name = {
+                name.lower(): dtype
+                for name, dtype in HiddenStateCaptureDtype.__members__.items()
+            }
+            if (
+                not isinstance(capture_dtype_name, str)
+                or capture_dtype_name not in capture_dtype_by_name
+            ):
+                raise ValueError(
+                    "hidden_state_capture_dtype must be 'bf16' or 'fp8_e4m3'"
+                )
+            capture_dtype = capture_dtype_by_name[capture_dtype_name]
+
+        capture_fail_open = None
+        if "hidden_state_capture_fail_open" in model_override_args:
+            capture_fail_open = model_override_args["hidden_state_capture_fail_open"]
+            if not isinstance(capture_fail_open, bool):
+                raise ValueError("hidden_state_capture_fail_open must be a boolean")
+
+        # Apply only after all capture overrides have been validated so an
+        # invalid later field cannot leave an earlier field partially updated.
+        self.apply_rope_scaling_override(model_override_args)
+        if layer_ids is not None:
+            self.hidden_state_capture_layer_ids = layer_ids
+        if capture_dtype is not None:
+            self.hidden_state_capture_dtype = capture_dtype
+        if capture_fail_open is not None:
+            self.hidden_state_capture_fail_open = capture_fail_open
 
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
@@ -839,6 +896,15 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
     model_config.num_layers = num_layers
 
 
+def _apply_model_override_args(model_config: ModelConfig, model_args: Any) -> None:
+    if model_args.json_model_override_args:
+        model_config.apply_override_args(model_args.json_model_override_args)
+    if model_args.hidden_state_capture_fail_open is not None:
+        model_config.hidden_state_capture_fail_open = (
+            model_args.hidden_state_capture_fail_open
+        )
+
+
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
@@ -932,6 +998,6 @@ def build_model_config(
     model_config.output_vocab_padded_size = 0
     model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
 
-    # Apply model override args
-    if model_args.json_model_override_args:
-        model_config.apply_override_args(model_args.json_model_override_args)
+    # JSON model overrides are applied first; the dedicated operational switch
+    # is the final override when it was explicitly supplied by CLI or env.
+    _apply_model_override_args(model_config, model_args)

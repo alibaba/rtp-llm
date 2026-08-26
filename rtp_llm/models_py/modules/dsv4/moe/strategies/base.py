@@ -12,6 +12,7 @@ Strategies (priority high→low for ``forced=None``):
 
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
+    >1       DSV4_MOE_STRATEGY=deepep      DeepEPStrategy (strict)
     >1       DSV4_USE_MEGA_MOE_SE=1        MegaMoEStrategySE (strict)
     >1       mega available + dist-init    MegaMoEStrategy
     >1       mega unavailable/disabled     RuntimeError
@@ -19,8 +20,9 @@ Strategies (priority high→low for ``forced=None``):
     1        grouped unavailable           LocalLoopStrategy
 
 A model can override the auto-pick via:
-  - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
-  - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
+  - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop")`` ctor kwarg
+  - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg; ``deepep`` is the
+    only supported way to opt EP>1 into DeepEP)
   - strict ``DSV4_USE_MEGA_MOE_SE=1`` fused-shared-expert opt-in
   - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
     (translated to forced=... internally; conflicting toggles → RuntimeError)
@@ -246,8 +248,9 @@ def select_strategy(
     ``DSV4_MOE_STRATEGY``), fail loudly if ``forced`` can't handle cfg.
     When False (legacy env toggle), fall through silently to auto-pick.
     """
-    explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
-    explicit_env = bool(explicit_env and explicit_env != "auto")
+    explicit_strategy = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
+    explicit_deepep = explicit_strategy == "deepep"
+    explicit_env = bool(explicit_strategy and explicit_strategy != "auto")
 
     # The current DeepGEMM shared-expert API and the older experimental fused
     # API use incompatible buffers. Never allow both opt-ins to race.
@@ -294,6 +297,15 @@ def select_strategy(
                         "mega_fused",
                         "mega_se",
                     ):
+                        if cls.name == "deepep" and explicit_deepep:
+                            return cls
+                        if cls.name == "deepep":
+                            raise RuntimeError(
+                                "DSV4 EP DeepEPStrategy is allowed only via explicit "
+                                "DSV4_MOE_STRATEGY=deepep; constructor/legacy forcing "
+                                f"is rejected (layer_id={cfg.layer_id}, "
+                                f"ep_size={cfg.ep_size})."
+                            )
                         raise RuntimeError(
                             "DSV4 EP MoE requires MegaMoEStrategy. "
                             f"Requested strategy {forced!r} would bypass Mega "

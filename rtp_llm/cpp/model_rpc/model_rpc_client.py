@@ -13,6 +13,7 @@ from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     FetchRequestPB,
     GenerateConfigPB,
@@ -32,27 +33,99 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
-    RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
-from rtp_llm.utils.grpc_util import (
-    trans_from_tensor,
-    trans_option,
-    trans_option_cast,
-    trans_tensor,
-)
+from rtp_llm.utils.grpc_util import trans_option, trans_option_cast, trans_tensor
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+logger = logging.getLogger(__name__)
+
 
 class StreamState:
     def __init__(self):
         self.cached_logits_dict = {}
+        self.prefill_aux_info_observed = False
+
+
+def _validate_prefill_only_response(
+    input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
+) -> None:
+    if not input_py.generate_config.is_prefill_only():
+        return
+
+    aux_infos = outputs_pb.flatten_output.aux_info
+    if not aux_infos:
+        return
+
+    stream_state.prefill_aux_info_observed = True
+    for index, aux_info in enumerate(aux_infos):
+        if aux_info.output_len != 0:
+            logger.error(
+                "prefill-only response contract violation: request_id=%s, "
+                "aux_info[%s].output_len=%s; backend generated tokens",
+                input_py.request_id,
+                index,
+                aux_info.output_len,
+            )
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"prefill-only request [{input_py.request_id}] received "
+                f"aux_info[{index}].output_len={aux_info.output_len}; the backend "
+                "generated tokens and may not support GenerateConfigPB.prefill_only",
+            )
+
+
+def _validate_prefill_only_completed(
+    input_py: GenerateInput, stream_state: StreamState
+) -> None:
+    if (
+        input_py.generate_config.is_prefill_only()
+        and not stream_state.prefill_aux_info_observed
+    ):
+        logger.error(
+            "prefill-only capability verification failed: request_id=%s "
+            "completed without aux_info",
+            input_py.request_id,
+        )
+        raise FtRuntimeException(
+            ExceptionType.EXECUTION_EXCEPTION,
+            f"prefill-only request [{input_py.request_id}] completed without "
+            "aux_info; the backend capability cannot be verified and it may not "
+            "support GenerateConfigPB.prefill_only",
+        )
 
 
 def _is_finished_response(outputs_pb: GenerateOutputsPB) -> bool:
     finished = outputs_pb.flatten_output.finished
     return bool(finished) and all(finished)
+
+
+_RPC_ERROR_CODE_OVERRIDES = {
+    # Preserve the legacy client-facing cancellation code instead of mapping to
+    # the distinct internal ExceptionType.CANCELLED member by name.
+    ErrorCodePB.CANCELLED: ExceptionType.CANCELLED_ERROR,
+    # The protobuf enum uses single-L CANCELED while ExceptionType uses CANCELLED.
+    ErrorCodePB.P2P_CONNECTOR_WORKER_READ_CANCELED: (
+        ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED
+    ),
+}
+
+
+def _rpc_error_code_name(error_code: int) -> str:
+    try:
+        return ErrorCodePB.Name(error_code)
+    except ValueError:
+        return f"UNRECOGNIZED_ERROR_CODE_{error_code}"
+
+
+def _trans_rpc_error_code(error_code: int) -> ExceptionType:
+    if error_code in _RPC_ERROR_CODE_OVERRIDES:
+        return _RPC_ERROR_CODE_OVERRIDES[error_code]
+    try:
+        return ExceptionType[_rpc_error_code_name(error_code)]
+    except KeyError:
+        return ExceptionType.UNKNOWN_ERROR
 
 
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
@@ -141,6 +214,7 @@ def trans_input(input_py: GenerateInput):
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
+    generate_config_pb.prefill_only = input_py.generate_config.is_prefill_only()
     generate_config_pb.max_thinking_tokens = (
         input_py.generate_config.max_thinking_tokens
     )
@@ -347,6 +421,7 @@ def trans_multimodal_input(
 def trans_output(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> GenerateOutputs:
+    _validate_prefill_only_response(input_py, outputs_pb, stream_state)
     logging.debug("outputs_pb = %s", outputs_pb)
     output_pb = outputs_pb.flatten_output
     num_outputs = len(output_pb.finished)
@@ -517,7 +592,6 @@ def trans_output(
 
 
 class ModelRpcClient(object):
-
     def __init__(
         self,
         addresses: list[str],
@@ -544,7 +618,8 @@ class ModelRpcClient(object):
 
         # Initialize the channel pool
         self._channel_pool = GrpcHostChannelPool(
-            options=self._options, cleanup_interval=60  # clean up every minute
+            options=self._options,
+            cleanup_interval=60,  # clean up every minute
         )
         logging.info(f"addresses: {self._addresses}")
 
@@ -679,10 +754,15 @@ class ModelRpcClient(object):
                     terminal_seen = True
                 yield output
             stream_done = True
+            _validate_prefill_only_completed(input_py, stream_state)
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
+            self._handle_grpc_error(
+                e, f"request: [{input_pb.request_id}]", target_address
+            )
+        except FtRuntimeException:
+            raise
         except Exception as e:
             logging.error(
                 f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
@@ -722,16 +802,24 @@ class ModelRpcClient(object):
 
             results = []
             for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
+                if result_pb.HasField("error_info") and (
+                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                    or result_pb.error_info.error_message
                 ):
+                    exception_type = _trans_rpc_error_code(
+                        result_pb.error_info.error_code
+                    )
+                    error_message = (
+                        result_pb.error_info.error_message
+                        or _rpc_error_code_name(result_pb.error_info.error_code)
+                    )
                     raise FtRuntimeException(
-                        ExceptionType.UNKNOWN_ERROR,
-                        f"batch item {i} failed: {result_pb.error_info.error_message}",
+                        exception_type,
+                        f"batch item {i} failed: {error_message}",
                     )
                 stream_state = StreamState()
                 output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                _validate_prefill_only_completed(inputs[i], stream_state)
                 results.append(output)
             return results
 

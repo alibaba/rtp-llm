@@ -510,6 +510,14 @@ class BackendRPCServerVisitor:
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
+        if input.generate_config.is_prefill_only():
+            if input.prompt_length > self.max_seq_len:
+                raise FtRuntimeException(
+                    ExceptionType.LONG_PROMPT_ERROR,
+                    f"model max tokens is {self.max_seq_len}, "
+                    f"request length is {input.prompt_length}, max_new_tokens is 0",
+                )
+            return
         max_new_tokens = min(
             self.max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,
@@ -641,6 +649,7 @@ class BackendRPCServerVisitor:
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
             self.fill_request_info(input)
+            input.generate_config.validate()
             self._validate_input(input)
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)

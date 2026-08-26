@@ -21,10 +21,24 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+py_test(
+    name = "rpc_error_code_proto_test",
+    size = "small",
+    srcs = ["rpc_error_code_proto_test.py"],
+    deps = [
+        "//rtp_llm:protobuf",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
 py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
     deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util",

@@ -283,16 +283,56 @@ class Dsv4KvCacheSpecTest(TestCase):
 
 
 class Dsv4PostBuildModelConfigTest(TestCase):
-    def _model_config(self, tokens_per_block=FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK):
+    def _model_config(
+        self,
+        tokens_per_block=FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK,
+        kv_cache_dtype=None,
+    ):
         config = ModelConfig()
         config.num_layers = len(LAYER_COMPRESS_RATIOS)
         config.attn_config.size_per_head = HEAD_DIM
         config.attn_config.indexer_head_dim = INDEXER_HEAD_DIM
-        config.attn_config.kv_cache_dtype = KvCacheDataType.FP8
+        if kv_cache_dtype is not None:
+            config.attn_config.kv_cache_dtype = kv_cache_dtype
         config.attn_config.layer_compress_ratios = LAYER_COMPRESS_RATIOS
         config.attn_config.tokens_per_block = tokens_per_block
         config.attn_config.kernel_tokens_per_block = tokens_per_block
         return config
+
+    def _assert_fp8_topology(self, config):
+        by_tag = {
+            desc.tag: desc for descs in config.kv_cache_spec_descs for desc in descs
+        }
+        self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.FP8)
+        self.assertEqual(by_tag[CSA_KV_TAG].entry_elems, DSV4_FP8_KV_ENTRY_BYTES)
+        self.assertEqual(by_tag[HCA_KV_TAG].entry_elems, DSV4_FP8_KV_ENTRY_BYTES)
+        self.assertEqual(by_tag[SWA_KV_TAG].entry_elems, DSV4_FP8_KV_ENTRY_BYTES)
+        self.assertEqual(
+            by_tag[INDEXER_KV_TAG].entry_elems, DSV4_FP8_INDEXER_ENTRY_BYTES
+        )
+
+    def test_fp8_per_block_without_explicit_kv_dtype_uses_fp8_everywhere(self):
+        config = self._model_config()
+        config.quantization = "FP8_PER_BLOCK"
+        self.assertEqual(config.attn_config.kv_cache_dtype, KvCacheDataType.BASE)
+
+        DeepSeekV4._post_build_model_config(config)
+
+        self._assert_fp8_topology(config)
+
+    def test_explicit_fp8_kv_dtype_stays_fp8(self):
+        config = self._model_config(kv_cache_dtype=KvCacheDataType.FP8)
+
+        DeepSeekV4._post_build_model_config(config)
+
+        self._assert_fp8_topology(config)
+
+    def test_explicit_base_kv_dtype_is_normalized_to_supported_fp8(self):
+        config = self._model_config(kv_cache_dtype=KvCacheDataType.BASE)
+
+        DeepSeekV4._post_build_model_config(config)
+
+        self._assert_fp8_topology(config)
 
     def test_post_build_enables_independent_pools(self):
         config = self._model_config()

@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
@@ -627,6 +627,43 @@ class HWKernelConfig:
         ...
     def to_string(self) -> str:
         ...
+class HiddenStateCaptureDtype:
+    """
+    Members:
+
+      BF16
+
+      FP8_E4M3
+    """
+    BF16: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.BF16: 0>
+    FP8_E4M3: typing.ClassVar[HiddenStateCaptureDtype]  # value = <HiddenStateCaptureDtype.FP8_E4M3: 1>
+    __members__: typing.ClassVar[dict[str, HiddenStateCaptureDtype]]  # value = {'BF16': <HiddenStateCaptureDtype.BF16: 0>, 'FP8_E4M3': <HiddenStateCaptureDtype.FP8_E4M3: 1>}
+    def __eq__(self, other: typing.Any) -> bool:
+        ...
+    def __getstate__(self) -> int:
+        ...
+    def __hash__(self) -> int:
+        ...
+    def __index__(self) -> int:
+        ...
+    def __init__(self, value: int) -> None:
+        ...
+    def __int__(self) -> int:
+        ...
+    def __ne__(self, other: typing.Any) -> bool:
+        ...
+    def __repr__(self) -> str:
+        ...
+    def __setstate__(self, state: int) -> None:
+        ...
+    def __str__(self) -> str:
+        ...
+    @property
+    def name(self) -> str:
+        ...
+    @property
+    def value(self) -> int:
+        ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
     enable_independent_kv_cache_pools: bool
@@ -1039,6 +1076,9 @@ class ModelConfig:
     has_post_decoder_layernorm: bool
     has_pre_decoder_layernorm: bool
     hidden_size: int
+    hidden_state_capture_dtype: HiddenStateCaptureDtype
+    hidden_state_capture_fail_open: bool
+    hidden_state_capture_layer_ids: list[int]
     hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int

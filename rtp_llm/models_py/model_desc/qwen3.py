@@ -120,6 +120,20 @@ class Qwen3Model(GptModelBase):
         self.norm = RMSNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
         )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return self.norm(hidden_states)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -127,6 +141,7 @@ class Qwen3Model(GptModelBase):
         hidden_states = inputs_embeds
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        capture = self.capture_context(inputs.capture_hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             hidden_states = decoder_layer(
@@ -134,8 +149,8 @@ class Qwen3Model(GptModelBase):
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
-        hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states)
+            capture.capture_layer(i, hidden_states)
+        return capture.finalize(hidden_states)
 
 
 __all__ = [

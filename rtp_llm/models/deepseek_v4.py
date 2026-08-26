@@ -537,10 +537,17 @@ class DeepSeekV4(DeepSeekV2):
         ``attn_config.tokens_per_block`` is already in place and can be
         promoted here without being clobbered.
         """
+        attn_config = model_config.attn_config
+        if attn_config.kv_cache_dtype != KvCacheDataType.FP8:
+            logging.info(
+                "DeepSeek-V4 only supports FP8 attention KV cache; overriding %s",
+                attn_config.kv_cache_dtype,
+            )
+            attn_config.kv_cache_dtype = KvCacheDataType.FP8
+
         if model_config.kv_cache_spec_descs:
             return
 
-        attn_config = model_config.attn_config
         layer_num = int(model_config.num_layers)
 
         promoted = resolve_dsv4_tokens_per_block(int(attn_config.tokens_per_block))

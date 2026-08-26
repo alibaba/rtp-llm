@@ -213,6 +213,21 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
     config.setTopology(std::move(groups), std::move(layers));
 }
 
+void applyDsv4HcaStatePoolBlocks(CacheConfig& config, uint32_t block_num) {
+    if (block_num == 0) {
+        return;
+    }
+
+    auto policies = config.groupPoliciesSnapshot();
+    for (size_t gid = 0; gid < policies.size(); ++gid) {
+        if (config.tagForGroup(gid) == "hca_state") {
+            policies[gid].explicit_block_num = block_num;
+            config.setGroupPolicies(policies);
+            return;
+        }
+    }
+}
+
 void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.use_independent_block_pools = true;
     const auto            group_num    = static_cast<size_t>(config.groupNums());
@@ -322,6 +337,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
             model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
         populateGroupsFromLayerSpecs(
             config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
+        applyDsv4HcaStatePoolBlocks(config, kv_cache_config.dsv4_hca_state_pool_blocks);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV

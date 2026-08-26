@@ -47,6 +47,35 @@ def _cfg(ep_size: int = 1) -> MoeCfg:
     )
 
 
+class _FakeDeepEPMode:
+    NORMAL = "NORMAL"
+    LOW_LATENCY = "LOW_LATENCY"
+
+
+class _FakeDeepEPWrapper:
+    _initialized = False
+    _instance = None
+
+    @classmethod
+    def is_initialized(cls) -> bool:
+        return cls._initialized
+
+
+@contextmanager
+def _deepep_wrapper(*, initialized: bool, mode=None):
+    module_name = "rtp_llm.models_py.distributed.deepep_wrapper"
+    module = types.ModuleType(module_name)
+    module.DeepEPMode = _FakeDeepEPMode
+    module.DeepEPWrapper = _FakeDeepEPWrapper
+    instance = None if mode is None else types.SimpleNamespace(mode=mode)
+    with mock.patch.object(
+        _FakeDeepEPWrapper, "_initialized", initialized
+    ), mock.patch.object(_FakeDeepEPWrapper, "_instance", instance), mock.patch.dict(
+        sys.modules, {module_name: module}
+    ):
+        yield
+
+
 @contextmanager
 def _env(**kw):
     """Temporarily set env vars; ``None`` value pops the var."""
@@ -167,10 +196,56 @@ class StrategySelectTest(unittest.TestCase):
         self.assertIn("Forced MoE strategy 'grouped_fp4'", str(cm.exception))
         self.assertIn("cannot handle", str(cm.exception))
 
-    def test_forced_ep_gt1_non_mega_raises_even_if_capable(self):
-        with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+    def test_env_deepep_ep_gt1_selects_and_initializes(self):
+        with _env(DSV4_MOE_STRATEGY="deepep"), _deepep_wrapper(
+            initialized=True, mode=_FakeDeepEPMode.NORMAL
+        ):
+            forced, strict = _resolve_forced(None)
+            strategy_cls = select_strategy(
+                _cfg(ep_size=4), forced=forced, strict=strict
+            )
+            self.assertIs(strategy_cls, DeepEPStrategy)
+            self.assertIsInstance(strategy_cls(_cfg(ep_size=4)), DeepEPStrategy)
+
+    def test_deepep_ep1_fails_during_initialization(self):
+        with self.assertRaises(RuntimeError) as cm:
+            DeepEPStrategy(_cfg(ep_size=1))
+        self.assertIn("requires ep_size > 1", str(cm.exception))
+        self.assertIn("ep_size=1", str(cm.exception))
+
+    def test_env_deepep_wrapper_missing_fails_during_initialization(self):
+        with _env(DSV4_MOE_STRATEGY="deepep"), _deepep_wrapper(initialized=False):
+            forced, strict = _resolve_forced(None)
+            strategy_cls = select_strategy(
+                _cfg(ep_size=4), forced=forced, strict=strict
+            )
             with self.assertRaises(RuntimeError) as cm:
-                select_strategy(_cfg(ep_size=4), forced="deepep")
+                strategy_cls(_cfg(ep_size=4))
+        self.assertIn("initialized DeepEPWrapper", str(cm.exception))
+        self.assertIn("wrapper is not initialized", str(cm.exception))
+
+    def test_env_deepep_low_latency_fails_during_initialization(self):
+        with _env(DSV4_MOE_STRATEGY="deepep"), _deepep_wrapper(
+            initialized=True, mode=_FakeDeepEPMode.LOW_LATENCY
+        ):
+            forced, strict = _resolve_forced(None)
+            strategy_cls = select_strategy(
+                _cfg(ep_size=4), forced=forced, strict=strict
+            )
+            with self.assertRaises(RuntimeError) as cm:
+                strategy_cls(_cfg(ep_size=4))
+        self.assertIn("requires DeepEPMode.NORMAL", str(cm.exception))
+        self.assertIn("LOW_LATENCY", str(cm.exception))
+
+    def test_ctor_forced_deepep_ep_gt1_requires_explicit_env(self):
+        with self.assertRaises(RuntimeError) as cm:
+            select_strategy(_cfg(ep_size=4), forced="deepep")
+        self.assertIn("only via explicit DSV4_MOE_STRATEGY=deepep", str(cm.exception))
+        self.assertIn("constructor/legacy forcing is rejected", str(cm.exception))
+
+    def test_forced_ep_gt1_other_non_mega_raises_even_if_capable(self):
+        with self.assertRaises(RuntimeError) as cm:
+            select_strategy(_cfg(ep_size=4), forced="local_loop")
         self.assertIn("requires MegaMoEStrategy", str(cm.exception))
         self.assertIn("bypass Mega", str(cm.exception))
 

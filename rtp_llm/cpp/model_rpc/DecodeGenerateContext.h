@@ -45,7 +45,8 @@ public:
                           grpc::ServerContext*                  server_context,
                           kmonitor::MetricsReporterPtr&         metrics_reporter,
                           std::shared_ptr<RpcServerRuntimeMeta> meta):
-        GenerateContext(0, timeout_ms, server_context, metrics_reporter, meta), rpc_context(rpc_context) {}
+        GenerateContext(0, timeout_ms, server_context, metrics_reporter, meta, /*request_id_present=*/false),
+        rpc_context(rpc_context) {}
     ~DecodeGenerateContext();
     void reportTime();
     struct TimeInfo {

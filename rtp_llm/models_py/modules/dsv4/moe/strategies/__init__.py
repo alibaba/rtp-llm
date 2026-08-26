@@ -8,7 +8,8 @@ kernel availability).
 Importing this package populates the strategy registry (each
 ``@register_strategy``-decorated class registers itself on import). Order
 of import below = priority for ``select_strategy(forced=None)`` auto-pick.
-EP>1 is special-cased to require Mega and fail fast when it is unavailable.
+EP>1 defaults to Mega and fails fast when it is unavailable; DeepEP is only
+allowed through the explicit ``DSV4_MOE_STRATEGY=deepep`` opt-in.
 
 NOTE: ``# isort: skip_file`` above is REQUIRED. The import order here is the
 priority order, and it is load-bearing: ``deepep`` transitively imports
@@ -34,7 +35,7 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
     GroupedFP4Strategy,
     _has_fp8_fp4_grouped_kernel,
 )
-from .deepep import DeepEPStrategy  # noqa: F401  ep_size>1 fallback
+from .deepep import DeepEPStrategy  # noqa: F401  explicit EP>1 opt-in only
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
 
 __all__ = [

@@ -2,12 +2,16 @@
 
 #include "autil/legacy/jsonizable.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -72,6 +76,15 @@ public:
     // valid streams are admitted as ordinary individual streams.
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override {
+        if (hasMixedExecutionModes(streams)) {
+            for (const auto& stream : streams) {
+                if (!stream->hasError()) {
+                    stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+                }
+            }
+            return {std::vector<bool>(streams.size(), false), streams};
+        }
+
         std::vector<bool> enqueue_successes;
         enqueue_successes.reserve(streams.size());
         std::vector<GenerateStreamPtr> stream_enqueued;
@@ -139,34 +152,58 @@ public:
     }
 
     void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误的 stream
-        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
-
-        std::list<GenerateStreamPtr> new_streams;
-        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
-            // 先检查是否有错误，避免错误请求占用资源
-            if (!(*it)->hasError()) {
-                new_streams.push_back(*it);
-            }
-            if (new_streams.size() >= batch_size_) {
-                break;
+        const auto mixed_group_ids = mixedForceBatchGroupIds();
+        for (const auto& stream : waiting_streams_) {
+            if (stream->isGroup() && mixed_group_ids.count(stream->groupId()) > 0 && !stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
             }
         }
-        // 凑到batch_size_个stream再统一入队
-        if (new_streams.size() >= batch_size_) {
-            for (auto& stream : new_streams) {
-                stream->reportEvent(StreamEvents::CanRun);
-                // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
-                while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                }
+
+        // Reject every invalid force-batch member before advancing any waiting stream.
+        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+            if (!(*it)->hasError()) {
+                ++it;
+                continue;
             }
-            // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
-            new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
-            running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
-            // 从waiting_streams_中移除已调度的stream
-            for (auto& stream : new_streams) {
-                waiting_streams_.remove(stream);
+            (*it)->moveToNext();
+            it = waiting_streams_.erase(it);
+        }
+
+        // schedule() preserves the original aggregate batch-size gate. Homogeneous queues still run
+        // exactly batch_size_ streams; only a mixed queue can yield a smaller mode-homogeneous batch.
+        std::list<GenerateStreamPtr> selected_streams;
+        bool                         has_execution_mode = false;
+        bool                         prefill_only       = false;
+        bool                         has_other_mode     = false;
+        for (const auto& stream : waiting_streams_) {
+            const bool stream_prefill_only = isPrefillOnly(stream);
+            if (!has_execution_mode) {
+                has_execution_mode = true;
+                prefill_only       = stream_prefill_only;
+            }
+            if (stream_prefill_only != prefill_only) {
+                has_other_mode = true;
+                continue;
+            }
+            if (selected_streams.size() < batch_size_) {
+                selected_streams.push_back(stream);
+            }
+        }
+
+        // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
+        // but later homogeneous arrivals must go through the normal batch-size gate.
+        draining_mixed_modes_ = has_other_mode;
+        for (auto& stream : selected_streams) {
+            stream->reportEvent(StreamEvents::CanRun);
+            // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
+            while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        for (const auto& stream : selected_streams) {
+            waiting_streams_.remove(stream);
+            if (stream->getStatus() == StreamState::RUNNING) {
+                running_streams_.push_back(stream);
             }
         }
     }
@@ -181,7 +218,7 @@ public:
             if (dp_rank_ != 0) {
                 (*it)->setGenTimeline(false);
             }
-            if (scheduler_type_ == SchedulerType::kBatchDecode) {
+            if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(*it)) {
                 (*it)->setIsContextStream(false);
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
@@ -193,7 +230,7 @@ public:
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
             return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
-                   || !loading_cache_streams_.empty();
+                   || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
         });
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
@@ -201,7 +238,12 @@ public:
         evaluateAndUpdateStreams(loading_cache_streams_);
         evaluateAndUpdateStreams(running_streams_);
 
-        if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
+        if (waiting_streams_.empty()) {
+            draining_mixed_modes_ = false;
+        }
+
+        if (running_streams_.empty()
+            && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
@@ -233,6 +275,22 @@ public:
     }
 
 private:
+    std::unordered_set<int64_t> mixedForceBatchGroupIds() const {
+        std::unordered_map<int64_t, bool> group_prefill_only;
+        std::unordered_set<int64_t>       mixed_group_ids;
+        for (const auto& stream : waiting_streams_) {
+            if (!stream->isGroup()) {
+                continue;
+            }
+            const bool prefill_only = isPrefillOnly(stream);
+            const auto result       = group_prefill_only.emplace(stream->groupId(), prefill_only);
+            if (!result.second && result.first->second != prefill_only) {
+                mixed_group_ids.insert(stream->groupId());
+            }
+        }
+        return mixed_group_ids;
+    }
+
     std::mutex                   lock_;
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
@@ -240,7 +298,8 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
+    bool                         draining_mixed_modes_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;
