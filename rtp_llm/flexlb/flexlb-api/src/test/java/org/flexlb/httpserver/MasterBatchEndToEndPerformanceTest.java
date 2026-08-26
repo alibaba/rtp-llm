@@ -505,8 +505,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "at least one EnqueueBatch call must contain multiple tasks");
         assertTrue(batches.distinctInputLengths() >= 32,
                 "engine traffic must retain the log-derived input-length distribution");
-        assertEquals(0L, activeRequestCounter.getCount(),
-                "all Master gRPC requests must release their active-request token");
+        awaitNoActiveRequests();
 
         int processors = Runtime.getRuntime().availableProcessors();
         long defaultMinimumQps = Math.min(5_000L, Math.max(500L, processors * 250L));
@@ -554,6 +553,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         double minimumQpsRatio = Double.parseDouble(
                 System.getProperty("flexlb.perf.engine-matrix-min-qps-ratio", "0.85"));
+        double maximumClientP99Ms = Double.parseDouble(System.getProperty(
+                "flexlb.perf.engine-matrix-max-client-p99-ms", "250"));
         long maximumServerP99Ms = Long.getLong(
                 "flexlb.perf.engine-matrix-max-server-p99-ms", 250L);
         long maximumBatchWaitP99Ms = Long.getLong(
@@ -575,20 +576,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         BatchSummary batches = summarizeEngineBatches(firstRequestId, allPrefillWorkers());
         double masterQps = number(masterSnapshot, "completion_qps").doubleValue();
         Map<String, Object> serverLatency = nestedMap(masterSnapshot, "server_total_ms");
-        long serverP50Ms = number(serverLatency, "p50").longValue();
-        long serverP90Ms = number(serverLatency, "p90").longValue();
-        long serverP95Ms = number(serverLatency, "p95").longValue();
         long serverP99Ms = number(serverLatency, "p99").longValue();
-        double serverMeanMs = number(serverLatency, "mean").doubleValue();
         Map<String, Object> batchWait = nestedMap(masterSnapshot, "batch_wait_ms");
-        long batchWaitP50Ms = number(batchWait, "p50").longValue();
-        long batchWaitP90Ms = number(batchWait, "p90").longValue();
         long batchWaitP95Ms = number(batchWait, "p95").longValue();
         long batchWaitP99Ms = number(batchWait, "p99").longValue();
-        double batchWaitMeanMs = number(batchWait, "mean").doubleValue();
         Map<String, Object> dispatchAck = nestedMap(masterSnapshot, "dispatch_ack_ms");
-        long dispatchAckP99Ms = number(dispatchAck, "p99").longValue();
-        double dispatchAckMeanMs = number(dispatchAck, "mean").doubleValue();
         Map<String, Object> grpcQueue = nestedMap(masterSnapshot, "grpc_queue_ms");
         Map<String, Object> routeSubmit = nestedMap(masterSnapshot, "route_submit_ms");
         Map<String, Object> ackResponse = nestedMap(masterSnapshot, "ack_response_ms");
@@ -603,38 +595,55 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         System.out.printf(
                 "FlexLB Master engine-scale E2E: delivery=%s prefill=%d decode=%d "
                         + "target_qps=%d requests=%d client_qps=%.1f master_qps=%.1f "
-                        + "master_p50=%dms master_p90=%dms master_p95=%dms "
-                        + "master_p99=%dms master_avg=%.3fms active_prefill_rpc=%d "
+                        + "client_p50=%.3fms client_p90=%.3fms client_p95=%.3fms "
+                        + "client_p99=%.3fms "
+                        + "master_p50=%s master_p90=%s master_p95=%s "
+                        + "master_p99=%s active_prefill_rpc=%d "
                         + "active_prefill_route=%d active_decode_route=%d "
-                        + "batch_wait_count=%d batch_wait_p50=%dms batch_wait_p90=%dms "
-                        + "batch_wait_p95=%dms batch_wait_p99=%dms "
-                        + "batch_wait_avg=%.3fms dispatch_ack_count=%d "
-                        + "dispatch_ack_p99=%dms dispatch_ack_avg=%.3fms "
+                        + "batch_wait_count=%d batch_wait_p50=%s batch_wait_p90=%s "
+                        + "batch_wait_p95=%s batch_wait_p99=%s "
+                        + "dispatch_ack_count=%d dispatch_ack_p99=%s "
                         + "engine_batches=%d batch_full=%d window_timeout=%d "
                         + "predicted_execution_cap=%d avg_batch=%.2f max_batch=%d "
-                        + "grpc_queue_p99=%dms route_submit_p99=%dms "
-                        + "ack_response_p99=%dms%n",
+                        + "grpc_queue_p99=%s route_submit_p99=%s "
+                        + "ack_response_p99=%s%n",
                 DELIVERY_MODE, prefillEngineCount, decodeEngineCount, targetQps,
-                requestCount, result.qps(), masterQps, serverP50Ms, serverP90Ms,
-                serverP95Ms, serverP99Ms, serverMeanMs, batches.activeWorkerCount(),
+                requestCount, result.qps(), masterQps,
+                result.p50Ms(), result.p90Ms(), result.p95Ms(), result.p99Ms(),
+                latencyBucketLabel(serverLatency, "p50"),
+                latencyBucketLabel(serverLatency, "p90"),
+                latencyBucketLabel(serverLatency, "p95"),
+                latencyBucketLabel(serverLatency, "p99"),
+                batches.activeWorkerCount(),
                 activePrefillRoutes, activeDecodeRoutes,
                 number(batchWait, "count").longValue(),
-                batchWaitP50Ms, batchWaitP90Ms, batchWaitP95Ms, batchWaitP99Ms,
-                batchWaitMeanMs, number(dispatchAck, "count").longValue(),
-                dispatchAckP99Ms, dispatchAckMeanMs,
+                latencyBucketLabel(batchWait, "p50"),
+                latencyBucketLabel(batchWait, "p90"),
+                latencyBucketLabel(batchWait, "p95"),
+                latencyBucketLabel(batchWait, "p99"),
+                number(dispatchAck, "count").longValue(),
+                latencyBucketLabel(dispatchAck, "p99"),
                 batches.batchCount(), batchFullCount, windowTimeoutCount,
                 predictedExecutionCapCount, batches.averageBatchSize(),
-                batches.maxBatchSize(), number(grpcQueue, "p99").longValue(),
-                number(routeSubmit, "p99").longValue(),
-                number(ackResponse, "p99").longValue());
+                batches.maxBatchSize(), latencyBucketLabel(grpcQueue, "p99"),
+                latencyBucketLabel(routeSubmit, "p99"),
+                latencyBucketLabel(ackResponse, "p99"));
 
         assertEquals(requestCount, number(masterSnapshot, "arrival_count").longValue());
         assertEquals(requestCount, number(masterSnapshot, "completion_count").longValue());
+        assertEquals(requestCount, number(serverLatency, "count").longValue(),
+                "every request must record Master server latency");
+        assertEquals(requestCount, number(grpcQueue, "count").longValue(),
+                "every request must record gRPC queue latency");
+        assertEquals(requestCount, number(routeSubmit, "count").longValue(),
+                "every request must record route-submit latency");
+        assertEquals(requestCount, number(ackResponse, "count").longValue(),
+                "every request must record response-publication latency");
         assertEquals(prefillEngineCount, activePrefillRoutes,
                 "every prefill engine must appear in measured routing decisions");
         assertEquals(decodeEngineCount, activeDecodeRoutes,
                 "every decode engine must appear in measured routing decisions");
-        assertEquals(0L, activeRequestCounter.getCount());
+        awaitNoActiveRequests();
         assertTrue(result.qps() >= targetQps * minimumQpsRatio,
                 () -> String.format(
                         "client throughput %.1f QPS missed %.0f%% of target %d QPS",
@@ -643,6 +652,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 () -> String.format(
                         "Master throughput %.1f QPS missed %.0f%% of target %d QPS",
                         masterQps, minimumQpsRatio * 100.0, targetQps));
+        assertTrue(result.p99Ms() <= maximumClientP99Ms,
+                () -> String.format("client E2E P99 %.3f ms exceeds ceiling %.3f ms",
+                        result.p99Ms(), maximumClientP99Ms));
         assertTrue(serverP99Ms <= maximumServerP99Ms,
                 () -> String.format("Master server P99 %d ms exceeds ceiling %d ms",
                         serverP99Ms, maximumServerP99Ms));
@@ -688,8 +700,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     "NON_BATCH must not report a batch queue-wait histogram");
             assertEquals(0L, number(dispatchAck, "count").longValue(),
                     "NON_BATCH must not report an EnqueueBatch ACK histogram");
-            assertEquals(requestCount, number(ackResponse, "count").longValue(),
-                    "every NON_BATCH route decision must record response publication");
             assertEquals(0, batches.batchCount(),
                     "NON_BATCH must not call EnqueueBatch");
             assertEquals(0, batches.activeWorkerCount(),
@@ -846,6 +856,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return new TrafficResult(
                 requestCount * 1_000_000_000.0 / elapsedNanos,
                 percentileNanos(latencies, 0.50) / 1_000_000.0,
+                percentileNanos(latencies, 0.90) / 1_000_000.0,
+                percentileNanos(latencies, 0.95) / 1_000_000.0,
                 percentileNanos(latencies, 0.99) / 1_000_000.0,
                 responses);
     }
@@ -1015,6 +1027,16 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             TimeUnit.MILLISECONDS.sleep(5);
         } while (System.nanoTime() < deadlineNanos);
         return latencyRecorder.snapshot();
+    }
+
+    private void awaitNoActiveRequests() throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (activeRequestCounter.getCount() != 0L
+                && System.nanoTime() < deadlineNanos) {
+            TimeUnit.MILLISECONDS.sleep(1);
+        }
+        assertEquals(0L, activeRequestCounter.getCount(),
+                "all Master gRPC requests must release their active-request token");
     }
 
     private void resetMeasurementState() {
@@ -1344,6 +1366,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return (Number) source.get(key);
     }
 
+    private static String latencyBucketLabel(Map<String, Object> histogram, String percentile) {
+        if (number(histogram, "count").longValue() == 0L) {
+            return "N/A";
+        }
+        long millis = number(histogram, percentile).longValue();
+        return millis == 0L ? "<1ms" : millis + "ms";
+    }
+
     private static long percentileNanos(long[] sortedValues, double percentile) {
         int index = Math.max(0, (int) Math.ceil(sortedValues.length * percentile) - 1);
         return sortedValues[index];
@@ -1353,7 +1383,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                                  long latencyNanos) {
     }
 
-    private record TrafficResult(double qps, double p50Ms, double p99Ms,
+    private record TrafficResult(double qps, double p50Ms, double p90Ms,
+                                 double p95Ms, double p99Ms,
                                  List<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responses) {
     }
 
