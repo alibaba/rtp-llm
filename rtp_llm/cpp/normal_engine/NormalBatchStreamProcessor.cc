@@ -23,18 +23,6 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;
     model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.kernel_seq_size_per_block;
     model_input_gatherer_config_.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
-    // Hybrid cache groups can use different kernel subdivisions.  The input
-    // tensor is rectangular, so its per-group row stride must accommodate the
-    // widest group; copyKvCacheBlocksToModelInput already copies each group's
-    // actual vector into that padded row.  Using only the legacy global value
-    // truncated INDEXER_KV rows when its 256-token kernel geometry differed
-    // from the 1024-token global geometry.
-    if (cache_config.groupNums() > 0) {
-        for (const auto group_blocks_per_kv_block : cache_config.groupKernelBlocksPerKvBlockSnapshot()) {
-            model_input_gatherer_config_.kernel_blocks_per_kv_block =
-                std::max(model_input_gatherer_config_.kernel_blocks_per_kv_block, group_blocks_per_kv_block);
-        }
-    }
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;
     if (model_input_gatherer_config_.kv_cache_group_nums > 0) {
