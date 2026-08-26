@@ -147,8 +147,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             sumLoad += loads[i];
             sumCacheUsed += kvUseds[i];
         }
-        long avgLoad = sumLoad / n;
-        long avgCacheUsed = sumCacheUsed / n;
 
         List<DecodeEndpoint> survivors = new ArrayList<>(n);
         Map<String, Integer> rejections = new java.util.HashMap<>();
@@ -160,15 +158,29 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 rejections.merge("KV_CAPACITY", 1, Integer::sum);
                 continue;
             }
-            if (hotspotMultiplier > 0 && avgLoad > 0
-                    && loads[i] > avgLoad * hotspotMultiplier) {
-                rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
-                continue;
-            }
-            if (imbalanceMultiplier > 0 && avgCacheUsed > 0
-                    && kvUseds[i] > avgCacheUsed * imbalanceMultiplier) {
-                rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
-                continue;
+            // Leave-one-out outlier baselines: judge each engine against the
+            // average of the OTHER eligible engines, never one that includes
+            // itself. A self-inclusive average lets a single hot engine drag
+            // its own baseline up with it — with n engines the threshold
+            // becomes multiplier * (own + rest)/n, so for small fleets (n=2,3)
+            // a genuinely hot engine mathematically cannot exceed it and the
+            // filter never fires. n == 1 (or an all-zero rest average) skips
+            // the relative checks: with no "others" to be an outlier against,
+            // rejecting the only candidate could only yield
+            // NO_AVAILABLE_WORKER with nothing to gain.
+            if (n > 1) {
+                long othersAvgLoad = (sumLoad - loads[i]) / (n - 1);
+                long othersAvgCacheUsed = (sumCacheUsed - kvUseds[i]) / (n - 1);
+                if (hotspotMultiplier > 0 && othersAvgLoad > 0
+                        && loads[i] > othersAvgLoad * hotspotMultiplier) {
+                    rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
+                    continue;
+                }
+                if (imbalanceMultiplier > 0 && othersAvgCacheUsed > 0
+                        && kvUseds[i] > othersAvgCacheUsed * imbalanceMultiplier) {
+                    rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
+                    continue;
+                }
             }
             survivors.add(ep);
         }

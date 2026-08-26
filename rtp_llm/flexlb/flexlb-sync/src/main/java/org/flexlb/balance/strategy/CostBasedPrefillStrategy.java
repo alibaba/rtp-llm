@@ -387,10 +387,17 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return new FilterResult(feasible, rejections);
         }
 
-        long avgWaitMs = sumWaitMs / feasible.size();
-        long avgPendingCount = sumPendingCount / feasible.size();
-
-        // Round 2: hotspot / imbalance filter using cached values (no re-computation)
+        // Round 2: hotspot / imbalance filter using cached values (no re-computation).
+        // Outlier baselines are leave-one-out: each engine is judged against the
+        // average of the OTHER feasible engines, never one that includes itself.
+        // A self-inclusive average lets a busy engine drag its own baseline up
+        // with it — with n engines the threshold becomes multiplier * (own +
+        // rest)/n, so for small fleets (n=2,3) a genuinely overloaded engine
+        // mathematically cannot exceed it and the filter never fires.
+        // feasibleSize == 1 (or an all-zero rest average) skips the relative
+        // checks: with no "others" to be an outlier against, rejecting the only
+        // candidate could only yield NO_AVAILABLE_WORKER with nothing to gain
+        // (the least-loaded fallback below would rescue it anyway).
         int survivorCount = 0;
         PrefillEndpoint leastLoadedEndpoint = null;
         long leastLoadedCacheHit = 0;
@@ -410,13 +417,20 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 leastLoadedPrefillMs = feasible.prefillMs(i);
             }
 
-            if (hotspotMultiplier > 0 && avgPendingCount > 0 && pendingCount > avgPendingCount * hotspotMultiplier) {
-                rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
-                continue;
-            }
-            if (imbalanceMultiplier > 0 && avgWaitMs > 0 && endpointWaitMs > avgWaitMs * imbalanceMultiplier) {
-                rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
-                continue;
+            if (feasibleSize > 1) {
+                long othersAvgPendingCount =
+                        (sumPendingCount - Math.max(0L, pendingCount)) / (feasibleSize - 1);
+                long othersAvgWaitMs = (sumWaitMs - endpointWaitMs) / (feasibleSize - 1);
+                if (hotspotMultiplier > 0 && othersAvgPendingCount > 0
+                        && pendingCount > othersAvgPendingCount * hotspotMultiplier) {
+                    rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
+                    continue;
+                }
+                if (imbalanceMultiplier > 0 && othersAvgWaitMs > 0
+                        && endpointWaitMs > othersAvgWaitMs * imbalanceMultiplier) {
+                    rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
+                    continue;
+                }
             }
 
             feasible.moveSelectionFields(i, survivorCount++);

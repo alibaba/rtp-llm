@@ -418,6 +418,53 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
+    void imbalanceFilterUsesOthersAverageExcludingSelf() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 350));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 100));
+
+        // Keep BOTH engines inside the RANDOM_WITHIN_TOLERANCE window
+        // (constant 5s prefill estimate => scores 5350 vs 5100, tolerance
+        // = 10% * 5100 = 510) so only the outlier filter — not score
+        // ordering — can exclude the busy one. With the old self-inclusive
+        // average the threshold was 3.0 * 225 = 675, so wait=350 could
+        // mathematically NEVER be filtered with n=2 and 10.0.0.1 stayed
+        // selectable. The leave-one-out baseline (others avg = 100) must
+        // reject it: 350 > 3.0 * 100.
+        FlexlbConfig config = new FlexlbConfig();
+        setFormula(config, "5000");
+
+        BalanceContext ctx = buildContext(500, 61L, config);
+        for (int i = 0; i < 30; i++) {
+            long requestId = 6_100L + i;
+            ctx.getRequest().setRequestId(requestId);
+            ServerStatus result = strategy.select(ctx, RoleType.PREFILL, null);
+            assertTrue(result.isSuccess());
+            assertNotEquals("10.0.0.1", result.getServerIp(),
+                    "wait=350ms vs others-avg=100ms must be outlier-rejected");
+            strategy.rollBack(
+                    endpointRegistry.get(RoleType.PREFILL, result.getServerIp() + ":8080"),
+                    requestId);
+        }
+    }
+
+    @Test
+    void singleCandidateSkipsOutlierRejection() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 100_000));
+
+        // A lone engine with a huge wait: there are no "other" engines to
+        // be an outlier against, so the relative outlier checks must be
+        // skipped — rejecting the only candidate could only yield
+        // NO_AVAILABLE_WORKER with nothing to gain.
+        ServerStatus result = strategy.select(buildContext(500, 62L), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp(),
+                "a lone engine has no 'others' to be an outlier against and must stay selectable");
+    }
+
+    @Test
     void noAvailableWorkersReturnsError() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 

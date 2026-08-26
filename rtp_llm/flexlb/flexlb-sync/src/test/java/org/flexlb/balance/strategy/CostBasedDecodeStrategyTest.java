@@ -437,4 +437,97 @@ class CostBasedDecodeStrategyTest {
         Assertions.assertFalse(priorityResult.isSuccess(),
                 "PRIORITY must preserve the inclusive admission gate for preemption/classification");
     }
+
+    @Test
+    void hotspotFilterUsesOthersAverageExcludingSelf() {
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        worker1.getTotalKvCacheTokens().set(10000);
+        worker1.getAvailableKvCacheTokens().set(9000);
+        WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
+        worker2.getTotalKvCacheTokens().set(10000);
+        worker2.getAvailableKvCacheTokens().set(9000);
+
+        decodeMap.put("127.0.0.1:8080", worker1);
+        decodeMap.put("127.0.0.2:8080", worker2);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
+
+        // Hot engine carries 4 running-phase reservations (engineLoad = 4),
+        // the cool one a single reservation (engineLoad = 1). With the old
+        // self-inclusive average the threshold was 3.0 * (4+1)/2 = 7.5, so
+        // the hot engine could mathematically NEVER be filtered with n=2.
+        // The leave-one-out baseline (others avg = 1) must reject it:
+        // 4 > 3.0 * 1.
+        DecodeEndpoint hot = registry.getDecode("127.0.0.1:8080");
+        DecodeEndpoint cool = registry.getDecode("127.0.0.2:8080");
+        for (long rid = 1L; rid <= 4L; rid++) {
+            hot.reserve(rid, 100, 500, 50);
+        }
+        cool.reserve(5L, 100, 500, 50);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        allowDecodeSelection(decodeResourceMeasure);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
+
+        Request req = new Request();
+        req.setSeqLen(100);
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        for (int i = 0; i < 30; i++) {
+            long requestId = 20_000L + i;
+            req.setRequestId(requestId);
+            ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+            Assertions.assertTrue(status.isSuccess());
+            Assertions.assertEquals("127.0.0.2", status.getServerIp(),
+                    "the hot engine (load=4 vs others-avg=1) must be outlier-rejected");
+            costBasedDecodeStrategy.rollBack(
+                    registry.get(RoleType.DECODE, status.getServerIp() + ":8080"), requestId);
+        }
+    }
+
+    @Test
+    void singleCandidateSkipsOutlierRejection() {
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        worker.getTotalKvCacheTokens().set(10000);
+        worker.getAvailableKvCacheTokens().set(9000);
+        decodeMap.put("127.0.0.1:8080", worker);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
+        // A lone engine carrying heavy load: there are no "other" engines to
+        // be an outlier against, so the relative outlier checks must be
+        // skipped — rejecting the only candidate could only yield
+        // NO_AVAILABLE_WORKER with nothing to gain.
+        for (long rid = 1L; rid <= 6L; rid++) {
+            endpoint.reserve(rid, 100, 500, 50);
+        }
+
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        allowDecodeSelection(decodeResourceMeasure);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
+
+        Request req = new Request();
+        req.setSeqLen(100);
+        req.setRequestId(30_000L);
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+        balanceContext.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("127.0.0.1", status.getServerIp());
+    }
 }
