@@ -699,27 +699,29 @@ inflight_ts = [
 age_pts = prom_ts_extract("flexlb_app_flexlb_inflight_max_age_ms", agg="max")
 inflight_age_ts = [{"t": t, "age_ms": int(round(v))} for t, v in rel_axis(age_pts)]
 
+# KV cache: used / available are per-engine gauges (engineIp labels) summed
+# cluster-wide; capacity = used_sum + available_sum. The total gauge is NOT
+# per-engine (labels are model+role only, so every engine of a role overwrites
+# the same sample) and cannot be summed into a cluster capacity.
 kv_used = prom_ts_extract("flexlb_app_cache_used_kv_cache_tokens", agg="sum")
-kv_total = prom_ts_extract("flexlb_app_cache_total_kv_cache_tokens", agg="sum")
+kv_avail = prom_ts_extract("flexlb_app_cache_available_kv_cache_tokens", agg="sum")
 kv_ts = []
 if kv_used:
     used_by_ts = {ts: v for ts, v in kv_used}
-    total_by_ts = {ts: v for ts, v in kv_total}
+    avail_by_ts = {ts: v for ts, v in kv_avail}
     kv_rows = []
-    last_total = None
-    for ts in sorted(set(used_by_ts) | set(total_by_ts)):
-        if ts in total_by_ts:
-            last_total = total_by_ts[ts]
-        used = used_by_ts.get(ts)
-        if used is None or not last_total:
+    for ts in sorted(set(used_by_ts) & set(avail_by_ts)):
+        used = used_by_ts[ts]
+        capacity = used + avail_by_ts[ts]
+        if capacity <= 0:
             continue
         kv_rows.append(
             (
                 ts,
                 {
                     "used_tokens": int(round(used)),
-                    "total_tokens": int(round(last_total)),
-                    "used_pct": round(100.0 * used / last_total, 1),
+                    "capacity_tokens": int(round(capacity)),
+                    "used_pct": round(100.0 * used / capacity, 1),
                 },
             )
         )
@@ -742,7 +744,13 @@ if batcher_pts or routing_pts:
     batcher_ts = [{"t": t, **row} for t, row in rel_axis(b_rows)]
 
 out = {
-    "meta": {"run_dir": os.path.basename(run_dir)},
+    "meta": {
+        "run_dir": os.path.basename(run_dir),
+        "schedule_only": str(
+            (run_meta.get("params") or {}).get("schedule_only", "0")
+        ).strip()
+        in ("1", "true", "True"),
+    },
     "summary": {
         "total_requests": summary.get("total_requests"),
         "success_count": summary.get("success_count"),
