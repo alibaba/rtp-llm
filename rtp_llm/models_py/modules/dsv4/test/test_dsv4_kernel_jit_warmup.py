@@ -1382,6 +1382,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
 
         fallback_calls = []
         direct_calls = []
+        rank_major_calls = []
         local_slice_bytes = 74880
         cp_size = 2
         expected_full_stride = local_slice_bytes * cp_size
@@ -1419,6 +1420,29 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 )
             )
             return True
+
+        def fake_rank_major(
+            out,
+            gathered,
+            compact_slots,
+            gather_lens,
+            offset,
+            *,
+            full_entries_per_block,
+            num_unique_blocks,
+        ):
+            rank_major_calls.append(
+                (
+                    tuple(gathered.shape),
+                    tuple(gathered.stride()),
+                    tuple(compact_slots.shape),
+                    gather_lens.tolist(),
+                    tuple(out.shape),
+                    offset,
+                    full_entries_per_block,
+                    num_unique_blocks,
+                )
+            )
 
         def with_patch(obj, name, value):
             old = getattr(obj, name)
@@ -1499,6 +1523,17 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     ),
                 )
             )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "_launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "_launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked",
+                        fake_rank_major,
+                    ),
+                )
+            )
             warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
 
             warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
@@ -1542,6 +1577,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     [2, 1],
                     (2, 4, _swa_dequant_triton.HEAD_DIM),
                     torch.bfloat16,
+                    1,
+                )
+            ],
+        )
+        self.assertEqual(
+            rank_major_calls,
+            [
+                (
+                    (cp_size, local_slice_bytes),
+                    (local_slice_bytes, 1),
+                    (2, 2),
+                    [2, 1],
+                    (2, 4, _swa_dequant_triton.HEAD_DIM),
+                    1,
+                    expected_entries,
                     1,
                 )
             ],

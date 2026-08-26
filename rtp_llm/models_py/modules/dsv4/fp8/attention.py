@@ -207,6 +207,8 @@ def _get_cp_post_gather_stream(
 
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
+    if t.dim() == 1 and t.is_contiguous():
+        return t
     return t.reshape(-1).contiguous()
 
 
@@ -3146,7 +3148,7 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
         from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
             combine_topk_swa_indices,
-            combine_topk_swa_indices_cp,
+            combine_topk_swa_indices_cp_prepared,
         )
 
         ratio = self.compress_ratio
@@ -3310,9 +3312,18 @@ class AttentionFP8(nn.Module):
             # round-trip loss on tokens we just wrote, while keeping the hot
             # path free of casts / gathers / per-request slicing.
             with record_function_range("dsv4.fp8.attn.workspace.overlay_new_k"):
-                kv_bf16 = qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+                kv_owner_is_ready = (
+                    qkv.kv_full.dim() == 2
+                    and qkv.kv_full.shape[-1] == D
+                    and qkv.kv_full.dtype == torch.bfloat16
+                )
+                kv_source = (
+                    qkv.kv_full
+                    if kv_owner_is_ready
+                    else qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+                )
                 workspace.view(B * wm.M, D).index_copy_(
-                    0, wm.new_k_slot_in_flat, kv_bf16
+                    0, wm.new_k_slot_in_flat, kv_source
                 )
                 # Free the kv_full storage before combine_topk + flash_mla_sparse_fwd.
                 # After the overlay, kv_full has no remaining consumer in this
@@ -3320,7 +3331,8 @@ class AttentionFP8(nn.Module):
                 # each FlashMLA chunk immediately after attention.
                 # The NamedTuple ref keeps it alive otherwise, costing ~1.1 GiB
                 # of peak overlap with the sparse-attn workspace at 1M ctx.
-                dispose_tensor(kv_bf16)
+                if not kv_owner_is_ready:
+                    dispose_tensor(kv_source)
                 dispose_tensor(qkv.kv_full)
 
             # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
@@ -3367,25 +3379,23 @@ class AttentionFP8(nn.Module):
                 assert common.cp_ctx is not None
                 cp_ctx_local = common.cp_ctx
                 legacy_prefix_length = int(cp_ctx_local.prefix_length)
-                combine_kwargs = dict(
-                    topk_indices=cmp_topk,
-                    global_positions=_flat_1d(cp_ctx_local.global_positions),
-                    sp_int=legacy_prefix_length,
-                    window_size=self.window_size,
-                    compress_ratio=ratio,
-                    topk=int(cmp_topk.shape[-1]),
-                    M=wm.M,
-                    N=wm.N,
-                )
                 assert common.req_id_per_token is not None
                 assert common.prefix_lengths is not None
-                combine_kwargs.update(
-                    req_id_per_token=_flat_1d(common.req_id_per_token),
-                    prefix_lengths=_flat_1d(common.prefix_lengths),
-                )
+                global_positions = cp_ctx_local.global_positions
+                req_id_per_token = common.req_id_per_token
+                prefix_lengths = common.prefix_lengths
                 with record_function_range("dsv4.fp8.attn.workspace.combine_topk_cp"):
-                    combined_indices, combined_lens = combine_topk_swa_indices_cp(
-                        **combine_kwargs,
+                    combined_indices, combined_lens = combine_topk_swa_indices_cp_prepared(
+                        topk_indices=cmp_topk,
+                        global_positions=global_positions,
+                        sp_int=legacy_prefix_length,
+                        window_size=self.window_size,
+                        compress_ratio=ratio,
+                        topk=int(cmp_topk.shape[-1]),
+                        M=wm.M,
+                        N=wm.N,
+                        req_id_per_token=req_id_per_token,
+                        prefix_lengths=prefix_lengths,
                         flash_mla_indices=True,
                     )
             else:
@@ -5448,20 +5458,12 @@ class AttentionFP8(nn.Module):
         assert prefill_workspace is not None, "prefill workspace not bound"
         s_q = int(q.shape[0])
         assert s_q > 0, "streaming FlashMLA prefill requires at least one Q row"
-        q_workspace = prefill_workspace.prefill_q(s_q)
+        prefill_workspace.validate_prefill_q_alias(q, s_q)
         assert q.dtype == torch.bfloat16, f"prefill Q must be bf16, got {q.dtype}"
         assert q.is_contiguous(), "prefill Q workspace view must be contiguous"
         assert tuple(q.shape[1:]) == (self.n_heads, self.head_dim), (
             "prefill Q shape mismatch: expected "
             f"[T, {self.n_heads}, {self.head_dim}], got {tuple(q.shape)}"
-        )
-        assert q.numel() == q_workspace.numel(), (
-            "prefill workspace Q shape mismatch: "
-            f"q.numel={q.numel()} != workspace.numel={q_workspace.numel()}"
-        )
-        assert q.data_ptr() == q_workspace.data_ptr(), (
-            "prefill Q must reuse PrefillWorkspace storage; got different "
-            "base pointers"
         )
         assert (
             int(indices.shape[0]) == s_q
@@ -5477,6 +5479,7 @@ class AttentionFP8(nn.Module):
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
+        single_chunk = chunk_rows == s_q
         if out is None:
             out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=q.device)
         else:
@@ -5494,20 +5497,32 @@ class AttentionFP8(nn.Module):
 
         for start in range(0, s_q, chunk_rows):
             end = min(start + chunk_rows, s_q)
+            if single_chunk:
+                q_part = q
+                indices_part = indices
+                topk_length_part = topk_length
+                freqs_cis_part = freqs_cis
+                out_part = out
+            else:
+                q_part = q[start:end]
+                indices_part = indices[start:end]
+                topk_length_part = topk_length[start:end]
+                freqs_cis_part = freqs_cis[start:end]
+                out_part = out[start:end, :]
             with record_function_range(profile_name):
                 o_part, _, _ = flash_mla_sparse_fwd(
-                    q=q[start:end],
+                    q=q_part,
                     kv=kv,
-                    indices=indices[start:end],
+                    indices=indices_part,
                     sm_scale=self.softmax_scale,
                     attn_sink=self.attn_sink,
-                    topk_length=topk_length[start:end],
+                    topk_length=topk_length_part,
                 )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(
                     o_part,
-                    freqs_cis[start:end],
-                    out=out[start:end, :],
+                    freqs_cis_part,
+                    out=out_part,
                 )
             dispose_tensor(o_part)
 
@@ -5663,7 +5678,16 @@ class AttentionFP8(nn.Module):
                     )
 
         # 2. New K BF16 overlay.
-        kv_bf16 = qkv.kv_full.to(torch.bfloat16)
+        kv_owner_is_ready = (
+            qkv.kv_full.dim() == 2
+            and qkv.kv_full.shape[-1] == D
+            and qkv.kv_full.dtype == torch.bfloat16
+        )
+        kv_source = (
+            qkv.kv_full
+            if kv_owner_is_ready
+            else qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
+        )
         # ``meta.slot_in_flat`` is pre-baked in ``_build_swa_prefill_meta_varlen``
         # (= ``req_id * M + min(prefix, win-1) + local_pos``). Single
         # ``index_copy_`` here — no per-layer casts / gathers / arith.
@@ -5671,12 +5695,15 @@ class AttentionFP8(nn.Module):
             meta.slot_in_flat is not None
         ), "via_concat varlen path expects pre-baked slot_in_flat in swa_meta"
         with record_function_range("dsv4.fp8.attn.swa_concat.overlay_new_k"):
-            workspace.view(B * meta.M, D).index_copy_(0, meta.slot_in_flat, kv_bf16)
+            workspace.view(B * meta.M, D).index_copy_(
+                0, meta.slot_in_flat, kv_source
+            )
         # Free kv_full storage before flash_mla_sparse_fwd. After the
         # overlay nothing else reads it on this path; the NamedTuple ref
         # would otherwise keep it alive through the sparse-attn workspace
         # alloc — ~1.1 GiB peak overlap at 1M ctx.
-        dispose_tensor(kv_bf16)
+        if not kv_owner_is_ready:
+            dispose_tensor(kv_source)
         dispose_tensor(qkv.kv_full)
 
         # 3. Chunked flash_mla_sparse_fwd over the [B*M] flat KV view.

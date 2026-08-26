@@ -135,6 +135,22 @@ class PrefillWorkspace:
             .view(self._q_rows, self._q_dim)[:num_tokens]
         )
 
+    def validate_prefill_q_alias(self, q: torch.Tensor, num_tokens: int) -> None:
+        """Validate a live Q alias without constructing another tensor view."""
+        num_tokens = int(num_tokens)
+        assert (
+            0 <= num_tokens <= self._q_rows
+        ), f"prefill_q overflow: num_tokens={num_tokens} > capacity {self._q_rows}"
+        expected_numel = num_tokens * self._q_dim
+        assert q.numel() == expected_numel, (
+            "prefill workspace Q shape mismatch: "
+            f"q.numel={q.numel()} != workspace.numel={expected_numel}"
+        )
+        assert q.data_ptr() == self._union.data_ptr(), (
+            "prefill Q must reuse PrefillWorkspace storage; got different "
+            "base pointers"
+        )
+
     def cp_gather_main(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the main compressor's CP gather buffer."""
         return self._cp_view(

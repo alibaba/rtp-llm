@@ -2309,6 +2309,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
         ENTRY_BYTES,
         HEAD_DIM,
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked,
         cp_swa_direct_dequant_scatter_enabled,
         dequantize_slots_to_bf16,
         try_dequantize_and_gather_k_cache_slots_to_workspace,
@@ -2371,6 +2372,15 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
                 "DSV4 SWA direct dequant-scatter is enabled but unsupported during "
                 "JIT warmup"
             )
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+            workspace,
+            full_raw.view(cp_size, local_slice_bytes),
+            slot_mapping,
+            gather_lens,
+            1,
+            full_entries_per_block=entries_per_block,
+            num_unique_blocks=1,
+        )
         del slot_mapping, gather_lens, workspace
     del full_raw, full_view, slot_indices, out
     _sync_cuda(device)

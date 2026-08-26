@@ -285,6 +285,23 @@ def dequantize_and_gather_k_cache(
     )
 
 
+@triton.jit
+def _packed_slot_byte_ptr(
+    k_cache_ptr,
+    physical_block_idx,
+    full_byte_offset,
+    block_stride,
+    num_cache_blocks,
+    CP_RANK_MAJOR_RAW: tl.constexpr,
+):
+    if CP_RANK_MAJOR_RAW:
+        byte_rank = full_byte_offset // block_stride
+        byte_in_rank = full_byte_offset - byte_rank * block_stride
+        rank_major_row = byte_rank * num_cache_blocks + physical_block_idx
+        return k_cache_ptr + rank_major_row * block_stride + byte_in_rank
+    return k_cache_ptr + physical_block_idx * block_stride + full_byte_offset
+
+
 @triton.jit(
     do_not_specialize=[
         "out_stride0",
@@ -317,6 +334,7 @@ def _dequantize_and_gather_k_slots_kernel(
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    CP_RANK_MAJOR_RAW: tl.constexpr,
 ):
     """Gather/dequant using pre-translated flat global slot ids.
 
@@ -355,18 +373,10 @@ def _dequantize_and_gather_k_slots_kernel(
             if physical_block_idx >= num_cache_blocks.to(tl.int64):
                 _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-            cache_block_ptr = (
-                k_cache_ptr
-                + physical_block_idx.to(tl.int64) * block_stride.to(tl.int64)
+            token_data_offset = pos_in_block * token_data_size
+            token_scale_offset = (
+                cache_block_size * token_data_size + pos_in_block * scale_dim
             )
-            token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-            token_scale_ptr = (
-                cache_block_ptr
-                + cache_block_size * token_data_size
-                + pos_in_block * scale_dim
-            )
-            token_fp8_ptr = token_data_ptr
-            token_bf16_ptr = token_data_ptr + fp8_dim
 
             for qblock_idx in tl.static_range(n_quant_blocks):
                 qblock_start = qblock_idx * quant_block
@@ -374,11 +384,27 @@ def _dequantize_and_gather_k_slots_kernel(
                     offsets = qblock_start + tl.arange(0, quant_block)
                     mask = offsets < fp8_dim
 
-                    x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+                    token_fp8_ptr = _packed_slot_byte_ptr(
+                        k_cache_ptr,
+                        physical_block_idx,
+                        token_data_offset + offsets,
+                        block_stride,
+                        num_cache_blocks,
+                        CP_RANK_MAJOR_RAW,
+                    )
+                    x_uint8 = tl.load(token_fp8_ptr, mask=mask, other=0)
                     x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
                     x_float = x_fp8.to(tl.float32)
 
-                    encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+                    token_scale_ptr = _packed_slot_byte_ptr(
+                        k_cache_ptr,
+                        physical_block_idx,
+                        token_scale_offset + qblock_idx,
+                        block_stride,
+                        num_cache_blocks,
+                        CP_RANK_MAJOR_RAW,
+                    )
+                    encoded_scale = tl.load(token_scale_ptr)
                     exponent = encoded_scale.to(tl.float32) - 127.0
                     scale = tl.exp2(exponent)
 
@@ -388,11 +414,150 @@ def _dequantize_and_gather_k_slots_kernel(
                     )
 
             bf16_output_offset = fp8_dim
-            bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
             for j in tl.static_range(bf16_dim // 16):
                 chunk_offsets = j * 16 + tl.arange(0, 16)
-                bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+                bf16_byte_offsets = token_data_offset + fp8_dim + chunk_offsets * 2
+                bf16_cache_ptr = _packed_slot_byte_ptr(
+                    k_cache_ptr,
+                    physical_block_idx,
+                    bf16_byte_offsets,
+                    block_stride,
+                    num_cache_blocks,
+                    CP_RANK_MAJOR_RAW,
+                ).to(tl.pointer_type(tl.bfloat16))
+                bf16_vals = tl.load(bf16_cache_ptr)
                 tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+
+
+def _launch_dequantize_and_gather_k_slots_unchecked(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: Optional[torch.Tensor],
+    offset: int,
+    *,
+    cache_block_size: int,
+    block_stride: int,
+    num_cache_blocks: int,
+    cp_rank_major_raw: bool,
+) -> None:
+    """Launch after the caller has established the packed-slot contracts."""
+    batch_size = int(slot_mapping.shape[0])
+    max_gather_len = int(slot_mapping.shape[1])
+    if batch_size == 0 or max_gather_len == 0:
+        return
+
+    NUM_WORKERS = 128
+    _dequantize_and_gather_k_slots_kernel[(batch_size, NUM_WORKERS)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        slot_mapping,
+        slot_mapping.stride(0),
+        int(offset),
+        gather_lens,
+        max_gather_len,
+        fp8_dim=NOPE_DIM,
+        bf16_dim=ROPE_DIM,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+        quant_block=TILE_SIZE,
+        cache_block_size=int(cache_block_size),
+        token_data_size=TOKEN_DATA_SIZE,
+        block_stride=int(block_stride),
+        num_cache_blocks=int(num_cache_blocks),
+        fp8_max=FP8_MAX,
+        n_quant_blocks=NOPE_TILES,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        CP_RANK_MAJOR_RAW=bool(cp_rank_major_raw),
+    )
+
+
+def _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+    out: torch.Tensor,
+    gathered: torch.Tensor,
+    compact_slots: torch.Tensor,
+    gather_lens: torch.Tensor,
+    offset: int,
+    *,
+    full_entries_per_block: int,
+    num_unique_blocks: int,
+) -> None:
+    """Launch after start/compaction established rank-major raw contracts."""
+    _launch_dequantize_and_gather_k_slots_unchecked(
+        out,
+        gathered,
+        compact_slots,
+        gather_lens,
+        offset,
+        cache_block_size=int(full_entries_per_block),
+        block_stride=int(gathered.shape[1]),
+        num_cache_blocks=int(num_unique_blocks),
+        cp_rank_major_raw=True,
+    )
+
+
+def _launch_dequantize_and_gather_k_slots_cp_rank_major_checked(
+    out: torch.Tensor,
+    gathered: torch.Tensor,
+    compact_slots: torch.Tensor,
+    gather_lens: torch.Tensor,
+    offset: int,
+    *,
+    full_entries_per_block: int,
+    num_unique_blocks: int,
+    cp_size: int,
+) -> None:
+    """Validate rank-major CP metadata, then launch the direct-read kernel."""
+    num_unique_blocks = int(num_unique_blocks)
+    full_entries_per_block = int(full_entries_per_block)
+    cp_size = int(cp_size)
+    assert num_unique_blocks > 0 and full_entries_per_block > 0 and cp_size > 1
+    assert (
+        gathered.is_cuda
+        and gathered.device == out.device
+        and gathered.dtype == torch.uint8
+        and gathered.dim() == 2
+        and gathered.is_contiguous()
+        and int(gathered.shape[0]) == cp_size * num_unique_blocks
+    ), "rank-major CP gather must be contiguous uint8 [cp_size * U, local_slice_bytes]"
+    local_slice_bytes = int(gathered.shape[1])
+    assert cp_size > 1 and local_slice_bytes > 0 and local_slice_bytes % 2 == 0
+    assert full_entries_per_block * ENTRY_BYTES <= cp_size * local_slice_bytes
+    assert (
+        compact_slots.is_cuda
+        and compact_slots.device == out.device
+        and compact_slots.dtype == torch.int64
+        and compact_slots.dim() == 2
+        and compact_slots.is_contiguous()
+        and int(compact_slots.shape[0]) == int(out.shape[0])
+    )
+    assert (
+        gather_lens.is_cuda
+        and gather_lens.device == out.device
+        and gather_lens.dtype == torch.int32
+        and gather_lens.dim() == 1
+        and gather_lens.is_contiguous()
+        and int(gather_lens.shape[0]) == int(compact_slots.shape[0])
+    )
+    assert (
+        out.is_cuda
+        and out.dtype == torch.bfloat16
+        and out.dim() == 3
+        and int(out.shape[-1]) == HEAD_DIM
+        and int(out.stride(2)) == 1
+        and 0 <= int(offset)
+        and int(offset) + int(compact_slots.shape[1]) <= int(out.shape[1])
+    )
+    _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+        out,
+        gathered,
+        compact_slots,
+        gather_lens,
+        offset,
+        full_entries_per_block=full_entries_per_block,
+        num_unique_blocks=num_unique_blocks,
+    )
 
 
 def dequantize_and_gather_k_cache_slots(
@@ -450,28 +615,16 @@ def dequantize_and_gather_k_cache_slots(
         else gather_lens.to(device=out.device, dtype=torch.int32).contiguous()
     )
 
-    NUM_WORKERS = 128
-    _dequantize_and_gather_k_slots_kernel[(slots_i64.shape[0], NUM_WORKERS)](
+    _launch_dequantize_and_gather_k_slots_unchecked(
         out,
-        out.stride(0),
-        out.stride(1),
         k_cache,
         slots_i64,
-        slots_i64.stride(0),
-        offset,
         gather_lens_i32,
-        max_gather_len,
-        fp8_dim=NOPE_DIM,
-        bf16_dim=ROPE_DIM,
-        scale_dim=SCALE_BYTES_PER_TOKEN,
-        quant_block=TILE_SIZE,
+        offset,
         cache_block_size=int(k_cache.shape[1]),
-        token_data_size=TOKEN_DATA_SIZE,
         block_stride=k_cache.stride(0),
         num_cache_blocks=int(k_cache.shape[0]),
-        fp8_max=FP8_MAX,
-        n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        cp_rank_major_raw=False,
     )
 
 
@@ -535,28 +688,16 @@ def try_dequantize_and_gather_k_cache_slots_to_workspace(
         num_blocks=int(k_cache.shape[0]),
         negative_mode="skip_any",
     )
-    NUM_WORKERS = 128
-    _dequantize_and_gather_k_slots_kernel[(batch_size, NUM_WORKERS)](
+    _launch_dequantize_and_gather_k_slots_unchecked(
         out,
-        out.stride(0),
-        out.stride(1),
         k_cache,
         slot_mapping,
-        slot_mapping.stride(0),
-        int(offset),
         gather_lens,
-        max_gather_len,
-        fp8_dim=NOPE_DIM,
-        bf16_dim=ROPE_DIM,
-        scale_dim=SCALE_BYTES_PER_TOKEN,
-        quant_block=TILE_SIZE,
+        offset,
         cache_block_size=int(k_cache.shape[1]),
-        token_data_size=TOKEN_DATA_SIZE,
         block_stride=int(k_cache.stride(0)),
         num_cache_blocks=int(k_cache.shape[0]),
-        fp8_max=FP8_MAX,
-        n_quant_blocks=NOPE_TILES,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        cp_rank_major_raw=False,
     )
     return True
 
@@ -1333,6 +1474,13 @@ def _device_gather_lens(
         f"gather_lens must contain one value per request ({batch_size}); "
         f"got shape={tuple(gather_lens.shape)}"
     )
+    if (
+        gather_lens.dim() == 1
+        and gather_lens.dtype == torch.int32
+        and gather_lens.device == device
+        and gather_lens.is_contiguous()
+    ):
+        return gather_lens
     return gather_lens.reshape(-1).to(device=device, dtype=torch.int32).contiguous()
 
 
@@ -1394,7 +1542,14 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     gather_stream.wait_stream(current_stream)
 
     with torch.cuda.stream(gather_stream):
-        local_slices = k_cache_raw.index_select(0, unique_blocks).contiguous()
+        if compaction.contiguous_block_start >= 0 and k_cache_raw.is_contiguous():
+            local_slices = k_cache_raw.narrow(
+                0,
+                compaction.contiguous_block_start,
+                int(unique_blocks.numel()),
+            )
+        else:
+            local_slices = k_cache_raw.index_select(0, unique_blocks).contiguous()
         gathered = torch.empty(
             (
                 cp_size * int(unique_blocks.numel()),
@@ -1466,34 +1621,38 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         pending.compact_slots.record_stream(assemble_stream)
         pending.gather_lens.record_stream(assemble_stream)
         out.record_stream(assemble_stream)
-        full_raw = (
-            pending.gathered.view(
-                pending.cp_size,
-                int(pending.unique_blocks.numel()),
-                int(pending.gathered.shape[1]),
+        if cp_swa_direct_dequant_scatter_enabled():
+            _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+                out,
+                pending.gathered,
+                pending.compact_slots,
+                pending.gather_lens,
+                pending.offset,
+                full_entries_per_block=pending.full_entries_per_block,
+                num_unique_blocks=int(pending.unique_blocks.numel()),
             )
-            .permute(1, 0, 2)
-            .reshape(
-                int(pending.unique_blocks.numel()),
-                pending.cp_size * int(pending.gathered.shape[1]),
+        else:
+            full_raw = (
+                pending.gathered.view(
+                    pending.cp_size,
+                    int(pending.unique_blocks.numel()),
+                    int(pending.gathered.shape[1]),
+                )
+                .permute(1, 0, 2)
+                .reshape(
+                    int(pending.unique_blocks.numel()),
+                    pending.cp_size * int(pending.gathered.shape[1]),
+                )
+                .contiguous()
             )
-            .contiguous()
-        )
-        full_view = full_raw.as_strided(
-            (
-                int(pending.unique_blocks.numel()),
-                pending.full_entries_per_block,
-                ENTRY_BYTES,
-            ),
-            (int(full_raw.shape[1]), ENTRY_BYTES, 1),
-        )
-        if not try_dequantize_and_gather_k_cache_slots_to_workspace(
-            out,
-            full_view,
-            pending.compact_slots,
-            pending.gather_lens,
-            pending.offset,
-        ):
+            full_view = full_raw.as_strided(
+                (
+                    int(pending.unique_blocks.numel()),
+                    pending.full_entries_per_block,
+                    ENTRY_BYTES,
+                ),
+                (int(full_raw.shape[1]), ENTRY_BYTES, 1),
+            )
             restored = dequantize_slots_to_bf16(
                 full_view,
                 pending.compact_slots.reshape(-1),
@@ -1508,9 +1667,9 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                             restored_3d[b, :gl, :]
                         )
             else:
-                out[
-                    :, pending.offset : pending.offset + pending.W, :
-                ].copy_(restored_3d)
+                out[:, pending.offset : pending.offset + pending.W, :].copy_(
+                    restored_3d
+                )
         ready_event = torch.cuda.Event()
         ready_event.record(assemble_stream)
     pending.ready_event = ready_event
@@ -1602,13 +1761,39 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
 
     from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-    local_slices = k_cache_raw.index_select(
-        0, unique_blocks
-    ).contiguous()  # [num_unique_blocks, local_slice_bytes]
-    with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
-        gathered = all_gather(local_slices, group=Group.TP).view(
-            cp_size, int(unique_blocks.numel()), int(k_cache_raw.shape[1])
+    if compaction.contiguous_block_start >= 0 and k_cache_raw.is_contiguous():
+        local_slices = k_cache_raw.narrow(
+            0,
+            compaction.contiguous_block_start,
+            int(unique_blocks.numel()),
         )
+    else:
+        local_slices = k_cache_raw.index_select(
+            0, unique_blocks
+        ).contiguous()  # [num_unique_blocks, local_slice_bytes]
+    with record_function_range("dsv4.cp.all_gather.swa_prefix.sync.launch"):
+        gathered = all_gather(local_slices, group=Group.TP)
+    gather_lens_i32 = _device_gather_lens(
+        gather_lens,
+        batch_size=B,
+        max_gather_len=W,
+        device=out.device,
+    )
+    if cp_swa_direct_dequant_scatter_enabled():
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_checked(
+            out,
+            gathered,
+            compact_slots,
+            gather_lens_i32,
+            offset,
+            full_entries_per_block=full_entries_per_block,
+            num_unique_blocks=int(unique_blocks.numel()),
+            cp_size=cp_size,
+        )
+        return
+    gathered = gathered.view(
+        cp_size, int(unique_blocks.numel()), int(k_cache_raw.shape[1])
+    )
     full_raw = (
         gathered.permute(1, 0, 2)
         .reshape(int(unique_blocks.numel()), cp_size * int(k_cache_raw.shape[1]))
@@ -1618,20 +1803,6 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         (int(unique_blocks.numel()), full_entries_per_block, ENTRY_BYTES),
         (int(full_raw.shape[1]), ENTRY_BYTES, 1),
     )
-    gather_lens_i32 = _device_gather_lens(
-        gather_lens,
-        batch_size=B,
-        max_gather_len=W,
-        device=out.device,
-    )
-    if try_dequantize_and_gather_k_cache_slots_to_workspace(
-        out,
-        full_view,
-        compact_slots,
-        gather_lens_i32,
-        offset,
-    ):
-        return
     restored = dequantize_slots_to_bf16(full_view, compact_slots.reshape(-1))
     restored_3d = restored.view(B, W, HEAD_DIM)
     if gather_lens is None:

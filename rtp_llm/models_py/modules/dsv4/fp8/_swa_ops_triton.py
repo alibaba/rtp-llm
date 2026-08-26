@@ -1169,11 +1169,57 @@ def combine_topk_swa_indices_cp(
     explicit rank-local CP global positions, so it works for zigzag CP
     where contiguous query-row math is invalid.
     """
+    global_positions = global_positions.reshape(-1).contiguous()
+    assert (req_id_per_token is None) == (prefix_lengths is None), (
+        "req_id_per_token and prefix_lengths must be passed together for "
+        "CP varlen combine"
+    )
+    if req_id_per_token is not None:
+        req_id_per_token = req_id_per_token.reshape(-1).contiguous()
+        prefix_lengths = prefix_lengths.reshape(-1).contiguous()
+
+    return combine_topk_swa_indices_cp_prepared(
+        topk_indices=topk_indices,
+        global_positions=global_positions,
+        sp_int=sp_int,
+        window_size=window_size,
+        compress_ratio=compress_ratio,
+        topk=topk,
+        M=M,
+        N=N,
+        req_id_per_token=req_id_per_token,
+        prefix_lengths=prefix_lengths,
+        flash_mla_indices=flash_mla_indices,
+    )
+
+
+def combine_topk_swa_indices_cp_prepared(
+    topk_indices: torch.Tensor,
+    global_positions: torch.Tensor,
+    sp_int: int,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    M: int,
+    N: int,
+    req_id_per_token: torch.Tensor | None = None,
+    prefix_lengths: torch.Tensor | None = None,
+    *,
+    flash_mla_indices: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Launch the CP combine kernel with pre-normalized metadata.
+
+    This internal hot-path entry point avoids repeated ``reshape`` and
+    ``contiguous`` dispatcher calls in every attention layer. Callers must pass
+    one-dimensional contiguous position/request tensors. The public wrapper
+    above retains the permissive normalization contract.
+    """
     assert (
         topk_indices.dtype == torch.int32
     ), f"topk_indices must be int32, got {topk_indices.dtype}"
     assert topk_indices.dim() == 2, f"topk_indices must be 2D, got {topk_indices.shape}"
     assert window_size >= 1 and compress_ratio >= 1
+    assert global_positions.dim() == 1 and global_positions.is_contiguous()
 
     num_tokens = int(global_positions.numel())
     combined_topk = (
@@ -1209,16 +1255,14 @@ def combine_topk_swa_indices_cp(
     # ``ptr + row*stride + col`` and a 0-stride broadcast is bit-equal to
     # the materialized version. A force-contiguous here defeats the
     # optimization and reintroduces the alloc.
-    global_positions = global_positions.reshape(-1).contiguous()
-
     assert (req_id_per_token is None) == (prefix_lengths is None), (
         "req_id_per_token and prefix_lengths must be passed together for "
         "CP varlen combine"
     )
     is_varlen = req_id_per_token is not None
     if is_varlen:
-        req_id_per_token = req_id_per_token.reshape(-1).contiguous()
-        prefix_lengths = prefix_lengths.reshape(-1).contiguous()
+        assert req_id_per_token.dim() == 1 and req_id_per_token.is_contiguous()
+        assert prefix_lengths.dim() == 1 and prefix_lengths.is_contiguous()
         assert (
             req_id_per_token.numel() == num_tokens
         ), f"req_id_per_token rows {req_id_per_token.numel()} != positions {num_tokens}"

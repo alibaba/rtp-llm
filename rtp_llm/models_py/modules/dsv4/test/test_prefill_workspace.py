@@ -66,6 +66,30 @@ def test_prefill_q_storage_is_stable_across_gets():
     assert ws.prefill_q(3).data_ptr() == ws._union.data_ptr()
 
 
+def test_validate_prefill_q_alias_uses_capacity_and_base_pointer():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=5, q_dim=4, reserve_cp=False, align_bytes=1
+    )
+    q = ws.prefill_q(3)
+    ws.validate_prefill_q_alias(q, 3)
+
+    _assert_raises(
+        lambda: ws.validate_prefill_q_alias(q, 6),
+        AssertionError,
+        "prefill_q overflow: num_tokens=6",
+    )
+    _assert_raises(
+        lambda: ws.validate_prefill_q_alias(q[:2], 3),
+        AssertionError,
+        "prefill workspace Q shape mismatch",
+    )
+    _assert_raises(
+        lambda: ws.validate_prefill_q_alias(torch.empty_like(q), 3),
+        AssertionError,
+        "prefill Q must reuse PrefillWorkspace storage",
+    )
+
+
 def test_cp_region_not_reserved_when_reserve_cp_false():
     ws = PrefillWorkspace(
         torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1

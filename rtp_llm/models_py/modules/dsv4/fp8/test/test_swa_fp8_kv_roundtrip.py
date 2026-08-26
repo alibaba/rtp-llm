@@ -822,6 +822,9 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 "width": 127,
                 "unique_blocks": 7,
                 "entries_per_block": 132,
+                "block_ids": [1, 2, 3, 4, 5, 6, 7],
+                "cp_size": 4,
+                "padding_bytes": 128,
                 "offset": 5,
                 "workspace_len": 145,
                 "gather_lens": [0, 1, 17, 63, 126, 127, 5, 88, 42, 120],
@@ -832,6 +835,10 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 "width": 9,
                 "unique_blocks": 2,
                 "entries_per_block": 16,
+                "block_ids": [2, 3],
+                "cp_size": 2,
+                "padding_bytes": 800,
+                "expect_bf16_crossing": True,
                 "offset": 3,
                 "workspace_len": 17,
                 "gather_lens": [9, 0, 4],
@@ -842,6 +849,9 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 "width": 37,
                 "unique_blocks": 5,
                 "entries_per_block": 64,
+                "block_ids": [1, 3, 6, 8, 11],
+                "cp_size": 4,
+                "padding_bytes": 128,
                 "offset": 1,
                 "workspace_len": 43,
                 "gather_lens": [1, 22, 37, 5],
@@ -856,17 +866,41 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 W = case["width"]
                 U = case["unique_blocks"]
                 entries_per_block = case["entries_per_block"]
-                cp_size = 2
-                num_blocks = U + 1
-                local_slice_bytes = entries_per_block * HEAD_BYTES // cp_size
+                block_ids = torch.tensor(
+                    case["block_ids"], dtype=torch.int64, device=self.device
+                )
+                cp_size = case["cp_size"]
+                num_blocks = max(case["block_ids"]) + 1
+                full_stride_bytes = (
+                    entries_per_block * HEAD_BYTES + case["padding_bytes"]
+                )
+                self.assertEqual(full_stride_bytes % cp_size, 0)
+                local_slice_bytes = full_stride_bytes // cp_size
+                self.assertEqual(local_slice_bytes % 2, 0)
+
+                crosses_fp8_slice_boundary = False
+                crosses_bf16_slice_boundary = False
+                for pos in range(entries_per_block):
+                    for quant_block_idx in range(7):
+                        byte_start = pos * 576 + quant_block_idx * 64
+                        if byte_start // local_slice_bytes != (
+                            byte_start + 63
+                        ) // local_slice_bytes:
+                            crosses_fp8_slice_boundary = True
+                    for bf16_chunk_idx in range(4):
+                        byte_start = pos * 576 + 448 + bf16_chunk_idx * 32
+                        if byte_start // local_slice_bytes != (
+                            byte_start + 31
+                        ) // local_slice_bytes:
+                            crosses_bf16_slice_boundary = True
+                self.assertTrue(
+                    crosses_fp8_slice_boundary or crosses_bf16_slice_boundary
+                )
+                if case.get("expect_bf16_crossing", False):
+                    self.assertTrue(crosses_bf16_slice_boundary)
 
                 write_slots = (
-                    torch.arange(
-                        1,
-                        num_blocks,
-                        dtype=torch.int64,
-                        device=self.device,
-                    ).unsqueeze(1)
+                    block_ids.unsqueeze(1)
                     * entries_per_block
                     + torch.arange(
                         entries_per_block,
@@ -909,9 +943,10 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
 
                 linear = torch.arange(B * W, device=self.device).view(B, W)
                 read_slots = (
-                    1 + linear.remainder(U)
-                ) * entries_per_block + (linear * 17 + 3).remainder(
-                    entries_per_block
+                    block_ids[linear.remainder(U)] * entries_per_block
+                    + (linear * 17 + 3).remainder(
+                        entries_per_block
+                    )
                 )
                 gather_lens = torch.tensor(
                     case["gather_lens"], dtype=torch.int32, device=self.device
@@ -932,6 +967,16 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                     gather_lens=gather_lens,
                 )
                 self.assertEqual(int(read_compaction.unique_blocks.numel()), U)
+                expected_contiguous_start = case["block_ids"][0]
+                if case["block_ids"] == list(
+                    range(expected_contiguous_start, expected_contiguous_start + U)
+                ):
+                    self.assertEqual(
+                        read_compaction.contiguous_block_start,
+                        expected_contiguous_start,
+                    )
+                else:
+                    self.assertEqual(read_compaction.contiguous_block_start, -1)
 
                 def fake_all_gather(tensor, group):
                     del group
@@ -939,6 +984,16 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                         0, read_compaction.unique_blocks
                     )
                     self.assertTrue(torch.equal(tensor, expected_local))
+                    if read_compaction.contiguous_block_start >= 0:
+                        self.assertEqual(
+                            tensor.untyped_storage().data_ptr(),
+                            raw_by_rank[0].untyped_storage().data_ptr(),
+                        )
+                    else:
+                        self.assertNotEqual(
+                            tensor.untyped_storage().data_ptr(),
+                            raw_by_rank[0].untyped_storage().data_ptr(),
+                        )
                     return torch.cat(
                         [
                             raw.index_select(0, read_compaction.unique_blocks)
