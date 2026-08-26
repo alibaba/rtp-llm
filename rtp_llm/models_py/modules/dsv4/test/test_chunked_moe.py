@@ -64,8 +64,12 @@ class _FakeGate(nn.Module):
         super().__init__()
         self.input_id_chunks: list[torch.Tensor] = []
         self.token_chunks: list[int] = []
+        self.x_refs: list[torch.Tensor] = []
+        self.input_id_refs: list[torch.Tensor] = []
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor):
+        self.x_refs.append(x)
+        self.input_id_refs.append(input_ids)
         self.token_chunks.append(x.size(0))
         self.input_id_chunks.append(input_ids.detach().clone())
         weights = torch.ones((x.size(0), 1), dtype=torch.float32, device=x.device)
@@ -76,9 +80,11 @@ class _FakeGate(nn.Module):
 class _FakeSharedExecutor:
     def __init__(self) -> None:
         self.token_chunks: list[int] = []
+        self.x_refs: list[torch.Tensor] = []
         self._out: torch.Tensor | None = None
 
     def start(self, shared_experts, x: torch.Tensor) -> None:
+        self.x_refs.append(x)
         self.token_chunks.append(x.size(0))
         self._out = x.float() + 1.0
 
@@ -96,6 +102,7 @@ class _FakeStrategy(nn.Module):
         super().__init__()
         self.cap = cap
         self.token_chunks: list[int] = []
+        self.x_refs: list[torch.Tensor] = []
 
     def forward(
         self,
@@ -103,6 +110,7 @@ class _FakeStrategy(nn.Module):
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> torch.Tensor:
+        self.x_refs.append(x)
         self.token_chunks.append(x.size(0))
         if x.size(0) > self.cap:
             raise RuntimeError(f"chunk overflow: {x.size(0)} > {self.cap}")
@@ -131,6 +139,12 @@ class _FakeGatePackStrategy(_FakeStrategy):
         if x.size(0) > self.cap:
             raise RuntimeError(f"chunk overflow: {x.size(0)} > {self.cap}")
         return x.float() * 2.0
+
+
+class _FlattenForbiddenTensor(torch.Tensor):
+    def flatten(self, *args, **kwargs):
+        del args, kwargs
+        raise AssertionError("1D input_ids must not call flatten")
 
 
 def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
@@ -367,6 +381,34 @@ class ChunkedMoETest(unittest.TestCase):
 
         self.assertEqual(moe.gate.token_chunks, [7])
         self.assertTrue(torch.allclose(out, x * 3.0 + 1.0))
+
+    def test_forward_reuses_2d_x_and_1d_input_ids(self):
+        moe = _fake_moe(dim=2, cap=8)
+        x = torch.randn(7, 2)
+        input_ids = torch.arange(7, dtype=torch.long).as_subclass(
+            _FlattenForbiddenTensor
+        )
+
+        out = moe(x, input_ids)
+
+        self.assertIs(moe.gate.x_refs[0], x)
+        self.assertIs(moe.gate.input_id_refs[0], input_ids)
+        self.assertIs(moe._shared_executor.x_refs[0], x)
+        self.assertIs(moe._strategy.x_refs[0], x)
+        self.assertEqual(tuple(out.shape), tuple(x.shape))
+        self.assertTrue(torch.allclose(out, x * 3.0 + 1.0))
+
+    def test_forward_flattens_higher_rank_inputs_and_restores_shape(self):
+        moe = _fake_moe(dim=2, cap=8)
+        x = torch.arange(12, dtype=torch.float32).view(2, 3, 2)
+        input_ids = torch.arange(6, dtype=torch.long).view(2, 3)
+
+        out = moe(x, input_ids)
+
+        self.assertEqual(tuple(moe.gate.x_refs[0].shape), (6, 2))
+        self.assertEqual(tuple(moe.gate.input_id_refs[0].shape), (6,))
+        self.assertEqual(tuple(out.shape), (2, 3, 2))
+        self.assertTrue(torch.equal(out, x * 3.0 + 1.0))
 
     def test_nonfused_gate_pack_keeps_shared_expert_add(self):
         moe = _fake_moe(dim=2, cap=8)

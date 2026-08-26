@@ -395,8 +395,9 @@ class MoE(nn.Module):
         # Instruments layers 0..2 (first CSA layer is L2) when enabled.
         _dbg = _rt.should_record_layer(self.layer_id)
         shape = x.size()
-        x = x.view(-1, self.dim)
-        input_ids_flat = input_ids.flatten()
+        if x.dim() != 2 or x.size(1) != self.dim:
+            x = x.view(-1, self.dim)
+        input_ids_flat = input_ids if input_ids.dim() == 1 else input_ids.flatten()
         if input_ids_flat.numel() != x.size(0):
             raise RuntimeError(
                 "MoE input_ids/token mismatch: "
