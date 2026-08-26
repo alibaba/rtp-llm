@@ -678,6 +678,7 @@ prefixes = (
     "flexlb_app_routing_queue_length",
     "flexlb_app_flexlb_inflight_max_age_ms",
     "flexlb_app_engine_balancing_master_dispatch_reason_total",
+    "flexlb_app_engine_balancing_master_batch_size",
     "jvm_memory_used",
     "jvm_gc_pause",
     "process_cpu",
