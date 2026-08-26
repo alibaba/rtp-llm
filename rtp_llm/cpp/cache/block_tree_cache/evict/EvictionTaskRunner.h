@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -12,12 +13,16 @@ class BlockTransferDispatcher;
 class BlockTreeCacheMetricsReporter;
 class EvictionTaskRunner {
 public:
+    using EvictionDoneCallback = std::function<void(EvictionTaskResult)>;
+
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
                        const BlockTransferDispatcher*  transfer_dispatcher,
                        int                             memory_timeout_ms,
                        int                             disk_timeout_ms);
 
-    EvictionTaskResult runTransfer(const EvictionTask& task, BlockTreeCacheMetricsReporter& metrics_reporter) const;
+    void runTransfer(std::shared_ptr<const EvictionTask> task,
+                     BlockTreeCacheMetricsReporter&     metrics_reporter,
+                     EvictionDoneCallback               on_done) const;
 
 private:
     static bool validateTransferDescriptors(const EvictionTask& task);
