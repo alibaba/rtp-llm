@@ -125,7 +125,8 @@ Important optional variables:
                             0 retains compute-all-then-transfer behavior
   KIMI_K3_DECODE_TOPOLOGY   tp8_ep8 (default) validates the legacy baseline;
                             dp8_ep8_tp1_ktp8 validates Decode TP1/DP8/EP8/KTP8
-                            with Prefill flat-72 MLA Cache-TP and Decode fan-in
+                            with a replicated full-width 576 MLA cache on every
+                            Prefill TP rank; KTP partitions only KDA heads
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
