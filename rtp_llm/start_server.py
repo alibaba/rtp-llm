@@ -594,6 +594,24 @@ def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
 
 def _get_startup_real_warmup_token_lens(py_env_configs: PyEnvConfigs):
     max_len = _get_startup_real_warmup_max_len(py_env_configs)
+    configured_token_lens = os.environ.get(
+        "RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS", ""
+    ).strip()
+    if configured_token_lens:
+        token_lens = [int(value) for value in configured_token_lens.split(",")]
+        if not all(
+            STARTUP_REAL_WARMUP_MIN_TOKEN_LEN <= token_len <= max_len
+            for token_len in token_lens
+        ):
+            raise ValueError(
+                f"invalid RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS: {token_lens}"
+            )
+        logging.info(
+            "DSV4 startup real warmup uses configured token lens: %s",
+            token_lens,
+        )
+        return token_lens
+
     token_lens = _get_startup_real_warmup_pow2_lens(max_len)
     logging.info(
         "DSV4 startup real warmup uses fixed pow2 token lens through max_seq_len=%d: %s",

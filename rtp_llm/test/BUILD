@@ -328,3 +328,13 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+py_test(
+    name = "start_server_warmup_test",
+    srcs = ["start_server_warmup_test.py"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {"gpu": "H20"},
+)
