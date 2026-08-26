@@ -127,7 +127,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")
         self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
         self.assertEqual(py_env_configs.model_args.act_type, "BF16")
-        self.assertTrue(py_env_configs.model_args.use_new_loader)
+        self.assertIs(py_env_configs.model_args.use_new_loader, True)
         self.assertTrue(py_env_configs.model_args.require_weight_update)
 
         # Verify parallelism_config
@@ -424,7 +424,7 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(
             py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
         )  # Overridden
-        self.assertFalse(py_env_configs.model_args.use_new_loader)
+        self.assertIs(py_env_configs.model_args.use_new_loader, False)
         self.assertFalse(py_env_configs.model_args.require_weight_update)
         self.assertFalse(py_env_configs.load_config.keep_mla_checkpoint_weights)
 

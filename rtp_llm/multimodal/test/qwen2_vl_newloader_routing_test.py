@@ -10,6 +10,7 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen2_vl.vision import Qwen2VLForVisionEmbedding
+from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
 from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VisionTransformerPretrainedModel,
     VisionSdpaAttention,
@@ -22,6 +23,51 @@ from rtp_llm.utils.new_loader import is_new_loader_enabled
 
 
 class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
+    def test_multimodal_factory_follows_language_compatibility_fallback(self):
+        model_config = types.SimpleNamespace(
+            mm_model_config=types.SimpleNamespace(is_multimodal=True),
+            model_type="qwen2_vl",
+            use_new_loader=None,
+            compute_dtype=torch.float16,
+            mm_related_params=object(),
+            ckpt_path="/tmp/model",
+            enable_output_vocab_pruning=False,
+            eplb_config=types.SimpleNamespace(enable_eplb=lambda: False),
+            ptuning_path="",
+            lora_infos={},
+            require_weight_update=True,
+            quant_config=None,
+        )
+        engine_config = types.SimpleNamespace(
+            load_config=types.SimpleNamespace(
+                load_method=LoadMethod.SCRATCH,
+                force_cpu_load_weights=False,
+            ),
+            device_resource_config=types.SimpleNamespace(enable_layer_micro_batch=0),
+            parallelism_config=object(),
+        )
+        mixin_cls = mock.Mock(return_value=object())
+
+        with mock.patch(
+            "rtp_llm.multimodal.multimodal_mixin_factory.get_multimodal_mixin_cls",
+            return_value=mixin_cls,
+        ):
+            MultimodalMixinFactory._create_multimodal_mixin(
+                model_config,
+                engine_config,
+                VitConfig(),
+            )
+            self.assertFalse(mixin_cls.call_args.kwargs["use_new_loader"])
+
+            mixin_cls.reset_mock()
+            MultimodalMixinFactory._create_multimodal_mixin(
+                model_config,
+                engine_config,
+                VitConfig(),
+                resolved_use_new_loader=False,
+            )
+            self.assertFalse(mixin_cls.call_args.kwargs["use_new_loader"])
+
     def test_newloader_switch_matches_language_loader_semantics(self):
         model_config = types.SimpleNamespace(use_new_loader=None)
         self.assertFalse(is_new_loader_enabled(model_config))

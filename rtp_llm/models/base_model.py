@@ -29,6 +29,7 @@ from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
+from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
@@ -43,7 +44,10 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import identity, sp_0_pad8_size, sp_id
-from rtp_llm.utils.new_loader import is_new_loader_enabled
+from rtp_llm.utils.new_loader import (
+    is_new_loader_enabled,
+    new_loader_unsupported_reason,
+)
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -136,6 +140,7 @@ class BaseModel(object):
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
+        self._uses_new_loader = False
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
@@ -211,6 +216,7 @@ class BaseModel(object):
             self.model_weights_loader,
             non_owned_global_weights=self._weight_alias_names,
         )
+        self._report_update_weights_capability(available=True)
         if skip_python_model:
             return
         logging.info(
@@ -500,60 +506,13 @@ class BaseModel(object):
         self, *, skip_python_model: bool = False
     ) -> Optional[str]:
         """Return why this load configuration cannot use NewLoader yet."""
-        if skip_python_model:
-            return "newloader requires the Python model runtime"
-        if self.force_cpu_load_weights:
-            return "force_cpu_load_weights is not supported by this newloader slice"
-        if self.model_config.enable_output_vocab_pruning:
-            return (
-                "output vocabulary pruning is not supported by this newloader "
-                "slice"
-            )
-        if self.model_config.eplb_config.enable_eplb():
-            return "EPLB is not supported by this newloader slice"
-        if self.model_config.ptuning_path:
-            return "p-tuning is not supported by this newloader slice"
-        if self.model_config.lora_infos:
-            return "LoRA loading is not supported by this newloader slice"
-        if self.model_config.require_weight_update:
-            return (
-                "online UpdateWeights is required but is not supported by "
-                "NewLoader; use --use_new_loader false"
-            )
-        quant_config = self.model_config.quant_config
-        if quant_config is not None:
-            runtime_method = quant_config.get_runtime_method_key()
-            if not isinstance(runtime_method, str) or not runtime_method.strip():
-                return (
-                    f"quantization config {type(quant_config).__name__} does not "
-                    "provide a supported NewLoader runtime method"
-                )
-        if (
-            self.device_resource_config is not None
-            and self.device_resource_config.enable_layer_micro_batch != 0
-        ):
-            return "layer micro-batch is not supported by this newloader slice"
-
-        parallelism = self.parallelism_config
-        attn_tp = (
-            parallelism.get_attn_tp_size(),
-            parallelism.get_attn_tp_rank(),
+        return new_loader_unsupported_reason(
+            self.model_config,
+            skip_python_model=skip_python_model,
+            force_cpu_load_weights=self.force_cpu_load_weights,
+            device_resource_config=self.device_resource_config,
+            parallelism_config=self.parallelism_config,
         )
-        ffn_tp = (
-            parallelism.get_ffn_tp_size(),
-            parallelism.get_ffn_tp_rank(),
-        )
-        physical_tp = (parallelism.tp_size, parallelism.tp_rank)
-        if parallelism.prefill_cp_config.is_enabled() or attn_tp != physical_tp:
-            return "Context parallelism is not supported by this newloader slice"
-        if ffn_tp != attn_tp:
-            return (
-                "Independent FFN TP/sequence parallelism is not supported by "
-                "this newloader slice"
-            )
-        if parallelism.ffn_disaggregate_config.enable_ffn_disaggregate:
-            return "FFN disaggregation is not supported by this newloader slice"
-        return None
 
     def _use_new_loader(self, *, skip_python_model: bool = False) -> bool:
         from rtp_llm.models_py.registry import is_model_registered
@@ -590,7 +549,25 @@ class BaseModel(object):
             "newloader" if enabled else "legacy",
             source,
         )
+        self._uses_new_loader = enabled
         return enabled
+
+    @property
+    def uses_new_loader(self) -> bool:
+        """The final loader route selected for this model instance."""
+        return self._uses_new_loader
+
+    def _report_update_weights_capability(self, *, available: bool) -> None:
+        if self.parallelism_config.world_rank != 0:
+            return
+        kmonitor.report(
+            GaugeMetrics.UPDATE_WEIGHTS_AVAILABLE_METRIC,
+            1 if available else 0,
+            {
+                "loader": "legacy" if available else "newloader",
+                "model_type": self.model_config.model_type,
+            },
+        )
 
     def _new_loader_quant_type(self) -> str:
         quant_config = self.model_config.quant_config
@@ -700,9 +677,12 @@ class BaseModel(object):
         self.model_weights_loader = loader
         self.weight_manager = None
         self.py_eplb = None
-        logging.warning(
-            "NewLoader does not support the online UpdateWeights RPC. Restart "
-            "with --use_new_loader false when online weight updates are required."
+        self._report_update_weights_capability(available=False)
+        logging.error(
+            "CAPABILITY_DISABLED: NewLoader does not support the online "
+            "UpdateWeights RPC. Deployments that require online updates must set "
+            "--require_weight_update true; use --use_new_loader false to force "
+            "the legacy loader."
         )
         logging.info("NewModelLoader: model loaded successfully")
 
