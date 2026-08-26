@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <initializer_list>
@@ -13,6 +15,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
@@ -22,6 +25,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
@@ -36,7 +40,8 @@ using block_tree_cache_test::unreferenceDeviceBlocksForTest;
 static_assert(!noexcept(std::declval<BlockTreeEvictor&>().settleEvictionLocked(
     std::declval<const EvictionTask&>(), std::declval<const EvictionTaskResult&>())));
 static_assert(!noexcept(std::declval<BlockTreeEvictor&>().abortEvictionLocked(std::declval<const EvictionTask&>())));
-static_assert(noexcept(std::declval<BlockTreeEvictor&>().runEvictionTask(std::declval<const EvictionTask&>())));
+static_assert(noexcept(std::declval<BlockTreeEvictor&>().runEvictionTask(
+    std::declval<std::shared_ptr<const EvictionTask>>())));
 static_assert(noexcept(std::declval<BlockTreeEvictor&>().finalizeEvictionLocked(
     std::declval<const EvictionTask&>(), std::declval<const EvictionTaskResult&>())));
 
@@ -259,6 +264,44 @@ private:
     std::mutex                               mutex_;
 };
 
+class DeferredEvictionTransferEngine final: public PerRankBlockTransferEngine {
+public:
+    explicit DeferredEvictionTransferEngine(const std::vector<GroupSetPtr>& groups):
+        PerRankBlockTransferEngine(groups) {}
+
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        auto context = std::make_shared<TransferBatchAsyncContext>();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            descriptors_.push_back(descriptors);
+            contexts_.push_back(context);
+        }
+        cv_.notify_all();
+        return context;
+    }
+
+    bool waitForBatchCount(size_t expected, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [&] { return contexts_.size() >= expected; });
+    }
+
+    void complete(size_t index, bool success) {
+        std::shared_ptr<TransferBatchAsyncContext> context;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            context = contexts_.at(index);
+        }
+        context->complete(success ? ErrorInfo::OkStatus() :
+                                    ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+    }
+
+private:
+    std::mutex                                             mutex_;
+    std::condition_variable                                cv_;
+    std::vector<std::vector<TransferDescriptor>>           descriptors_;
+    std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts_;
+};
+
 class BlockTreeEvictorTestPeer {
 public:
     static void reserveSource(BlockTreeEvictor& evictor, const TransferDescriptor& eviction_desc) {
@@ -279,6 +322,71 @@ public:
         evictor.abortEvictionLocked(task);
     }
 };
+
+TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
+    auto device_pool = makeTestDevicePool(1, "async_eviction_device");
+    auto host_pool   = makePageableHostPool(1);
+    ASSERT_NE(device_pool, nullptr);
+    ASSERT_NE(host_pool, nullptr);
+    auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    initializeFullGroup(group, device_pool);
+    std::vector<GroupSetPtr> groups = {group};
+    BlockTree                tree(groups);
+
+    BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/1, "eviction_async_test");
+    ASSERT_TRUE(task_pool.start());
+    auto deferred_engine = std::make_shared<DeferredEvictionTransferEngine>(groups);
+    BlockTransferDispatcher dispatcher(deferred_engine);
+    BlockTreeCacheMetricsReporter metrics_reporter;
+    std::mutex cache_mutex;
+    size_t     settled_count = 0;
+    BlockTreeEvictor evictor(&tree,
+                             EvictionPolicy::LRU,
+                             EvictionPolicy::LRU,
+                             EvictionPolicy::FIFO,
+                             &dispatcher,
+                             &task_pool,
+                             metrics_reporter,
+                             cache_mutex,
+                             0,
+                             0,
+                             [](Tier) { return true; },
+                             [&](bool, bool) { ++settled_count; });
+
+    MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    const BlockIdxType source = device_blocks.front().front();
+    auto inserted = tree.insertNode({100}, {{makeResource(Tier::DEVICE, source)}}, /*collect_path=*/false);
+    unreferenceDeviceBlocksForTest(*group, device_blocks, BlockTreeRefType::CACHE);
+    evictor.onInserted(inserted);
+
+    ASSERT_TRUE(evictor.evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false));
+    ASSERT_TRUE(deferred_engine->waitForBatchCount(1, std::chrono::seconds(2)));
+    EXPECT_FALSE(task_pool.acquireBusinessCredit());
+
+    std::mutex              marker_mutex;
+    std::condition_variable marker_cv;
+    bool                    marker_ran = false;
+    ASSERT_TRUE(task_pool.submit([&] {
+        {
+            std::lock_guard<std::mutex> lock(marker_mutex);
+            marker_ran = true;
+        }
+        marker_cv.notify_one();
+    }));
+    {
+        std::unique_lock<std::mutex> lock(marker_mutex);
+        EXPECT_TRUE(marker_cv.wait_for(lock, std::chrono::milliseconds(300), [&] { return marker_ran; }));
+    }
+    EXPECT_EQ(settled_count, 0u);
+
+    deferred_engine->complete(0, true);
+    task_pool.waitForIdle();
+    EXPECT_EQ(settled_count, 1u);
+    EXPECT_TRUE(task_pool.acquireBusinessCredit());
+    task_pool.releaseBusinessCredit();
+    task_pool.shutdown();
+}
 
 std::vector<size_t> cascadeGroupSetIds(const EvictionTask& task) {
     std::vector<size_t> result;
@@ -396,6 +504,19 @@ public:
         for (bool success : results) {
             transfer_engine->enqueue(success);
         }
+    }
+
+    EvictionTaskResult runTransfer(const EvictionTask& task) {
+        std::optional<EvictionTaskResult> result;
+        evictor_->task_runner_->runTransfer(
+            std::make_shared<EvictionTask>(task),
+            *evictor_->metrics_reporter_,
+            [&](EvictionTaskResult completed) { result = std::move(completed); });
+        if (!result.has_value()) {
+            ADD_FAILURE() << "scripted eviction transfer did not complete inline";
+            return {};
+        }
+        return std::move(*result);
     }
 
     std::vector<size_t> transferGroupSetIds() const {
@@ -599,7 +720,7 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskTerminatesOnSettledCallbackException
     evictor_->settled_ = [](bool, bool) { throw std::runtime_error("settled callback failure"); };
     evictor_runtime_.transferEngine()->enqueue(false);
 
-    EXPECT_DEATH(evictor_->runEvictionTask(*task), "");
+    EXPECT_DEATH(evictor_->runEvictionTask(std::make_shared<EvictionTask>(*task)), "");
 
     evictor_->settled_ = [](bool, bool) {};
     evictor_->updatePendingReleases(*task, false);
@@ -634,7 +755,7 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingCapacityBeforeSettled
     };
     evictor_runtime_.transferEngine()->enqueue(false);
 
-    evictor_->runEvictionTask(*task);
+    evictor_->runEvictionTask(std::make_shared<EvictionTask>(*task));
 
     EXPECT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 0u);
     EXPECT_EQ(settled_count, 1u);
@@ -1802,7 +1923,7 @@ TEST(BlockTreeEvictorCascadeTest, PrimaryFailureSkipsCascadesAndAbortsFullTask) 
     ASSERT_TRUE(task.has_value());
     ASSERT_EQ(cascadeGroupSetIds(*task), (std::vector<size_t>{1, 2}));
     environment.evictor_->updatePendingReleases(*task, true);
-    auto task_result = environment.evictor_->task_runner_->runTransfer(*task, *environment.evictor_->metrics_reporter_);
+    auto task_result = environment.runTransfer(*task);
     environment.evictor_->updatePendingReleases(*task, false);
     EXPECT_FALSE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{false, false}));
@@ -1835,7 +1956,7 @@ TEST(BlockTreeEvictorCascadeTest, OrderedTransferSuccessPublishesFullTask) {
     const BlockIdxType first_target   = task->cascade_descs[0].target_blocks[0];
     const BlockIdxType success_target = task->cascade_descs[1].target_blocks[0];
 
-    auto task_result = environment.evictor_->task_runner_->runTransfer(*task, *environment.evictor_->metrics_reporter_);
+    auto task_result = environment.runTransfer(*task);
     environment.evictor_->updatePendingReleases(*task, false);
     ASSERT_TRUE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{true, true}));

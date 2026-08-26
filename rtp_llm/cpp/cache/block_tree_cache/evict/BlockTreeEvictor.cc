@@ -253,7 +253,7 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
     }
     task_ptr->business_credit_acquired = true;
     updatePendingReleases(*task_ptr, true);
-    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(*task_ptr); });
+    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); });
     if (!submitted) {
         task_pool_->releaseBusinessCredit();
         updatePendingReleases(*task_ptr, false);
@@ -264,27 +264,52 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
     return true;
 }
 
-void BlockTreeEvictor::runEvictionTask(const EvictionTask& task) noexcept {
-    block_tree_cache_detail::ScopeRollback credit_guard([this, &task]() {
-        if (task.business_credit_acquired) {
-            task_pool_->releaseBusinessCredit();
-        }
-    });
+void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTask> task) noexcept {
+    if (task == nullptr) {
+        return;
+    }
     EvictionTaskResult task_result;
     task_result.primary_success = false;
-    task_result.cascade_success.assign(task.cascade_descs.size(), false);
+    task_result.cascade_success.assign(task->cascade_descs.size(), false);
     try {
-        task_result = task_runner_->runTransfer(task, *metrics_reporter_);
+        task_runner_->runTransfer(task, *metrics_reporter_, [this, task](EvictionTaskResult completed) {
+            scheduleEvictionSettlement(task, std::move(completed));
+        });
+        return;
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("eviction copy failed with exception: %s", error.what());
     } catch (...) {
         RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
     }
-    {
-        std::lock_guard<std::mutex> lock(*mutex_);
-        finalizeEvictionLocked(task, task_result);
+    scheduleEvictionSettlement(std::move(task), std::move(task_result));
+}
+
+void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTask> task,
+                                                  EvictionTaskResult                  task_result) noexcept {
+    auto settle = [this, task = std::move(task), task_result = std::move(task_result)]() noexcept {
+        block_tree_cache_detail::ScopeRollback credit_guard([this, &task]() {
+            if (task->business_credit_acquired) {
+                task_pool_->releaseBusinessCredit();
+            }
+        });
+        {
+            std::lock_guard<std::mutex> lock(*mutex_);
+            finalizeEvictionLocked(*task, task_result);
+        }
+        metrics_reporter_->reportEvictionFinished(*task, task_result, tree_->groupSets());
+    };
+
+    bool submitted = false;
+    try {
+        submitted = task_pool_ != nullptr && task_pool_->submitCompletion(settle);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement with unknown exception");
     }
-    metrics_reporter_->reportEvictionFinished(task, task_result, tree_->groupSets());
+    if (!submitted) {
+        settle();
+    }
 }
 
 void BlockTreeEvictor::finalizeEvictionLocked(const EvictionTask&       task,
