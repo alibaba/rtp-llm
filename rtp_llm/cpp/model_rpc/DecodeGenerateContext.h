@@ -32,6 +32,7 @@ struct DecodeStatInfo {
     ExecuteStage saveStage() const;
     void         restoreStage(ExecuteStage stage);
     void         nextStage();
+    void         finishStage();
 };
 
 struct DecodeRpcContext {

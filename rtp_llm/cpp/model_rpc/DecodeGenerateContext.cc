@@ -11,32 +11,35 @@ void DecodeStatInfo::restoreStage(DecodeStatInfo::ExecuteStage stage_) {
 }
 
 void DecodeStatInfo::nextStage() {
-    stage             = static_cast<DecodeStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
-    auto cost_time_us = currentTimeUs() - begin_time;
-    begin_time        = currentTimeUs();
+    finishStage();
+    stage      = static_cast<DecodeStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
+    begin_time = currentTimeUs();
+}
+
+void DecodeStatInfo::finishStage() {
+    if (begin_time == 0) {
+        return;
+    }
+    const auto cost_time_us = currentTimeUs() - begin_time;
+    begin_time              = 0;
     switch (stage) {
-        case prepareGenerateContext: {
-            break;
-        }
-        case allocateResource: {
+        case prepareGenerateContext:
             prepare_generate_context_rt_us += cost_time_us;
             break;
-        }
-        case loadCacheFromPrefill: {
+        case allocateResource:
             allocate_resource_rt_us += cost_time_us;
             break;
-        }
-        case localGenerate: {
+        case loadCacheFromPrefill:
             load_cache_from_prefill_rt_us += cost_time_us;
             break;
-        }
-        case finish: {
+        case localGenerate:
             local_generate_rt_us += cost_time_us;
             break;
-        }
-        default: {
+        case start:
+        case finish:
+            break;
+        default:
             RTP_LLM_CHECK_WITH_INFO(false, "error stage");
-        }
     }
 }
 
