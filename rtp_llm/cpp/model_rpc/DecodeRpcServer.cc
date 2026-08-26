@@ -1295,8 +1295,10 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
 
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
+        decode_context.stat_info.nextStage();
         EXECUTE_WITH_RETRY(
             allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
+        decode_context.stat_info.finishStage();
         if (decode_context.hasError()) {
             RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %ld times, cost time ms [%ld], "
                                 "max retry time [%ld], max retry timeout ms [%ld]",
