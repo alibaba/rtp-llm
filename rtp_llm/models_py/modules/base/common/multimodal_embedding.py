@@ -3,7 +3,6 @@ from typing import List, Optional, Sequence
 import torch
 from torch import nn
 
-
 # Keep this layout contract aligned with cpp/multimodal_processor/MultimodalInputUtils.h.
 # Python consumes the flattened C++ representation after transport.
 
@@ -79,6 +78,8 @@ class MultimodalEmbeddingInjector(nn.Module):
             )
 
         hidden_size = embeddings.size(-1)
+        copy_features: List[torch.Tensor] = []
+        copy_locs: List[int] = []
         for idx, (feature, loc) in enumerate(zip(multimodal_features, locs)):
             if feature is None or feature.numel() == 0:
                 continue
@@ -98,8 +99,14 @@ class MultimodalEmbeddingInjector(nn.Module):
             if feature.device != embeddings.device:
                 feature = feature.to(embeddings.device)
 
+            # A negative location means that part (or all) of this feature lives in
+            # a reused prefix. Only inject the suffix that belongs to this request.
             if loc < 0:
-                raise ValueError(f"feature[{idx}] loc must be non-negative, got {loc}")
+                reused_rows = min(-loc, feature.size(0))
+                feature = feature.narrow(0, reused_rows, feature.size(0) - reused_rows)
+                loc = 0
+                if feature.numel() == 0:
+                    continue
 
             length = feature.size(0)
             if loc + length > embeddings.size(0):
@@ -108,7 +115,30 @@ class MultimodalEmbeddingInjector(nn.Module):
                     f"within embeddings of length {embeddings.size(0)}"
                 )
 
-            embeddings.narrow(0, loc, length).copy_(feature.contiguous())
+            copy_features.append(feature.contiguous())
+            copy_locs.append(loc)
+
+        intervals = sorted(
+            (loc, loc + feature.size(0))
+            for feature, loc in zip(copy_features, copy_locs)
+        )
+        has_overlap = any(
+            current_start < previous_end
+            for (_, previous_end), (current_start, _) in zip(intervals, intervals[1:])
+        )
+
+        if embeddings.is_cuda and copy_features and not has_overlap:
+            # Batch the small feature copies into one launch. Vision-BERT commonly
+            # has one feature per request item, so the scalar fallback otherwise
+            # creates O(batch_size) D2D launches on the model stream.
+            from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+            rtp_llm_ops.fused_multimodal_copy_(embeddings, copy_features, copy_locs)
+        else:
+            # Sequential copies define last-writer-wins semantics for overlapping
+            # ranges; a parallel fused kernel cannot preserve that ordering.
+            for feature, loc in zip(copy_features, copy_locs):
+                embeddings.narrow(0, loc, feature.size(0)).copy_(feature)
 
         return embeddings
 

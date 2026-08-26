@@ -15,37 +15,47 @@ private:
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
-            std::vector<std::string>   urls;
-            std::vector<int32_t>       types;
             std::vector<torch::Tensor> tensors;
+            tensors.reserve(mm_inputs.size());
+            bool all_precomputed = true;
             for (auto& mm_input : mm_inputs) {
-                urls.push_back(mm_input.url);
                 tensors.push_back(mm_input.tensor);
-                types.push_back(mm_input.mm_type);
+                all_precomputed &= mm_input.url.empty() && mm_input.tensor.defined();
             }
             try {
                 py::gil_scoped_acquire acquire;
 
-                std::vector<py::list> mm_preprocess_configs;
-                for (auto& mm_input : mm_inputs) {
-                    py::list mm_preprocess_config;
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.width);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.height);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.min_pixels);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_pixels);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.fps);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.min_frames);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.max_frames);
-                    py::list crop_positions;
-                    for (const float& crop_position : mm_input.mm_preprocess_config.crop_positions) {
-                        crop_positions.append(crop_position);
+                py::object res;
+                if (all_precomputed && py::cast<bool>(mm_process_engine_.attr("supports_precomputed_embedding"))) {
+                    res = mm_process_engine_.attr("mm_embedding_precomputed_cpp")(tensors);
+                } else {
+                    std::vector<std::string> urls;
+                    std::vector<int32_t>     types;
+                    std::vector<py::list>    mm_preprocess_configs;
+                    urls.reserve(mm_inputs.size());
+                    types.reserve(mm_inputs.size());
+                    mm_preprocess_configs.reserve(mm_inputs.size());
+                    for (auto& mm_input : mm_inputs) {
+                        urls.push_back(mm_input.url);
+                        types.push_back(mm_input.mm_type);
+                        py::list mm_preprocess_config;
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.width);
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.height);
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.min_pixels);
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.max_pixels);
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.fps);
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.min_frames);
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.max_frames);
+                        py::list crop_positions;
+                        for (const float& crop_position : mm_input.mm_preprocess_config.crop_positions) {
+                            crop_positions.append(crop_position);
+                        }
+                        mm_preprocess_config.append(crop_positions);
+                        mm_preprocess_config.append(mm_input.mm_preprocess_config.mm_timeout_ms);
+                        mm_preprocess_configs.push_back(mm_preprocess_config);
                     }
-                    mm_preprocess_config.append(crop_positions);
-                    mm_preprocess_config.append(mm_input.mm_preprocess_config.mm_timeout_ms);
-                    mm_preprocess_configs.push_back(mm_preprocess_config);
+                    res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
                 }
-
-                auto res = mm_process_engine_.attr("mm_embedding_cpp")(urls, types, tensors, mm_preprocess_configs);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;
