@@ -60,7 +60,7 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     } else if (hasError()) {
         collector.error_code = ErrorCode::UNKNOWN_ERROR;
     }
-    collector.onflight_request   = onflight_requests;
+    collector.onflight_request   = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;
     collector.retry_cost_time_ms = retry_cost_time_ms;

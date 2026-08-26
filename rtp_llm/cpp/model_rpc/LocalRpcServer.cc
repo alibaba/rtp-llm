@@ -196,6 +196,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
+    generate_context.onflight_requests = &onflight_requests_;
     std::shared_ptr<GenerateInput> input;
     {
         auto mm_res = prepareInput(*request, input);

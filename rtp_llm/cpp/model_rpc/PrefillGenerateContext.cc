@@ -316,7 +316,8 @@ void PrefillGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request                 = loading_cache_requests;
+    collector.loading_cache_request =
+        loading_cache_requests ? static_cast<int64_t>(loading_cache_requests->load()) : 0;
     collector.get_rpc_connection_rt_us              = stat_info.get_rpc_connection_rt_us;
     collector.remote_allocate_resource_rt_us        = stat_info.remote_allocate_resource_rt_us;
     collector.multimodal_process_rt_us              = stat_info.multimodal_process_rt_us;
