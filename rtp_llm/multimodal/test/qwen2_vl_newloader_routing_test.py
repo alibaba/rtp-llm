@@ -44,7 +44,7 @@ class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
                 force_cpu_load_weights=False,
             ),
             device_resource_config=types.SimpleNamespace(enable_layer_micro_batch=0),
-            parallelism_config=object(),
+            parallelism_config=None,
         )
         mixin_cls = mock.Mock(return_value=object())
 
@@ -67,6 +67,42 @@ class Qwen2VLNewLoaderRoutingTest(unittest.TestCase):
                 resolved_use_new_loader=False,
             )
             self.assertFalse(mixin_cls.call_args.kwargs["use_new_loader"])
+
+    def test_multimodal_factory_preserves_legacy_when_policy_is_undeclared(self):
+        model_config = types.SimpleNamespace(
+            mm_model_config=types.SimpleNamespace(is_multimodal=True),
+            model_type="qwen2_vl",
+            use_new_loader=None,
+            require_weight_update=None,
+            compute_dtype=torch.float16,
+            mm_related_params=object(),
+            ckpt_path="/tmp/model",
+            enable_output_vocab_pruning=False,
+            eplb_config=types.SimpleNamespace(enable_eplb=lambda: False),
+            ptuning_path="",
+            lora_infos={},
+            quant_config=None,
+        )
+        engine_config = types.SimpleNamespace(
+            load_config=types.SimpleNamespace(
+                load_method=LoadMethod.SCRATCH,
+                force_cpu_load_weights=False,
+            ),
+            device_resource_config=types.SimpleNamespace(enable_layer_micro_batch=0),
+            parallelism_config=None,
+        )
+
+        mixin_cls = mock.Mock(return_value=object())
+        with mock.patch(
+            "rtp_llm.multimodal.multimodal_mixin_factory.get_multimodal_mixin_cls",
+            return_value=mixin_cls,
+        ):
+            MultimodalMixinFactory._create_multimodal_mixin(
+                model_config,
+                engine_config,
+                VitConfig(),
+            )
+        self.assertFalse(mixin_cls.call_args.kwargs["use_new_loader"])
 
     def test_newloader_switch_matches_language_loader_semantics(self):
         model_config = types.SimpleNamespace(use_new_loader=None)

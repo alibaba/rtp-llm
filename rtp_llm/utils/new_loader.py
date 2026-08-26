@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 class NewLoaderConfigSource(Protocol):
     use_new_loader: Optional[bool]
+    require_weight_update: Optional[bool]
 
 
 def is_new_loader_enabled(
@@ -48,6 +49,15 @@ def new_loader_unsupported_reason(
         return "p-tuning is not supported by this newloader slice"
     if model_config.lora_infos:
         return "LoRA loading is not supported by this newloader slice"
+    if (
+        model_config.use_new_loader is None
+        and model_config.require_weight_update is None
+    ):
+        return (
+            "the online UpdateWeights policy is undeclared; set "
+            "--require_weight_update false to opt in to automatic NewLoader "
+            "routing, or true to retain the legacy loader"
+        )
     if model_config.require_weight_update:
         return (
             "online UpdateWeights is required but is not supported by NewLoader; "
