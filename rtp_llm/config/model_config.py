@@ -79,6 +79,7 @@ class ModelConfig(CppModelConfig):
         "lora_infos",
         "headwise_config",
         "use_new_loader",
+        "require_weight_update",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -568,6 +569,7 @@ class ModelConfig(CppModelConfig):
         self.quant_config = None
         # None selects the model registry default; bool is an explicit override.
         self.use_new_loader: Optional[bool] = None
+        self.require_weight_update: bool = False
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -872,7 +874,7 @@ def build_model_config(
     model_config.tokenizer_path = model_args.tokenizer_path
     model_config.model_type = model_args.model_type
     model_config.use_new_loader = model_args.use_new_loader
-    logging.info("use_new_loader override: %s", model_config.use_new_loader)
+    model_config.require_weight_update = model_args.require_weight_update
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
         model_config.local_extra_data_path = vit_config.local_extra_data_path

@@ -718,7 +718,8 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
             py::gil_scoped_acquire acquire;
             if (!weight_manager_ || weight_manager_.is_none()) {
                 const std::string error_msg =
-                    "UpdateWeights is unavailable because no weight manager is configured";
+                    "UpdateWeights is unavailable because no weight manager is configured; "
+                    "restart with --use_new_loader false to enable online weight updates";
                 RTP_LLM_LOG_WARNING("Reject update weights request from %s: %s",
                                     context->peer().c_str(),
                                     error_msg.c_str());
