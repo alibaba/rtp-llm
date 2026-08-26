@@ -37,6 +37,7 @@ class TelemetryEmissionSurfaceTest {
         for (String key : new String[] {
                 "ts_epoch_ms", "enqueue_rpcs", "enqueued_requests", "status_rpcs", "cache_rpcs",
                 "prefill_batches", "avg_batch_size", "max_batch_size", "avg_batch_ms", "max_batch_ms",
+                "prefill_exec_p50", "prefill_exec_p95",
                 "prefill_waiting", "prefill_running", "prefill_running_reqs", "max_prefill_waiting",
                 "decode_waiting", "decode_running", "decode_run_min", "decode_run_max",
                 "max_decode_waiting", "decode_done", "decode_exec_p50", "decode_exec_p95",

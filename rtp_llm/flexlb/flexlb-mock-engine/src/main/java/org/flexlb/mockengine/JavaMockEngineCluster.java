@@ -301,6 +301,7 @@ public final class JavaMockEngineCluster {
         // Per-tick decode completion window: count + execution-time summary
         // since the previous stats sample (drained, so each tick is disjoint).
         ClusterStats.DecodeWindow decodeWindow = stats.drainDecodeWindow();
+        ClusterStats.PrefillWindow prefillWindow = stats.drainPrefillWindow();
         long prefillBatches = stats.prefillBatches.sum();
         double avgBatchSize = prefillBatches == 0
                 ? 0.0 : stats.prefillBatchRequests.sum() / (double) prefillBatches;
@@ -312,7 +313,8 @@ public final class JavaMockEngineCluster {
         return String.format(
                 "java_mock_stats ts_epoch_ms=%d enqueue_rpcs=%d enqueued_requests=%d status_rpcs=%d cache_rpcs=%d "
                         + "prefill_batches=%d avg_batch_size=%.2f max_batch_size=%d "
-                        + "avg_batch_ms=%.2f max_batch_ms=%d prefill_waiting=%d prefill_running=%d "
+                        + "avg_batch_ms=%.2f max_batch_ms=%d prefill_exec_p50=%d prefill_exec_p95=%d "
+                        + "prefill_waiting=%d prefill_running=%d "
                         + "prefill_running_reqs=%d max_prefill_waiting=%d decode_waiting=%d decode_running=%d "
                         + "decode_run_min=%d decode_run_max=%d max_decode_waiting=%d "
                         + "decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
@@ -323,6 +325,7 @@ public final class JavaMockEngineCluster {
                 stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
                 prefillBatches, avgBatchSize, stats.maxPrefillBatchSize.get(),
                 avgBatchMs, stats.maxPrefillBatchExecutionMs.get(),
+                prefillWindow.p50Ms(), prefillWindow.p95Ms(),
                 prefillWaiting, prefillRunning, prefillRunningReqs, maxPrefillWaiting,
                 decodeWaiting, decodeRunning, decodeRunMin, decodeRunMax, maxDecodeWaiting,
                 decodeWindow.count(), decodeWindow.p50Ms(), decodeWindow.p95Ms(), decodeWindow.maxMs(),
@@ -510,6 +513,14 @@ public final class JavaMockEngineCluster {
         private final AtomicLong cacheVersion = new AtomicLong(1);
         private final Map<Integer, AtomicLong> nextPrefillAvailableNanosByDp = new ConcurrentHashMap<>();
         private final AtomicLong activeKvTokens = new AtomicLong();
+        // Per-engine busy time. Prefill engines accumulate batch execution ms
+        // (maxPrefillConcurrency=1 -> busy == wall-clock occupancy; utilization =
+        // busy/elapsed). Decode engines accumulate per-request execution ms under
+        // soft concurrency, so busy/elapsed reads as the average concurrent
+        // request count, not a <=100% utilization. Exported via /snapshot busy_ms
+        // (never per-engine keys on the per-second stats line: 1250 engines would
+        // bloat every tick line).
+        private final AtomicLong busyMs = new AtomicLong();
         private final AtomicInteger pendingRequests = new AtomicInteger();
         private final AtomicInteger waitingPrefillRequests = new AtomicInteger();
         private final AtomicInteger activePrefillBatches = new AtomicInteger();
@@ -1314,6 +1325,9 @@ public final class JavaMockEngineCluster {
             }
 
             stats.recordPrefillBatch(shapes.size(), executionMs);
+            // Per-engine prefill busy: one executionMs per scheduled batch (the
+            // execution duration is known at schedule time in the mock model).
+            busyMs.addAndGet(executionMs);
             long startDelayNanos = Math.max(0, startNanos - now);
             if (startDelayNanos == 0) {
                 startPrefillBatch(shapes, batchId, dpRank);
@@ -1640,6 +1654,9 @@ public final class JavaMockEngineCluster {
                     // still queued or mid-run), so it never produced a normal
                     // completion and must not contribute a window sample.
                     stats.recordDecodeDone(executionMs);
+                    // Per-engine decode busy: one executionMs per completed request
+                    // (cancelled requests contribute nothing, same rule as the window).
+                    busyMs.addAndGet(executionMs);
                 }
                 boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                 recordLifecycleEnd(requestId, alreadyCancelled);
@@ -2188,6 +2205,9 @@ public final class JavaMockEngineCluster {
             snap.put("stopped", stopped);
             // Java-only fields retained (do not rename Python fields above).
             snap.put("port", grpcPort);
+            // Cumulative per-engine busy time (ms): prefill batches (resp. decode
+            // requests) executed by this engine — see busyMs field comment.
+            snap.put("busy_ms", busyMs.get());
             snap.put("inflight", getInflightCount());
             snap.put("leak_detected", leakDetected.get());
             snap.put("kv_tokens_used", effectiveActiveKv);
@@ -2235,13 +2255,37 @@ public final class JavaMockEngineCluster {
         private final AtomicInteger maxPrefillBatchSize = new AtomicInteger();
         private final AtomicLong maxPrefillBatchExecutionMs = new AtomicLong();
 
-        private void recordPrefillBatch(int batchSize, long executionMs) {
+        void recordPrefillBatch(int batchSize, long executionMs) {
             prefillBatches.increment();
             prefillBatchRequests.add(batchSize);
             prefillBatchExecutionMs.add(executionMs);
             maxPrefillBatchSize.accumulateAndGet(batchSize, Math::max);
             maxPrefillBatchExecutionMs.accumulateAndGet(executionMs, Math::max);
+            synchronized (prefillWindowLock) {
+                prefillWindowCount++;
+                prefillWindowMaxMs = Math.max(prefillWindowMaxMs, executionMs);
+                if (prefillWindowSize < PREFILL_WINDOW_SAMPLE_CAP) {
+                    prefillWindowSamples[prefillWindowSize++] = executionMs;
+                } else {
+                    long slot = ThreadLocalRandom.current().nextLong(prefillWindowCount);
+                    if (slot < PREFILL_WINDOW_SAMPLE_CAP) {
+                        prefillWindowSamples[(int) slot] = executionMs;
+                    }
+                }
+            }
         }
+
+        // ---- Prefill completion window (drained on every java_mock_stats tick) ----
+        // Same bounded-reservoir scheme as the decode window: per-tick prefill
+        // batch execution-time summary feeding java_mock_stats prefill_exec_p50/p95
+        // (the legacy avg_batch_ms is a since-start cumulative mean and cannot
+        // show per-tick execution-time drift).
+        private static final int PREFILL_WINDOW_SAMPLE_CAP = 8192;
+        private final Object prefillWindowLock = new Object();
+        private final long[] prefillWindowSamples = new long[PREFILL_WINDOW_SAMPLE_CAP];
+        private long prefillWindowCount;
+        private long prefillWindowMaxMs;
+        private int prefillWindowSize;
 
         // ---- Decode completion window (drained on every java_mock_stats tick) ----
         // A bounded reservoir keeps p50/p95 approximation cheap under load: exact
@@ -2298,6 +2342,32 @@ public final class JavaMockEngineCluster {
 
         /** Decode completions since the previous stats sample, with execution-time summary. */
         record DecodeWindow(long count, long p50Ms, long p95Ms, long maxMs) {
+        }
+
+        PrefillWindow drainPrefillWindow() {
+            long count;
+            long maxMs;
+            long[] samples;
+            synchronized (prefillWindowLock) {
+                count = prefillWindowCount;
+                maxMs = prefillWindowMaxMs;
+                samples = Arrays.copyOf(prefillWindowSamples, prefillWindowSize);
+                prefillWindowCount = 0;
+                prefillWindowMaxMs = 0;
+                prefillWindowSize = 0;
+            }
+            if (samples.length == 0) {
+                return new PrefillWindow(count, 0, 0, maxMs);
+            }
+            Arrays.sort(samples);
+            return new PrefillWindow(count,
+                    samples[percentileIndex(samples.length, 0.50)],
+                    samples[percentileIndex(samples.length, 0.95)],
+                    maxMs);
+        }
+
+        /** Prefill batches since the previous stats sample, with execution-time summary. */
+        record PrefillWindow(long count, long p50Ms, long p95Ms, long maxMs) {
         }
     }
 
