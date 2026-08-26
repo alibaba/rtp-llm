@@ -15,52 +15,50 @@ void PrefillStatInfo::restoreStage(PrefillStatInfo::ExecuteStage stage_) {
 }
 
 void PrefillStatInfo::nextStage() {
-    stage             = static_cast<PrefillStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
-    auto cost_time_us = currentTimeUs() - begin_time;
-    begin_time        = currentTimeUs();
+    finishStage();
+    stage      = static_cast<PrefillStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
+    begin_time = currentTimeUs();
+}
+
+void PrefillStatInfo::finishStage() {
+    if (begin_time == 0) {
+        return;
+    }
+    const auto cost_time_us = currentTimeUs() - begin_time;
+    begin_time              = 0;
     switch (stage) {
-        case getRpcConnection: {
-            break;
-        }
-        case multimodalProcess: {
+        case getRpcConnection:
             get_rpc_connection_rt_us += cost_time_us;
             break;
-        }
-        case remoteAllocateResource: {
+        case multimodalProcess:
             multimodal_process_rt_us += cost_time_us;
             break;
-        }
-        case enqueueRequest: {
+        case remoteAllocateResource:
             remote_allocate_resource_rt_us += cost_time_us;
             break;
-        }
-        case remoteLoadCacheStart: {
+        case enqueueRequest:
             enqueue_request_rt_us += cost_time_us;
             break;
-        }
-        case pollLocalOutput: {
+        case remoteLoadCacheStart:
             remote_load_cache_start_rt_us += cost_time_us;
             break;
-        }
-        case remoteLoadCacheEnd: {
+        case pollLocalOutput:
             poll_local_output_rt_us += cost_time_us;
             break;
-        }
-        case RemoteGenerate: {
+        case remoteLoadCacheEnd:
             remote_load_cache_end_rt_us += cost_time_us;
             break;
-        }
-        case pollRemoteOutput: {
+        case RemoteGenerate:
             remote_generate_rt_us += cost_time_us;
             break;
-        }
-        case finish: {
+        case pollRemoteOutput:
             poll_remote_output_rt_us += cost_time_us;
             break;
-        }
-        default: {
+        case start:
+        case finish:
+            break;
+        default:
             RTP_LLM_CHECK_WITH_INFO(false, "error stage");
-        }
     }
 }
 

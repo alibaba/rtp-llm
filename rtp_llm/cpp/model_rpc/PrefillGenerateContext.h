@@ -59,6 +59,7 @@ struct PrefillStatInfo {
     ExecuteStage saveStage() const;
     void         restoreStage(ExecuteStage stage);
     void         nextStage();
+    void         finishStage();
 };
 
 struct RPCContext {

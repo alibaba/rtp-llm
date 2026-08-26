@@ -98,6 +98,7 @@ protected:
     CHECK_REQUEST_STOP(generate_context)                                                                               \
     generate_context.stat_info.nextStage();                                                                            \
     func(generate_context);                                                                                            \
+    generate_context.stat_info.finishStage();                                                                          \
     CHECK_ERROR_STATUS(generate_context)
 
 // for prefill or decode retry
