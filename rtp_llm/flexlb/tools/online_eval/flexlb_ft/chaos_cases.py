@@ -976,3 +976,313 @@ def coldstart_burst(ctx: CaseContext):
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
+
+
+# ===========================================================================
+# Chaos core group — 4 cases (flexlb_behavior_test.sh ports + master kill)
+# ===========================================================================
+
+
+@case(
+    "chaos_inflight_ttl_cleanup",
+    modes=["batch"],
+    source="flexlb_behavior_test.sh S1 (stuck inflight TTL cleanup)",
+)
+def inflight_ttl_cleanup(ctx: CaseContext):
+    """S1 port: slow prefill → inflight stuck → /stop_engine → TTL cleans.
+
+    Batch mode only — the stuck-inflight state lives in the master's batcher
+    (enqueued_by_master path); direct/queue modes have no enqueue bookkeeping.
+    """
+    env = ctx.env_manager.ensure(ttl_spec(ctx))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "chaos")
+    try:
+        # Slow both prefills (10s) so scheduled requests stay inflight.
+        ops.set_perf("prefill-0", prefill_fixed_ms=10000.0)
+        ops.set_perf("prefill-1", prefill_fixed_ms=10000.0)
+
+        # Fire-and-forget: schedule without consuming the response stream —
+        # the master has already enqueued these batches into the engines.
+        rids = [ops.next_request_id(base) for _ in range(6)]
+        for rid in rids:
+            resp = ops.schedule(rid, output_len=10)
+            if resp.code != 200 or not resp.success:
+                return False, f"schedule failed for rid={rid}: {resp.error_message}"
+
+        enqueued = wait_for(lambda: _accepted(ops, "prefill-0") > 0, 15.0, 0.5)
+        inflight_before = ops.master_scheduler_inflight()
+
+        # Cut the engine mid-flight; its batches will never complete.
+        ops.stop_engine("prefill-0")
+        time.sleep(5.0)  # let the gRPC failures propagate
+        # Per-endpoint view: the evicted engine's row disappears from
+        # prefill_endpoints, so observe the stuck batches via the global
+        # scheduler inflight (survives eviction until TTL cleanup).
+        inflight_after_kill = ops.master_scheduler_inflight()
+
+        # TTL (30s) + sync margin: poll to zero within 90s.
+        cleanup_ok = wait_for(lambda: ops.master_scheduler_inflight() == 0, 90.0, 2.0)
+        inflight_final = ops.master_scheduler_inflight()
+
+        # The surviving prefill keeps serving normally.
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            enqueued
+            and inflight_after_kill > 0
+            and cleanup_ok
+            and inflight_final == 0
+            and recovery_ok
+        )
+        return passed, (
+            f"enqueued={enqueued}, inflight_before_stop={inflight_before}, "
+            f"stuck_after_kill={inflight_after_kill}, "
+            f"cleanup_within_90s={cleanup_ok}, inflight_final={inflight_final}, "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            snap = ops.snapshot_by_name()
+            if snap.get("prefill-0", {}).get("stopped"):
+                ops.start_engine("prefill-0")
+            ops.set_perf("prefill-0", prefill_fixed_ms=100.0)
+            ops.set_perf("prefill-1", prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+
+
+@case(
+    "chaos_engine_down_http_stop_prefill",
+    source="flexlb_behavior_test.sh S2/S4 merged — five-phase engine-down assertion set",
+)
+def engine_down_http_stop_prefill(ctx: CaseContext):
+    """Five phases with the uniform engine-down assertion set (core 3 of 7):
+    master stays up + surviving engines take over + recovery rate.
+    """
+    env, ops = _elastic_env(ctx)
+    base = rid_base(ctx, "chaos")
+    try:
+        _cleanup_dynamic(ops, env)
+
+        def master_up() -> bool:
+            return (
+                http_get_status(
+                    f"{_master_http(ops)}/rtp_llm/inflight_status", timeout=5
+                )
+                == 200
+            )
+
+        # Phase 1 — baseline: 20 requests, all succeed.
+        ok1, err1, _ = _run_batch(ops, base, 20)
+        master_ok1 = master_up()
+        if err1:
+            return False, f"baseline had {err1} errors (master_up={master_ok1})"
+
+        # Phase 2 — http-stop prefill-0.
+        ops.stop_engine("prefill-0")
+        # Phase 3 — downtime: wait for the 3-consecutive-failure eviction,
+        # then 20 more requests must still succeed (2P redundancy).
+        evicted = wait_for(
+            lambda: ops.master_alive_count("PREFILL") <= 1,
+            MASTER_EVICT_S,
+            0.5,
+        )
+        ok2, err2, _ = _run_batch(ops, base, 20)
+        master_ok2 = master_up()
+        rate2 = ok2 / 20 if err2 == 0 else ok2 / 20
+        takeover_ok = err2 <= 2  # ≥90% success while one prefill is down
+        downtime_err_types = list(getattr(_run_batch, "last_error_types", []))[:3]
+
+        # Phase 4 — restart the engine and wait for re-discovery.
+        ops.start_engine("prefill-0")
+        alive_back = wait_for(
+            lambda: ops.master_alive_count("PREFILL") >= 2,
+            MASTER_EVICT_S,
+            0.5,
+        )
+        # Channel recovery settle (S2's reconnect window).
+        time.sleep(3.0)
+
+        # Phase 5 — recovery: 20 requests ≥95%.
+        ok5, err5, _ = _run_batch(ops, base, 20)
+        master_ok5 = master_up()
+        recovery_ok = ok5 >= 19  # ≥95%
+
+        passed = (
+            master_ok1
+            and master_ok2
+            and master_ok5
+            and evicted
+            and takeover_ok
+            and alive_back
+            and recovery_ok
+        )
+        return passed, (
+            f"baseline=20/20, evicted_after_stop={evicted}"
+            f"(alive={ops.master_alive_count('PREFILL')}), "
+            f"downtime={ok2}/20({rate2:.0%}, err_types={downtime_err_types}), "
+            f"alive_restored={alive_back}, "
+            f"recovery={ok5}/20({ok5 / 20:.0%}), "
+            f"master_up=(p1:{master_ok1}, p3:{master_ok2}, p5:{master_ok5})"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            snap = ops.snapshot_by_name()
+            if snap.get("prefill-0", {}).get("stopped"):
+                ops.start_engine("prefill-0")
+        except Exception:
+            pass
+
+
+@case(
+    "chaos_master_kill",
+    source="master HA: kill -9 master → restart → clean state + recovery",
+)
+def master_kill(ctx: CaseContext):
+    env, ops = _elastic_env(ctx)
+    base = rid_base(ctx, "chaos")
+    try:
+        _cleanup_dynamic(ops, env)
+
+        # Baseline: one request succeeds before the kill.
+        addr, err0 = ops.run_one_request(
+            ops.next_request_id(base),
+            output_len=2,
+            block_keys=[base + 11],
+            stream_timeout_s=10.0,
+        )
+        del addr
+        if err0:
+            return False, f"baseline request failed: {err0}"
+
+        # kill -9 the master, restart it from the same argv/env.
+        ctx.env_manager.kill_master9(env)
+        time.sleep(2.0)  # settle; port release
+        ctx.env_manager.start_master(env)
+
+        # Wait for the full topology to re-converge (ready + alive workers).
+        alive_ok = wait_for(
+            lambda: ops.master_alive_count("PREFILL") >= 2
+            and ops.master_alive_count("DECODE") >= 4,
+            60.0,
+            1.0,
+        )
+        # Fresh master must start from clean inflight state.
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 10.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = alive_ok and inflight_ok and recovery_ok
+        return passed, (
+            f"master_restarted, topology_reconverged={alive_ok}"
+            f"(alive P:{ops.master_alive_count('PREFILL')}/"
+            f"D:{ops.master_alive_count('DECODE')}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        # If the case died mid-way with the master down, bring it back so the
+        # shared env stays usable (and teardown finds a ManagedProcess).
+        try:
+            if env.master is None:
+                ctx.env_manager.start_master(env)
+        except Exception:
+            pass
+
+
+@case(
+    "chaos_master_quota_block",
+    modes=["batch"],
+    source="flexlb_behavior_test.sh S3 (1P+1D quota blocking + TTL recovery)",
+)
+def master_quota_block(ctx: CaseContext):
+    """S3 port: fill the 1-batch inflight quota → stop the only prefill →
+    new requests fail (≥50%) → TTL cleanup → start engine → recovery ≥90%.
+    """
+    env = ctx.env_manager.ensure(quota_spec(ctx))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "chaos")
+    try:
+        # Slow the only prefill: scheduled requests stick in inflight.
+        ops.set_perf("prefill-0", prefill_fixed_ms=10000.0)
+
+        # Fill the (maxInflightBatches=1) quota with fire-and-forget requests.
+        rids = [ops.next_request_id(base) for _ in range(4)]
+        for rid in rids:
+            resp = ops.schedule(rid, output_len=10)
+            if resp.code != 200 or not resp.success:
+                return False, f"schedule failed for rid={rid}: {resp.error_message}"
+        filled = wait_for(lambda: ops.master_scheduler_inflight() > 0, 15.0, 0.5)
+        if not filled:
+            return False, "could not fill the inflight quota"
+        stuck = ops.master_scheduler_inflight()
+
+        # Stop the only prefill → the stuck batch never completes.
+        ops.stop_engine("prefill-0")
+        time.sleep(3.0)
+
+        # Blocked phase: 10 concurrent requests, expect ≥50% failures
+        # (single prefill down + quota consumed → queue timeouts / rejects).
+        block_rids = [ops.next_request_id(base) for _ in range(10)]
+
+        def run(rid: int):
+            return ops.run_one_request(
+                rid,
+                output_len=2,
+                block_keys=[rid * 100 + 1],
+                stream_timeout_s=12.0,
+            )
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            results = list(pool.map(run, block_rids))
+        block_ok = sum(1 for _, err in results if err is None)
+        block_fail_rate = (10 - block_ok) / 10
+        block_err_types = sorted(
+            {str(err)[:60] for _, err in results if err is not None}
+        )[:3]
+
+        # TTL cleanup (30s): scheduler inflight drains to zero (the evicted
+        # engine's endpoint row is gone, so watch the global counter).
+        cleanup_ok = wait_for(lambda: ops.master_scheduler_inflight() == 0, 90.0, 2.0)
+        ops.start_engine("prefill-0")
+        ops.set_perf("prefill-0", prefill_fixed_ms=100.0)
+        alive_back = wait_for(
+            lambda: ops.master_alive_count("PREFILL") >= 1,
+            MASTER_EVICT_S,
+            0.5,
+        )
+        time.sleep(2.0)
+
+        # Recovery phase: 20 requests ≥90%.
+        ok5, err5, _ = _run_batch(ops, base, 20)
+        recovery_rate = ok5 / 20 if err5 == 0 else ok5 / 20
+        recovery_err_types = list(getattr(_run_batch, "last_error_types", []))[:3]
+
+        passed = block_fail_rate >= 0.50 and cleanup_ok and alive_back and ok5 >= 18
+        return passed, (
+            f"stuck_inflight={stuck}, "
+            f"blocked={block_ok}/10 ok (fail_rate={block_fail_rate:.0%}, >=50% required, "
+            f"types={block_err_types}), "
+            f"ttl_cleanup_within_90s={cleanup_ok}, "
+            f"alive_restored={alive_back}, "
+            f"recovery={ok5}/20({recovery_rate:.0%}, >=90% required, "
+            f"types={recovery_err_types})"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            snap = ops.snapshot_by_name()
+            if snap.get("prefill-0", {}).get("stopped"):
+                ops.start_engine("prefill-0")
+            ops.set_perf("prefill-0", prefill_fixed_ms=100.0)
+        except Exception:
+            pass
