@@ -796,7 +796,23 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
-    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prefill_step(prefill_stream_size=%zu)", streams.size());
+    size_t total_prefix_length  = 0;
+    size_t total_execute_length = 0;
+    size_t total_length         = 0;
+    if (at::hasCallbacks()) {
+        for (const auto& stream : streams) {
+            total_prefix_length += static_cast<size_t>(stream->prefixLength());
+            total_execute_length += static_cast<size_t>(stream->contextLength());
+            total_length += static_cast<size_t>(stream->seqLength());
+        }
+    }
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+        "executor.mtp.prefill_step(prefill_stream_size=%zu,total_prefix_length=%zu,total_execute_length=%zu,"
+        "total_length=%zu)",
+        streams.size(),
+        total_prefix_length,
+        total_execute_length,
+        total_length);
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
     RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
