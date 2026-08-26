@@ -124,7 +124,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     if (cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config)) {
-        constexpr int kK3PrefillAttentionTp = 8;
+        constexpr uint32_t kK3TotalLinearHeads = 96;
         RTP_LLM_CHECK_WITH_INFO(decode_context.prefill_seq_size_per_block > 0
                                     && static_cast<size_t>(decode_context.prefill_seq_size_per_block)
                                            == cache_config.seq_size_per_block,
@@ -140,10 +140,13 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                 decode_context.prefill_kernel_seq_size_per_block,
                                 cache_config.kernel_seq_size_per_block);
         RTP_LLM_CHECK_WITH_INFO(
-            decode_context.prefill_attention_tp_size == kK3PrefillAttentionTp
+            decode_context.prefill_attention_tp_size > 0
+                && kK3TotalLinearHeads % static_cast<uint32_t>(decode_context.prefill_attention_tp_size) == 0
                 && static_cast<size_t>(decode_context.prefill_attention_tp_size) == decode_context.peer_addrs.size(),
-            "request [%s] this K3 PD stage requires prefill attention TP=8 and eight ordered peers, got TP=%d peers=%zu",
+            "request [%s] K3 PD requires Prefill TP to divide %u KDA heads and one ordered peer per TP rank, "
+            "got TP=%d peers=%zu",
             decode_context.request_key.c_str(),
+            kK3TotalLinearHeads,
             decode_context.prefill_attention_tp_size,
             decode_context.peer_addrs.size());
         RTP_LLM_CHECK_WITH_INFO(decode_context.prefill_cache_dtype == static_cast<int32_t>(cache_config.dtype),
@@ -176,15 +179,14 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                 decode_context.prefill_conv_state_dtype,
                 static_cast<int32_t>(linear_spec->ssm_state_dtype),
                 static_cast<int32_t>(linear_spec->conv_state_dtype));
-            // Equal TP was already asserted above, so the decode side always holds
-            // exactly its own 96/8 KDA heads.  The dropped branch existed only to
-            // let a TP1 decode accept the full 96 heads.
-            constexpr uint32_t kK3TotalLinearHeads = 96;
-            constexpr uint32_t kK3LocalLinearHeads = kK3TotalLinearHeads / kK3PrefillAttentionTp;
-            RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == kK3LocalLinearHeads
-                                        && linear_spec->local_num_v_heads == kK3LocalLinearHeads,
-                                    "request [%s] equal-TP K3 PD requires 12 local KDA heads, got k=%u v=%u",
+            const uint32_t expected_local_heads = kK3TotalLinearHeads / decode_attention_tp;
+            RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == expected_local_heads
+                                        && linear_spec->local_num_v_heads == expected_local_heads,
+                                    "request [%s] P%d->D%d K3 PD requires %u local KDA heads, got k=%u v=%u",
                                     decode_context.request_key.c_str(),
+                                    decode_context.prefill_attention_tp_size,
+                                    decode_attention_tp,
+                                    expected_local_heads,
                                     linear_spec->local_num_k_heads,
                                     linear_spec->local_num_v_heads);
         }

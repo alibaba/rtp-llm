@@ -111,25 +111,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             prepare_fp4_weight_scale_for_deepgemm,
         )
 
-        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10:
-            raise RuntimeError("K3 DeepGEMM MegaMoE SE requires an SM100+ CUDA GPU")
-        if not dist.is_initialized():
-            raise RuntimeError(
-                "K3 DeepGEMM MegaMoE SE requires torch.distributed initialization"
-            )
-        world_size = int(dist.get_world_size())
-        if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
-        ):
-            raise RuntimeError(
-                "K3 DeepGEMM MegaMoE SE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
-                f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
-                f"local_experts={self.local_expert_count}"
-            )
+        self._validate_mega_preconditions("K3 DeepGEMM MegaMoE SE")
         if self.top_k > 32:
             raise RuntimeError(
                 f"K3 DeepGEMM MegaMoE SE requires topk <= 32, got {self.top_k}"

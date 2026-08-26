@@ -107,6 +107,29 @@ class KimiK3LatentMoE(nn.Module):
         self._group_topk = GroupTopK()
         self._setup_deep_gemm_mega()
 
+    def _validate_mega_preconditions(self, label: str) -> None:
+        """Check what both mega strategies require of the device and the world.
+
+        K3 hands every rank exactly one EP partition, so attention TP, EP and
+        the distributed world must all be the same size.  ``label`` names the
+        calling strategy so ``mega_moe`` and ``mega_moe_se`` stay
+        distinguishable in the error text.
+        """
+
+        import torch.distributed as dist
+
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10:
+            raise RuntimeError(f"{label} requires an SM100+ CUDA GPU")
+        if not dist.is_initialized():
+            raise RuntimeError(f"{label} requires torch.distributed initialization")
+        world_size = int(dist.get_world_size())
+        if self.attn_tp_size != self.ep_size or self.ep_size != world_size:
+            raise RuntimeError(
+                f"{label} requires attention TP, EP, and the full distributed "
+                "world to have the same size; got "
+                f"TP={self.attn_tp_size}, EP={self.ep_size}, world={world_size}"
+            )
+
     def _validate_shared_expert_weight_layout(self, hidden_size: int) -> None:
         intermediate = self.shared_intermediate_size
         if self.shared_expert_weight_shard:
@@ -226,25 +249,7 @@ class KimiK3LatentMoE(nn.Module):
             prepare_fp4_weight_scale_for_deepgemm,
         )
 
-        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10:
-            raise RuntimeError("K3 DeepGEMM MegaMoE requires an SM100+ CUDA GPU")
-        if not dist.is_initialized():
-            raise RuntimeError(
-                "K3 DeepGEMM MegaMoE requires torch.distributed initialization"
-            )
-        world_size = int(dist.get_world_size())
-        if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
-        ):
-            raise RuntimeError(
-                "K3 DeepGEMM MegaMoE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
-                f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
-                f"local_experts={self.local_expert_count}"
-            )
+        self._validate_mega_preconditions("K3 DeepGEMM MegaMoE")
 
         mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
         required_parameters = {
