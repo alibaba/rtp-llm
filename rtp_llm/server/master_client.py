@@ -1,5 +1,6 @@
 """FlexLB schedule client: request role addrs from master/slave and parse response."""
 
+import inspect
 import json
 import logging
 import time
@@ -11,7 +12,7 @@ from aiohttp import ClientTimeout
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
-from rtp_llm.server.host_service import HostService
+from rtp_llm.server.host_service import HostService, VipServerWrapper
 from rtp_llm.server.worker_status import ScheduleMeta
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -43,6 +44,9 @@ class FlexlbResponse:
     error_code: Optional[int] = None
     error_message: Optional[str] = None
     result: Optional[Dict[str, Any]] = None  # internal: raw JSON from scheduler
+    route_source: str = "NONE"
+    cache_match: Optional[Dict[str, Any]] = None
+    kvcm_outcome: Optional[str] = None
 
     @property
     def is_ok(self) -> bool:
@@ -60,7 +64,14 @@ class FlexlbResponse:
         )
 
     @classmethod
-    def ok(cls, role_addrs: List[RoleAddr]) -> "FlexlbResponse":
+    def ok(
+        cls,
+        role_addrs: List[RoleAddr],
+        *,
+        route_source: str = "FLEXLB",
+        cache_match: Optional[Dict[str, Any]] = None,
+        kvcm_outcome: Optional[str] = None,
+    ) -> "FlexlbResponse":
         """Business success: parsed role addrs."""
         return cls(
             role_addrs=role_addrs,
@@ -68,6 +79,9 @@ class FlexlbResponse:
             error_code=None,
             error_message=None,
             result=None,
+            route_source=route_source,
+            cache_match=cache_match,
+            kvcm_outcome=kvcm_outcome,
         )
 
     @classmethod
@@ -111,7 +125,13 @@ class FlexlbResponse:
 class MasterClient:
     """Client for FlexLB schedule API (master and optional slave)."""
 
-    def __init__(self, host_service=None, server_config=None, master_config=None):
+    def __init__(
+        self,
+        host_service=None,
+        server_config=None,
+        master_config=None,
+        kvcm_fallback_client=None,
+    ):
         self.master_config = master_config
         self.host_service: Optional[HostService] = host_service
         self.max_connect_pool_size = (
@@ -120,6 +140,74 @@ class MasterClient:
         self._session: Optional[aiohttp.ClientSession] = None
         self.latest_queue_length: int = 0
         self.session_timeout_s = self._get_session_timeout_s()
+        self.kvcm_fallback_enabled = bool(
+            getattr(master_config, "master_kvcm_fallback_enabled", False)
+        )
+        self._kvcm_vip = None
+        self._kvcm_fallback_client = kvcm_fallback_client
+        if self.kvcm_fallback_enabled and self._kvcm_fallback_client is None:
+            self._kvcm_fallback_client = self._create_kvcm_fallback_client()
+
+    def _create_kvcm_fallback_client(self):
+        """Create KVCM lazily only when the compatibility switch is enabled."""
+
+        from rtp_llm.server.kvcm_fallback import KvcmFallbackClient, KvcmFallbackConfig
+
+        service_id = str(
+            getattr(self.master_config, "master_kvcm_service_id", "")
+        ).strip()
+        instance_id = str(
+            getattr(self.master_config, "master_kvcm_instance_id", "")
+        ).strip()
+        bootstrap_port = int(
+            getattr(self.master_config, "master_kvcm_bootstrap_port", 6381)
+        )
+        block_size = int(getattr(self.master_config, "master_kvcm_block_size", 0))
+        request_timeout_ms = int(
+            getattr(self.master_config, "master_kvcm_request_timeout_ms", 100)
+        )
+        grpc_port_override = int(
+            getattr(
+                self.master_config,
+                "master_kvcm_worker_grpc_port_override",
+                0,
+            )
+        )
+        if not service_id:
+            raise ValueError(
+                "master_kvcm_service_id is required when KVCM fallback is enabled"
+            )
+        if not instance_id:
+            raise ValueError(
+                "master_kvcm_instance_id is required when KVCM fallback is enabled"
+            )
+        if not 1 <= bootstrap_port <= 65_535:
+            raise ValueError("master_kvcm_bootstrap_port must be a valid port")
+
+        self._kvcm_vip = VipServerWrapper(
+            service_id,
+            bool(getattr(self.master_config, "master_kvcm_use_local", False)),
+        )
+
+        def resolve_bootstrap_targets() -> List[str]:
+            targets: List[str] = []
+            for host in self._kvcm_vip.get_hosts(refresh=True):
+                ip = str(host.ip)
+                if ":" in ip and not ip.startswith("["):
+                    targets.append(f"[{ip}]:{bootstrap_port}")
+                else:
+                    targets.append(f"{ip}:{bootstrap_port}")
+            return targets
+
+        return KvcmFallbackClient(
+            KvcmFallbackConfig(
+                instance_id=instance_id,
+                block_size=block_size,
+                request_timeout_ms=request_timeout_ms,
+                worker_grpc_port_override=(grpc_port_override or None),
+            ),
+            resolve_bootstrap_targets,
+        )
 
     def _get_session_timeout_s(self) -> float:
         # Session-level timeout is a safety net for the connection pool lifetime,
@@ -146,6 +234,99 @@ class MasterClient:
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+        if self._kvcm_fallback_client is not None:
+            close_result = self._kvcm_fallback_client.close()
+            if inspect.isawaitable(close_result):
+                await close_result
+
+    @staticmethod
+    def _input_ids_for_kvcm(input: GenerateInput) -> Optional[List[int]]:
+        raw_input_ids = getattr(input, "input_ids", None)
+        if raw_input_ids is None:
+            raw_input_ids = getattr(input, "token_ids", None)
+        if raw_input_ids is None:
+            return None
+        if hasattr(raw_input_ids, "tolist"):
+            raw_input_ids = raw_input_ids.tolist()
+        if (
+            isinstance(raw_input_ids, list)
+            and len(raw_input_ids) == 1
+            and isinstance(raw_input_ids[0], list)
+        ):
+            raw_input_ids = raw_input_ids[0]
+        if not isinstance(raw_input_ids, list):
+            return None
+        try:
+            return [int(token_id) for token_id in raw_input_ids]
+        except (TypeError, ValueError):
+            return None
+
+    async def _try_kvcm_fallback(
+        self,
+        block_cache_keys: list[int],
+        input: GenerateInput,
+        request_id: int,
+    ) -> Optional[FlexlbResponse]:
+        if not self.kvcm_fallback_enabled or self._kvcm_fallback_client is None:
+            return None
+
+        try:
+            result = await self._kvcm_fallback_client.query_and_select(
+                request_id=str(request_id),
+                block_cache_keys=block_cache_keys,
+                input_ids=self._input_ids_for_kvcm(input),
+            )
+        except Exception as error:
+            route_logger.warning(
+                "KVCM fallback failed, request_id=%s, error=%s",
+                request_id,
+                error,
+            )
+            return None
+
+        selected = result.selected
+        if selected is None:
+            route_logger.info(
+                "KVCM fallback returned no route, request_id=%s, outcome=%s, "
+                "candidate_count=%s, latency_us=%s",
+                request_id,
+                result.outcome,
+                result.candidate_count,
+                result.latency_us,
+            )
+            return None
+
+        cache_match = {
+            "host": selected.host_ip_port,
+            "local_blocks": selected.local_blocks,
+            "p2p_fetch_blocks": selected.p2p_fetch_blocks,
+            "p2p_total_match_blocks": selected.p2p_total_match_blocks,
+            "block_count": result.block_count,
+            "candidate_count": result.candidate_count,
+            "latency_us": result.latency_us,
+        }
+        route_logger.info(
+            "KVCM fallback selected worker, request_id=%s, worker=%s, "
+            "local_blocks=%s, candidate_count=%s, latency_us=%s",
+            request_id,
+            selected.host_ip_port,
+            selected.local_blocks,
+            result.candidate_count,
+            result.latency_us,
+        )
+        return FlexlbResponse.ok(
+            [
+                RoleAddr(
+                    role=RoleType.PREFILL,
+                    ip=selected.host_ip,
+                    http_port=selected.http_port,
+                    grpc_port=selected.grpc_port,
+                )
+            ],
+            route_source="KVCM",
+            cache_match=cache_match,
+            kvcm_outcome=result.outcome,
+        )
 
     def get_latest_queue_length(self) -> int:
         return self.latest_queue_length
@@ -242,9 +423,6 @@ class MasterClient:
         directly so the caller can perform domain fallback.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
-        if not master_addr:
-            return FlexlbResponse.connection_failed_response()
-
         slave_addr = None
         if self.host_service:
             slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
@@ -276,9 +454,27 @@ class MasterClient:
             "request_time_ms": int(start * 1000),
         }
 
-        resp = await self._send_schedule_request(
-            master_addr, payload, ttft_timeout_ms, request_id
+        flexlb_timeout_ms = ttft_timeout_ms
+        configured_transport_timeout_ms = int(
+            getattr(
+                self.master_config,
+                "master_flexlb_transport_timeout_ms",
+                0,
+            )
+            if self.master_config
+            else 0
         )
+        if configured_transport_timeout_ms > 0:
+            flexlb_timeout_ms = min(
+                flexlb_timeout_ms,
+                configured_transport_timeout_ms,
+            )
+
+        resp = FlexlbResponse.connection_failed_response()
+        if master_addr:
+            resp = await self._send_schedule_request(
+                master_addr, payload, flexlb_timeout_ms, request_id
+            )
 
         if resp.connection_failed and slave_addr:
             route_logger.info(
@@ -287,8 +483,19 @@ class MasterClient:
                 request_id,
             )
             resp = await self._send_schedule_request(
-                slave_addr, payload, ttft_timeout_ms, request_id
+                slave_addr, payload, flexlb_timeout_ms, request_id
             )
+
+        # KVCM is an availability fallback only.  Explicit FlexLB fallback
+        # (8600) and all business/admission errors keep their original meaning.
+        if resp.connection_failed:
+            kvcm_response = await self._try_kvcm_fallback(
+                block_cache_keys,
+                input,
+                request_id,
+            )
+            if kvcm_response is not None:
+                return kvcm_response
 
         if resp.result is None:
             return FlexlbResponse(
@@ -298,6 +505,9 @@ class MasterClient:
                 error_code=resp.error_code,
                 error_message=resp.error_message,
                 result=None,
+                route_source=resp.route_source,
+                cache_match=resp.cache_match,
+                kvcm_outcome=resp.kvcm_outcome,
             )
 
         if resp.result.get("code", SUCCESS_CODE) != SUCCESS_CODE:
@@ -306,6 +516,8 @@ class MasterClient:
                 code = int(raw_code)
             except (TypeError, ValueError):
                 code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
+            if code == FALLBACK_ERROR_CODE:
+                return FlexlbResponse.fallback_response()
             try:
                 exception_type = ExceptionType(code)
             except ValueError:

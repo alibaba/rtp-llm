@@ -77,6 +77,7 @@ requirement([
     "pynvml",
     "tiktoken",
     "protobuf",
+    "grpcio",
     "grpcio-tools",
     "setuptools",
     "Pillow",

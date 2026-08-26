@@ -223,7 +223,14 @@ class BackendRPCServerVisitor:
                 input_token_batched = True
 
             master_route_result: Optional[FlexlbResponse] = None
-            if not role_addrs_specified and master_addr and not input_token_batched:
+            can_attempt_master_route = bool(master_addr) or bool(
+                self.master_client.kvcm_fallback_enabled
+            )
+            if (
+                not role_addrs_specified
+                and can_attempt_master_route
+                and not input_token_batched
+            ):
                 with Timer() as master_route_timer:
                     master_route_result = await self.get_master_route_addrs(input)
                 kmonitor.report(
@@ -231,8 +238,10 @@ class BackendRPCServerVisitor:
                 )
             elif not role_addrs_specified:
                 route_logger.warning(
-                    "master address: %s or input token batched: %s is not valid, fallback to domain routing",
+                    "master address: %s, KVCM fallback enabled: %s, or input token batched: %s "
+                    "is not valid, fallback to domain routing",
                     master_addr,
+                    self.master_client.kvcm_fallback_enabled,
                     input_token_batched,
                 )
             specified_roles = {addr.role for addr in input.generate_config.role_addrs}

@@ -25,6 +25,36 @@ py_test(
 )
 
 py_test(
+    name = "kvcm_fallback_test",
+    srcs = ["kvcm_fallback_test.py"],
+    deps = [
+        "//rtp_llm/server:server",
+        "//rtp_llm:grpcio",
+        "//rtp_llm:protobuf",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "master_client_fallback_test",
+    srcs = ["master_client_fallback_test.py"],
+    deps = [
+        "//rtp_llm/server:server",
+        "//rtp_llm:aiohttp",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "backend_rpc_server_visitor_fallback_test",
+    srcs = ["backend_rpc_server_visitor_fallback_test.py"],
+    deps = [
+        "//rtp_llm/server:server",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
     name = "vit_proxy_server_test",
     srcs = ["vit_proxy_server_test.py"],
     deps = [
