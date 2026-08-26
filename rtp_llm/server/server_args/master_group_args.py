@@ -118,7 +118,7 @@ def init_master_group_args(parser, master_config):
         bind_to=(master_config, "master_client_fallback_candidate_pool_size"),
         type=int,
         default=3,
-        help="Maximum fallback candidate count, including the caller-local worker",
+        help="Maximum WorkerStatus probes per fallback request, including KVCM hot workers",
     )
 
     master_group.add_argument(
@@ -131,12 +131,24 @@ def init_master_group_args(parser, master_config):
     )
 
     master_group.add_argument(
+        "--master_client_fallback_cold_candidate_batch_size",
+        env_name="MASTER_CLIENT_FALLBACK_COLD_CANDIDATE_BATCH_SIZE",
+        bind_to=(
+            master_config,
+            "master_client_fallback_cold_candidate_batch_size",
+        ),
+        type=int,
+        default=3,
+        help="New service-discovered workers probed in each fallback round",
+    )
+
+    master_group.add_argument(
         "--master_client_fallback_worker_status_concurrency",
         env_name="MASTER_CLIENT_FALLBACK_WORKER_STATUS_CONCURRENCY",
         bind_to=(master_config, "master_client_fallback_worker_status_concurrency"),
         type=int,
         default=3,
-        help="Maximum concurrent WorkerStatus RPCs per fallback request",
+        help="Maximum concurrent WorkerStatus RPCs across fallback requests in one process",
     )
 
     master_group.add_argument(
@@ -209,6 +221,24 @@ def init_master_group_args(parser, master_config):
         type=str2bool,
         default=False,
         help="Treat service id as a comma-separated local IP:port list",
+    )
+
+    master_group.add_argument(
+        "--master_client_fallback_discovery_refresh_ms",
+        env_name="MASTER_CLIENT_FALLBACK_DISCOVERY_REFRESH_MS",
+        bind_to=(master_config, "master_client_fallback_discovery_refresh_ms"),
+        type=int,
+        default=1000,
+        help="Background fallback service-discovery refresh interval",
+    )
+
+    master_group.add_argument(
+        "--master_client_fallback_discovery_stale_ms",
+        env_name="MASTER_CLIENT_FALLBACK_DISCOVERY_STALE_MS",
+        bind_to=(master_config, "master_client_fallback_discovery_stale_ms"),
+        type=int,
+        default=5000,
+        help="Last-known-good fallback discovery snapshot lifetime",
     )
 
     master_group.add_argument(

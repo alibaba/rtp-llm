@@ -69,6 +69,10 @@ class MasterGroupArgsTest(TestCase):
                 "MASTER_CLIENT_FALLBACK_CANDIDATE_POOL_SIZE",
                 "master_client_fallback_candidate_pool_size",
             ),
+            "--master_client_fallback_cold_candidate_batch_size": (
+                "MASTER_CLIENT_FALLBACK_COLD_CANDIDATE_BATCH_SIZE",
+                "master_client_fallback_cold_candidate_batch_size",
+            ),
             "--master_client_fallback_worker_status_concurrency": (
                 "MASTER_CLIENT_FALLBACK_WORKER_STATUS_CONCURRENCY",
                 "master_client_fallback_worker_status_concurrency",
@@ -100,6 +104,14 @@ class MasterGroupArgsTest(TestCase):
             "--master_client_fallback_flexlb_transport_timeout_ms": (
                 "MASTER_CLIENT_FALLBACK_FLEXLB_TRANSPORT_TIMEOUT_MS",
                 "master_client_fallback_flexlb_transport_timeout_ms",
+            ),
+            "--master_client_fallback_discovery_refresh_ms": (
+                "MASTER_CLIENT_FALLBACK_DISCOVERY_REFRESH_MS",
+                "master_client_fallback_discovery_refresh_ms",
+            ),
+            "--master_client_fallback_discovery_stale_ms": (
+                "MASTER_CLIENT_FALLBACK_DISCOVERY_STALE_MS",
+                "master_client_fallback_discovery_stale_ms",
             ),
         }
         for flag, (env_name, field_name) in fallback_arguments.items():

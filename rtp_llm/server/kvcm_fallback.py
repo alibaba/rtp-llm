@@ -1,8 +1,9 @@
-"""Lightweight KVCM + WorkerStatus availability fallback for MasterClient.
+"""Lightweight service-discovery + KVCM fallback for MasterClient.
 
-The implementation reuses FlexLB CacheAffinityFirst semantics but scores only
-a bounded worker subset: the caller's local worker plus KVCM cache hits.
-WorkerStatus responses are never cached; gRPC channels are reused.
+The implementation reuses FlexLB CacheAffinityFirst semantics over a bounded
+worker subset. KVCM contributes cache-hot workers while a background VIP
+snapshot contributes cache-cold workers. WorkerStatus responses are fresh for
+every request; only gRPC channels and deterministic selection history are kept.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -23,6 +25,8 @@ from rtp_llm.server.worker_status_proto import worker_status_service_pb2 as stat
 from rtp_llm.server.worker_status_proto import (
     worker_status_service_pb2_grpc as status_pb2_grpc,
 )
+
+route_logger = logging.getLogger("route_logger")
 
 
 class KvcmFallbackError(RuntimeError):
@@ -44,6 +48,7 @@ class KvcmFallbackConfig:
     minimum_local_blocks: int = 1
     candidate_pool_size: int = 3
     hot_candidate_pool_size: int = 2
+    cold_candidate_batch_size: int = 3
     worker_status_concurrency: int = 3
     worker_status_timeout_ms: int = 200
     prefill_queue_size_threshold: int = 1_024
@@ -61,12 +66,17 @@ class KvcmFallbackConfig:
             ("leader_refresh_interval_ms", self.leader_refresh_interval_ms),
             ("candidate_pool_size", self.candidate_pool_size),
             ("hot_candidate_pool_size", self.hot_candidate_pool_size),
+            ("cold_candidate_batch_size", self.cold_candidate_batch_size),
             ("worker_status_concurrency", self.worker_status_concurrency),
             ("worker_status_timeout_ms", self.worker_status_timeout_ms),
             ("prefill_queue_size_threshold", self.prefill_queue_size_threshold),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"KVCM {name} must be positive")
+        if self.hot_candidate_pool_size > self.candidate_pool_size:
+            raise ValueError(
+                "KVCM hot_candidate_pool_size must not exceed candidate_pool_size"
+            )
         for name, value in (
             ("p2p_host_count", self.p2p_host_count),
             ("lookahead_tokens", self.lookahead_tokens),
@@ -177,9 +187,34 @@ class KvcmFallbackResult:
     selected_outstanding_uncached_tokens: int = 0
     selected_request_uncached_tokens: int = 0
     selected_estimated_ttft_work: int = 0
+    discovered_candidate_count: int = 0
+    probe_round_count: int = 0
 
 
 BootstrapResolver = Callable[[], Sequence[str]]
+CandidateSnapshotResolver = Callable[[], Sequence[KvcmCacheCandidate]]
+
+
+@dataclass(frozen=True)
+class CandidatePlan:
+    """One request's bounded hot set and deterministic cold ordering."""
+
+    hot: tuple[KvcmCacheCandidate, ...]
+    cold: tuple[KvcmCacheCandidate, ...]
+
+    @property
+    def candidates(self) -> tuple[KvcmCacheCandidate, ...]:
+        return self.hot + self.cold
+
+    def batches(self, cold_batch_size: int) -> list[tuple[KvcmCacheCandidate, ...]]:
+        batches: list[tuple[KvcmCacheCandidate, ...]] = []
+        first_cold = self.cold[:cold_batch_size]
+        first = self.hot + first_cold
+        if first:
+            batches.append(first)
+        for offset in range(cold_batch_size, len(self.cold), cold_batch_size):
+            batches.append(self.cold[offset : offset + cold_batch_size])
+        return batches
 
 
 def _cbor_head(major_type: int, value: int) -> bytes:
@@ -278,13 +313,10 @@ def effective_cache_blocks(
     return candidate.local_blocks + p2p_added * max(0.0, p2p_hit_discount)
 
 
-def build_candidate_pool(
+def _positive_hot_candidates(
     candidates: Sequence[KvcmCacheCandidate],
-    local_candidate: Optional[KvcmCacheCandidate],
     config: KvcmFallbackConfig,
 ) -> list[KvcmCacheCandidate]:
-    """Build the bounded worker universe, always retaining the local worker."""
-
     positive = [
         candidate
         for candidate in candidates
@@ -295,46 +327,86 @@ def build_candidate_pool(
         key=lambda candidate: (
             -effective_cache_blocks(candidate, config.p2p_hit_discount),
             -candidate.local_blocks,
-            candidate.host_ip_port,
+            candidate.route_target,
         )
     )
-    hot = positive[: config.hot_candidate_pool_size]
-
-    pool: list[KvcmCacheCandidate] = []
-    seen_ips: set[str] = set()
-    if local_candidate is not None:
-        matching = next(
-            (
-                candidate
-                for candidate in positive
-                if candidate.host_ip == local_candidate.host_ip
-            ),
-            None,
-        )
-        if matching is None:
-            pool.append(local_candidate)
-        else:
-            pool.append(
-                KvcmCacheCandidate(
-                    host_ip=local_candidate.host_ip,
-                    http_port=matching.http_port,
-                    grpc_port=local_candidate.grpc_port,
-                    worker_status_port=local_candidate.worker_status_port,
-                    local_blocks=matching.local_blocks,
-                    p2p_fetch_blocks=matching.p2p_fetch_blocks,
-                    p2p_total_match_blocks=matching.p2p_total_match_blocks,
-                )
-            )
-        seen_ips.add(local_candidate.host_ip)
-
-    for candidate in hot:
-        if candidate.host_ip in seen_ips:
+    # Deduplicate before applying H. Multiple cache records for one route must
+    # not shrink the effective hot pool.
+    unique: list[KvcmCacheCandidate] = []
+    seen: set[str] = set()
+    for candidate in positive:
+        if candidate.route_target in seen:
             continue
-        if len(pool) >= config.candidate_pool_size:
+        seen.add(candidate.route_target)
+        unique.append(candidate)
+        if len(unique) >= config.hot_candidate_pool_size:
             break
-        pool.append(candidate)
-        seen_ips.add(candidate.host_ip)
-    return pool[: config.candidate_pool_size]
+    return unique
+
+
+def _cold_rank(
+    request_id: str,
+    instance_id: str,
+    candidate: KvcmCacheCandidate,
+) -> tuple[bytes, str]:
+    material = (
+        request_id.encode("utf-8", errors="surrogatepass")
+        + b"\x00"
+        + instance_id.encode("utf-8", errors="surrogatepass")
+        + b"\x00"
+        + candidate.route_target.encode("utf-8", errors="surrogatepass")
+    )
+    return hashlib.sha256(material).digest(), candidate.route_target
+
+
+def build_candidate_plan(
+    candidates: Sequence[KvcmCacheCandidate],
+    discovered_candidates: Sequence[KvcmCacheCandidate],
+    config: KvcmFallbackConfig,
+    *,
+    request_id: str,
+    local_candidate: Optional[KvcmCacheCandidate] = None,
+) -> CandidatePlan:
+    """Combine Top-H KVCM workers with a deterministic cold VIP subset.
+
+    ``local_candidate`` remains as a compatibility input, but is treated exactly
+    like any other cold discovered worker. It is never pinned to the first round.
+    Candidate identity is ``(IP, route gRPC port)`` via ``route_target``.
+    """
+
+    hot = _positive_hot_candidates(candidates, config)
+    hot_targets = {candidate.route_target for candidate in hot}
+    cold_by_target: dict[str, KvcmCacheCandidate] = {}
+    for candidate in discovered_candidates:
+        if candidate.route_target not in hot_targets:
+            cold_by_target.setdefault(candidate.route_target, candidate)
+    if local_candidate is not None and local_candidate.route_target not in hot_targets:
+        cold_by_target.setdefault(local_candidate.route_target, local_candidate)
+
+    cold = sorted(
+        cold_by_target.values(),
+        key=lambda candidate: _cold_rank(request_id, config.instance_id, candidate),
+    )
+    cold_budget = max(0, config.candidate_pool_size - len(hot))
+    return CandidatePlan(tuple(hot), tuple(cold[:cold_budget]))
+
+
+def build_candidate_pool(
+    candidates: Sequence[KvcmCacheCandidate],
+    local_candidate: Optional[KvcmCacheCandidate],
+    config: KvcmFallbackConfig,
+) -> list[KvcmCacheCandidate]:
+    """Compatibility wrapper around :func:`build_candidate_plan`."""
+
+    return list(
+        build_candidate_plan(
+            candidates,
+            (),
+            config,
+            request_id="",
+            local_candidate=local_candidate,
+        ).candidates
+    )
 
 
 def _task_uncached_tokens(task: status_pb2.TaskInfoPB) -> int:
@@ -504,9 +576,11 @@ class KvcmFallbackClient:
         self,
         config: KvcmFallbackConfig,
         bootstrap_resolver: BootstrapResolver,
+        candidate_snapshot_resolver: Optional[CandidateSnapshotResolver] = None,
     ) -> None:
         self.config = config
         self._bootstrap_resolver = bootstrap_resolver
+        self._candidate_snapshot_resolver = candidate_snapshot_resolver
         self._channels: dict[str, grpc.aio.Channel] = {}
         self._stubs: dict[str, kvcm_pb2_grpc.MetaServiceStub] = {}
         self._worker_status_channels: dict[str, grpc.aio.Channel] = {}
@@ -514,6 +588,9 @@ class KvcmFallbackClient:
         self._leader: Optional[str] = None
         self._leader_refreshed_at = 0.0
         self._leader_lock = asyncio.Lock()
+        self._worker_status_semaphore = asyncio.Semaphore(
+            self.config.worker_status_concurrency
+        )
         self._last_selected_ns: dict[str, int] = {}
         self._closed = False
 
@@ -566,7 +643,14 @@ class KvcmFallbackClient:
             if self._leader and now - self._leader_refreshed_at < refresh_interval_s:
                 return self._leader
             previous_leader = self._leader
-            targets = tuple(dict.fromkeys(self._bootstrap_resolver()))
+            try:
+                # Bootstrap discovery can use a synchronous VIP adapter. Keep it
+                # off the routing event loop even when a caller does not provide
+                # the preferred in-memory background snapshot resolver.
+                resolved = await asyncio.to_thread(self._bootstrap_resolver)
+            except Exception as error:
+                raise KvcmFallbackError("KVCM bootstrap discovery failed") from error
+            targets = tuple(dict.fromkeys(resolved))
             timeout_s = self.config.request_timeout_ms / 1_000.0
             for target in targets:
                 try:
@@ -658,9 +742,8 @@ class KvcmFallbackClient:
     async def _probe_worker(
         self,
         candidate: KvcmCacheCandidate,
-        semaphore: asyncio.Semaphore,
     ) -> Optional[WorkerLoadSnapshot]:
-        async with semaphore:
+        async with self._worker_status_semaphore:
             try:
                 response = await self._worker_status_stub_for(
                     candidate.worker_status_target
@@ -683,7 +766,7 @@ class KvcmFallbackClient:
         input_ids: Optional[Sequence[int]] = None,
         local_candidate: Optional[KvcmCacheCandidate] = None,
     ) -> KvcmFallbackResult:
-        """Query KVCM, freshly probe the bounded pool, then select once."""
+        """Query KVCM once, then probe hot+cold candidates in bounded rounds."""
 
         started_at = time.monotonic_ns()
         keys = list(block_cache_keys)
@@ -694,23 +777,51 @@ class KvcmFallbackClient:
                 self.config.lookahead_tokens,
             )
         if keys:
-            raw_candidates = await self._query_cache_candidates(request_id, keys)
-            cache_query_outcome = (
-                "cache_candidates"
-                if any(
-                    candidate.local_blocks >= self.config.minimum_local_blocks
-                    or candidate.p2p_total_match_blocks
-                    >= self.config.minimum_local_blocks
-                    for candidate in raw_candidates
+            try:
+                raw_candidates = await self._query_cache_candidates(request_id, keys)
+            except Exception as error:
+                route_logger.warning(
+                    "KVCM cache query failed; continuing with discovered workers, "
+                    "request_id=%s, error=%s",
+                    request_id,
+                    error,
                 )
-                else "no_positive_match"
-            )
+                raw_candidates = []
+                cache_query_outcome = "query_failed"
+            else:
+                cache_query_outcome = (
+                    "cache_candidates"
+                    if any(
+                        candidate.local_blocks >= self.config.minimum_local_blocks
+                        or candidate.p2p_total_match_blocks
+                        >= self.config.minimum_local_blocks
+                        for candidate in raw_candidates
+                    )
+                    else "no_positive_match"
+                )
         else:
             raw_candidates = []
             cache_query_outcome = "no_complete_blocks"
 
-        pool = build_candidate_pool(raw_candidates, local_candidate, self.config)
-        if not pool:
+        discovered_candidates: list[KvcmCacheCandidate] = []
+        if self._candidate_snapshot_resolver is not None:
+            try:
+                discovered_candidates = list(self._candidate_snapshot_resolver())
+            except Exception as error:
+                route_logger.warning(
+                    "Fallback candidate snapshot read failed, request_id=%s, error=%s",
+                    request_id,
+                    error,
+                )
+        plan = build_candidate_plan(
+            raw_candidates,
+            discovered_candidates,
+            self.config,
+            request_id=request_id,
+            local_candidate=local_candidate,
+        )
+        batches = plan.batches(self.config.cold_candidate_batch_size)
+        if not batches:
             return KvcmFallbackResult(
                 outcome="no_candidates",
                 selected=None,
@@ -718,28 +829,41 @@ class KvcmFallbackClient:
                 block_count=len(keys),
                 latency_us=max(0, (time.monotonic_ns() - started_at) // 1_000),
                 cache_query_outcome=cache_query_outcome,
+                discovered_candidate_count=len(discovered_candidates),
             )
 
         status_started_at = time.monotonic_ns()
-        semaphore = asyncio.Semaphore(self.config.worker_status_concurrency)
-        probed = await asyncio.gather(
-            *(self._probe_worker(candidate, semaphore) for candidate in pool)
-        )
-        snapshots = [snapshot for snapshot in probed if snapshot is not None]
-        status_latency_us = max(
-            0,
-            (time.monotonic_ns() - status_started_at) // 1_000,
-        )
+        snapshots_by_target: dict[str, WorkerLoadSnapshot] = {}
+        decision = CacheAffinityDecision(None, "NO_AVAILABLE_WORKER", 0, 0)
+        probe_round_count = 0
         seq_len = (
             len(input_ids)
             if input_ids is not None
             else len(keys) * self.config.block_size
         )
-        decision = select_cache_affinity_first(
-            snapshots,
-            seq_len=seq_len,
-            config=self.config,
-            last_selected_ns=self._last_selected_ns,
+        for batch in batches:
+            probe_round_count += 1
+            probed = await asyncio.gather(
+                *(self._probe_worker(candidate) for candidate in batch)
+            )
+            for snapshot in probed:
+                if snapshot is not None:
+                    snapshots_by_target[snapshot.candidate.route_target] = snapshot
+            decision = select_cache_affinity_first(
+                list(snapshots_by_target.values()),
+                seq_len=seq_len,
+                config=self.config,
+                last_selected_ns=self._last_selected_ns,
+            )
+            if (
+                decision.selected is not None
+                and decision.reason != "SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK"
+            ):
+                break
+
+        status_latency_us = max(
+            0,
+            (time.monotonic_ns() - status_started_at) // 1_000,
         )
         scored = decision.selected
         if scored is not None:
@@ -752,8 +876,8 @@ class KvcmFallbackClient:
             block_count=len(keys),
             latency_us=max(0, (time.monotonic_ns() - started_at) // 1_000),
             cache_query_outcome=cache_query_outcome,
-            pool_candidate_count=len(pool),
-            status_success_count=len(snapshots),
+            pool_candidate_count=len(plan.candidates),
+            status_success_count=len(snapshots_by_target),
             status_latency_us=status_latency_us,
             selection_reason=decision.reason,
             selected_hit_cache_tokens=0 if scored is None else scored.hit_cache_tokens,
@@ -766,6 +890,8 @@ class KvcmFallbackClient:
             selected_estimated_ttft_work=(
                 0 if scored is None else scored.estimated_ttft_work
             ),
+            discovered_candidate_count=len(discovered_candidates),
+            probe_round_count=probe_round_count,
         )
 
     async def close(self) -> None:
@@ -785,6 +911,7 @@ class KvcmFallbackClient:
 
 
 __all__ = [
+    "CandidatePlan",
     "CacheAffinityDecision",
     "KvcmCacheCandidate",
     "KvcmFallbackClient",
@@ -794,6 +921,7 @@ __all__ = [
     "ScoredCandidate",
     "WorkerLoadSnapshot",
     "build_candidate_pool",
+    "build_candidate_plan",
     "calculate_vllm_block_cache_keys",
     "effective_cache_blocks",
     "select_cache_affinity_first",

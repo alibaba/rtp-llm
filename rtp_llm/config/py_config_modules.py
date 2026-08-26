@@ -397,6 +397,7 @@ class MasterConfig:
         self.master_client_fallback_worker_status_port: int = 0
         self.master_client_fallback_candidate_pool_size: int = 3
         self.master_kvcm_hot_candidate_pool_size: int = 2
+        self.master_client_fallback_cold_candidate_batch_size: int = 3
         self.master_client_fallback_worker_status_concurrency: int = 3
         # Keep these values aligned with the colocated FlexLB configuration.
         self.master_client_fallback_worker_status_timeout_ms: int = 200
@@ -405,6 +406,8 @@ class MasterConfig:
         self.master_client_fallback_cache_affinity_first_max_extra_work_tokens: int = 0
         self.master_client_fallback_outstanding_uncached_tokens_threshold: int = 0
         self.master_client_fallback_cache_affinity_first_min_hit_rate: float = 5.0
+        self.master_client_fallback_discovery_refresh_ms: int = 1000
+        self.master_client_fallback_discovery_stale_ms: int = 5000
         # Static IP:port lists used by tests may opt out of VIP discovery.
         self.master_kvcm_use_local: bool = False
         # Zero preserves the legacy behavior of using the request TTFT timeout.
@@ -430,6 +433,8 @@ class MasterConfig:
             f"{self.master_client_fallback_candidate_pool_size}\n"
             "master_kvcm_hot_candidate_pool_size: "
             f"{self.master_kvcm_hot_candidate_pool_size}\n"
+            "master_client_fallback_cold_candidate_batch_size: "
+            f"{self.master_client_fallback_cold_candidate_batch_size}\n"
             "master_client_fallback_worker_status_concurrency: "
             f"{self.master_client_fallback_worker_status_concurrency}\n"
             "master_client_fallback_worker_status_timeout_ms: "
@@ -444,6 +449,10 @@ class MasterConfig:
             f"{self.master_client_fallback_outstanding_uncached_tokens_threshold}\n"
             "master_client_fallback_cache_affinity_first_min_hit_rate: "
             f"{self.master_client_fallback_cache_affinity_first_min_hit_rate}\n"
+            "master_client_fallback_discovery_refresh_ms: "
+            f"{self.master_client_fallback_discovery_refresh_ms}\n"
+            "master_client_fallback_discovery_stale_ms: "
+            f"{self.master_client_fallback_discovery_stale_ms}\n"
             f"master_kvcm_use_local: {self.master_kvcm_use_local}\n"
             "master_client_fallback_flexlb_transport_timeout_ms: "
             f"{self.master_client_fallback_flexlb_transport_timeout_ms}"

@@ -1,5 +1,6 @@
 import importlib
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -127,7 +128,7 @@ class KvcmFallbackClientTest(unittest.IsolatedAsyncioTestCase):
         await self.server.stop(None)
         await self.worker_server.stop(None)
 
-    def _client(self):
+    def _client(self, candidate_snapshot_resolver=None):
         return kvcm.KvcmFallbackClient(
             kvcm.KvcmFallbackConfig(
                 instance_id="prefill-test_4",
@@ -138,7 +139,32 @@ class KvcmFallbackClientTest(unittest.IsolatedAsyncioTestCase):
                 candidate_pool_size=4,
             ),
             lambda: [f"127.0.0.1:{self.service.port}"],
+            candidate_snapshot_resolver,
         )
+
+    async def test_bootstrap_resolver_runs_off_the_event_loop_thread(self):
+        resolver_threads = []
+
+        def resolver():
+            resolver_threads.append(threading.get_ident())
+            return [f"127.0.0.1:{self.service.port}"]
+
+        client = kvcm.KvcmFallbackClient(
+            kvcm.KvcmFallbackConfig(
+                instance_id="prefill-test_4",
+                block_size=4,
+            ),
+            resolver,
+        )
+        try:
+            self.assertEqual(
+                f"127.0.0.1:{self.service.port}",
+                await client._resolve_leader("request-bootstrap"),
+            )
+            self.assertEqual(1, len(resolver_threads))
+            self.assertNotEqual(threading.get_ident(), resolver_threads[0])
+        finally:
+            await client.close()
 
     async def test_queries_leader_and_selects_maximum_local_affinity(self):
         self.service.hosts = [
@@ -247,18 +273,107 @@ class KvcmFallbackClientTest(unittest.IsolatedAsyncioTestCase):
                     )
                 )
             try:
-                semaphore = asyncio.Semaphore(2)
                 snapshots = await asyncio.gather(
-                    *(
-                        client._probe_worker(candidate, semaphore)
-                        for candidate in extra_candidates
-                    )
+                    *(client._probe_worker(candidate) for candidate in extra_candidates)
                 )
                 self.assertTrue(all(snapshot is not None for snapshot in snapshots))
                 self.assertLessEqual(self.worker_service.max_active, 2)
             finally:
                 for server in extra_servers:
                     await server.stop(None)
+        finally:
+            await client.close()
+
+    async def test_kvcm_failure_still_selects_from_discovery_snapshot(self):
+        discovered = kvcm.KvcmCacheCandidate(
+            host_ip="127.0.0.1",
+            http_port=8080,
+            grpc_port=8001,
+            worker_status_port=self.worker_port,
+            local_blocks=0,
+            p2p_fetch_blocks=0,
+            p2p_total_match_blocks=0,
+        )
+        client = kvcm.KvcmFallbackClient(
+            kvcm.KvcmFallbackConfig(
+                instance_id="prefill-test_4",
+                block_size=4,
+                candidate_pool_size=3,
+                hot_candidate_pool_size=2,
+            ),
+            lambda: [],
+            lambda: [discovered],
+        )
+        try:
+            result = await client.query_and_select(
+                request_id="request-discovery",
+                block_cache_keys=[1, 2],
+            )
+            self.assertEqual("selected", result.outcome)
+            self.assertEqual("query_failed", result.cache_query_outcome)
+            self.assertEqual(discovered.route_target, result.selected.route_target)
+            self.assertEqual(1, result.discovered_candidate_count)
+        finally:
+            await client.close()
+
+    async def test_guarded_first_round_expands_to_next_cold_batch(self):
+        candidates = [
+            kvcm.KvcmCacheCandidate(
+                host_ip="127.0.0.1",
+                http_port=8080 + index,
+                grpc_port=8001 + index,
+                worker_status_port=18002 + index,
+                local_blocks=0,
+                p2p_fetch_blocks=0,
+                p2p_total_match_blocks=0,
+            )
+            for index in range(5)
+        ]
+        config = kvcm.KvcmFallbackConfig(
+            instance_id="prefill-test_4",
+            block_size=4,
+            candidate_pool_size=5,
+            hot_candidate_pool_size=1,
+            cold_candidate_batch_size=2,
+            outstanding_uncached_tokens_threshold=10,
+        )
+        plan = kvcm.build_candidate_plan(
+            [], candidates, config, request_id="request-rounds"
+        )
+        batches = plan.batches(config.cold_candidate_batch_size)
+        first_targets = {candidate.route_target for candidate in batches[0]}
+        second_winner = min(candidate.route_target for candidate in batches[1])
+        probed_targets = []
+        client = kvcm.KvcmFallbackClient(
+            config,
+            lambda: [],
+            lambda: candidates,
+        )
+
+        async def fake_probe(candidate):
+            probed_targets.append(candidate.route_target)
+            return kvcm.WorkerLoadSnapshot(
+                candidate=candidate,
+                role="RoleType.PREFILL",
+                alive=True,
+                waiting_task_count=0,
+                outstanding_uncached_tokens=(
+                    100 if candidate.route_target in first_targets else 0
+                ),
+                status_version=1,
+            )
+
+        client._probe_worker = fake_probe
+        try:
+            result = await client.query_and_select(
+                request_id="request-rounds",
+                block_cache_keys=[],
+                input_ids=[1, 2, 3, 4],
+            )
+            self.assertEqual("selected", result.outcome)
+            self.assertEqual(second_winner, result.selected.route_target)
+            self.assertEqual(2, result.probe_round_count)
+            self.assertEqual(4, len(probed_targets))
         finally:
             await client.close()
 
@@ -269,11 +384,12 @@ class CandidatePoolAndStrategyTest(unittest.TestCase):
         ip: str,
         local_blocks: int = 0,
         p2p_total_match_blocks: int = 0,
+        grpc_port: int = 8001,
     ):
         return kvcm.KvcmCacheCandidate(
             host_ip=ip,
             http_port=8080,
-            grpc_port=8001,
+            grpc_port=grpc_port,
             worker_status_port=18002,
             local_blocks=local_blocks,
             p2p_fetch_blocks=0,
@@ -297,20 +413,41 @@ class CandidatePoolAndStrategyTest(unittest.TestCase):
             status_version=1,
         )
 
-    def test_pool_keeps_local_and_merges_its_real_cache_match(self):
+    def test_plan_does_not_pin_local_ahead_of_hot_workers(self):
         local = self._candidate("10.0.0.1")
         hits = [
             self._candidate("10.0.0.1", 7),
             self._candidate("10.0.0.2", 9),
             self._candidate("10.0.0.3", 8),
         ]
-        pool = kvcm.build_candidate_pool(
+        plan = kvcm.build_candidate_plan(
             hits,
-            local,
+            [local],
             self._config(candidate_pool_size=2, hot_candidate_pool_size=2),
+            request_id="request",
         )
-        self.assertEqual(["10.0.0.1", "10.0.0.2"], [item.host_ip for item in pool])
-        self.assertEqual(7, pool[0].local_blocks)
+        self.assertEqual(
+            ["10.0.0.2", "10.0.0.3"],
+            [item.host_ip for item in plan.candidates],
+        )
+
+    def test_plan_deduplicates_by_ip_and_grpc_port(self):
+        discovered = [
+            self._candidate("10.0.0.1", grpc_port=8001),
+            self._candidate("10.0.0.1", grpc_port=8002),
+            self._candidate("10.0.0.1", grpc_port=8001),
+        ]
+        plan = kvcm.build_candidate_plan(
+            [],
+            discovered,
+            self._config(candidate_pool_size=3, hot_candidate_pool_size=2),
+            request_id="request",
+        )
+        self.assertEqual(2, len(plan.candidates))
+        self.assertEqual(
+            {"10.0.0.1:8001", "10.0.0.1:8002"},
+            {item.route_target for item in plan.candidates},
+        )
 
     def test_worker_snapshot_uses_remaining_running_tokens(self):
         candidate = self._candidate("10.0.0.1")

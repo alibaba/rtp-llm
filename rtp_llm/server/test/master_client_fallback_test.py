@@ -51,6 +51,7 @@ def _load_master_client_module():
 
     host_service = types.ModuleType("rtp_llm.server.host_service")
     host_service.HostService = object
+    host_service.VipHostSnapshot = object
     host_service.VipServerWrapper = object
     sys.modules[host_service.__name__] = host_service
 
@@ -153,7 +154,7 @@ def _selected_result():
 
 
 class MasterClientKvcmFallbackTest(unittest.IsolatedAsyncioTestCase):
-    async def test_local_worker_is_added_to_kvcm_candidate_pool(self):
+    async def test_local_worker_remains_only_the_callers_final_escape_hatch(self):
         kvcm_client = _KvcmClient(result=_selected_result())
         client = master_client.MasterClient(
             host_service=_HostService(),
@@ -171,10 +172,7 @@ class MasterClientKvcmFallbackTest(unittest.IsolatedAsyncioTestCase):
                 [], _input(), "request-local", local_fallback_addr=local
             )
             self.assertTrue(result.is_ok)
-            candidate = kvcm_client.last_kwargs["local_candidate"]
-            self.assertEqual("10.0.0.9", candidate.host_ip)
-            self.assertEqual(8001, candidate.worker_status_port)
-            self.assertEqual(0, candidate.local_blocks)
+            self.assertNotIn("local_candidate", kvcm_client.last_kwargs)
         finally:
             await client.close()
 
@@ -188,7 +186,7 @@ class MasterClientKvcmFallbackTest(unittest.IsolatedAsyncioTestCase):
         try:
             result = await client.get_backend_role_addrs([], _input(), "request-1")
             self.assertTrue(result.is_ok)
-            self.assertEqual("KVCM", result.route_source)
+            self.assertEqual("CLIENT_FALLBACK", result.route_source)
             self.assertEqual("10.0.0.2", result.role_addrs[0].ip)
             self.assertEqual(8001, result.role_addrs[0].grpc_port)
             self.assertEqual(5, result.cache_match["local_blocks"])
@@ -225,7 +223,7 @@ class MasterClientKvcmFallbackTest(unittest.IsolatedAsyncioTestCase):
         client._send_schedule_request = fail_transport
         result = await client.get_backend_role_addrs([], _input(), "request-3")
         self.assertEqual([("master:7001", 50), ("slave:7001", 50)], attempts)
-        self.assertEqual("KVCM", result.route_source)
+        self.assertEqual("CLIENT_FALLBACK", result.route_source)
         self.assertEqual(1, kvcm_client.calls)
         await client.close()
 

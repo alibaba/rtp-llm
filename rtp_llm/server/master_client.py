@@ -12,7 +12,7 @@ from aiohttp import ClientTimeout
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
-from rtp_llm.server.host_service import HostService, VipServerWrapper
+from rtp_llm.server.host_service import HostService, VipHostSnapshot, VipServerWrapper
 from rtp_llm.server.worker_status import ScheduleMeta
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -144,6 +144,7 @@ class MasterClient:
             getattr(master_config, "master_client_fallback", False)
         )
         self._kvcm_vip = None
+        self._kvcm_vip_snapshot = None
         self._kvcm_fallback_client = kvcm_fallback_client
         if self.client_fallback_enabled and self._kvcm_fallback_client is None:
             self._kvcm_fallback_client = self._create_kvcm_fallback_client()
@@ -151,7 +152,11 @@ class MasterClient:
     def _create_kvcm_fallback_client(self):
         """Create KVCM lazily only when the compatibility switch is enabled."""
 
-        from rtp_llm.server.kvcm_fallback import KvcmFallbackClient, KvcmFallbackConfig
+        from rtp_llm.server.kvcm_fallback import (
+            KvcmCacheCandidate,
+            KvcmFallbackClient,
+            KvcmFallbackConfig,
+        )
 
         service_id = str(
             getattr(self.master_config, "master_kvcm_service_id", "")
@@ -180,6 +185,20 @@ class MasterClient:
                 0,
             )
         )
+        discovery_refresh_ms = int(
+            getattr(
+                self.master_config,
+                "master_client_fallback_discovery_refresh_ms",
+                1000,
+            )
+        )
+        discovery_stale_ms = int(
+            getattr(
+                self.master_config,
+                "master_client_fallback_discovery_stale_ms",
+                5000,
+            )
+        )
         if not service_id:
             raise ValueError(
                 "master_kvcm_service_id is required when KVCM fallback is enabled"
@@ -195,10 +214,15 @@ class MasterClient:
             service_id,
             bool(getattr(self.master_config, "master_kvcm_use_local", False)),
         )
+        self._kvcm_vip_snapshot = VipHostSnapshot(
+            self._kvcm_vip,
+            refresh_interval_seconds=discovery_refresh_ms / 1000.0,
+            stale_timeout_seconds=discovery_stale_ms / 1000.0,
+        )
 
         def resolve_bootstrap_targets() -> List[str]:
             targets: List[str] = []
-            for host in self._kvcm_vip.get_hosts(refresh=True):
+            for host in self._kvcm_vip_snapshot.get_hosts():
                 ip = str(host.ip)
                 if ":" in ip and not ip.startswith("["):
                     targets.append(f"[{ip}]:{bootstrap_port}")
@@ -206,78 +230,136 @@ class MasterClient:
                     targets.append(f"{ip}:{bootstrap_port}")
             return targets
 
-        return KvcmFallbackClient(
-            KvcmFallbackConfig(
-                instance_id=instance_id,
-                block_size=block_size,
-                request_timeout_ms=request_timeout_ms,
-                worker_grpc_port_override=(grpc_port_override or None),
-                worker_status_port_override=(worker_status_port or None),
-                candidate_pool_size=int(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_candidate_pool_size",
-                        3,
-                    )
-                ),
-                hot_candidate_pool_size=int(
-                    getattr(
-                        self.master_config,
-                        "master_kvcm_hot_candidate_pool_size",
-                        2,
-                    )
-                ),
-                worker_status_concurrency=int(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_worker_status_concurrency",
-                        3,
-                    )
-                ),
-                worker_status_timeout_ms=int(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_worker_status_timeout_ms",
-                        200,
-                    )
-                ),
-                prefill_queue_size_threshold=int(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_prefill_queue_size_threshold",
-                        1024,
-                    )
-                ),
-                p2p_hit_discount=float(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_p2p_hit_discount",
-                        0.2,
-                    )
-                ),
-                cache_affinity_first_max_extra_work_tokens=int(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_cache_affinity_first_max_extra_work_tokens",
-                        0,
-                    )
-                ),
-                outstanding_uncached_tokens_threshold=int(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_outstanding_uncached_tokens_threshold",
-                        0,
-                    )
-                ),
-                cache_affinity_first_min_hit_rate=float(
-                    getattr(
-                        self.master_config,
-                        "master_client_fallback_cache_affinity_first_min_hit_rate",
-                        5.0,
-                    )
-                ),
+        fallback_config = KvcmFallbackConfig(
+            instance_id=instance_id,
+            block_size=block_size,
+            request_timeout_ms=request_timeout_ms,
+            worker_grpc_port_override=(grpc_port_override or None),
+            worker_status_port_override=(worker_status_port or None),
+            candidate_pool_size=int(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_candidate_pool_size",
+                    3,
+                )
             ),
+            hot_candidate_pool_size=int(
+                getattr(
+                    self.master_config,
+                    "master_kvcm_hot_candidate_pool_size",
+                    2,
+                )
+            ),
+            cold_candidate_batch_size=int(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_cold_candidate_batch_size",
+                    3,
+                )
+            ),
+            worker_status_concurrency=int(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_worker_status_concurrency",
+                    3,
+                )
+            ),
+            worker_status_timeout_ms=int(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_worker_status_timeout_ms",
+                    200,
+                )
+            ),
+            prefill_queue_size_threshold=int(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_prefill_queue_size_threshold",
+                    1024,
+                )
+            ),
+            p2p_hit_discount=float(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_p2p_hit_discount",
+                    0.2,
+                )
+            ),
+            cache_affinity_first_max_extra_work_tokens=int(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_cache_affinity_first_max_extra_work_tokens",
+                    0,
+                )
+            ),
+            outstanding_uncached_tokens_threshold=int(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_outstanding_uncached_tokens_threshold",
+                    0,
+                )
+            ),
+            cache_affinity_first_min_hit_rate=float(
+                getattr(
+                    self.master_config,
+                    "master_client_fallback_cache_affinity_first_min_hit_rate",
+                    5.0,
+                )
+            ),
+        )
+
+        candidate_snapshot_resolver = None
+        if self.host_service is not None:
+            enable_snapshot = getattr(
+                self.host_service,
+                "enable_role_snapshot",
+                None,
+            )
+            get_snapshot = getattr(
+                self.host_service,
+                "get_backend_role_addr_snapshot",
+                None,
+            )
+            if callable(enable_snapshot) and callable(get_snapshot):
+                enabled = enable_snapshot(
+                    RoleType.PREFILL,
+                    refresh_interval_seconds=discovery_refresh_ms / 1000.0,
+                    stale_timeout_seconds=discovery_stale_ms / 1000.0,
+                )
+                if enabled:
+
+                    def resolve_candidate_snapshot() -> List[KvcmCacheCandidate]:
+                        candidates: List[KvcmCacheCandidate] = []
+                        for role_addr in get_snapshot(RoleType.PREFILL):
+                            host_ip = str(role_addr.ip)
+                            if host_ip.startswith("[") and host_ip.endswith("]"):
+                                host_ip = host_ip[1:-1]
+                            grpc_port = (
+                                fallback_config.worker_grpc_port_override
+                                or int(role_addr.grpc_port)
+                            )
+                            status_port = (
+                                fallback_config.worker_status_port_override or grpc_port
+                            )
+                            candidates.append(
+                                KvcmCacheCandidate(
+                                    host_ip=host_ip,
+                                    http_port=int(role_addr.http_port),
+                                    grpc_port=grpc_port,
+                                    worker_status_port=status_port,
+                                    local_blocks=0,
+                                    p2p_fetch_blocks=0,
+                                    p2p_total_match_blocks=0,
+                                )
+                            )
+                        return candidates
+
+                    candidate_snapshot_resolver = resolve_candidate_snapshot
+
+        return KvcmFallbackClient(
+            fallback_config,
             resolve_bootstrap_targets,
+            candidate_snapshot_resolver,
         )
 
     def _get_session_timeout_s(self) -> float:
@@ -309,6 +391,8 @@ class MasterClient:
             close_result = self._kvcm_fallback_client.close()
             if inspect.isawaitable(close_result):
                 await close_result
+        if self._kvcm_vip_snapshot is not None:
+            self._kvcm_vip_snapshot.close()
 
     @staticmethod
     def _input_ids_for_kvcm(input: GenerateInput) -> Optional[List[int]]:
@@ -342,37 +426,19 @@ class MasterClient:
         if not self.client_fallback_enabled or self._kvcm_fallback_client is None:
             return None
 
-        local_candidate = None
-        if local_fallback_addr is not None:
-            from rtp_llm.server.kvcm_fallback import KvcmCacheCandidate
-
-            status_port = int(
-                getattr(
-                    self.master_config,
-                    "master_client_fallback_worker_status_port",
-                    0,
-                )
-            ) or int(local_fallback_addr.grpc_port)
-            local_candidate = KvcmCacheCandidate(
-                host_ip=str(local_fallback_addr.ip),
-                http_port=int(local_fallback_addr.http_port),
-                grpc_port=int(local_fallback_addr.grpc_port),
-                worker_status_port=status_port,
-                local_blocks=0,
-                p2p_fetch_blocks=0,
-                p2p_total_match_blocks=0,
-            )
+        # Keep the argument for API compatibility. The caller's endpoint is an
+        # upstream escape hatch, not a privileged scheduling candidate.
+        del local_fallback_addr
 
         try:
             result = await self._kvcm_fallback_client.query_and_select(
                 request_id=str(request_id),
                 block_cache_keys=block_cache_keys,
                 input_ids=self._input_ids_for_kvcm(input),
-                local_candidate=local_candidate,
             )
         except Exception as error:
             route_logger.warning(
-                "KVCM fallback failed, request_id=%s, error=%s",
+                "Master client fallback failed, request_id=%s, error=%s",
                 request_id,
                 error,
             )
@@ -381,7 +447,7 @@ class MasterClient:
         selected = result.selected
         if selected is None:
             route_logger.info(
-                "KVCM fallback returned no route, request_id=%s, outcome=%s, "
+                "Master client fallback returned no route, request_id=%s, outcome=%s, "
                 "candidate_count=%s, latency_us=%s",
                 request_id,
                 result.outcome,
@@ -398,6 +464,11 @@ class MasterClient:
             "block_count": result.block_count,
             "candidate_count": result.candidate_count,
             "pool_candidate_count": getattr(result, "pool_candidate_count", 0),
+            "discovered_candidate_count": getattr(
+                result, "discovered_candidate_count", 0
+            ),
+            "probe_round_count": getattr(result, "probe_round_count", 0),
+            "cache_query_outcome": getattr(result, "cache_query_outcome", ""),
             "status_success_count": getattr(result, "status_success_count", 0),
             "status_latency_us": getattr(result, "status_latency_us", 0),
             "selection_reason": getattr(result, "selection_reason", None),
@@ -412,7 +483,7 @@ class MasterClient:
             "latency_us": result.latency_us,
         }
         route_logger.info(
-            "KVCM fallback selected worker, request_id=%s, worker=%s, "
+            "Master client fallback selected worker, request_id=%s, worker=%s, "
             "local_blocks=%s, candidate_count=%s, pool_candidate_count=%s, "
             "status_success_count=%s, selection_reason=%s, latency_us=%s",
             request_id,
@@ -433,7 +504,7 @@ class MasterClient:
                     grpc_port=selected.grpc_port,
                 )
             ],
-            route_source="KVCM",
+            route_source="CLIENT_FALLBACK",
             cache_match=cache_match,
             kvcm_outcome=result.outcome,
         )
