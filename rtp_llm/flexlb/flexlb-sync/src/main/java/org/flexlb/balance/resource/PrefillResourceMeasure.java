@@ -7,7 +7,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.enums.TaskPhase;
 import org.springframework.stereotype.Component;
 
 import org.flexlb.util.Logger;
@@ -16,7 +15,7 @@ import java.util.Map;
 
 /**
  * Prefill role resource measure
- * Availability criteria: queue wait time below threshold
+ * Availability criteria: effective pending task count below threshold
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -75,7 +74,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         int count = 0;
 
         for (WorkerStatus worker : workerStatusMap.values()) {
-            double waterLevel = calculateWaterLevel(worker);
+            double waterLevel = calculateWorkerWaterLevel(worker);
             totalWaterLevel += waterLevel;
             count++;
         }
@@ -83,12 +82,20 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         return count > 0 ? totalWaterLevel / count : 0.0;
     }
 
-    private double calculateWaterLevel(WorkerStatus workerStatus) {
+    @Override
+    public double calculateWorkerWaterLevel(WorkerStatus workerStatus) {
         if (workerStatus == null) {
             return 0.0;
         }
 
-        long pendingRequests = countWaitingTasks(workerStatus);
+        long workerObservedPending = workerStatus.getRunningTaskList() == null
+                ? 0
+                : workerStatus.getRunningTaskList().values().stream()
+                        .filter(task -> task != null
+                                && task.getPhase() != org.flexlb.enums.TaskPhase.RUNNING)
+                        .count();
+        long pendingRequests = Math.max(
+                workerStatus.getInTransitAndWaitingTaskCount(), workerObservedPending);
 
         if (pendingRequests <= 0) {
             return 0.0;
@@ -97,14 +104,6 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         } else {
             return (pendingRequests * 100.0) / prefillSaturatedAtPendingRequests;
         }
-    }
-
-    private static long countWaitingTasks(WorkerStatus workerStatus) {
-        if (MapUtils.isEmpty(workerStatus.getRunningTaskList())) {
-            return 0;
-        }
-        return workerStatus.getRunningTaskList().values().stream()
-                .filter(t -> t.getPhase() != TaskPhase.RUNNING).count();
     }
 
 }

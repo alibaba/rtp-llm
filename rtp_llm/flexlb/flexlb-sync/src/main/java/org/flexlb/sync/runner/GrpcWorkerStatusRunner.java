@@ -3,6 +3,7 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -15,6 +16,7 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
@@ -146,10 +148,21 @@ public class GrpcWorkerStatusRunner implements Runnable {
             WorkerEndpoint ep = endpointRegistry != null ? endpointRegistry.get(roleType, ipPort) : null;
             boolean versionAdvanced = currentVersion < responseVersion;
 
-            if (versionAdvanced) {
-                // 1. WorkerStatusResponse directly updates WorkerStatus
-                workerStatus.updateFromResponse(newWorkerStatus);
+            Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
+            Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
+            Map<String, TaskInfo> lifecycleRunningTaskInfo =
+                    runningOnly(runningTaskInfo);
+            Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
 
+            // Task lifecycle is incremental and may advance even when the coarse
+            // status version is unchanged. Reconcile it on every successful poll.
+            workerStatus.updateFromResponse(newWorkerStatus);
+            workerStatus.setWaitingTaskList(waitingTaskInfo);
+            workerStatus.updateTaskStates(
+                    waitingTaskInfo, lifecycleRunningTaskInfo, finishedTaskInfo);
+            workerStatus.updateRunningQueueTime();
+
+            if (versionAdvanced) {
                 if (endpointRegistry != null) {
                     if (workerStatus.isAlive()) {
                         ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
@@ -164,23 +177,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
                 }
 
-                // 3. Notify scheduler (cleanup finished requests)
-                if (priorityScheduler != null) {
-                    priorityScheduler.onWorkerStatusUpdate(newWorkerStatus);
-                }
-
-                Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
-
-                // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
-                // If this is done outside the version guard, a skipped calibrate (version not
-                // advanced) would still consume the incremental version, causing the engine to
-                // filter out those finished tasks on the next poll — leaking inflight entries.
-                if (latestFinishedVersion != null
-                        && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
-                    workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
-                }
             } else {
-                workerStatus.refreshStatusHeartbeat(newWorkerStatus.isAlive());
                 if (endpointRegistry != null) {
                     if (workerStatus.isAlive()) {
                         ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
@@ -189,6 +186,19 @@ public class GrpcWorkerStatusRunner implements Runnable {
                         ep = null;
                     }
                 }
+            }
+
+            // Finished-task cleanup is not gated by the coarse status version.
+            if (priorityScheduler != null && finishedTaskInfo != null && !finishedTaskInfo.isEmpty()) {
+                priorityScheduler.onWorkerStatusUpdate(newWorkerStatus);
+            }
+
+            // Advance the incremental cursor only after both local lifecycle
+            // reconciliation and scheduler cleanup consumed the finished tasks.
+            Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
+            if (latestFinishedVersion != null
+                    && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
+                workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
@@ -226,6 +236,19 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 workerStatus.getRunningTaskList() != null ? workerStatus.getRunningTaskList().size() : 0,
                 workerStatus.getStatusVersion(),
                 System.nanoTime() / 1000 - startTime);
+    }
+
+    private static Map<String, TaskInfo> runningOnly(Map<String, TaskInfo> tasks) {
+        if (tasks == null) {
+            return null;
+        }
+        Map<String, TaskInfo> running = new HashMap<>();
+        tasks.forEach((requestId, task) -> {
+            if (task != null && task.getPhase() == org.flexlb.enums.TaskPhase.RUNNING) {
+                running.put(requestId, task);
+            }
+        });
+        return running;
     }
 
     private void handleException(Throwable ex) {

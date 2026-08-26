@@ -4,7 +4,9 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.enums.PriorityPreemptionProgress;
 
@@ -37,6 +39,9 @@ public class EngineStatusConverter {
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
         response.setDpRank(workerStatusPB.getDpRank());
+        response.setBlockHashLookaheadTokens(workerStatusPB.getBlockHashLookaheadTokens());
+        response.setCacheMatchRollbackBlocks(workerStatusPB.getCacheMatchRollbackBlocks());
+        response.setKvCacheGroupMode(convertKvCacheGroupMode(workerStatusPB.getKvCacheGroupMode()));
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());
@@ -44,13 +49,40 @@ public class EngineStatusConverter {
         response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
         response.setMaxSeqLen(workerStatusPB.getMaxSeqLen());
         response.setMaxBatchTokensSize(workerStatusPB.getMaxBatchTokensSize());
+        if (workerStatusPB.getBlockSize() > 0) {
+            response.setCacheStatus(CacheStatus.builder()
+                    .availableKvCache(workerStatusPB.getAvailableKvCache())
+                    .totalKvCache(workerStatusPB.getTotalKvCache())
+                    .blockSize(workerStatusPB.getBlockSize())
+                    .version(workerStatusPB.getStatusVersion())
+                    .build());
+        }
 
-        response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
+        List<EngineRpcService.TaskInfoPB> srcRunningTaskInfoList = workerStatusPB.getRunningTaskInfoList();
+        List<EngineRpcService.TaskInfoPB> waitingTaskInfoList = srcRunningTaskInfoList.stream()
+                .filter(taskInfoPB -> resolvePhase(taskInfoPB) != TaskPhase.RUNNING)
+                .toList();
+        // Convert waiting task info
+        response.setWaitingTaskInfo(convertToTaskInfoList(waitingTaskInfoList));
+
+        // Keep the dsv4 running_task_info contract unified. Endpoint calibration
+        // and priority scheduling need every active phase; lifecycle consumers
+        // use waitingTaskInfo plus a phase-filtered view of this map.
+        response.setRunningTaskInfo(convertToTaskInfoList(srcRunningTaskInfoList));
 
         // Convert finished task list
         response.setFinishedTaskInfo(convertToTaskInfoList(workerStatusPB.getFinishedTaskListList()));
 
         return response;
+    }
+
+    private static KvCacheGroupMode convertKvCacheGroupMode(
+            EngineRpcService.KvCacheGroupModePB mode) {
+        return switch (mode) {
+            case KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY -> KvCacheGroupMode.FULL_ATTENTION_ONLY;
+            case KV_CACHE_GROUP_MODE_WITH_MAMBA -> KvCacheGroupMode.WITH_MAMBA;
+            default -> KvCacheGroupMode.UNSPECIFIED;
+        };
     }
 
     /**
@@ -84,8 +116,10 @@ public class EngineStatusConverter {
 
         for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
             TaskInfo taskInfo = new TaskInfo();
-            taskInfo.setRequestId(taskInfoPB.getRequestId());
+            long requestId = taskInfoPB.getRequestId();
+            taskInfo.setRequestId(requestId);
             taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
+            taskInfo.setPrefixLengthValid(taskInfoPB.getPrefixLengthValid());
             taskInfo.setInputLength(taskInfoPB.getInputLength());
             taskInfo.setWaitingTime(taskInfoPB.getWaitingTimeMs());
             taskInfo.setIterateCount(taskInfoPB.getIterateCount());
@@ -105,13 +139,35 @@ public class EngineStatusConverter {
                 taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
                 taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
             }
+            taskInfo.setWaitingEnteredTimeMs(taskInfoPB.getWaitingEnteredTimeMs());
+            taskInfo.setRunningEnteredTimeMs(taskInfoPB.getRunningEnteredTimeMs());
+            taskInfo.setRequestReceivedTimeMs(taskInfoPB.getRequestReceivedTimeMs());
+            taskInfo.setInputQueueEnqueueTimeMs(taskInfoPB.getInputQueueEnqueueTimeMs());
+            taskInfo.setInputQueueDrainTimeMs(taskInfoPB.getInputQueueDrainTimeMs());
+            taskInfo.setRemoteKvWaitMs(taskInfoPB.getRemoteKvWaitMs());
+            taskInfo.setFirstTokenTimeMs(taskInfoPB.getFirstTokenTimeMs());
+            taskInfo.setHbmLocalMatchTokens(taskInfoPB.getHbmLocalMatchTokens());
+            taskInfo.setRemoteKvAddedMatchTokens(taskInfoPB.getRemoteKvAddedMatchTokens());
+            taskInfo.setFirstPrefillStepId(taskInfoPB.getFirstPrefillStepId());
+            taskInfo.setLastPrefillStepId(taskInfoPB.getLastPrefillStepId());
+            taskInfo.setPrefillStepCount(taskInfoPB.getPrefillStepCount());
+            taskInfo.setPrefillNonfinalChunkTokensMin(taskInfoPB.getPrefillNonfinalChunkTokensMin());
+            taskInfo.setPrefillNonfinalChunkTokensMax(taskInfoPB.getPrefillNonfinalChunkTokensMax());
+            if (taskInfoPB.hasCompletedPrefillTokens()) {
+                taskInfo.setCompletedPrefillTokens(taskInfoPB.getCompletedPrefillTokens());
+            }
+            if (taskInfoPB.hasRemainingPrefillTokens()) {
+                taskInfo.setRemainingPrefillTokens(taskInfoPB.getRemainingPrefillTokens());
+            }
+            if (taskInfoPB.hasLastCompletedPrefillStepId()) {
+                taskInfo.setLastCompletedPrefillStepId(taskInfoPB.getLastCompletedPrefillStepId());
+            }
 
-            taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
+            taskInfoMap.put(String.valueOf(requestId), taskInfo);
         }
 
         return taskInfoMap;
     }
-
     private static TaskPhase resolvePhase(EngineRpcService.TaskInfoPB task) {
         if (task.getPhase() != EngineRpcService.TaskPhase.TASK_PHASE_PENDING) {
             // phase was added after the legacy is_waiting flag and is the
