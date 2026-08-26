@@ -4,7 +4,10 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.kvcm.KvcmCacheMatchProvider;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
@@ -25,6 +28,14 @@ class CacheMatchQueryOrchestratorTest {
             mock(LocalSyncCacheMatchProvider.class);
     private final KvcmCacheMatchProvider kvcmProvider = mock(KvcmCacheMatchProvider.class);
     private final CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
+    private final LocalStandbyCacheMatchProvider localStandbyProvider =
+            mock(LocalStandbyCacheMatchProvider.class);
+    private final LocalStandbyCacheManager localStandbyCacheManager =
+            mock(LocalStandbyCacheManager.class);
+    private final CacheMatchFailoverManager failoverManager =
+            mock(CacheMatchFailoverManager.class);
+    private final CacheMetricsReporter cacheMetricsReporter =
+            mock(CacheMetricsReporter.class);
     private final CacheMatchQuery query = new CacheMatchQuery(
             "request-1", List.of(11L, 22L), 2192L,
             List.of(), 0, RoleType.PREFILL, "default");
@@ -52,6 +63,7 @@ class CacheMatchQueryOrchestratorTest {
     @Test
     void usesKvcmWhenEnabled() {
         when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.KVCM);
         when(kvcmProvider.findMatchingEngines(
                 "request-1", List.of(11L, 22L), 2192L,
                 RoleType.PREFILL, "default"))
@@ -66,6 +78,7 @@ class CacheMatchQueryOrchestratorTest {
     @Test
     void skipsProviderForEmptyKeys() {
         when(configuration.isKvcmEnabled()).thenReturn(true);
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.KVCM);
         CacheMatchQuery empty = new CacheMatchQuery(
                 "request-2", List.of(), 2192L,
                 List.of(), 0, RoleType.PREFILL, "default");
@@ -84,6 +97,12 @@ class CacheMatchQueryOrchestratorTest {
 
     private CacheMatchQueryOrchestrator orchestrator() {
         return new CacheMatchQueryOrchestrator(
-                localSyncProvider, kvcmProvider, configuration);
+                localSyncProvider,
+                kvcmProvider,
+                localStandbyProvider,
+                localStandbyCacheManager,
+                failoverManager,
+                cacheMetricsReporter,
+                configuration);
     }
 }

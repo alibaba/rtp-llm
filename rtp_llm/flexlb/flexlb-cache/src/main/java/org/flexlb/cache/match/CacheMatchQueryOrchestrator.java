@@ -2,12 +2,19 @@ package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchFailoverAction;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.kvcm.KvcmCacheMatchProvider;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
+import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -20,46 +27,117 @@ public class CacheMatchQueryOrchestrator {
 
     private final LocalSyncCacheMatchProvider localSyncProvider;
     private final KvcmCacheMatchProvider kvcmProvider;
+    private final LocalStandbyCacheMatchProvider localStandbyProvider;
+    private final LocalStandbyCacheManager localStandbyCacheManager;
+    private final CacheMatchFailoverManager failoverManager;
+    private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchConfiguration configuration;
 
+    @Autowired
     public CacheMatchQueryOrchestrator(
             LocalSyncCacheMatchProvider localSyncProvider,
             KvcmCacheMatchProvider kvcmProvider,
+            LocalStandbyCacheMatchProvider localStandbyProvider,
+            LocalStandbyCacheManager localStandbyCacheManager,
+            CacheMatchFailoverManager failoverManager,
+            CacheMetricsReporter cacheMetricsReporter,
             CacheMatchConfiguration configuration) {
         this.localSyncProvider = localSyncProvider;
         this.kvcmProvider = kvcmProvider;
+        this.localStandbyProvider = localStandbyProvider;
+        this.localStandbyCacheManager = localStandbyCacheManager;
+        this.failoverManager = failoverManager;
+        this.cacheMetricsReporter = cacheMetricsReporter;
         this.configuration = configuration;
         log.info("Cache match query orchestrator initialized: source={}", effectiveSource());
     }
 
     public CacheMatchResult findMatchingEngines(CacheMatchQuery query) {
         long startTimeNs = System.nanoTime();
-        CacheMatchSource source = effectiveSource();
+        if (!configuration.isKvcmEnabled()) {
+            return queryLocalSync(query, startTimeNs);
+        }
+        CacheMatchSource source = failoverManager.activeSource();
+        if (source == CacheMatchSource.LOCAL_STANDBY) {
+            cacheMetricsReporter.reportStandbyFallback("active_source");
+            return queryLocalStandby(query, startTimeNs);
+        }
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
-            return emptyResult(source, startTimeNs);
+            return emptyResult(CacheMatchSource.KVCM, startTimeNs);
         }
 
         try {
-            Map<String, HostCacheMatch> matches = source == CacheMatchSource.KVCM
-                    ? kvcmProvider.findMatchingEngines(
-                            query.requestId(), query.blockCacheKeys(), query.blockSize(),
-                            query.roleType(), query.group())
-                    : localSyncProvider.findMatchingEngines(
-                            query.requestId(), query.blockCacheKeys(), query.blockSize(),
-                            query.roleType(), query.group());
+            Map<String, HostCacheMatch> matches = kvcmProvider.findMatchingEngines(
+                    query.requestId(), query.blockCacheKeys(), query.blockSize(),
+                    query.roleType(), query.group());
             return new CacheMatchResult(
-                    matches, source, elapsedUs(startTimeNs), query.blockSize());
+                    matches, CacheMatchSource.KVCM, elapsedUs(startTimeNs), query.blockSize());
         } catch (RuntimeException error) {
-            log.warn("Cache query failed; requestId={}, source={}",
-                    query.requestId(), source, error);
-            return CacheMatchResult.failed(source, elapsedUs(startTimeNs));
+            log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY",
+                    query.requestId(), error);
+            cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
+            return queryLocalStandby(query, startTimeNs);
+        }
+    }
+
+    public void applyFailoverAction(CacheMatchFailoverAction action) {
+        if (!configuration.isKvcmEnabled()) {
+            throw new IllegalStateException("cache failover is unavailable in LOCAL_SYNC mode");
+        }
+        if (action == null) {
+            throw new IllegalArgumentException("cache failover action must not be null");
+        }
+        switch (action) {
+            case ACTIVATE_FALLBACK -> failoverManager.activateFallbackManually();
+            case RECOVER_PRIMARY -> failoverManager.recoverPrimaryManually();
         }
     }
 
     public CacheMatchSource effectiveSource() {
-        return configuration.isKvcmEnabled()
-                ? CacheMatchSource.KVCM
-                : CacheMatchSource.LOCAL_SYNC;
+        if (!configuration.isKvcmEnabled()) {
+            return CacheMatchSource.LOCAL_SYNC;
+        }
+        return failoverManager.activeSource();
+    }
+
+    public CacheMatchStatus status() {
+        KvcmHealthSnapshot health = failoverManager.healthSnapshot();
+        return new CacheMatchStatus(
+                configuration.isKvcmEnabled(),
+                configuration.isLocalStandbyEnabled(),
+                configuration.getConfiguredMode(),
+                configuration.isAutoSwitchEnabled(),
+                effectiveSource(),
+                health.state(),
+                health.consecutiveQueryFailures(),
+                health.consecutiveHeartbeatFailures(),
+                health.consecutiveHeartbeatSuccesses(),
+                health.lastHeartbeatSuccessTimeMs(),
+                health.lastHeartbeatFailureTimeMs(),
+                failoverManager.lastFailoverTimeMs(),
+                failoverManager.lastFailoverReason(),
+                localStandbyCacheManager.mappingCount(),
+                localStandbyCacheManager.maximumEntryCount());
+    }
+
+    private CacheMatchResult queryLocalSync(CacheMatchQuery query, long startTimeNs) {
+        if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
+            return emptyResult(CacheMatchSource.LOCAL_SYNC, startTimeNs);
+        }
+        Map<String, HostCacheMatch> matches = localSyncProvider.findMatchingEngines(
+                query.requestId(), query.blockCacheKeys(), query.blockSize(),
+                query.roleType(), query.group());
+        return new CacheMatchResult(
+                matches, CacheMatchSource.LOCAL_SYNC, elapsedUs(startTimeNs), query.blockSize());
+    }
+
+    private CacheMatchResult queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
+        try {
+            return localStandbyProvider.asyncLocalStandbyMatch(query).join();
+        } catch (RuntimeException error) {
+            log.warn("Local Standby cache query failed; requestId={}", query.requestId(), error);
+            return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, elapsedUs(startTimeNs));
+        }
     }
 
     private CacheMatchResult emptyResult(CacheMatchSource source, long startTimeNs) {
