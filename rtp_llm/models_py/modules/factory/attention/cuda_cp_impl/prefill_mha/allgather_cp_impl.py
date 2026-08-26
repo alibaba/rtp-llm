@@ -20,6 +20,27 @@ logger = logging.getLogger(__name__)
 _cp_trt_workspace_buffer: Optional[torch.Tensor] = None
 
 
+def _page_counts(lengths: torch.Tensor, page_size: int) -> torch.Tensor:
+    """Pages needed per request, ``ceil(length / page_size)``."""
+    return torch.div(lengths + page_size - 1, page_size, rounding_mode="floor")
+
+
+def _contiguous_logical_pages(
+    page_counts: torch.Tensor, max_pages: int, device: Optional[torch.device] = None
+) -> torch.Tensor:
+    """Pack each request's logical page ids consecutively, zero-padding short rows.
+
+    Row ``i`` is ``[start_i, start_i + 1, ...]`` where ``start_i`` is the running
+    sum of the preceding page counts.
+    """
+    starts = torch.zeros_like(page_counts)
+    torch.cumsum(page_counts[:-1], dim=0, out=starts[1:])
+    ramp = torch.arange(max_pages, dtype=page_counts.dtype, device=page_counts.device)
+    table = torch.where(ramp < page_counts.unsqueeze(1), starts.unsqueeze(1) + ramp, 0)
+    table = table.to(torch.int32)
+    return table if device is None else table.to(device)
+
+
 def _build_cp_sharded_params_block_table(
     prefix_lengths: torch.Tensor,
     input_lengths: torch.Tensor,
@@ -27,14 +48,11 @@ def _build_cp_sharded_params_block_table(
 ) -> torch.Tensor:
     """Build logical page ids used only by ``fill_mla_params`` metadata.
 
-    A CP-sharded physical block table contains only this rank's page-RR shard,
-    while ``fill_mla_params`` indexes one entry for every logical page in the
-    request.  Passing the compact table therefore reads out of bounds on long
-    cache hits.  The sharded attention path does not use the resulting page ids
-    for physical cache I/O: writes use ``cp_kv_slot_mapping`` and prefix reads
-    use the all-gathered contiguous pool.  Give the metadata builder a complete
-    contiguous logical table and keep the real rank-local table for those I/O
-    paths.
+    ``fill_mla_params`` indexes one entry per logical page, so handing it a
+    CP-sharded physical table — which holds only this rank's page-RR shard — reads
+    out of bounds on long cache hits. These ids never reach physical cache I/O:
+    writes go through ``cp_kv_slot_mapping`` and prefix reads through the
+    all-gathered pool, both of which keep using the real rank-local table.
     """
     if page_size <= 0:
         raise ValueError(f"page_size must be positive, got {page_size}")
@@ -42,19 +60,97 @@ def _build_cp_sharded_params_block_table(
     total_lengths = prefix_lengths.to(
         device="cpu", dtype=torch.int64
     ) + input_lengths.to(device="cpu", dtype=torch.int64)
-    page_counts = torch.div(
-        total_lengths + page_size - 1, page_size, rounding_mode="floor"
-    )
-    batch_size = int(page_counts.numel())
-    max_pages = int(page_counts.max().item()) if batch_size else 0
-    table = torch.zeros((batch_size, max_pages), dtype=torch.int32)
+    if not total_lengths.numel():
+        return torch.zeros((0, 0), dtype=torch.int32)
+    page_counts = _page_counts(total_lengths, page_size)
+    return _contiguous_logical_pages(page_counts, int(page_counts.max()))
+
+
+@triton.jit
+def _contiguous_prefix_page_table_kernel(
+    prefix_lengths_ptr,
+    table_ptr,
+    table_stride,
+    BATCH: tl.constexpr,
+    PAGE_SIZE: tl.constexpr,
+    MAX_PAGES: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    req = tl.program_id(0)
+    own_pages = (tl.load(prefix_lengths_ptr + req) + PAGE_SIZE - 1) // PAGE_SIZE
+
+    # Exclusive prefix sum of page counts. The batch is small enough that an
+    # O(BATCH) scan per program beats launching a separate cumsum kernel.
     page_offset = 0
-    for batch_idx, page_count_value in enumerate(page_counts.tolist()):
-        page_count = int(page_count_value)
-        table[batch_idx, :page_count] = torch.arange(
-            page_offset, page_offset + page_count, dtype=torch.int32
+    for other in tl.range(0, BATCH):
+        other_pages = (tl.load(prefix_lengths_ptr + other) + PAGE_SIZE - 1) // PAGE_SIZE
+        page_offset += tl.where(other < req, other_pages, 0)
+
+    for start in tl.range(0, MAX_PAGES, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        tl.store(
+            table_ptr + req * table_stride + offs,
+            tl.where(offs < own_pages, page_offset + offs, 0),
+            mask=offs < MAX_PAGES,
         )
-        page_offset += page_count
+
+
+_logical_page_ramp_buffer: Optional[torch.Tensor] = None
+
+
+def _logical_page_ramp(size: int, device: torch.device) -> torch.Tensor:
+    """Process-lifetime ``[0, 1, 2, ...]`` buffer, grown on demand."""
+    global _logical_page_ramp_buffer
+    # An indexless "cuda" compares unequal to the "cuda:0" a tensor reports, which
+    # would reallocate on every call and defeat the caching.
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    ramp = _logical_page_ramp_buffer
+    if ramp is None or ramp.numel() < size or ramp.device != device:
+        ramp = torch.arange(max(size, 8192), dtype=torch.int32, device=device)
+        _logical_page_ramp_buffer = ramp
+    return ramp
+
+
+def _build_contiguous_prefix_page_table(
+    prefix_lengths: torch.Tensor,
+    page_size: int,
+    max_pages: int,
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Page table for a prefix pool whose pages are packed per request in logical
+    order — the layout ``gather_cp_sharded_prefix_pool`` produces. The rank-local
+    physical table cannot address it: under page-RR sharding that table only holds
+    this rank's 1/cp_size shard, so its entry ``p`` is not logical page ``p``.
+
+    ``prefix_lengths`` may live on either side.
+    """
+    device = device or (
+        prefix_lengths.device if prefix_lengths.is_cuda else torch.device("cuda")
+    )
+    lengths_host = prefix_lengths.to(device="cpu", dtype=torch.int32)
+    batch_size = int(lengths_host.numel())
+    if not batch_size or not max_pages:
+        return torch.empty((batch_size, max_pages), dtype=torch.int32, device=device)
+
+    page_counts = _page_counts(lengths_host, page_size)
+    if bool((page_counts == max_pages).all()):
+        # A uniform batch needs no zero padding, so the table is exactly the ramp.
+        # Sharing the persistent buffer is safe because the table is read-only.
+        total = batch_size * max_pages
+        return _logical_page_ramp(total, device)[:total].view(batch_size, max_pages)
+
+    table = torch.empty((batch_size, max_pages), dtype=torch.int32, device=device)
+    _contiguous_prefix_page_table_kernel[(batch_size,)](
+        prefix_lengths if prefix_lengths.is_cuda else lengths_host.to(device),
+        table,
+        table.stride(0),
+        BATCH=batch_size,
+        PAGE_SIZE=page_size,
+        MAX_PAGES=max_pages,
+        BLOCK=min(triton.next_power_of_2(max_pages), 1024),
+    )
     return table
 
 
@@ -73,9 +169,8 @@ from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 
-# FlashAttention-4 paged attention (Blackwell). Replaces trtllm_batch_context in
-# the non-prefix CP paged path (links A/B); reads the HND pool via a zero-copy
-# transpose view and, unlike trtllm, supports fp8 KV cache paged.
+# FlashAttention-4 paged attention (Blackwell). Unlike trtllm_batch_context it
+# supports an fp8 paged KV cache.
 try:
     from flash_attn.cute import flash_attn_varlen_func as _fa4_varlen_func
 
@@ -85,37 +180,37 @@ except Exception:  # pragma: no cover - FA4 only shipped on cuda13 x86 (Blackwel
     _HAS_FA4 = False
 
 
-def _use_fa4_cp_paged(*, has_prefix: bool = False, fp8_kv_cache: bool = False) -> bool:
-    """Select FA4 only when cache reuse cannot change its attention math.
+def _env_enabled(name: str, *, default: bool) -> bool:
+    return os.environ.get(name, "1" if default else "0").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
 
-    Prefix attention is served by FlashInfer.  With FP8 KV, FA4's no-prefix path
-    also quantizes the gathered K/V used for attention, while FlashInfer's
-    cache-hit path combines FP8 prefix K/V with BF16 extend K/V.  A cache-serving
-    process must therefore keep cold and hit requests on the compatible
-    FlashInfer path.  BF16-KV and cache-disabled services retain no-prefix FA4.
+
+def _use_fa4_cp_paged(*, has_prefix: bool = False, fp8_kv_cache: bool = False) -> bool:
+    """Select FA4 for the CP prefill paths, including cache hits when opted in.
+
+    FA4 runs uniform FP8 against an FP8 cache (q quantized to match), while
+    FlashInfer keeps q in BF16 and dequantizes only the cached prefix. The two are
+    therefore not numerically interchangeable per request, so a process serving
+    both cold and cache-hit traffic must put both on one backend:
+    ``RTP_LLM_CP_PREFILL_FA4_PREFIX`` moves it to FA4, and without it an FP8
+    cache-serving process stays entirely on FlashInfer.
     """
-    enabled = os.environ.get("RTP_LLM_CP_PREFILL_FA4", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-    cache_serving_process = os.environ.get("REUSE_CACHE", "0").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-    incompatible_cache_math = cache_serving_process and fp8_kv_cache
-    return _HAS_FA4 and enabled and not has_prefix and not incompatible_cache_math
+    if not _HAS_FA4 or not _env_enabled("RTP_LLM_CP_PREFILL_FA4", default=True):
+        return False
+    if _env_enabled("RTP_LLM_CP_PREFILL_FA4_PREFIX", default=False):
+        return True
+    cache_serving_process = _env_enabled("REUSE_CACHE", default=False)
+    return not has_prefix and not (cache_serving_process and fp8_kv_cache)
 
 
 def _match_q_to_kv(q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
-    """FA4 requires q/k/v to share one dtype. The KV cache is stored in its
-    configured dtype (fp8 for the fp8-KV-cache layers, else bf16) and is read
-    as-is (never re-cast); q is the bf16 model activation, so cast it to match
-    the KV dtype. => fp8 cache yields uniform-fp8 attention automatically
-    (scale=1.0, no descale); bf16 cache stays bf16.
+    """FA4 requires q/k/v to share one dtype, and the KV cache is never re-cast, so
+    the bf16 q activation follows the cache: an fp8 cache yields uniform-fp8
+    attention (scale=1.0, no descale), a bf16 cache stays bf16.
     """
     return q if q.dtype == kv.dtype else q.to(kv.dtype)
 
@@ -125,9 +220,6 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     fill_fp8_kv_cache_scale,
     gather_cp_sharded_prefix_pool,
     plan_prefix_paged_attention,
-)
-from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.fmha_cp_kv_triton import (
-    triton_build_dual_prefix_extend,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -147,8 +239,11 @@ def _fused_restore_packed_kv_kernel(
     NK: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    # int64 throughout: TOTAL is token_count * 2 * num_kv_heads * head_dim, which
+    # for a 1M-token context is already half of int32's range, and a wrapped
+    # negative offset would still pass ``offs < TOTAL`` and scribble out of bounds.
+    pid = tl.program_id(0).to(tl.int64)
+    offs = pid * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     mask = offs < TOTAL
     per_token = 2 * NK
     token = offs // per_token
@@ -263,6 +358,10 @@ def _generate_full_causal_kv_indices_device(
 
 
 class PCPAllGatherAttnOp:
+    # One line per process, not per layer per forward: the backend choice is fixed
+    # by config, and a silent fallback to FlashInfer is otherwise invisible.
+    _logged_fa4_fused = False
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -314,6 +413,7 @@ class PCPAllGatherAttnOp:
         )
         self._cp_size = self.prefill_cp_size if self._kv_sharded else 1
         self._cp_rank = self.prefill_cp_rank if self._kv_sharded else 0
+        self._fp8_kv_cache = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
 
         self.seq_size_per_block = (
             attn_configs.kernel_tokens_per_block or attn_configs.tokens_per_block
@@ -322,6 +422,14 @@ class PCPAllGatherAttnOp:
         self.q0_idx = self.q1_idx = None
         self.kv0_idx = self.kv1_idx = None
         self.kv_restore_unpad_indices = None
+        self._fa4_prefix_page_table = None
+        self._fa4_seq_lens_part0 = None
+        self._fa4_seq_lens_part1 = None
+        self._fa4_max_kv_len_part0 = 0
+        self._fa4_max_kv_len_part1 = 0
+        self._fa4_pool_lengths = None
+        self._fa4_fused = False
+        self._fa4_no_prefix = False
 
         self.prefill_wrappers = {
             "ragged": {
@@ -346,20 +454,12 @@ class PCPAllGatherAttnOp:
         value = os.environ.get("RTP_LLM_CP_PREFILL_FORWARD_OPT", "1").strip()
         if value.lower() in ("0", "false", "no", "off"):
             return False
-        fa4 = _use_fa4_cp_paged(
-            fp8_kv_cache=self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-        )
         # Paged-context backend must be available: FA4 (preferred) or trtllm.
-        if not fa4 and not self._can_use_trtllm_paged_context:
+        if not self._fa4_no_prefix and not self._can_use_trtllm_paged_context:
             return False
-        # fp8 KV cache stays excluded: it is a mixed bf16-Q / fp8-KV path, and
-        # FA4's flash_attn_varlen_func requires q/k/v to share one dtype (link B
-        # deferred pending a mixed-dtype path). trtllm also lacks fp8 paged here.
-        if (
-            self.has_prefix
-            or self._kv_sharded
-            or self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-        ):
+        # An fp8 KV cache would make this a mixed bf16-q / fp8-KV pass, which neither
+        # FA4 (one dtype across q/k/v) nor trtllm supports here.
+        if self.has_prefix or self._kv_sharded or self._fp8_kv_cache:
             return False
 
         return True
@@ -403,20 +503,33 @@ class PCPAllGatherAttnOp:
 
         qo_indptr = cu_seqlens // 2
 
-        q0_idx, q1_idx = _generate_q_indices_device(
+        self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
+        # Both backend choices are settled once here: the rest of prepare() skips
+        # building metadata the chosen backend never reads, so forward must not
+        # re-derive them and risk disagreeing.
+        fa4_fused = self.has_prefix and _use_fa4_cp_paged(
+            has_prefix=True, fp8_kv_cache=self._fp8_kv_cache
+        )
+        self._fa4_fused = fa4_fused
+        self._fa4_no_prefix = _use_fa4_cp_paged(fp8_kv_cache=self._fp8_kv_cache)
+
+        self.q0_idx, self.q1_idx = _generate_q_indices_device(
             self.cp_info.prefill_cp_chunk_lengths, self.device
         )
-        kv0_idx, kv1_idx = _generate_full_causal_kv_indices_device(
-            self.cp_info.prefill_cp_chunk_lengths,
-            self.prefill_cp_rank,
-            self.prefill_cp_size,
-            self.device,
-        )
-
-        self.kv0_idx = kv_restore_indices[kv0_idx]
-        self.kv1_idx = kv_restore_indices[kv1_idx]
-        self.q0_idx = q0_idx
-        self.q1_idx = q1_idx
+        if fa4_fused:
+            # The fused path never gathers the extend K/V out of the all-gathered
+            # activation, so these indices — part1's alone spans
+            # ``2 * cp_size - rank`` chunks per request — would go unread.
+            self.kv0_idx = self.kv1_idx = None
+        else:
+            kv0_idx, kv1_idx = _generate_full_causal_kv_indices_device(
+                self.cp_info.prefill_cp_chunk_lengths,
+                self.prefill_cp_rank,
+                self.prefill_cp_size,
+                self.device,
+            )
+            self.kv0_idx = kv_restore_indices[kv0_idx]
+            self.kv1_idx = kv_restore_indices[kv1_idx]
 
         kv_block_id_host = self.attn_inputs.kv_cache_kernel_block_id_host
         if kv_block_id_host is None:
@@ -440,22 +553,35 @@ class PCPAllGatherAttnOp:
             tokens_per_block,
         )
 
-        self._plan_ragged(qo_indptr, attention_inputs.prefix_lengths)
+        if fa4_fused and not PCPAllGatherAttnOp._logged_fa4_fused:
+            PCPAllGatherAttnOp._logged_fa4_fused = True
+            logger.info(
+                "CP prefill cache hits take the fused FA4 paged path "
+                "(kv_cache_dtype=%s, kv_sharded=%s)",
+                self.attn_configs.kv_cache_dtype,
+                self._kv_sharded,
+            )
+
+        self._plan_ragged(qo_indptr, plan_wrappers=not fa4_fused)
         q_lens = qo_indptr[1:] - qo_indptr[:-1]
         self._trtllm_max_q_len = int(q_lens.max().item())
-        (
-            self._trtllm_seq_lens_part0,
-            self._trtllm_cu_kv_pages_part0,
-            self._trtllm_max_kv_len_part0,
-        ) = self._build_trtllm_paged_context_metadata(self.kv_indptr_part0)
-        (
-            self._trtllm_seq_lens_part1,
-            self._trtllm_cu_kv_pages_part1,
-            self._trtllm_max_kv_len_part1,
-        ) = self._build_trtllm_paged_context_metadata(self.kv_indptr_part1)
-        self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
         self._use_forward_opt = self._should_use_forward_opt()
-        if self.has_prefix:
+        if self._use_forward_opt:
+            # Only _forward_opt reads this metadata, and a cache hit never selects
+            # that path, so building it unconditionally is pure overhead.
+            (
+                self._trtllm_seq_lens_part0,
+                self._trtllm_cu_kv_pages_part0,
+                self._trtllm_max_kv_len_part0,
+            ) = self._build_trtllm_paged_context_metadata(self.kv_indptr_part0)
+            (
+                self._trtllm_seq_lens_part1,
+                self._trtllm_cu_kv_pages_part1,
+                self._trtllm_max_kv_len_part1,
+            ) = self._build_trtllm_paged_context_metadata(self.kv_indptr_part1)
+        if fa4_fused:
+            self._prepare_fa4_prefix_metadata()
+        elif self.has_prefix:
             plan_prefix_paged_attention(
                 self.prefill_wrappers["paged"]["prefix"],
                 cu_seqlens,
@@ -467,22 +593,76 @@ class PCPAllGatherAttnOp:
                 page_size=self.seq_size_per_block,
                 device=self.device,
                 kv_data_type=(
-                    torch.float8_e4m3fn
-                    if self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-                    else torch.bfloat16
+                    torch.float8_e4m3fn if self._fp8_kv_cache else torch.bfloat16
                 ),
                 contiguous_page_indices=self._kv_sharded,
             )
         return params
 
-    def _plan_ragged(
-        self, qo_indptr: torch.Tensor, prefix_lengths: torch.Tensor
-    ) -> None:
+    def _prepare_fa4_prefix_metadata(self) -> None:
+        """Per-forward metadata for the fused FA4 paged passes.
+
+        Each CP part reads its prefix and its extend in one causal pass, so its key
+        extent is the prefix plus the same causal extent ``kv_indptr_part{0,1}``
+        encodes for the ragged passes: ``h * (rank + 1)`` and
+        ``h * (2 * cp_size - rank)`` for a per-part query length ``h``.
+
+        Under CP sharding the pool comes from ``gather_cp_sharded_prefix_pool``,
+        which is page-granular, so the gathered extent is the page-aligned ceiling
+        of part1's (which dominates part0's at every rank) and each part's
+        ``seqused_k`` truncates inside the last page. Only that gathered pool needs
+        the synthetic logical page table; the rank-local physical table already
+        lists each request's logical pages in order, new tokens included.
+        """
+        page_size = self.seq_size_per_block
+        # Keeping the arithmetic on host tensors avoids one device->host sync per
+        # scalar read, three per layer per forward. The engine's qo_indptr and
+        # prefix_lengths are already host-resident, so to("cpu") is a no-op here and
+        # only copies for a caller that hands over device-resident lengths.
+        host = {"device": "cpu", "dtype": torch.int32}
+        q_lens = (self.qo_indptr[1:] - self.qo_indptr[:-1]).to(**host)
+        prefix_lengths = self.attn_inputs.prefix_lengths.to(**host)
+        seq_lens_part0 = prefix_lengths + q_lens * (self.prefill_cp_rank + 1)
+        seq_lens_part1 = prefix_lengths + q_lens * (
+            2 * self.prefill_cp_size - self.prefill_cp_rank
+        )
+        self._fa4_max_kv_len_part0 = int(seq_lens_part0.max())
+        self._fa4_max_kv_len_part1 = int(seq_lens_part1.max())
+
+        # Stays on the host: the gather plan wants its lengths there.
+        self._fa4_pool_lengths = _page_counts(seq_lens_part1, page_size) * page_size
+
+        # seqused_k is read on device; one copy carries both parts.
+        seq_lens = torch.stack((seq_lens_part0, seq_lens_part1)).to(
+            self.device, non_blocking=True
+        )
+        self._fa4_seq_lens_part0 = seq_lens[0]
+        self._fa4_seq_lens_part1 = seq_lens[1]
+
+        if self._kv_sharded:
+            self._fa4_prefix_page_table = _build_contiguous_prefix_page_table(
+                self._fa4_pool_lengths,
+                page_size,
+                int(self._fa4_pool_lengths.max()) // page_size,
+                device=self.device,
+            )
+        else:
+            self._fa4_prefix_page_table = (
+                self._physical_block_table().to(torch.int32).contiguous()
+            )
+
+    def _plan_ragged(self, qo_indptr: torch.Tensor, *, plan_wrappers: bool) -> None:
+        """Publish the per-part query/key offsets, which always define each CP
+        part's causal extent, and plan the FlashInfer ragged wrappers unless the
+        caller settled on a backend that never runs them.
+        """
         self.qo_indptr = qo_indptr
         kv_indptr_part0 = qo_indptr * (self.prefill_cp_rank + 1)
         kv_indptr_part1 = qo_indptr * (2 * self.prefill_cp_size - self.prefill_cp_rank)
         self.kv_indptr_part0 = kv_indptr_part0
         self.kv_indptr_part1 = kv_indptr_part1
+        if not plan_wrappers:
+            return
         common_params = {
             "num_qo_heads": self.num_qo_heads,
             "num_kv_heads": self.num_kv_heads,
@@ -518,9 +698,7 @@ class PCPAllGatherAttnOp:
         seq_lens = (kv_indptr[1:] - kv_indptr[:-1]).to(
             device=self.device, dtype=torch.int32
         )
-        pages_per_seq = (
-            seq_lens + self.seq_size_per_block - 1
-        ) // self.seq_size_per_block
+        pages_per_seq = _page_counts(seq_lens, self.seq_size_per_block)
         cu_kv_pages = torch.empty(
             seq_lens.numel() + 1, device=self.device, dtype=torch.int32
         )
@@ -566,17 +744,14 @@ class PCPAllGatherAttnOp:
         max_kv_len: int,
         block_tables: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """FA4 paged causal attention over the HND pool (drop-in for trtllm).
+        """FA4 paged causal attention over the HND pool.
 
         The HND pool ``[blocks, 2, H_kv, page, D]`` is fed to FA4 (which wants
         ``[num_pages, page, H_kv, D]``) via a zero-copy ``transpose(1, 2)`` view;
-        FA4's TMA handles the strided K/V at full speed. Causal alignment and
-        page-table/seqlen semantics match trtllm (verified numerically).
+        FA4's TMA handles the strided K/V at full speed.
         """
         if block_tables is None:
             block_tables = self._physical_block_table()
-        # Pool read as-is (fp8 when the KV cache is fp8 — zero-copy strided view);
-        # q cast to match so fp8 cache => uniform-fp8 attention.
         k = kv_cache_tensor[:, 0].transpose(1, 2)
         v = kv_cache_tensor[:, 1].transpose(1, 2)
         q = _match_q_to_kv(q, k)
@@ -603,9 +778,7 @@ class PCPAllGatherAttnOp:
         max_kv_len: int,
     ) -> torch.Tensor:
         """Dispatch the CP paged-context attention to FA4 (default) or trtllm."""
-        if _use_fa4_cp_paged(
-            fp8_kv_cache=self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-        ):
+        if self._fa4_no_prefix:
             return self._run_fa4_paged_context(q, kv_cache_tensor, seq_lens, max_kv_len)
         return self._run_trtllm_paged_context(
             q, kv_cache_tensor, seq_lens, cu_kv_pages, max_kv_len
@@ -619,17 +792,15 @@ class PCPAllGatherAttnOp:
         cu_seqlens_q: torch.Tensor,
         cu_seqlens_k: torch.Tensor,
     ) -> torch.Tensor:
-        """FA4 varlen (ragged) causal attention over contiguous [prefix||extend]
-        K/V — drop-in for ``run_fmha_cp_ragged``. No page_table; k/v are the
-        per-part concatenated tensors from ``triton_build_dual_prefix_extend``.
-        Causal offset = seqlen_k - seqlen_q (bottom-right), matching fmha/trtllm.
+        """FA4 varlen (ragged) causal attention over contiguous per-part k/v.
+
+        Causal offset is ``seqlen_k - seqlen_q`` (bottom-right aligned), matching
+        the fmha and trtllm ragged paths.
         """
         max_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
         max_k = int((cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max().item())
-        # k/v are the materialised [prefix||extend] (prefix in the cache dtype);
-        # q cast to match so an fp8 cache yields uniform-fp8 attention.
         q = _match_q_to_kv(q, k)
-        out = _fa4_varlen_func(
+        out, _ = _fa4_varlen_func(
             q,
             k,
             v,
@@ -639,8 +810,42 @@ class PCPAllGatherAttnOp:
             max_seqlen_k=max_k,
             causal=True,
             softmax_scale=self.head_dim**-0.5,
+            return_lse=False,
         )
-        return out[0] if isinstance(out, tuple) else out
+        return out
+
+    def _run_fa4_paged_part(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        seqused_k: torch.Tensor,
+        max_kv_len: int,
+    ) -> torch.Tensor:
+        """One causal FA4 paged pass covering a CP part's prefix *and* its extend.
+
+        The KV cache write precedes attention, so the pool already holds this
+        forward's new K/V and a single pass can span both regions. ``causal=True``
+        reproduces the zigzag mask exactly: FA4 aligns the last query with the last
+        key, and this part's last query is the new token at absolute position
+        ``seqused_k - 1``, so query ``j`` reaches ``prefix + c * h + j`` for chunk
+        ``c`` — the per-chunk causal extent that ``kv_indptr_part{0,1}`` encodes for
+        the ragged passes.
+        """
+        out, _ = _fa4_varlen_func(
+            _match_q_to_kv(q, k),
+            k,
+            v,
+            cu_seqlens_q=self.qo_indptr,
+            max_seqlen_q=self._trtllm_max_q_len,
+            max_seqlen_k=max_kv_len,
+            seqused_k=seqused_k,
+            page_table=self._fa4_prefix_page_table,
+            causal=True,
+            softmax_scale=self.head_dim**-0.5,
+            return_lse=False,
+        )
+        return out
 
     def _forward_opt(
         self,
@@ -750,12 +955,11 @@ class PCPAllGatherAttnOp:
             -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
         )
         if self._kv_sharded:
-            # CP page-RR sharded: the local block table only holds this rank's
-            # 1/cp_size owned blocks. Map each all-gathered token to its physical
-            # slot via cp_kv_slot_mapping (non-owned / out-of-capacity -> -1) and
-            # write through the C++ writer, which skips -1 slots. This stores
-            # exactly this rank's owned page-RR shard, matching the MSA layers and
-            # what decode's per-rank pool reader expects.
+            # The local block table only holds this rank's 1/cp_size owned blocks, so
+            # map each all-gathered token to a physical slot (non-owned and
+            # out-of-capacity become -1, which the writer skips). What lands is
+            # exactly this rank's page-RR shard, matching the MSA layers and decode's
+            # per-rank pool reader.
             from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
                 cp_kv_slot_mapping,
             )
@@ -774,10 +978,8 @@ class PCPAllGatherAttnOp:
                 owner_tokens_per_block=self.seq_size_per_block,
             )
             rtp_llm_ops.mha_kv_write_cache(
-                # Unlike FlashInfer append, the C++ writer accepts activation
-                # dtypes and performs the FP8 cast while writing the physical
-                # cache.  Passing pre-cast float8 tensors violates its input
-                # contract and fails before the first sharded prefill.
+                # This writer casts to FP8 itself, so it takes activation dtypes;
+                # pre-cast float8 inputs violate its contract.
                 restore_k.contiguous(),
                 restore_v.contiguous(),
                 kv_cache_tensor,
@@ -798,10 +1000,8 @@ class PCPAllGatherAttnOp:
                 kv_last_page_len=params.paged_kv_last_page_len_d,
                 kv_layout="HND",
             )
-            # FP8 scale init only applies to the FlashInfer append path; the
-            # sharded path's params.page_indice_d is full-length (would index past
-            # the sharded block table), so it must not be used here. M3 uses a
-            # bf16 paged pool (FP8_KV_CACHE=0) where this is a no-op anyway.
+            # Append-path only: params.page_indice_d is full-length and would index
+            # past a sharded block table.
             fill_fp8_kv_cache_scale(
                 kv_cache,
                 params,
@@ -815,58 +1015,43 @@ class PCPAllGatherAttnOp:
         q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()
         q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()
 
+        if self._fa4_fused:
+            # The cache write above already placed this forward's K/V in the pool, so
+            # each CP part is a single causal paged pass spanning its prefix and its
+            # extend: no ragged pass, no LSE merge, and the extend K/V never has to be
+            # gathered out of the all-gathered activation.
+            pool = kv_cache_tensor
+            if self._kv_sharded:
+                pool = gather_cp_sharded_prefix_pool(
+                    kv_cache_tensor,
+                    self._physical_block_table(),
+                    self._fa4_pool_lengths,
+                    page_size=self.seq_size_per_block,
+                    cp_size=self._cp_size,
+                    cp_rank=self._cp_rank,
+                )
+            # Both parts read one pool, so these zero-copy views are shared. No
+            # prefix dequantisation is materialised: the pool is read in its stored
+            # dtype and q follows it.
+            k = pool[:, 0].transpose(1, 2)
+            v = pool[:, 1].transpose(1, 2)
+            output = torch.empty_like(q_reshaped)
+            output[self.q0_idx] = self._run_fa4_paged_part(
+                q0, k, v, self._fa4_seq_lens_part0, self._fa4_max_kv_len_part0
+            )
+            output[self.q1_idx] = self._run_fa4_paged_part(
+                q1, k, v, self._fa4_seq_lens_part1, self._fa4_max_kv_len_part1
+            )
+            return output
+
         k0 = torch.index_select(all_keys, 0, self.kv0_idx).contiguous()
         k1 = torch.index_select(all_keys, 0, self.kv1_idx).contiguous()
         v0 = torch.index_select(all_values, 0, self.kv0_idx).contiguous()
         v1 = torch.index_select(all_values, 0, self.kv1_idx).contiguous()
         if self.has_prefix:
-            if _use_fa4_cp_paged(
-                has_prefix=True,
-                fp8_kv_cache=self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8,
-            ):
-                # Link C (varlen): reuse the fused [prefix||extend] build, then
-                # FA4 varlen ragged per part (replaces the paged-prefix + ragged-
-                # extend + merge_state hybrid, and the fmha_sm100 ragged path).
-                prefix_lengths = self.attn_inputs.prefix_lengths
-                # The prefix comes from the cache (fp8 for the fp8-KV-cache
-                # layers); cast the bf16-gathered extend to the cache dtype so
-                # the concatenated [prefix||extend] is uniform (fp8 => uniform
-                # fp8 attention downstream). No-op for a bf16 cache.
-                kv_dtype = kv_cache_tensor.dtype
-                k0 = k0.to(kv_dtype)
-                v0 = v0.to(kv_dtype)
-                k1 = k1.to(kv_dtype)
-                v1 = v1.to(kv_dtype)
-                k0_cat, v0_cat, k1_cat, v1_cat = triton_build_dual_prefix_extend(
-                    kv_cache_tensor,
-                    prefix_lengths,
-                    self._physical_block_table().to(torch.int32),
-                    self.seq_size_per_block,
-                    k0,
-                    v0,
-                    self.kv_indptr_part0,
-                    k1,
-                    v1,
-                    self.kv_indptr_part1,
-                )
-                # cu_seqlens_k for [prefix||extend] = extend prefix-sum
-                # (kv_indptr_partX) + prefix prefix-sum.
-                pfx = torch.zeros_like(self.qo_indptr)
-                pfx[1:] = prefix_lengths.to(self.qo_indptr.dtype).cumsum(0)
-                output = torch.empty_like(q_reshaped)
-                output[self.q0_idx] = self._run_fa4_ragged(
-                    q0, k0_cat, v0_cat, self.qo_indptr, self.kv_indptr_part0 + pfx
-                )
-                output[self.q1_idx] = self._run_fa4_ragged(
-                    q1, k1_cat, v1_cat, self.qo_indptr, self.kv_indptr_part1 + pfx
-                )
-                return output
-
-            # A sharded cache's physical table is compact and rank-local. Gather
-            # the owner pages from all CP ranks, interleave them into logical
-            # page order, and read through the contiguous synthetic page table
-            # planned in prepare(). Non-sharded cache hits keep the zero-copy
-            # local-pool path.
+            # FlashInfer keeps q and the extend in bf16 and dequantises only the
+            # cached prefix, so a cache hit stays a non-causal paged pass over the
+            # prefix plus a causal ragged pass per CP part, combined through the LSE.
             prefix_kv_cache_tensor = kv_cache_tensor
             if self._kv_sharded:
                 prefix_kv_cache_tensor = gather_cp_sharded_prefix_pool(
@@ -877,14 +1062,12 @@ class PCPAllGatherAttnOp:
                     cp_size=self._cp_size,
                     cp_rank=self._cp_rank,
                 )
-
-            # Fallback (FA4 disabled): flashinfer paged prefix + ragged extend + LSE merge.
             prefix_out, prefix_lse = self.prefill_wrappers["paged"]["prefix"].run(
                 q_reshaped, prefix_kv_cache_tensor, return_lse=True
             )
-
             out0, lse0 = self._run_ragged_part("part0", q0, k0, v0, return_lse=True)
             out1, lse1 = self._run_ragged_part("part1", q1, k1, v1, return_lse=True)
+
             out0, _ = merge_state(
                 v_a=prefix_out[self.q0_idx],
                 s_a=prefix_lse[self.q0_idx],
@@ -903,13 +1086,9 @@ class PCPAllGatherAttnOp:
             return output
         else:
             output = torch.empty_like(q_reshaped)
-            if _use_fa4_cp_paged(
-                fp8_kv_cache=self.attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-            ):
-                # No-prefix FA4 varlen on the gathered extend K/V. Cast to the
-                # cache dtype so an fp8 KV cache yields uniform-fp8 attention
-                # (fp8-cache non-prefix lands here since it is excluded from the
-                # paged _forward_opt path); no-op for a bf16 cache.
+            if self._fa4_no_prefix:
+                # Cast the gathered extend K/V to the cache dtype so an fp8 cache
+                # still gets uniform-fp8 attention; a no-op for bf16.
                 kv_dtype = kv_cache_tensor.dtype
                 output[self.q0_idx] = self._run_fa4_ragged(
                     q0,
