@@ -551,6 +551,13 @@ public final class JavaMockEngineCluster {
         // by the prefill completion callback. waitingPrefillRequests now reports the
         // real queued depth (queued requests) instead of lane-delayed batches.
         private final ArrayDeque<PrefillPendingBatch> prefillPendingQueue = new ArrayDeque<>();
+        // Direct (generate_stream / NON_BATCH) requests parked while every
+        // maxPrefillConcurrency slot is busy. Unlike prefillPendingQueue (whose
+        // elements are master-composed batches), entries here are individual
+        // requests: the drain coalesces up to performance.directBatchSizeMax() of
+        // them into ONE batch, mirroring production engines' prefill continuous
+        // batching. waitingPrefillRequests counts members of BOTH queues.
+        private final ArrayDeque<MockPerformanceModel.RequestShape> directPrefillQueue = new ArrayDeque<>();
         private final Object prefillQueueLock = new Object();
         private final ConcurrentLinkedQueue<VersionedTask> completions = new ConcurrentLinkedQueue<>();
         /**
@@ -856,16 +863,16 @@ public final class JavaMockEngineCluster {
                     return;
                 }
             } else {
-                if (!schedulePrefillCompletion(List.of(shape), -1, 0)) {
-                    // Backpressure: prefill waiting-queue cap hit — reject so the
-                    // caller perceives prefill overload (mirrors the decode
-                    // rejection above). Clean up the per-request state set up
-                    // above; the cap check rejects before claiming any counter.
+                if (!admitDirectPrefill(shape)) {
+                    // Backpressure: direct waiting-queue cap hit — reject so the
+                    // caller (client/master) perceives prefill overload. Clean up
+                    // the per-request state set up above; the cap check rejects
+                    // before claiming any counter.
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
                     observer.onError(new RuntimeException(String.format(
                             "prefill waiting queue full (backpressure): waiting=%d cap=%d",
-                            prefillPendingQueueSize(), performance.maxWaitingPrefillBatches())));
+                            waitingPrefillRequests.get(), directWaitingRequestCap())));
                     return;
                 }
             }
@@ -1302,6 +1309,85 @@ public final class JavaMockEngineCluster {
         }
 
         /**
+         * Effective direct-path waiting cap in REQUESTS. The performance JSON
+         * cap ({@code prefill.max_waiting_batches}) counts queued batches; a
+         * coalesced direct batch holds up to {@code directBatchSizeMax()}
+         * requests, so the equivalent request-level cap is the product. 0
+         * (unbounded) stays 0.
+         */
+        private int directWaitingRequestCap() {
+            int batchCap = performance.maxWaitingPrefillBatches();
+            return batchCap > 0 ? batchCap * performance.directBatchSizeMax() : 0;
+        }
+
+        /**
+         * Admission point for a direct (generate_stream / NON_BATCH) prefill
+         * request. Mirrors {@link #schedulePrefillCompletion} but parks
+         * individual REQUESTS (not master-composed batches) and, whenever a
+         * concurrency slot is free, coalesces the queued requests with the
+         * newcomer into a single batch of up to
+         * {@code performance.directBatchSizeMax()} members — production engines
+         * run prefill continuous batching, so engine-side drain scales with
+         * batch size instead of one request per {@code prefillMs}.
+         *
+         * <p>Counting contract identical to schedulePrefillCompletion: true →
+         * pendingRequests/runningTasks claimed for every member (RECEIVED while
+         * queued, RUNNING via {@link #startPrefillBatch}); waitingPrefillRequests
+         * counts queued members of both waiting queues and is decremented when
+         * a request leaves the queue (drain), not at cancel time.
+         *
+         * <p>Direct batches carry batchId -1 and dpRank 0 (single-dp mock).
+         *
+         * @return false when the direct waiting-queue cap is reached — nothing
+         *         was claimed and the caller must reject the request.
+         */
+        private boolean admitDirectPrefill(MockPerformanceModel.RequestShape shape) {
+            int maxBatch = performance.directBatchSizeMax();
+            List<MockPerformanceModel.RequestShape> merged;
+            synchronized (prefillQueueLock) {
+                // Shutdown drain in progress — reject before claiming any counter.
+                if (shuttingDown) {
+                    return false;
+                }
+                if (activePrefillBatches.get() >= maxPrefillConcurrency) {
+                    int cap = directWaitingRequestCap();
+                    if (cap > 0 && directPrefillQueue.size() >= cap) {
+                        // Waiting-queue cap hit — reject before claiming anything.
+                        return false;
+                    }
+                    directPrefillQueue.addLast(shape);
+                    waitingPrefillRequests.incrementAndGet();
+                    pendingRequests.incrementAndGet();
+                    runningTasks.put(shape.input().getRequestId(),
+                            task(shape, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                    return true;
+                }
+                merged = new ArrayList<>(Math.min(maxBatch, directPrefillQueue.size() + 1));
+                // Coalesce queued requests with the newcomer: every polled entry
+                // leaves the waiting queue (cancelled members have no
+                // runningTasks entry and are skipped, matching the BATCH-queue
+                // drain's anyAlive semantics).
+                while (!directPrefillQueue.isEmpty() && merged.size() < maxBatch - 1) {
+                    MockPerformanceModel.RequestShape candidate = directPrefillQueue.pollFirst();
+                    waitingPrefillRequests.decrementAndGet();
+                    if (runningTasks.containsKey(candidate.input().getRequestId())) {
+                        merged.add(candidate);
+                    }
+                }
+                merged.add(shape);
+                activePrefillBatches.incrementAndGet();
+                activePrefillRequests.addAndGet(merged.size());
+                pendingRequests.addAndGet(merged.size());
+                for (MockPerformanceModel.RequestShape member : merged) {
+                    runningTasks.put(member.input().getRequestId(),
+                            task(member, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                }
+            }
+            runPrefillBatch(merged, -1L, 0);
+            return true;
+        }
+
+        /**
          * Execute a prefill batch through the lane time-axis serialization and
          * schedule its completion. The concurrency slot is already reserved by the
          * caller (schedulePrefillCompletion admission or pending-queue drain), so
@@ -1396,35 +1482,67 @@ public final class JavaMockEngineCluster {
                 // counted until the batch finishes — the batch keeps executing.
                 activePrefillRequests.addAndGet(-shapes.size());
                 pendingRequests.addAndGet(-activeCount);
-                // Drain one pending batch under the same lock that guards admission,
+                // Drain one queued batch under the same lock that guards admission,
                 // handing this completion's freed slot to a queued batch atomically.
+                // Direct-path (generate_stream) requests drain first, coalesced into
+                // ONE batch of up to directBatchSizeMax() alive members (production
+                // prefill continuous batching); the legacy BATCH queue drains only
+                // when no direct batch claimed the slot.
+                List<MockPerformanceModel.RequestShape> directBatch = null;
                 PrefillPendingBatch nextBatch = null;
                 synchronized (prefillQueueLock) {
-                    while (!prefillPendingQueue.isEmpty()) {
-                        PrefillPendingBatch candidate = prefillPendingQueue.peekFirst();
-                        // Skip batches whose every member was cancelled while queued
-                        // (cancel removed their runningTasks entries and already
-                        // decremented pendingRequests). Drop them without reserving.
-                        boolean anyAlive = false;
-                        for (MockPerformanceModel.RequestShape s : candidate.shapes()) {
-                            if (runningTasks.containsKey(s.input().getRequestId())) {
-                                anyAlive = true;
-                                break;
+                    if (activePrefillBatches.get() < maxPrefillConcurrency
+                            && !directPrefillQueue.isEmpty()) {
+                        int maxBatch = performance.directBatchSizeMax();
+                        directBatch = new ArrayList<>(
+                                Math.min(maxBatch, directPrefillQueue.size()));
+                        while (!directPrefillQueue.isEmpty()
+                                && directBatch.size() < maxBatch) {
+                            MockPerformanceModel.RequestShape candidate =
+                                    directPrefillQueue.pollFirst();
+                            waitingPrefillRequests.decrementAndGet();
+                            if (runningTasks.containsKey(candidate.input().getRequestId())) {
+                                directBatch.add(candidate);
                             }
                         }
-                        if (!anyAlive) {
-                            prefillPendingQueue.pollFirst();
-                            waitingPrefillRequests.addAndGet(-candidate.shapes().size());
-                            continue;
+                        if (directBatch.isEmpty()) {
+                            // Every member was cancelled while queued — the slot
+                            // stays free for the BATCH queue below.
+                            directBatch = null;
+                        } else {
+                            activePrefillBatches.incrementAndGet();
+                            activePrefillRequests.addAndGet(directBatch.size());
                         }
-                        activePrefillBatches.incrementAndGet();
-                        activePrefillRequests.addAndGet(candidate.shapes().size());
-                        waitingPrefillRequests.addAndGet(-candidate.shapes().size());
-                        nextBatch = prefillPendingQueue.pollFirst();
-                        break;
+                    }
+                    if (directBatch == null) {
+                        while (!prefillPendingQueue.isEmpty()) {
+                            PrefillPendingBatch candidate = prefillPendingQueue.peekFirst();
+                            // Skip batches whose every member was cancelled while queued
+                            // (cancel removed their runningTasks entries and already
+                            // decremented pendingRequests). Drop them without reserving.
+                            boolean anyAlive = false;
+                            for (MockPerformanceModel.RequestShape s : candidate.shapes()) {
+                                if (runningTasks.containsKey(s.input().getRequestId())) {
+                                    anyAlive = true;
+                                    break;
+                                }
+                            }
+                            if (!anyAlive) {
+                                prefillPendingQueue.pollFirst();
+                                waitingPrefillRequests.addAndGet(-candidate.shapes().size());
+                                continue;
+                            }
+                            activePrefillBatches.incrementAndGet();
+                            activePrefillRequests.addAndGet(candidate.shapes().size());
+                            waitingPrefillRequests.addAndGet(-candidate.shapes().size());
+                            nextBatch = prefillPendingQueue.pollFirst();
+                            break;
+                        }
                     }
                 }
-                if (nextBatch != null) {
+                if (directBatch != null) {
+                    runPrefillBatch(directBatch, -1L, 0);
+                } else if (nextBatch != null) {
                     runPrefillBatch(nextBatch.shapes(), nextBatch.batchId(), nextBatch.dpRank());
                 }
             }, delayNanos, TimeUnit.NANOSECONDS);
@@ -1907,6 +2025,12 @@ public final class JavaMockEngineCluster {
                     cancel(requestId);
                 }
             }
+            // Direct-path parked requests were cancelled above (their
+            // runningTasks entries are gone); drop the shapes themselves so a
+            // post-shutdown snapshot sees an empty queue.
+            synchronized (prefillQueueLock) {
+                directPrefillQueue.clear();
+            }
             // Queued prefill batches: cancel() removed every member's
             // runningTasks entry (and decremented pendingRequests) but by design
             // leaves the batch parked for the completion drain, which will never
@@ -2256,10 +2380,12 @@ public final class JavaMockEngineCluster {
         private final LongAdder generateStreamRpcs = new LongAdder();
         private final LongAdder fetchResponseRpcs = new LongAdder();
         private final LongAdder cancelRpcs = new LongAdder();
-        private final LongAdder prefillBatches = new LongAdder();
-        private final LongAdder prefillBatchRequests = new LongAdder();
+        // Package-private: DirectPrefillCoalescingTest asserts the coalesced
+        // batch structure through these counters (java_mock_stats same source).
+        final LongAdder prefillBatches = new LongAdder();
+        final LongAdder prefillBatchRequests = new LongAdder();
         private final LongAdder prefillBatchExecutionMs = new LongAdder();
-        private final AtomicInteger maxPrefillBatchSize = new AtomicInteger();
+        final AtomicInteger maxPrefillBatchSize = new AtomicInteger();
         private final AtomicLong maxPrefillBatchExecutionMs = new AtomicLong();
 
         void recordPrefillBatch(int batchSize, long executionMs) {

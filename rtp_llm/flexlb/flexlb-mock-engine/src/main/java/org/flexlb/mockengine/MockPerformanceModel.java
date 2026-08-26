@@ -45,6 +45,15 @@ final class MockPerformanceModel {
     // Cap on queued (not running) prefill batches from JSON "prefill.max_waiting_batches".
     // <= 0 disables the cap; defaults to DEFAULT_MAX_WAITING_PREFILL_BATCHES when absent.
     private final int maxWaitingPrefillBatches;
+    // Cap on the number of requests coalesced into ONE prefill batch on the direct
+    // (generate_stream / NON_BATCH) path, JSON "prefill.direct_batch_size_max"
+    // (default 32, matching the master FIXED_WINDOW maxRequests). Production
+    // engines run continuous batching on the prefill side, so per-engine drain
+    // scales with batch size instead of being capped at 1 request per batch —
+    // without coalescing the mock's direct-path drain rate is ~batch_ms per
+    // SINGLE request, several times below production. 1 restores the legacy
+    // one-request-per-batch behaviour.
+    private final int directBatchSizeMax;
     private final PrefillTimeFormula prefillFormula;
     private final List<DecodePoint> decodePoints;
     private final double decodeScale;
@@ -85,6 +94,7 @@ final class MockPerformanceModel {
                                  Double fixedPrefillMs,
                                  Double prefillMinMs,
                                  int maxWaitingPrefillBatches,
+                                 int directBatchSizeMax,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
                                  double decodeScale,
@@ -99,6 +109,7 @@ final class MockPerformanceModel {
         this.fixedPrefillMs = fixedPrefillMs;
         this.prefillMinMs = prefillMinMs;
         this.maxWaitingPrefillBatches = maxWaitingPrefillBatches;
+        this.directBatchSizeMax = Math.max(1, directBatchSizeMax);
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.decodeScale = decodeScale;
@@ -119,6 +130,7 @@ final class MockPerformanceModel {
         Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
         int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
                 .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
+        int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
 
         String expression = loadPrefillExpression(masterConfigFile);
         PrefillTimeFormula formula = expression == null ? null : PrefillTimeFormula.parse(expression);
@@ -144,7 +156,7 @@ final class MockPerformanceModel {
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
-                prefillMinMs, maxWaitingPrefillBatches, formula, List.copyOf(points),
+                prefillMinMs, maxWaitingPrefillBatches, directBatchSizeMax, formula, List.copyOf(points),
                 decode.path("scale").asDouble(1.0), perTokenMs, decodeMaxPendingRequests,
                 reportQueuedAsKvAllocated, jitterPct, cacheAdmissionRate);
     }
@@ -245,6 +257,14 @@ final class MockPerformanceModel {
      */
     int maxWaitingPrefillBatches() {
         return maxWaitingPrefillBatches;
+    }
+
+    /**
+     * Cap on requests coalesced into one direct-path prefill batch
+     * (JSON "prefill.direct_batch_size_max", default 32, minimum 1).
+     */
+    int directBatchSizeMax() {
+        return directBatchSizeMax;
     }
 
     /**
