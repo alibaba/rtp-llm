@@ -92,6 +92,10 @@ GRADIENT="${GRADIENT:-0}"
 GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
 GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
+# FORCE_PRIORITY > 0 pins every replayed request to one Auto-TPM QoS level,
+# overriding both the per-record trace priority and the PRIORITY env default
+# (single-QoS runs: priority-based preemption finds no victim).
+FORCE_PRIORITY="${FORCE_PRIORITY:-0}"
 LOOP="${LOOP:-0}"
 # Send mode is a pure pass-through (single env-var layer): empty SEND_MODE
 # means JavaLoadClient's built-in default (replay), identical to before.
@@ -1003,6 +1007,34 @@ PY
 fi
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${PROCESS_FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}}"
 
+# STRIP_PREEMPTION=1 removes scheduler.ordering.preemption from the
+# effective FLEXLB_CONFIG — a test-only edit of the in-memory string; the
+# production template file (master_fixed_window.json) itself is never
+# modified. Pair with FORCE_PRIORITY for single-QoS runs so no preemption
+# victim can exist on any path (belt and braces).
+STRIP_PREEMPTION="${STRIP_PREEMPTION:-0}"
+if [[ "${STRIP_PREEMPTION}" == "1" && -n "${FLEXLB_CONFIG}" ]]; then
+  FLEXLB_CONFIG="$(python3 - "${FLEXLB_CONFIG}" <<'PY'
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[1])
+except ValueError:
+    # non-JSON config: echo it back untouched (bare exit(0) would empty
+    # the command substitution and wipe the whole config).
+    print(sys.argv[1], end="")
+    sys.exit(0)
+ordering = (payload.get("scheduler") or {}).get("ordering") or {}
+if isinstance(ordering, dict) and "preemption" in ordering:
+    del ordering["preemption"]
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), end="")
+else:
+    print(sys.argv[1], end="")
+PY
+)"
+fi
+
 RUNTIME_OVERRIDE_ENV_ARGS=()
 OVERRIDE_ENV_KEYS=(
   FLEXLB_GRPC_EXECUTOR_CORE_SIZE
@@ -1133,6 +1165,8 @@ start_secondary_pollers
 # environment can leak in. PRIORITY is deliberately not passed: priority
 # comes from the trace records only, and records without one stay unset on
 # the wire (no default 50); the lib blanks ambient PRIORITY for us.
+# FORCE_PRIORITY (single-QoS pin, overrides trace priority) IS passed
+# explicitly — it is 0/unset by default so per-record priority still wins.
 # M9: archive the JavaLoadClient env effective values at the client launch
 # point. Receives the exact KEY=VALUE argv launch_java_load_client forwards
 # (PRIORITY is recorded empty — this script deliberately never passes it);
@@ -1181,6 +1215,7 @@ launch_java_load_client() {
       "SLA_TTFT_MS=${SLA_TTFT_MS}" \
       "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
       "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
+      "FORCE_PRIORITY=${FORCE_PRIORITY}" \
       "LOOP=${LOOP}" \
       "SEND_MODE=${SEND_MODE}" \
       "SEND_MODE_QPS=${SEND_MODE_QPS}" \
@@ -1218,6 +1253,7 @@ launch_java_load_client() {
     "SLA_TTFT_MS=${SLA_TTFT_MS}" \
     "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
     "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
+    "FORCE_PRIORITY=${FORCE_PRIORITY}" \
     "LOOP=${LOOP}" \
     "SEND_MODE=${SEND_MODE}" \
     "SEND_MODE_QPS=${SEND_MODE_QPS}" \

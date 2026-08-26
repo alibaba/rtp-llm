@@ -109,7 +109,9 @@ ensure_java_mock_engine_jar() {
 # mapping cannot drift between scripts. PRIORITY is part of the surface
 # (env-level default priority, 0 = unset; per-record trace priority
 # overrides it), so it is blanked here too — callers that want an env-level
-# default pass "PRIORITY=<n>" explicitly.
+# default pass "PRIORITY=<n>" explicitly. FORCE_PRIORITY (single-QoS pin
+# that overrides both the trace field and the PRIORITY default) is blanked
+# by the same rule: callers pass "FORCE_PRIORITY=<n>" explicitly.
 JAVA_LOAD_CLIENT_ENV_VARS=(
   TRACE_FILE
   TARGET_ADDR
@@ -145,6 +147,7 @@ JAVA_LOAD_CLIENT_ENV_VARS=(
   ENDPOINTS_FILE
   DRY_RUN
   PRIORITY
+  FORCE_PRIORITY
   SEND_MODE
   SEND_MODE_QPS
 )
