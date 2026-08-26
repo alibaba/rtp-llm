@@ -55,10 +55,12 @@ def init_load_group_args(parser, load_config, model_args):
         env_name="REQUIRE_WEIGHT_UPDATE",
         bind_to=(model_args, "require_weight_update"),
         type=str2bool,
-        default=False,
+        default=None,
         help=(
-            "声明部署需要在线 UpdateWeights RPC；自动选路时会使用支持权重热更的 "
-            "legacy loader。与 --use_new_loader true 同时设置会在启动期报错"
+            "声明部署是否需要在线 UpdateWeights RPC。未设置时保留 legacy loader；"
+            "true 使用支持热更的 legacy loader，false 确认不需要热更并允许自动"
+            "选择 NewLoader；"
+            "当它与 --use_new_loader 均为 true 时会在启动期报错"
         ),
     )
     load_group.add_argument(

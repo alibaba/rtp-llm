@@ -710,31 +710,36 @@ grpc::Status LocalRpcServer::SetRestart(grpc::ServerContext* context, const Empt
 grpc::Status
 LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) {
     RTP_LLM_LOG_DEBUG("Receive update weights request from: %s", context->peer().c_str());
+    // Keep the GIL for the complete Python exception lifetime, including the
+    // destruction of py::error_already_set after its catch handler returns.
+    py::gil_scoped_acquire acquire;
     try {
+        if (!weight_manager_ || weight_manager_.is_none()) {
+            const std::string error_msg = "UpdateWeights is unavailable because no weight manager is configured; "
+                                          "restart with --require_weight_update true (recommended) or "
+                                          "--use_new_loader false";
+            RTP_LLM_LOG_ERROR("Reject update weights request from %s: %s", context->peer().c_str(), error_msg.c_str());
+            return {grpc::StatusCode::UNIMPLEMENTED, error_msg};
+        }
         if (request->name().empty() || request->desc().empty() || request->method().empty()) {
-            throw std::runtime_error("Missing required field(s) in request");
+            return {grpc::StatusCode::INVALID_ARGUMENT, "Missing required field(s) in request"};
         }
-        {
-            py::gil_scoped_acquire acquire;
-            if (!weight_manager_ || weight_manager_.is_none()) {
-                const std::string error_msg =
-                    "UpdateWeights is unavailable because no weight manager is configured; "
-                    "restart with --use_new_loader false to enable online weight updates";
-                RTP_LLM_LOG_WARNING("Reject update weights request from %s: %s",
-                                    context->peer().c_str(),
-                                    error_msg.c_str());
-                return {grpc::StatusCode::UNIMPLEMENTED, error_msg};
-            }
-            py::dict               req;
-            req["name"]   = request->name();
-            req["desc"]   = request->desc();
-            req["method"] = request->method();
-            weight_manager_.attr("update")(req);
-        }
+        py::dict req;
+        req["name"]   = request->name();
+        req["desc"]   = request->desc();
+        req["method"] = request->method();
+        weight_manager_.attr("update")(req);
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
-        py::gil_scoped_acquire acquire;
-        return {grpc::StatusCode::INTERNAL, "exception from python: " + std::string(e.what())};
+        const std::string details = e.what();
+        RTP_LLM_LOG_WARNING("UpdateWeights Python exception: %s", details.c_str());
+        const auto       newline               = details.find('\n');
+        std::string      summary               = details.substr(0, newline);
+        constexpr size_t kMaxClientErrorLength = 512;
+        if (summary.size() > kMaxClientErrorLength) {
+            summary.resize(kMaxClientErrorLength);
+        }
+        return {grpc::StatusCode::INTERNAL, "exception from python: " + summary};
     } catch (const std::exception& e) {
         return {grpc::StatusCode::INTERNAL, "exception from C++: " + std::string(e.what())};
     }
