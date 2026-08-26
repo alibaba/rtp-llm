@@ -1035,7 +1035,11 @@ class KimiLinearForCausalLM(GptModelBase):
                 # tensor beyond the checkpoint topology remains visible so
                 # the normal unknown-weight validation rejects it.
                 return index >= checkpoint_layers
-            return name.startswith(("model.", "lm_head."))
+            # Only a valid, intentionally truncated tail layer may be hidden
+            # from the model tree.  Keep every other name visible so typoed or
+            # newly introduced checkpoint tensors reach the normal strict
+            # unknown-weight validation instead of being silently discarded.
+            return True
 
         return should_load
 
