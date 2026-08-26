@@ -252,9 +252,6 @@ class EngineOps:
         for status in response.server_status:
             input_pb.generate_config.role_addrs.add(
                 role=status.role,
-                role_type=getattr(
-                    self.pb2, f"ROLE_TYPE_{status.role}", self.pb2.ROLE_TYPE_PDFUSION
-                ),
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,

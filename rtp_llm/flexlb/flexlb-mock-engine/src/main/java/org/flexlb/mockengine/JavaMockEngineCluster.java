@@ -416,7 +416,10 @@ public final class JavaMockEngineCluster {
             throw new IllegalArgumentException(
                     "engine index " + engineIndex + " exceeds the unique loopback IP space (max 63749)");
         }
-        return "127." + thirdOctet + "." + (engineIndex % 250);
+        // Full quad (127.x.y.z): gRPC NettyChannelBuilder parses the advertised
+        // host via java.net.URI, which rejects 3-segment shorthand like "127.1.0"
+        // with URISyntaxException. The 4th octet (idx % 250) keeps uniqueness.
+        return "127." + thirdOctet + ".0." + (engineIndex % 250);
     }
 
     /** Parses a strict true/false CLI value for {@code flag}. */
