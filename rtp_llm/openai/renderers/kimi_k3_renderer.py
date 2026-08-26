@@ -1,23 +1,20 @@
-import asyncio
 import json
 import logging
 import re
 import uuid
-from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import torch
-from PIL import Image
 from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
-    K3_MAX_IMAGE_FILE_SIZE_KB,
     KimiK3VisionProcessor,
+    preflight_kimi_k3_images,
+    preflight_kimi_k3_images_async,
 )
-from rtp_llm.multimodal.multimodal_util import MMUrlType, get_bytes_io_from_url
+from rtp_llm.multimodal.multimodal_util import MMUrlType
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
@@ -39,11 +36,14 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 
-_K3_MEDIA_PREFLIGHT_CONCURRENCY = 4
-_K3_MEDIA_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_K3_MEDIA_PREFLIGHT_CONCURRENCY,
-    thread_name_prefix="kimi-k3-media",
-)
+
+_GRAMMAR_RESPONSE_FORMAT_TYPES = {
+    "json_object",
+    "json_schema",
+    "regex",
+    "ebnf",
+    "structural_tag",
+}
 
 
 def _thinking_enabled(
@@ -135,10 +135,6 @@ class KimiK3Renderer(CustomChatRenderer):
     Calling ``encode`` on the final debug string would lose that distinction,
     so this renderer consumes the tokenizer's tokenized result directly.
     """
-
-    MAX_IMAGES_PER_REQUEST = 16
-    MAX_IMAGE_BYTES = K3_MAX_IMAGE_FILE_SIZE_KB * 1024
-    MAX_TOTAL_IMAGE_BYTES = 128 * 1024 * 1024
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -585,82 +581,6 @@ class KimiK3Renderer(CustomChatRenderer):
             rewritten.append(new_message)
 
         return rewritten, PromptWithMMInput(prompt="", urls=urls, mm_types=types)
-
-    def _preflight_one(self, url: str) -> tuple[torch.Tensor, tuple[int, int]]:
-        data = get_bytes_io_from_url(
-            url,
-            self.vit_config.download_headers,
-            max_file_size_kb=self.MAX_IMAGE_BYTES // 1024,
-        )
-        raw = data.getbuffer()
-        with Image.open(BytesIO(raw)) as image:
-            width, height = image.size
-        return torch.frombuffer(raw, dtype=torch.uint8), (width, height)
-
-    def _validate_image_count(self, urls: List[str]) -> None:
-        if len(urls) > self.MAX_IMAGES_PER_REQUEST:
-            raise ValueError(
-                "Kimi K3 image count exceeds the per-request limit: "
-                f"{len(urls)} > {self.MAX_IMAGES_PER_REQUEST}"
-            )
-
-    def _append_preflight_batch(
-        self,
-        results: List[tuple[torch.Tensor, tuple[int, int]]],
-        tensors: List[torch.Tensor],
-        metadata: List[tuple[int, int]],
-        total_bytes: int,
-    ) -> int:
-        for tensor, size in results:
-            total_bytes += tensor.numel()
-            if total_bytes > self.MAX_TOTAL_IMAGE_BYTES:
-                raise ValueError(
-                    "Kimi K3 image bytes exceed the per-request limit: "
-                    f"{total_bytes} > {self.MAX_TOTAL_IMAGE_BYTES}"
-                )
-            tensors.append(tensor)
-            metadata.append(size)
-        return total_bytes
-
-    def _preflight_media(
-        self, urls: List[str]
-    ) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
-        self._validate_image_count(urls)
-        tensors: List[torch.Tensor] = []
-        metadata: List[tuple[int, int]] = []
-        total_bytes = 0
-        for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
-            batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
-            results = list(_K3_MEDIA_EXECUTOR.map(self._preflight_one, batch))
-            total_bytes = self._append_preflight_batch(
-                results, tensors, metadata, total_bytes
-            )
-        return tensors, metadata
-
-    async def _preflight_media_async(
-        self, urls: List[str]
-    ) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
-        self._validate_image_count(urls)
-        loop = asyncio.get_running_loop()
-        tensors: List[torch.Tensor] = []
-        metadata: List[tuple[int, int]] = []
-        total_bytes = 0
-        for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
-            batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
-            results = await asyncio.gather(
-                *(
-                    loop.run_in_executor(
-                        _K3_MEDIA_EXECUTOR,
-                        self._preflight_one,
-                        url,
-                    )
-                    for url in batch
-                )
-            )
-            total_bytes = self._append_preflight_batch(
-                results, tensors, metadata, total_bytes
-            )
-        return tensors, metadata
 
     @staticmethod
     def _tools(request_dict: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
@@ -1148,7 +1068,9 @@ class KimiK3Renderer(CustomChatRenderer):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
-        tensors, metadata = self._preflight_media(mm_input.urls)
+        tensors, metadata = preflight_kimi_k3_images(
+            mm_input.urls, self.vit_config.download_headers
+        )
         return self._render_preflighted(
             request,
             request_dict,
@@ -1162,7 +1084,9 @@ class KimiK3Renderer(CustomChatRenderer):
     async def render_chat_async(self, request: ChatCompletionRequest) -> RenderedInputs:
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
-        tensors, metadata = await self._preflight_media_async(mm_input.urls)
+        tensors, metadata = await preflight_kimi_k3_images_async(
+            mm_input.urls, self.vit_config.download_headers
+        )
         return self._render_preflighted(
             request,
             request_dict,

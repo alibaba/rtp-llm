@@ -581,6 +581,8 @@ class DashScApp:
                     tokenizer=base_tok,
                     generate_env_config=self.py_env_configs.generate_env_config,
                     think_runtime=think_runtime,
+                    model_type=model_config.model_type,
+                    mm_download_headers=self.py_env_configs.vit_config.download_headers,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
                     pretokenized_chat_constraint_applier=(

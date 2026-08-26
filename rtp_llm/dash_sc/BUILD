@@ -43,6 +43,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm:multimodal",
         "//rtp_llm/server:server",
         ":grpcio",
         "//rtp_llm/access_logger:access_logger",
