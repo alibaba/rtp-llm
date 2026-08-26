@@ -133,6 +133,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                     && kv_cache_config.multi_task_prompt_tokens.empty()
                                     && kv_cache_config.multi_task_prompt_str.empty(),
                                 "pipeline parallelism does not support multi-task system prompts");
+        RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
+                                "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
+        RTP_LLM_CHECK_WITH_INFO(!model_config_.mm_model_config.is_multimodal,
+                                "pipeline parallelism does not support multimodal models");
     }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
@@ -564,9 +568,6 @@ absl::Status NormalEngine::startLoop() {
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
-    if (executor_) {
-        executor_->requestStop();
-    }
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
     return absl::OkStatus();
@@ -596,7 +597,6 @@ void NormalEngine::pp_loop() {
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("PP step running error: %s", status.ToString().c_str());
             running_ = false;
-            executor_->requestStop();
             break;
         }
     }
@@ -746,9 +746,10 @@ absl::Status NormalEngine::pp_step() {
             mayAddFakeStream(streams);
         }
 
-        // Preserves plan arrival as the signal for an executable batch. An idle
-        // DP lane has already been converted to a fake batch above.
-        if (streams.empty()) {
+        // When TP > 1, all first-stage TP ranks must enter process() so the
+        // stage-local tpSyncModelInputs broadcast does not deadlock. An idle
+        // batch returns from process() without sending a plan downstream.
+        if (streams.empty() && parallelism_config.tp_size <= 1) {
             return absl::OkStatus();
         }
     }

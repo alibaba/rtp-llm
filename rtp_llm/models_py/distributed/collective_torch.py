@@ -513,6 +513,47 @@ def _register_process_groups_to_cpp():
         )
 
 
+def register_p2p_process_group(
+    process_group: torch.distributed.ProcessGroup,
+) -> None:
+    import librtp_compute_ops
+
+    if not hasattr(librtp_compute_ops, "register_p2p_ops"):
+        raise RuntimeError("register_p2p_ops is not available")
+
+    def cpp_isend(tensor: torch.Tensor, global_peer: int):
+        work = torch.distributed.isend(
+            tensor,
+            dst=global_peer,
+            group=process_group,
+        )
+        if work is None:
+            raise RuntimeError("isend returned no work")
+        return work
+
+    def cpp_irecv(tensor: torch.Tensor, global_peer: int):
+        work = torch.distributed.irecv(
+            tensor,
+            src=global_peer,
+            group=process_group,
+        )
+        if work is None:
+            raise RuntimeError("irecv returned no work")
+        return work
+
+    librtp_compute_ops.register_p2p_ops(cpp_isend, cpp_irecv)
+
+
+def unregister_p2p_process_group() -> None:
+    try:
+        import librtp_compute_ops
+    except ImportError:
+        return
+
+    if hasattr(librtp_compute_ops, "clear_p2p_ops"):
+        librtp_compute_ops.clear_p2p_ops()
+
+
 def distributed_environment_initialized() -> bool:
     """Check if distributed environment is initialized.
 
@@ -565,6 +606,8 @@ def destroy_distributed_environment():
         )
 
         destroy_user_buffers_communicator()
+
+    unregister_p2p_process_group()
 
     try:
         import librtp_compute_ops
@@ -691,7 +734,9 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
@@ -797,7 +842,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 
@@ -816,6 +864,8 @@ __all__ = [
     "Group",
     "init_distributed_environment",
     "init_user_buffers_environment",
+    "register_p2p_process_group",
+    "unregister_p2p_process_group",
     "distributed_environment_initialized",
     "destroy_distributed_environment",
     "send",

@@ -617,6 +617,8 @@ std::mutex g_comm_mutex;
 py::function* g_broadcast_fn = nullptr;
 py::function* g_allreduce_fn = nullptr;
 py::function* g_allgather_fn = nullptr;
+py::function* g_isend_fn     = nullptr;
+py::function* g_irecv_fn     = nullptr;
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
@@ -637,6 +639,62 @@ void clearCommOpsUnlocked() {
         delete g_allgather_fn;
         g_allgather_fn = nullptr;
     }
+}
+
+void clearP2POpsUnlocked() {
+    py::function isend_fn;
+    py::function irecv_fn;
+    if (g_isend_fn != nullptr) {
+        isend_fn = std::move(*g_isend_fn);
+        delete g_isend_fn;
+        g_isend_fn = nullptr;
+    }
+    if (g_irecv_fn != nullptr) {
+        irecv_fn = std::move(*g_irecv_fn);
+        delete g_irecv_fn;
+        g_irecv_fn = nullptr;
+    }
+}
+
+class PythonP2PWork final: public P2PWork {
+public:
+    PythonP2PWork(py::object work, torch::Tensor tensor): work_(std::move(work)), tensor_(std::move(tensor)) {}
+
+    ~PythonP2PWork() override {
+        py::gil_scoped_acquire gil;
+        work_ = py::object();
+    }
+
+    void wait() override {
+        py::gil_scoped_acquire gil;
+        if (!work_) {
+            return;
+        }
+        const bool completed = work_.attr("wait")().cast<bool>();
+        RTP_LLM_CHECK_WITH_INFO(completed, "P2P work wait failed");
+    }
+
+private:
+    py::object    work_;
+    torch::Tensor tensor_;
+};
+
+std::unique_ptr<P2PWork>
+runP2PCallback(const torch::Tensor& tensor, int global_peer, py::function** callback, const char* callback_name) {
+    py::gil_scoped_acquire gil;
+    py::function           fn;
+    {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        if (*callback != nullptr) {
+            fn = **callback;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        static_cast<bool>(fn), "%s called but its callback is not registered via register_p2p_ops", callback_name);
+    py::object work = fn(tensor, global_peer);
+    RTP_LLM_CHECK_WITH_INFO(!work.is_none(), "%s callback returned None", callback_name);
+    RTP_LLM_CHECK_WITH_INFO(py::hasattr(work, "wait"), "%s callback returned an object without wait()", callback_name);
+    return std::make_unique<PythonP2PWork>(std::move(work), tensor);
 }
 }  // anonymous namespace
 
@@ -667,8 +725,9 @@ void execBroadcastCpu(const BroadcastParams& params) {
     auto& broadcaster = CpuTpBroadcaster::instance();
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
-            RTP_LLM_CHECK_WITH_INFO(
-                tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
+            RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
+                                    "execBroadcastCpu requires CPU tensors (got device=%s)",
+                                    tensor.device().str().c_str());
             auto contiguous = tensor.contiguous();
             broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
             if (!contiguous.is_same(tensor)) {
@@ -721,6 +780,14 @@ void execAllGather(const AllGatherParams& params) {
     for (auto& t : params.send_buffers)
         send_list.append(t);
     fn(recv_list, static_cast<int>(params.mode), send_list, params.inplace);
+}
+
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int global_peer) {
+    return runP2PCallback(tensor, global_peer, &g_isend_fn, "execISend");
+}
+
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int global_peer) {
+    return runP2PCallback(tensor, global_peer, &g_irecv_fn, "execIRecv");
 }
 
 void execSyncCommunication(bool timeout) {
@@ -831,12 +898,28 @@ void registerExecCtxOps(pybind11::module& m) {
         "Register Python callbacks for C++ communication ops.");
 
     m.def(
+        "register_p2p_ops",
+        [](py::function isend_fn, py::function irecv_fn) {
+            std::lock_guard<std::mutex> lock(g_comm_mutex);
+            clearP2POpsUnlocked();
+            g_isend_fn = new py::function(std::move(isend_fn));
+            g_irecv_fn = new py::function(std::move(irecv_fn));
+        },
+        py::arg("isend_fn"),
+        py::arg("irecv_fn"));
+
+    m.def(
         "clear_comm_ops",
         []() {
             std::lock_guard<std::mutex> lock(g_comm_mutex);
             clearCommOpsUnlocked();
         },
         "Clear registered Python communication callbacks.");
+
+    m.def("clear_p2p_ops", []() {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        clearP2POpsUnlocked();
+    });
 
     m.def(
         "init_cpu_tp_broadcaster",
@@ -848,12 +931,10 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("tp_size"),
         py::arg("base_path"));
 
-    m.def(
-        "destroy_cpu_tp_broadcaster",
-        []() {
-            py::gil_scoped_release release;
-            CpuTpBroadcaster::instance().reset();
-        });
+    m.def("destroy_cpu_tp_broadcaster", []() {
+        py::gil_scoped_release release;
+        CpuTpBroadcaster::instance().reset();
+    });
 }
 
 }  // namespace rtp_llm

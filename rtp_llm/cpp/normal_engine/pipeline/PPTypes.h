@@ -1,8 +1,10 @@
 #pragma once
 
-#include <cstddef>
+#include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <torch/torch.h>
 
@@ -10,9 +12,22 @@
 
 namespace rtp_llm {
 
-// Transport-safe state reserved for PP sampling. Request objects, generators
-// and logits-processor state are currently unsupported across the PP boundary.
-struct PPSamplingPlan {
+struct RequestLogitsProcessorConfig {
+    std::string grammar_type;
+    std::string grammar_value;
+
+    int                           combo_token_size = 0;
+    std::vector<std::vector<int>> banned_combo_token_ids;
+    std::vector<int>              end_think_token_ids;
+};
+
+struct PPSamplingData {
+    std::vector<std::optional<int>>           random_seeds;
+    std::vector<RequestLogitsProcessorConfig> logits_processor_configs;
+    bool                                      need_cum_log_probs = false;
+
+    torch::Tensor request_ids;
+
     torch::Tensor token_ids;
     torch::Tensor input_lengths;
     torch::Tensor sequence_lengths;
@@ -26,34 +41,29 @@ struct PPSamplingPlan {
     torch::Tensor no_repeat_ngram_size;
     torch::Tensor do_sample;
     torch::Tensor finished_mask;
-    torch::Tensor cum_log_probs;
-
-    torch::Tensor random_seeds;
-    torch::Tensor random_offsets;
-
-    size_t batch_size = 0;
-    size_t step       = 0;
 };
 
-// Carries the execution payload along a PP lane. TP rank 0 carries the payload;
-// every other TP lane carries an empty plan so its corresponding lane in the
-// next stage advances by one batch.
 struct PPExecutionPlan {
-    GptModelInputs logical_model_input;
-    PPSamplingPlan sampling_plan;
+    GptModelInputs model_input;
+    PPSamplingData sampling;
 };
 
-// Carries model-defined named tensors between adjacent PP stages. PP execution
-// and transport treat the tensor keys as opaque.
 struct PPIntermediateTensors {
     std::map<std::string, torch::Tensor> tensors;
 };
 
+struct PPSampleError {
+    int64_t     request_id = 0;
+    int32_t     error_code = 0;
+    std::string message;
+};
+
 struct PPSampleResult {
-    torch::Tensor new_token_ids;  // [batch_size, 1]
-    torch::Tensor success;
-    torch::Tensor cum_log_probs;
-    torch::Tensor next_random_offsets;
+    torch::Tensor              request_ids;     // [batch_size]
+    torch::Tensor              new_token_ids;   // [batch_size, 1]
+    torch::Tensor              sample_success;  // [batch_size]
+    torch::Tensor              cum_log_probs;
+    std::vector<PPSampleError> errors;
 };
 
 }  // namespace rtp_llm

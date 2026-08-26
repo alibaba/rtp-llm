@@ -113,6 +113,16 @@ void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
 void            execSyncCommunication(ParallelMode mode, bool timeout = true);
 
+class P2PWork {
+public:
+    virtual ~P2PWork() = default;
+
+    virtual void wait() = 0;
+};
+
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int global_peer);
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int global_peer);
+
 // ===================================================================
 // MOE / EPLB
 // ===================================================================

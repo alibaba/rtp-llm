@@ -33,6 +33,8 @@ __all__: list[str] = [
     "init_exec_ctx",
     "register_comm_ops",
     "clear_comm_ops",
+    "register_p2p_ops",
+    "clear_p2p_ops",
     "init_cpu_tp_broadcaster",
     "destroy_cpu_tp_broadcaster",
     "rtp_llm_ops",
@@ -512,6 +514,9 @@ def clear_comm_ops() -> None:
     """
     Clear registered Python communication callbacks.
     """
+
+def register_p2p_ops(isend_fn: typing.Callable, irecv_fn: typing.Callable) -> None: ...
+def clear_p2p_ops() -> None: ...
 
 def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
 def destroy_cpu_tp_broadcaster() -> None: ...
