@@ -2,11 +2,13 @@ package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.lifecycle.WorkerGenerationRetirement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,6 +17,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Periodically evicts workers that have stopped sending WorkerStatus reports
@@ -41,10 +44,15 @@ public class ExpirationCleaner {
 
     private final long workerTimeoutUs;
     private final EndpointRegistry endpointRegistry;
+    private final CacheAwareService cacheAwareService;
 
     @Autowired
-    public ExpirationCleaner(EndpointRegistry endpointRegistry, ConfigService configService) {
-        this(endpointRegistry, resolveWorkerTimeoutUs(configService));
+    public ExpirationCleaner(
+            EndpointRegistry endpointRegistry,
+            ConfigService configService,
+            CacheAwareService cacheAwareService) {
+        this(endpointRegistry, cacheAwareService,
+                resolveWorkerTimeoutUs(configService));
     }
 
     /**
@@ -61,8 +69,13 @@ public class ExpirationCleaner {
         return configMs * 1000L;
     }
 
-    ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs) {
+    ExpirationCleaner(
+            EndpointRegistry endpointRegistry,
+            CacheAwareService cacheAwareService,
+            long workerTimeoutUs) {
         this.endpointRegistry = endpointRegistry;
+        this.cacheAwareService = Objects.requireNonNull(
+                cacheAwareService, "cacheAwareService");
         this.workerTimeoutUs = workerTimeoutUs;
     }
 
@@ -84,17 +97,38 @@ public class ExpirationCleaner {
             Map.Entry<String, WorkerStatus> item = it.next();
             WorkerStatus workerStatus = item.getValue();
 
-            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
-            long currentTime = System.nanoTime() / 1000;
-            if (currentTime > expirationTime) {
-                workerStatus.setAlive(false);
-                boolean statusRemoved = workerStatusMap.remove(item.getKey(), workerStatus);
-                boolean endpointRemoved = endpointRegistry.remove(role, item.getKey(), workerStatus);
-                if (statusRemoved || endpointRemoved) {
-                    logger.warn("Removed expired worker: {}, role: {}, statusRemoved={}, endpointRemoved={}",
-                            item.getKey(), role, statusRemoved, endpointRemoved);
+            EndpointRegistry.DetachedGeneration endpointToRetire = null;
+            boolean retirementStarted = false;
+            workerStatus.lock.lock();
+            try {
+                if (workerStatusMap.get(item.getKey()) != workerStatus) {
+                    continue;
                 }
+                if (!workerStatus.isActiveGeneration()) {
+                    continue;
+                }
+                WorkerStatus.PollHealth health = workerStatus.pollHealth();
+                long expirationTime = health.lastSuccessfulPollUs()
+                        + workerTimeoutUs;
+                long currentTime = System.nanoTime() / 1000;
+                if (currentTime > expirationTime) {
+                    endpointToRetire = WorkerGenerationRetirement.begin(
+                            workerStatus, endpointRegistry, role,
+                            item.getKey());
+                    retirementStarted = true;
+                }
+            } finally {
+                workerStatus.lock.unlock();
+            }
+            if (retirementStarted) {
+                WorkerGenerationRetirement.complete(
+                        workerStatus, workerStatusMap, cacheAwareService,
+                        role, item.getKey(), endpointToRetire, logger);
+                logger.warn(
+                        "Retiring expired worker: {}, role: {}, generation={}",
+                        item.getKey(), role, workerStatus.getGenerationId());
             }
         }
     }
+
 }

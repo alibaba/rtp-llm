@@ -17,7 +17,7 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -558,7 +558,7 @@ class FollowerAsyncForwardingNettyTest {
                     configService,
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
-                    mock(PrioritySchedulerReporter.class));
+                    mock(RequestSchedulerReporter.class));
 
             requestExecutor = new ThreadPoolExecutor(
                     EXECUTOR_CORE_SIZE,

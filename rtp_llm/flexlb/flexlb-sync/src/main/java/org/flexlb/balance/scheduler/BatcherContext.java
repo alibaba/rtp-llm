@@ -1,28 +1,39 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.CommittedDelivery;
+import org.flexlb.balance.delivery.DeliveryContext;
+import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.delivery.DeliveryMetadata;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
+import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.FixedWindowDecisionConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.PriorityBlockingQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
  * Controlled access to shared {@link WorkerBatcher} infrastructure.
  *
- * <p>Passed to {@link BatcherAlgorithm} methods so algorithms can
+ * <p>Passed to {@link GroupPolicy} methods so policies can
  * inspect and mutate the queue, read config, and invoke callbacks
  * without directly depending on WorkerBatcher internals.
  *
@@ -30,13 +41,19 @@ import java.util.concurrent.locks.ReentrantLock;
  * the queue version, keeping the priority scheduling invariant "version unchanged ⇒
  * queue content unchanged" (optimistic plan validation).
  */
-public class BatcherContext {
+class BatcherContext implements DeliveryContext<BatcherCycleResult> {
+
+    /** Compute and KV limits derived from one WorkerStatus publication. */
+    record BatchCapacitySnapshot(
+            long batchTokenCapacity,
+            long batchKvCapacity) {
+    }
 
     /*
      * Queue ownership state machine:
      *
      * ACTIVE (queue)
-     *   -> CALLBACK_OWNED (AdmittedDecisionGroup, only after capacity reservation)
+     *   -> CALLBACK_OWNED (one nested delivery owner after capacity reservation)
      *   -> terminal endpoint lifecycle (no batcher container)
      *
      * Capacity failure leaves the ordered head ACTIVE. A capacity-feasible
@@ -48,29 +65,29 @@ public class BatcherContext {
     private final PrefillEndpoint prefillEp;
     private final FlexlbConfig config;
     private final FixedWindowDecisionConfig fixedWindowDecision;
-    private final DecisionGroupHandler decisionHandler;
-    private final DeliveryCapacityAdmission capacityAdmission;
+    private final DeliveryLifecyclePort deliveryLifecycle;
     private final PriorityBlockingQueue<BatchItem> queue;
-    private final AtomicInteger queueDepth;
     private final AtomicLong queueVersion;
     private final AtomicLong schedulingInputVersion = new AtomicLong();
     private final ReentrantLock queueLock;
     private final Comparator<BatchItem> queueOrder;
-    private final BatchSchedulerReporter reporter;
+    private final Comparator<GroupPlanner.Item> projectionOrder;
+    private final boolean queueScheduling;
+    private final DeliveryStrategy deliveryStrategy;
+    private final PrefillWorkRegistry workRegistry;
 
-    /** Requests synchronously owned by the admitted-delivery callback. */
-    private final AtomicInteger callbackOwnedRequestCount = new AtomicInteger();
     private boolean stopped;
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig config,
-                   DecisionGroupHandler decisionHandler,
-                   DeliveryCapacityAdmission capacityAdmission,
+                   DeliveryLifecyclePort deliveryLifecycle,
                    PriorityBlockingQueue<BatchItem> queue,
-                   AtomicInteger queueDepth,
                    AtomicLong queueVersion,
                    ReentrantLock queueLock,
                    Comparator<BatchItem> queueOrder,
-                   BatchSchedulerReporter reporter) {
+                   Comparator<GroupPlanner.Item> projectionOrder,
+                   boolean queueScheduling,
+                   DeliveryStrategy deliveryStrategy,
+                   PrefillWorkRegistry workRegistry) {
         this.key = key;
         this.prefillEp = prefillEp;
         this.config = config;
@@ -78,14 +95,18 @@ public class BatcherContext {
                 ? config.decisionPolicy() : null;
         this.fixedWindowDecision = resolvedDecision instanceof FixedWindowDecisionConfig fixed
                 ? fixed : null;
-        this.decisionHandler = decisionHandler;
-        this.capacityAdmission = capacityAdmission;
+        this.deliveryLifecycle = Objects.requireNonNull(
+                deliveryLifecycle, "deliveryLifecycle");
         this.queue = queue;
-        this.queueDepth = queueDepth;
         this.queueVersion = queueVersion;
         this.queueLock = queueLock;
         this.queueOrder = queueOrder;
-        this.reporter = reporter;
+        this.projectionOrder = Objects.requireNonNull(
+                projectionOrder, "projectionOrder");
+        this.queueScheduling = queueScheduling;
+        this.deliveryStrategy = Objects.requireNonNull(
+                deliveryStrategy, "deliveryStrategy");
+        this.workRegistry = Objects.requireNonNull(workRegistry, "workRegistry");
     }
 
     // ---- accessors ----
@@ -135,10 +156,6 @@ public class BatcherContext {
         return configured == null ? 0L : configured;
     }
 
-    BatchSchedulerReporter reporter() {
-        return reporter;
-    }
-
     long now() {
         return System.currentTimeMillis();
     }
@@ -156,10 +173,6 @@ public class BatcherContext {
         schedulingInputVersion.incrementAndGet();
     }
 
-    Comparator<BatchItem> queueOrder() {
-        return queueOrder;
-    }
-
     // ---- queue inspection ----
 
     BatchItem peek() {
@@ -172,19 +185,11 @@ public class BatcherContext {
      * container is only consulted once something is charged.
      */
     boolean isActiveEmpty() {
-        return queueDepth.get() == 0 || queue.isEmpty();
-    }
-
-    /**
-     * Physical active decision-queue depth. Capacity-blocked work remains in
-     * this queue until an ordered prefix can reserve everything it needs.
-     */
-    int activeSize() {
-        return queue.size();
+        return queue.isEmpty();
     }
 
     int size() {
-        return queueDepth.get();
+        return queue.size();
     }
 
     boolean hasProcessableWork() {
@@ -193,31 +198,51 @@ public class BatcherContext {
 
     // ---- queue mutation ----
 
-    boolean remove(BatchItem item) {
-        queueLock.lock();
-        try {
-            boolean removed = queue.remove(item);
-            if (removed) {
-                queueDepth.decrementAndGet();
-                queueVersion.incrementAndGet();
-            }
-            return removed;
-        } finally {
-            queueLock.unlock();
+    /** Caller owns one previously reserved queue-depth unit and holds queueLock. */
+    boolean publishActiveIndexUnderLock(BatchItem item) {
+        boolean published = workRegistry.enqueueActiveUnderLock(item);
+        if (published) {
+            queueVersion.incrementAndGet();
         }
+        return published;
     }
 
-    void drainTo(List<BatchItem> dst) {
-        queueLock.lock();
-        try {
-            int drained = queue.drainTo(dst);
-            if (drained > 0) {
-                queueDepth.addAndGet(-drained);
-                queueVersion.incrementAndGet();
-            }
-        } finally {
-            queueLock.unlock();
+    /** Claim one ACTIVE request for a terminal reducer. */
+    private boolean removeTerminalActiveUnderLock(BatchItem item) {
+        return workRegistry.terminalizeActiveUnderLock(item);
+    }
+
+    /**
+     * Close this generation's ACTIVE admission gate before shutdown starts
+     * claiming exact queue identities. Caller holds {@code queueLock}.
+     */
+    void stopAcceptingUnderLock() {
+        assert queueLock.isHeldByCurrentThread()
+                : "queue mutation requires queueLock";
+        stopped = true;
+    }
+
+    /** Detach one exact queue head while retaining its stop-terminal owner. */
+    BatchItem detachNextStopTerminalUnderLock() {
+        BatchItem item = workRegistry.detachNextActiveForStopUnderLock();
+        if (item != null) {
+            queueVersion.incrementAndGet();
         }
+        return item;
+    }
+
+    /** Acknowledge only the exact retained owner whose callback completed. */
+    boolean acknowledgeStopTerminalUnderLock(BatchItem item) {
+        return workRegistry.acknowledgeStopTerminalUnderLock(item);
+    }
+
+    /** Caller holds queueLock. */
+    boolean removeUnderLock(BatchItem item) {
+        boolean removed = removeTerminalActiveUnderLock(item);
+        if (removed) {
+            queueVersion.incrementAndGet();
+        }
+        return removed;
     }
 
     /**
@@ -233,15 +258,30 @@ public class BatcherContext {
     }
 
     /**
-     * Capture one stable, ordered active-queue snapshot for a batching
+     * Capture the active-queue head and its versions for a single-request
+     * decision. The queue already exposes its least element, so this needs
+     * neither a copy nor a sort.
+     */
+    ActiveQueueSnapshot snapshotActiveQueueHead() {
+        queueLock.lock();
+        try {
+            long version = queueVersion.get();
+            long inputVersion = schedulingInputVersion.get();
+            BatchItem head = queue.peek();
+            return new ActiveQueueSnapshot(
+                    version, inputVersion,
+                    head == null ? List.of() : List.of(head));
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /**
+     * Capture one stable, fully ordered active-queue snapshot for a batching
      * decision. The version and identities are linearized under the same lock;
      * prediction intentionally runs after the lock is released.
-     *
-     * <p>{@code maxItems} is the largest group the decision can release. A
-     * single-request group needs only the ordering head, which the queue
-     * already exposes without a copy.
      */
-    ActiveQueueSnapshot snapshotActiveQueue(int maxItems) {
+    ActiveQueueSnapshot snapshotActiveQueue() {
         long version;
         long inputVersion;
         List<BatchItem> items;
@@ -249,14 +289,6 @@ public class BatcherContext {
         try {
             version = queueVersion.get();
             inputVersion = schedulingInputVersion.get();
-            if (maxItems <= 1) {
-                // The ordering head is the queue's own least element, so a
-                // single-request decision needs neither a copy nor a sort.
-                BatchItem head = queue.peek();
-                return new ActiveQueueSnapshot(
-                        version, inputVersion,
-                        head == null ? List.of() : List.of(head));
-            }
             if (queue.isEmpty()) {
                 return new ActiveQueueSnapshot(version, inputVersion, List.of());
             }
@@ -277,6 +309,50 @@ public class BatcherContext {
         BatchItem head() {
             return items.isEmpty() ? null : items.get(0);
         }
+    }
+
+    /** Capture queue, committed work and pending count under the ownership lock. */
+    RouteProjection.Inputs captureRouteProjectionInputs(
+            Supplier<AdmissionBlock> admissionBlockSnapshot) {
+        queueLock.lock();
+        try {
+            BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+            PrefillWorkRegistry.Snapshot ownership =
+                    workRegistry.snapshotUnderLock(queueOrder);
+            List<GroupPlanner.Item> items =
+                    ownership.activeItems().stream()
+                            .map(BatcherContext::projectionItem)
+                            .toList();
+            QueueSnapshot queueSnapshot = new QueueSnapshot(
+                    ownership.capturedAtMs(),
+                    queueScheduling,
+                    projectionOrder,
+                    new GroupPlanner.Constraints(
+                            maxDecisionRequests(),
+                            capacity.batchTokenCapacity(),
+                            capacity.batchKvCapacity(),
+                            predictedExecutionBudgetMs(),
+                            collectionWindowMs()),
+                    items,
+                    items.isEmpty() ? null : admissionBlockSnapshot.get());
+            return new RouteProjection.Inputs(
+                    queueSnapshot,
+                    ownership.committedWork(),
+                    ownership.pendingRequestCount());
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private static GroupPlanner.Item projectionItem(BatchItem item) {
+        return new GroupPlanner.Item(
+                item.requestId(),
+                item.priority(),
+                item.enqueueSeq(),
+                item.enqueuedAtMs(),
+                item.expiresAtMs(),
+                item.seqLen(),
+                item.hitCache());
     }
 
     /** Stable low-cost state used before a full ordered group snapshot is needed. */
@@ -316,92 +392,7 @@ public class BatcherContext {
     }
 
     /**
-     * Compact priority-position cache for the current queue version. It keeps
-     * only primitive counts, never request objects or futures.
-     */
-    private record QueuePositionView(long version,
-                                     int activeSize,
-                                     int[] activeCountByPriority) {
-    }
-
-    private volatile QueuePositionView queuePositionView;
-
-    private QueuePositionView queuePositionView() {
-        QueuePositionView view = queuePositionView;
-        if (view != null && view.version() == queueVersion.get()) {
-            return view;
-        }
-        queueLock.lock();
-        try {
-            long version = queueVersion.get();
-            view = queuePositionView;
-            if (view == null || view.version() != version) {
-                int[] counts = new int[101];
-                int activeSize = 0;
-                for (BatchItem item : queue) {
-                    int normalizedPriority = Math.max(1, Math.min(100, item.priority()));
-                    counts[normalizedPriority]++;
-                    activeSize++;
-                }
-                view = new QueuePositionView(version, activeSize, counts);
-                queuePositionView = view;
-            }
-            return view;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    /**
-     * Estimate only the additional fixed-window collection delay for an
-     * incoming priority request. Engine execution and request-slot turnover are
-     * already accounted by the endpoint ledgers and must not be fabricated from
-     * the wall-clock interval between unrelated logical decisions.
-     *
-     * <p>The estimate is zero when the incoming request's ordered group can be
-     * filled by members already active behind it; otherwise it is the configured
-     * window. Resource-shape filtering can still make the actual delay larger;
-     * no request-shape information exists at this probe boundary.
-     */
-    long estimateIncomingWaitMs(int priority, long arrivalMs, long requestId) {
-        int maxRequests = maxDecisionRequests();
-        if (maxRequests <= 1) {
-            return 0L;
-        }
-        QueuePositionView view = queuePositionView();
-        int normalizedPriority = Math.max(1, Math.min(100, priority));
-        int activeItemsAhead = 0;
-        for (int existingPriority = normalizedPriority;
-             existingPriority <= 100; existingPriority++) {
-            activeItemsAhead += view.activeCountByPriority()[existingPriority];
-        }
-        int membersAtOrBehindProbe = view.activeSize() - activeItemsAhead + 1;
-        int openSlots = maxRequests - activeItemsAhead % maxRequests;
-        return membersAtOrBehindProbe >= openSlots ? 0L : collectionWindowMs();
-    }
-
-    /** Same collection-delay estimate for a FIFO probe appended at the tail. */
-    long estimateFifoWaitMs() {
-        int maxRequests = maxDecisionRequests();
-        if (maxRequests <= 1) {
-            return 0L;
-        }
-        int activeItemsAhead = activeSize();
-        int openSlots = maxRequests - activeItemsAhead % maxRequests;
-        return openSlots == 1 ? 0L : collectionWindowMs();
-    }
-
-    BatchItem findQueued(long requestId) {
-        for (BatchItem item : queue) {
-            if (item.requestId() == requestId) {
-                return item;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Effective strict padded-token limit for one FlexLB batch.
+     * Compute and KV limits from one atomically published worker status.
      *
      * <p>The Engine's FIFO scheduler rejects a group when its padded context
      * shape ({@code maxSeqLen * batchSize}) is greater than or equal to
@@ -409,34 +400,36 @@ public class BatcherContext {
      * that exact worker-reported limit; {@code max_seq_len} is a conservative
      * fallback for workers that have not populated the newer field yet. An
      * internal safety ceiling covers the interval before either value arrives.
+     * A zero KV total means the worker has not published that capacity yet, so
+     * the returned KV limit is unbounded.
      */
-    long batchTokenCapacity() {
+    BatchCapacitySnapshot batchCapacitySnapshot() {
         long capacity = positiveOrUnlimited(
                 config.getInternalRuntime().getFallbackBatchTokenCapacity());
         WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
         if (status == null) {
-            return capacity;
+            return new BatchCapacitySnapshot(capacity, Long.MAX_VALUE);
         }
 
-        long engineCapacity = status.getMaxBatchTokensSize();
+        WorkerStatus.EngineObservation engineStatus =
+                status.committedEngineObservation();
+        long engineCapacity = engineStatus.maxBatchTokensSize();
         if (engineCapacity <= 0) {
-            engineCapacity = status.getMaxSeqLen();
+            engineCapacity = engineStatus.maxSeqLen();
         }
-        return Math.min(capacity, positiveOrUnlimited(engineCapacity));
-    }
+        long batchTokenCapacity = Math.min(
+                capacity, positiveOrUnlimited(engineCapacity));
 
-    /**
-     * Latest worker-reported KV budget. A zero total means the worker has not
-     * published KV capacity yet, so batching remains compute-bound only.
-     */
-    long batchKvCapacity() {
-        WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
-        long total = status == null ? 0 : status.getTotalKvCacheTokens().get();
+        // A zero total means the worker has not published KV capacity yet, so
+        // batching remains compute-bound only.
+        long total = engineStatus.totalKvCacheTokens();
         if (total <= 0) {
-            return Long.MAX_VALUE;
+            return new BatchCapacitySnapshot(
+                    batchTokenCapacity, Long.MAX_VALUE);
         }
-        long available = Math.max(0, status.getAvailableKvCacheTokens().get());
-        return Math.min(total, available);
+        long available = Math.max(0, engineStatus.availableKvCacheTokens());
+        return new BatchCapacitySnapshot(
+                batchTokenCapacity, Math.min(total, available));
     }
 
     void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
@@ -460,211 +453,219 @@ public class BatcherContext {
      *
      * <p>The ordered snapshot is the selection linearization point. Offers that
      * arrive after that snapshot belong to the next decision and do not revoke
-     * this one. Removal, expiration, or predictor replacement of a selected
-     * member does revoke it, and every provisional reservation is then released.
+     * this one. Removal or expiration of a selected member does revoke it, and
+     * every provisional reservation is then released. The immutable evaluator
+     * captured for this decision remains valid if online learning publishes a
+     * replacement concurrently.
      */
     BatcherCycleResult admitAndDeliverCapacityFeasiblePrefix(
             List<BatchItem> candidates,
-            DecisionGroupMetadata metadata,
-            PrefillTimePredictor expectedPredictor,
-            long expectedPredictorGeneration) {
-        if (candidates == null || candidates.isEmpty()) {
+            DeliveryMetadata metadata,
+            PrefillTimePredictor.Evaluator evaluator,
+            OptionalLong plannedCommittedPredictionMs) {
+        if (candidates.isEmpty()) {
             return BatcherCycleResult.Outcome.NO_ACTION;
         }
-        Objects.requireNonNull(metadata, "decision metadata");
-        validateCandidateGroup(candidates);
-        if (!candidateSelectionStillOwned(
-                candidates, expectedPredictor, expectedPredictorGeneration)) {
-            return BatcherCycleResult.Outcome.NO_ACTION;
-        }
+        return deliveryStrategy.admitAndDeliver(
+                deliveryItems(candidates),
+                metadata,
+                evaluator,
+                plannedCommittedPredictionMs,
+                this);
+    }
 
-        CapacityPrefix capacityPrefix = reserveCapacityPrefix(candidates);
-        AdmittedDecisionGroup admittedGroup = prepareAdmittedGroup(capacityPrefix);
-        DeliveryCapacityAdmission.BatchLoadPublication batchLoadPublication = null;
-        if (admittedGroup != null && capacityPrefix.batchReservation() != null) {
-            DeliveryCapacityAdmission.BatchLoadPublicationResult publicationResult =
-                    admittedGroup.establishBatchLoadPublication();
-            if (publicationResult
-                    instanceof DeliveryCapacityAdmission.BatchLoadPublicationFailed failed) {
-                return terminalizePublicationFailure(capacityPrefix, failed.cause());
-            }
-            batchLoadPublication =
-                    ((DeliveryCapacityAdmission.BatchLoadPublicationEstablished)
-                            publicationResult).publication();
+    double projectGroupDurationMs(
+            List<BatchItem> items,
+            PrefillTimePredictor.Evaluator evaluator) {
+        return deliveryStrategy.projectGroupDurationMs(
+                deliveryItems(items), evaluator);
+    }
+
+    /**
+     * Reduce an invalid prediction at the exact ACTIVE request that anchored
+     * the prediction. The operation owns all prediction work for one policy
+     * pass, so malformed model output cannot escape into the worker-loop
+     * failure path and drain unrelated requests.
+     */
+    BatcherCycleResult runPredictionBound(
+            BatchItem exactHead,
+            Supplier<BatcherCycleResult> operation) {
+        try {
+            return operation.get();
+        } catch (InvalidPrefillPredictionException failure) {
+            return commitBoundary(
+                    new DeliveryContext.SelectionBoundary(
+                            exactHead, new CapacityBoundary.Failed(failure)));
         }
-        boolean ownershipTransferred = false;
-        RemovedTerminalBoundary removedTerminalBoundary =
-                RemovedTerminalBoundary.NONE;
-        DecisionGroupMetadata admittedMetadata = null;
+    }
+
+    @Override
+    public BatcherCycleResult noAction() {
+        return BatcherCycleResult.Outcome.NO_ACTION;
+    }
+
+    @Override
+    public boolean selectionStillOwned(List<DeliveryItem> candidates) {
+        return candidateSelectionStillOwned(batchItems(candidates));
+    }
+
+    @Override
+    public DeliveryContext.SelectionCommit<BatcherCycleResult>
+            commitSelection(
+            DeliveryContext.CanonicalCommit capability,
+            DeliveryContext.SelectionBoundary boundary,
+            String reason) {
+        List<BatchItem> items = batchItems(capability.items());
+        assert !items.isEmpty()
+                : "canonical commit requires a non-empty selection";
+        CommittedDelivery committedOwner = null;
+        BatcherCycleResult result = BatcherCycleResult.Outcome.NO_ACTION;
+        RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
+        Throwable postCommitFailure = null;
+
         queueLock.lock();
         try {
-            if (stopped || !predictorStillCurrent(
-                    expectedPredictor, expectedPredictorGeneration)) {
-                return BatcherCycleResult.Outcome.NO_ACTION;
+            if (stopped) {
+                return new DeliveryContext.SelectionCommit.NotCommitted<>(result);
             }
-
-            if (capacityPrefix.items().isEmpty()
-                    && capacityPrefix.firstUnreservedResult()
-                    instanceof DeliveryCapacityAdmission.CapacityUnavailable unavailable) {
-                BatchItem blockedHead = capacityPrefix.firstUnreservedItem();
-                if (queue.peek() != blockedHead
-                        || blockedHead.ctx().requestExpired(now())
-                        || !containsIdentity(blockedHead)) {
-                    return BatcherCycleResult.Outcome.NO_ACTION;
-                }
-                return new BatcherCycleResult.CapacityBlocked(
-                        blockedHead, unavailable);
-            }
-
             long nowMs = now();
-            for (BatchItem item : capacityPrefix.items()) {
-                if (!containsIdentity(item) || item.ctx().requestExpired(nowMs)) {
-                    return BatcherCycleResult.Outcome.NO_ACTION;
+            for (BatchItem item : items) {
+                if (!containsIdentity(item) || item.requestExpired(nowMs)) {
+                    return new DeliveryContext.SelectionCommit.NotCommitted<>(
+                            BatcherCycleResult.Outcome.NO_ACTION);
                 }
             }
-
-            for (BatchItem item : capacityPrefix.items()) {
-                if (!queue.remove(item)) {
-                    throw new IllegalStateException(
-                            "validated decision member disappeared request_id="
-                                    + item.requestId());
-                }
-            }
-
-            removedTerminalBoundary = removeTerminalAdmissionBoundary(
-                    capacityPrefix, nowMs);
-
-            int removedCount = capacityPrefix.items().size()
-                    + removedTerminalBoundary.count();
-            if (removedCount > 0) {
-                queueDepth.addAndGet(-removedCount);
+            committedOwner = Objects.requireNonNull(
+                    capability.commitUnderLock(), "committed owner");
+            try {
+                removedBoundary = removeSelectionBoundaryUnderLock(
+                        boundary, nowMs);
                 queueVersion.incrementAndGet();
-            }
-            ownershipTransferred = !capacityPrefix.items().isEmpty();
-            if (ownershipTransferred) {
-                String reason = capacityPrefix.wasCapacityLimited()
-                        ? "delivery_capacity_prefix" : metadata.reason();
-                admittedMetadata = new DecisionGroupMetadata(reason, queue.size());
+                String committedReason = boundary != null
+                        && boundary.result()
+                        instanceof CapacityBoundary.Unavailable
+                        ? "delivery_capacity_prefix" : reason;
+                result = new BatcherCycleResult.Admitted(
+                        items,
+                        new DeliveryMetadata(
+                                committedReason, queue.size()));
+            } catch (Throwable failure) {
+                postCommitFailure = failure;
             }
         } finally {
             queueLock.unlock();
-            if (!ownershipTransferred) {
-                try {
-                    releaseCapacityPrefix(capacityPrefix);
-                } finally {
-                    closeBatchLoadPublication(batchLoadPublication);
-                }
+        }
+
+        if (postCommitFailure != null) {
+            Throwable failure = postCommitFailure;
+            try {
+                notifyTerminalAdmissionFailure(removedBoundary);
+            } catch (Throwable notificationFailure) {
+                failure = appendFailure(failure, notificationFailure);
             }
+            try {
+                committedOwner.fail(failure);
+            } catch (Throwable ownerFailure) {
+                failure = appendFailure(failure, ownerFailure);
+            }
+            throw propagateCommitFailure(failure);
         }
-
-        notifyTerminalAdmissionFailure(removedTerminalBoundary);
-        if (!ownershipTransferred) {
-            return removedTerminalBoundary.wasRemoved()
-                    ? BatcherCycleResult.Outcome.QUEUE_CHANGED
-                    : BatcherCycleResult.Outcome.NO_ACTION;
+        notifyTerminalAdmissionFailure(removedBoundary);
+        if (result instanceof BatcherCycleResult.Admitted admitted) {
+            return new DeliveryContext.SelectionCommit.Committed<>(
+                    committedOwner, admitted);
         }
-
-        try {
-            BatcherCycleResult.Admitted admitted = new BatcherCycleResult.Admitted(
-                    capacityPrefix.items(), admittedMetadata);
-            deliverAdmittedGroup(admittedGroup, admittedMetadata);
-            return admitted;
-        } finally {
-            closeBatchLoadPublication(batchLoadPublication);
-        }
+        return new DeliveryContext.SelectionCommit.NotCommitted<>(result);
     }
 
-    private void closeBatchLoadPublication(
-            DeliveryCapacityAdmission.BatchLoadPublication publication) {
-        if (publication == null) {
-            return;
+    private static Throwable appendFailure(
+            Throwable first,
+            Throwable next) {
+        if (first == null) {
+            return next;
         }
-        try {
-            publication.close();
-        } catch (Throwable cleanupFailure) {
-            Logger.error("WorkerBatcher[{}] batch load publication cleanup failed",
-                    key, cleanupFailure);
+        if (first != next) {
+            first.addSuppressed(next);
         }
+        return first;
     }
 
-    /**
-     * A publication invariant failure is terminal for the exact prefix which
-     * already reserved capacity. Returning it to ACTIVE would only repeat the
-     * same deterministic failure. The first non-reserved member is consumed by
-     * the same terminal-boundary rule as a successful publication: an explicit
-     * admission failure is removed and notified once, ownership loss is only
-     * removed, and capacity unavailability remains ACTIVE.
-     *
-     * <p>Members concurrently claimed by another terminal owner are left to
-     * that owner and their exact reservations are still released below.
-     */
-    private BatcherCycleResult terminalizePublicationFailure(
-            CapacityPrefix capacityPrefix,
-            Throwable publicationFailure) {
-        List<BatchItem> terminalItems = new ArrayList<>(capacityPrefix.items().size());
-        RemovedTerminalBoundary removedTerminalBoundary =
-                RemovedTerminalBoundary.NONE;
+    private static RuntimeException propagateCommitFailure(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            return runtimeFailure;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        return new IllegalStateException(
+                "delivery selection failed after ownership commit", failure);
+    }
+
+    @Override
+    public BatcherCycleResult commitBoundary(
+            DeliveryContext.SelectionBoundary boundary) {
+        BatcherCycleResult result = BatcherCycleResult.Outcome.NO_ACTION;
+        RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
         queueLock.lock();
         try {
-            if (!stopped) {
-                long nowMs = now();
-                for (BatchItem item : capacityPrefix.items()) {
-                    if (containsIdentity(item)
-                            && !item.ctx().requestExpired(nowMs)
-                            && queue.remove(item)) {
-                        terminalItems.add(item);
-                    }
-                }
-                removedTerminalBoundary = removeTerminalAdmissionBoundary(
-                        capacityPrefix, nowMs);
-                int removedCount = terminalItems.size()
-                        + removedTerminalBoundary.count();
-                if (removedCount > 0) {
-                    queueDepth.addAndGet(-removedCount);
+            if (stopped) {
+                return result;
+            }
+            long nowMs = now();
+            if (boundary.result()
+                    instanceof CapacityBoundary.Unavailable unavailable) {
+                result = resolveEmptyCapacityUnderLock(
+                        (BatchItem) boundary.item(), unavailable, nowMs);
+            } else {
+                removedBoundary = removeSelectionBoundaryUnderLock(
+                        boundary, nowMs);
+                if (removedBoundary.wasRemoved()) {
                     queueVersion.incrementAndGet();
+                    result = BatcherCycleResult.Outcome.QUEUE_CHANGED;
                 }
             }
         } finally {
             queueLock.unlock();
-            releaseCapacityPrefix(capacityPrefix);
         }
-        for (BatchItem item : terminalItems) {
-            notifyAdmissionFailure(item, publicationFailure);
-        }
-        notifyTerminalAdmissionFailure(removedTerminalBoundary);
-        return terminalItems.isEmpty() && !removedTerminalBoundary.wasRemoved()
-                ? BatcherCycleResult.Outcome.NO_ACTION
-                : BatcherCycleResult.Outcome.QUEUE_CHANGED;
+        notifyTerminalAdmissionFailure(removedBoundary);
+        return result;
     }
 
-    /**
-     * Consume the one terminal admission boundary captured while reserving an
-     * ordered prefix. Capacity pressure is deliberately excluded: it is the
-     * only admission result allowed to remain ACTIVE.
-     *
-     * <p>Caller holds {@link #queueLock}.
-     */
-    private RemovedTerminalBoundary removeTerminalAdmissionBoundary(
-            CapacityPrefix capacityPrefix,
+    /** Caller holds queueLock. */
+    private BatcherCycleResult resolveEmptyCapacityUnderLock(
+            BatchItem item,
+            CapacityBoundary.Unavailable unavailable,
             long nowMs) {
-        DeliveryCapacityAdmission.AdmissionResult result =
-                capacityPrefix.firstUnreservedResult();
-        if (result != DeliveryCapacityAdmission.OwnershipLost.INSTANCE
-                && !(result instanceof DeliveryCapacityAdmission.AdmissionFailed)) {
-            return RemovedTerminalBoundary.NONE;
+        if (queue.peek() != item
+                || item.requestExpired(nowMs)
+                || !containsIdentity(item)) {
+            return BatcherCycleResult.Outcome.NO_ACTION;
         }
+        return new BatcherCycleResult.CapacityBlocked(item, unavailable);
+    }
 
-        BatchItem item = capacityPrefix.firstUnreservedItem();
-        if (item == null
-                || !containsIdentity(item)
-                || item.ctx().requestExpired(nowMs)
-                || !queue.remove(item)) {
+    /** Caller holds queueLock. */
+    private RemovedTerminalBoundary removeSelectionBoundaryUnderLock(
+            DeliveryContext.SelectionBoundary boundary,
+            long nowMs) {
+        // OwnershipLost is not a terminal fact. In particular, the request's
+        // admission mutation may still be closing after publishing the exact
+        // queue item. Removing it here would leave RequestLifecycle QUEUED
+        // without either a queue owner or a terminal callback.
+        if (boundary == null
+                || boundary.result() instanceof CapacityBoundary.Unavailable
+                || boundary.result() == CapacityBoundary.OwnershipLost.INSTANCE) {
             return RemovedTerminalBoundary.NONE;
         }
-        Throwable failure = result
-                instanceof DeliveryCapacityAdmission.AdmissionFailed admissionFailed
-                ? admissionFailed.cause()
-                : null;
+        BatchItem item = (BatchItem) boundary.item();
+        if (!containsIdentity(item)
+                || item.requestExpired(nowMs)
+                || !removeTerminalActiveUnderLock(item)) {
+            return RemovedTerminalBoundary.NONE;
+        }
+        Throwable failure = boundary.result()
+                instanceof CapacityBoundary.Failed failed
+                ? failed.cause() : null;
         return new RemovedTerminalBoundary(item, failure);
     }
 
@@ -681,47 +682,31 @@ public class BatcherContext {
         private static final RemovedTerminalBoundary NONE =
                 new RemovedTerminalBoundary(null, null);
 
-        int count() {
-            return wasRemoved() ? 1 : 0;
-        }
-
         boolean wasRemoved() {
             return item != null;
         }
     }
 
-    /**
-     * Finish validation and allocate the callback payload before queue ownership
-     * changes. A construction failure releases every provisional reservation
-     * while all requests are still ACTIVE.
-     */
-    private AdmittedDecisionGroup prepareAdmittedGroup(CapacityPrefix capacityPrefix) {
-        if (capacityPrefix.items().isEmpty()) {
-            return null;
-        }
-        try {
-            return AdmittedDecisionGroup.create(
-                    capacityPrefix.items(), capacityPrefix.reservations(),
-                    capacityPrefix.batchReservation());
-        } catch (RuntimeException | Error payloadFailure) {
-            releaseCapacityPrefix(capacityPrefix);
-            throw payloadFailure;
-        }
+    /** Delivery items are the scheduler-owned BatchItem identities. */
+    @SuppressWarnings("unchecked")
+    private static List<BatchItem> batchItems(List<DeliveryItem> items) {
+        return (List<BatchItem>) (List<?>) items;
     }
 
-    private boolean candidateSelectionStillOwned(
-            List<BatchItem> candidates,
-            PrefillTimePredictor expectedPredictor,
-            long expectedPredictorGeneration) {
+    @SuppressWarnings("unchecked")
+    private static List<DeliveryItem> deliveryItems(List<BatchItem> items) {
+        return (List<DeliveryItem>) (List<?>) items;
+    }
+
+    private boolean candidateSelectionStillOwned(List<BatchItem> candidates) {
         queueLock.lock();
         try {
-            if (stopped || !predictorStillCurrent(
-                    expectedPredictor, expectedPredictorGeneration)) {
+            if (stopped) {
                 return false;
             }
             long nowMs = now();
             for (BatchItem item : candidates) {
-                if (!containsIdentity(item) || item.ctx().requestExpired(nowMs)) {
+                if (!containsIdentity(item) || item.requestExpired(nowMs)) {
                     return false;
                 }
             }
@@ -729,15 +714,6 @@ public class BatcherContext {
         } finally {
             queueLock.unlock();
         }
-    }
-
-    /** Caller holds {@link #queueLock}. */
-    private boolean predictorStillCurrent(
-            PrefillTimePredictor expectedPredictor,
-            long expectedPredictorGeneration) {
-        return expectedPredictor == null
-                || (prefillEp.getPredictor() == expectedPredictor
-                && expectedPredictor.generation() == expectedPredictorGeneration);
     }
 
     /** Identity membership avoids conflating different request generations. */
@@ -750,236 +726,10 @@ public class BatcherContext {
         return false;
     }
 
-    private CapacityPrefix reserveCapacityPrefix(List<BatchItem> candidates) {
-        BatchItem head = candidates.get(0);
-        DeliveryCapacityAdmission.BatchCapacityReservation batchReservation = null;
-        if (head.deliveryMode() == DeliveryMode.BATCH_ENQUEUE) {
-            DeliveryCapacityAdmission.BatchCapacityResult batchResult =
-                    tryReserveBatchCapacity(head);
-            if (batchResult
-                    instanceof DeliveryCapacityAdmission.BatchCapacityReserved reserved) {
-                batchReservation = reserved.reservation();
-            } else if (batchResult
-                    instanceof DeliveryCapacityAdmission.BatchCapacityUnavailable unavailable) {
-                return CapacityPrefix.blocked(head,
-                        new DeliveryCapacityAdmission.CapacityUnavailable(
-                                unavailable.resource(),
-                                unavailable.availability()));
-            } else if (batchResult
-                    == DeliveryCapacityAdmission.BatchOwnershipLost.INSTANCE) {
-                return CapacityPrefix.stopped(
-                        head, DeliveryCapacityAdmission.OwnershipLost.INSTANCE);
-            } else {
-                DeliveryCapacityAdmission.BatchAdmissionFailed failure =
-                        (DeliveryCapacityAdmission.BatchAdmissionFailed) batchResult;
-                return CapacityPrefix.stopped(head,
-                        new DeliveryCapacityAdmission.AdmissionFailed(failure.cause()));
-            }
-        }
-
-        List<BatchItem> admittedItems = new ArrayList<>(candidates.size());
-        List<DeliveryCapacityAdmission.ItemCapacityReservation> reservations =
-                new ArrayList<>(candidates.size());
-        for (BatchItem item : candidates) {
-            DeliveryCapacityAdmission.AdmissionResult result =
-                    tryReserveExactItemCapacity(item);
-            if (result instanceof DeliveryCapacityAdmission.CapacityReserved reserved) {
-                admittedItems.add(item);
-                reservations.add(reserved.reservation());
-                continue;
-            }
-            return new CapacityPrefix(
-                    admittedItems, reservations, batchReservation, item, result);
-        }
-        return new CapacityPrefix(
-                admittedItems, reservations, batchReservation, null, null);
-    }
-
-    private DeliveryCapacityAdmission.BatchCapacityResult tryReserveBatchCapacity(
-            BatchItem head) {
-        DeliveryCapacityAdmission.BatchCapacityResult result;
-        try {
-            result = capacityAdmission.tryReserveBatchCapacity(head);
-            if (result == null) {
-                return new DeliveryCapacityAdmission.BatchAdmissionFailed(
-                        new IllegalStateException(
-                                "batch capacity admission returned no result"));
-            }
-        } catch (Throwable failure) {
-            return new DeliveryCapacityAdmission.BatchAdmissionFailed(failure);
-        }
-        if (result instanceof DeliveryCapacityAdmission.BatchCapacityReserved reserved) {
-            DeliveryCapacityAdmission.BatchCapacityReservation reservation =
-                    reserved.reservation();
-            BatchItem reservationHead;
-            try {
-                reservationHead = reservation.head();
-            } catch (Throwable validationFailure) {
-                releaseBatchCapacityReservation(reservation);
-                return new DeliveryCapacityAdmission.BatchAdmissionFailed(
-                        validationFailure);
-            }
-            if (reservationHead != head) {
-                releaseBatchCapacityReservation(reservation);
-                return new DeliveryCapacityAdmission.BatchAdmissionFailed(
-                        new IllegalStateException(
-                                "batch capacity reservation belongs to another head"));
-            }
-        }
-        return result;
-    }
-
-    private DeliveryCapacityAdmission.AdmissionResult tryReserveExactItemCapacity(
-            BatchItem item) {
-        DeliveryCapacityAdmission.AdmissionResult result;
-        try {
-            result = capacityAdmission.tryReserveItemCapacity(item);
-            if (result == null) {
-                return new DeliveryCapacityAdmission.AdmissionFailed(
-                        new IllegalStateException("capacity admission returned no result"));
-            }
-        } catch (Throwable failure) {
-            return new DeliveryCapacityAdmission.AdmissionFailed(failure);
-        }
-        if (result instanceof DeliveryCapacityAdmission.CapacityReserved reserved) {
-            DeliveryCapacityAdmission.ItemCapacityReservation reservation =
-                    reserved.reservation();
-            BatchItem reservationOwner;
-            try {
-                reservationOwner = reservation.item();
-            } catch (Throwable validationFailure) {
-                releaseCapacityReservation(reservation);
-                return new DeliveryCapacityAdmission.AdmissionFailed(
-                        validationFailure);
-            }
-            if (reservationOwner != item) {
-                releaseCapacityReservation(reservation);
-                return new DeliveryCapacityAdmission.AdmissionFailed(
-                        new IllegalStateException(
-                                "capacity reservation belongs to another request"));
-            }
-        }
-        return result;
-    }
-
-    private record CapacityPrefix(
-            List<BatchItem> items,
-            List<DeliveryCapacityAdmission.ItemCapacityReservation> reservations,
-            DeliveryCapacityAdmission.BatchCapacityReservation batchReservation,
-            BatchItem firstUnreservedItem,
-            DeliveryCapacityAdmission.AdmissionResult firstUnreservedResult) {
-
-        private CapacityPrefix {
-            items = List.copyOf(items);
-            reservations = List.copyOf(reservations);
-            if (items.size() != reservations.size()) {
-                throw new IllegalArgumentException(
-                        "capacity prefix requires one reservation per item");
-            }
-        }
-
-        static CapacityPrefix blocked(
-                BatchItem item,
-                DeliveryCapacityAdmission.CapacityUnavailable unavailable) {
-            return new CapacityPrefix(
-                    List.of(), List.of(), null, item, unavailable);
-        }
-
-        static CapacityPrefix stopped(
-                BatchItem item,
-                DeliveryCapacityAdmission.AdmissionResult firstUnreservedResult) {
-            return new CapacityPrefix(
-                    List.of(), List.of(), null, item, firstUnreservedResult);
-        }
-
-        boolean wasCapacityLimited() {
-            return firstUnreservedResult
-                    instanceof DeliveryCapacityAdmission.CapacityUnavailable;
-        }
-    }
-
-    /** Reject malformed groups before the first endpoint reservation is acquired. */
-    private void validateCandidateGroup(List<BatchItem> candidates) {
-        for (int index = 0; index < candidates.size(); index++) {
-            BatchItem item = candidates.get(index);
-            if (item == null) {
-                throw new IllegalArgumentException(
-                        "decision group contains a null item at index " + index);
-            }
-            for (int earlier = 0; earlier < index; earlier++) {
-                if (candidates.get(earlier) == item) {
-                    throw new IllegalArgumentException(
-                            "decision group contains the same item more than once"
-                                    + " request_id=" + item.requestId());
-                }
-            }
-            if (index > 0
-                    && queueOrder.compare(candidates.get(index - 1), item) >= 0) {
-                throw new IllegalArgumentException(
-                        "decision candidates are not in queue order request_id="
-                                + item.requestId());
-            }
-        }
-        DeliveryMode deliveryMode = candidates.get(0).deliveryMode();
-        for (int index = 1; index < candidates.size(); index++) {
-            if (candidates.get(index).deliveryMode() != deliveryMode) {
-                throw new IllegalArgumentException(
-                        "decision group contains mixed delivery modes");
-            }
-        }
-    }
-
-    private void releaseCapacityReservations(
-            List<DeliveryCapacityAdmission.ItemCapacityReservation> reservations) {
-        for (DeliveryCapacityAdmission.ItemCapacityReservation reservation : reservations) {
-            releaseCapacityReservation(reservation);
-        }
-    }
-
-    private void releaseCapacityPrefix(CapacityPrefix capacityPrefix) {
-        releaseCapacityReservations(capacityPrefix.reservations());
-        if (capacityPrefix.batchReservation() != null) {
-            releaseBatchCapacityReservation(capacityPrefix.batchReservation());
-        }
-    }
-
-    private void releaseBatchCapacityReservation(
-            DeliveryCapacityAdmission.BatchCapacityReservation reservation) {
-        try {
-            reservation.release();
-        } catch (Throwable cleanupFailure) {
-            Logger.error("WorkerBatcher[{}] batch capacity cleanup failed",
-                    key, cleanupFailure);
-        }
-    }
-
-    /**
-     * Capacity cleanup must never prevent ownership cleanup for another item.
-     * Endpoint reservations attempt all of their own resources; this boundary
-     * additionally isolates custom admission implementations item by item.
-     */
-    private void releaseCapacityReservation(
-            DeliveryCapacityAdmission.ItemCapacityReservation reservation) {
-        try {
-            reservation.release();
-        } catch (Throwable cleanupFailure) {
-            long requestId = -1L;
-            try {
-                BatchItem item = reservation.item();
-                if (item != null) {
-                    requestId = item.requestId();
-                }
-            } catch (Throwable ignored) {
-                // Preserve the capacity cleanup failure as the diagnostic owner.
-            }
-            Logger.error("WorkerBatcher[{}] capacity cleanup failed request_id={}",
-                    key, requestId, cleanupFailure);
-        }
-    }
 
     private void notifyAdmissionFailure(BatchItem item, Throwable cause) {
         try {
-            decisionHandler.onDeliveryFailure(item, cause);
+            deliveryLifecycle.onDeliveryFailure(item, cause);
         } catch (Throwable callbackFailure) {
             Logger.error("WorkerBatcher[{}] delivery-failure callback failed "
                             + "request_id={}",
@@ -987,98 +737,39 @@ public class BatcherContext {
         }
     }
 
-    private void deliverAdmittedGroup(
-            AdmittedDecisionGroup admittedGroup,
-            DecisionGroupMetadata metadata) {
-        int admittedItemCount = admittedGroup.members().size();
-        callbackOwnedRequestCount.addAndGet(admittedItemCount);
+    /**
+     * Give the handler only the committed capability. A handler exception or
+     * normal return without delivery is resolved by that same capability;
+     * BatcherContext never sees its child permits or handoff tokens.
+     */
+    @Override
+    public void publishCommittedDelivery(
+            CommittedDelivery committedDelivery,
+            DeliveryMetadata metadata) {
         Throwable callbackFailure = null;
         try {
-            decisionHandler.onDecisionGroupAdmitted(admittedGroup, metadata);
-        } catch (Throwable t) {
-            callbackFailure = t;
-        } finally {
-            Throwable batchHandoffFailure = callbackFailure != null
-                    ? callbackFailure
-                    : new IllegalStateException(
-                            "batch callback did not establish a batch lifecycle");
-            AdmittedDecisionGroup.BatchCapacityCleanup batchCleanup =
-                    admittedGroup.terminateUntransferredBatchCapacity(
-                            batchHandoffFailure);
-            try {
-                admittedGroup.completeTransferredBatchHandoff();
-            } catch (Throwable handoffCompletionFailure) {
-                if (callbackFailure == null) {
-                    callbackFailure = handoffCompletionFailure;
-                } else if (callbackFailure != handoffCompletionFailure) {
-                    callbackFailure.addSuppressed(handoffCompletionFailure);
-                }
-            }
-            Throwable unresolvedMemberDefault = callbackFailure != null
-                    ? callbackFailure
-                    : batchCleanup.untransferred()
-                            ? batchCleanup.failure()
-                            : new IllegalStateException(
-                                    "delivery callback left admitted request unresolved");
-            Map<BatchItem, Throwable> terminalItems = null;
-            for (AdmittedDecisionGroup.AdmittedItem admittedItem
-                    : admittedGroup.members()) {
-                Throwable unresolvedFailure = admittedItem.terminateIfUnresolved(
-                        unresolvedMemberDefault);
-                if (unresolvedFailure != null) {
-                    if (terminalItems == null) {
-                        terminalItems = new java.util.LinkedHashMap<>();
-                    }
-                    terminalItems.put(admittedItem.request(), unresolvedFailure);
-                }
-            }
-            callbackOwnedRequestCount.addAndGet(-admittedItemCount);
-            if (terminalItems != null) {
-                for (Map.Entry<BatchItem, Throwable> failure
-                        : terminalItems.entrySet()) {
-                    try {
-                        decisionHandler.onDeliveryFailure(failure.getKey(), failure.getValue());
-                    } catch (Throwable terminalCallbackFailure) {
-                        Logger.error("WorkerBatcher[{}] terminal delivery callback failed "
-                                        + "request_id={}",
-                                key, failure.getKey().requestId(), terminalCallbackFailure);
-                        if (callbackFailure == null) {
-                            callbackFailure = terminalCallbackFailure;
-                        } else if (callbackFailure != terminalCallbackFailure) {
-                            callbackFailure.addSuppressed(terminalCallbackFailure);
-                        }
-                    }
-                }
+            deliveryLifecycle.onDeliveryCommitted(committedDelivery, metadata);
+        } catch (Throwable failure) {
+            callbackFailure = failure;
+        }
+        Throwable unresolved = callbackFailure != null
+                ? callbackFailure
+                : new IllegalStateException(
+                        "delivery callback returned without resolving owner");
+        try {
+            committedDelivery.fail(unresolved);
+        } catch (Throwable cleanupFailure) {
+            if (callbackFailure == null) {
+                callbackFailure = cleanupFailure;
+            } else if (callbackFailure != cleanupFailure) {
+                callbackFailure.addSuppressed(cleanupFailure);
             }
         }
         if (callbackFailure != null) {
-            Logger.error("WorkerBatcher[{}] decision-group callback failed after"
-                            + " terminal ownership cleanup",
+            Logger.error(
+                    "WorkerBatcher[{}] committed delivery callback failed",
                     key, callbackFailure);
         }
-    }
-
-    /**
-     * Linearize shutdown with the ACTIVE-to-callback ownership transfer. The
-     * queue lock decides the race: ACTIVE requests are drained; requests already
-     * removed into an {@link AdmittedDecisionGroup} remain callback-owned.
-     */
-    void stopAndDrainTo(List<BatchItem> dst) {
-        queueLock.lock();
-        try {
-            stopped = true;
-            int drained = queue.drainTo(dst);
-            if (drained > 0) {
-                queueDepth.addAndGet(-drained);
-                queueVersion.incrementAndGet();
-            }
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    int callbackOwnedRequestCount() {
-        return callbackOwnedRequestCount.get();
     }
 
     /** Terminate the head whose absolute request expiration has been reached. */
@@ -1095,15 +786,22 @@ public class BatcherContext {
     private void terminateActiveItem(
             BatchItem item,
             ActiveQueueTermination termination) {
-        if (!remove(item)) {
+        boolean removed;
+        queueLock.lock();
+        try {
+            removed = removeUnderLock(item);
+        } finally {
+            queueLock.unlock();
+        }
+        if (!removed) {
             return;
         }
         try {
             if (termination == ActiveQueueExpired.INSTANCE) {
-                decisionHandler.onExpired(item);
+                deliveryLifecycle.onExpired(item);
             } else {
                 ActiveQueueRejected rejected = (ActiveQueueRejected) termination;
-                decisionHandler.onOfferFailure(item, rejected.cause());
+                deliveryLifecycle.onOfferFailure(item, rejected.cause());
             }
         } catch (Throwable callbackFailure) {
             Logger.error("WorkerBatcher[{}] ACTIVE terminal callback failed "

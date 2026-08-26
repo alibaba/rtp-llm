@@ -4,10 +4,11 @@ import java.util.EnumSet;
 import java.util.Map;
 
 /**
- * Serialized request lifecycle. All mutations are synchronized so delivery,
- * timeout and worker-status callbacks observe one transition order.
+ * Serialized lifecycle transition kernel. In production the canonical
+ * RequestSlot inherits these fields, so every synchronized method locks that
+ * exact slot rather than a delegated lifecycle object.
  */
-final class RequestLifecycle {
+class RequestLifecycle {
 
     private static final Map<RequestLifecycleState, EnumSet<RequestLifecycleState>> ALLOWED = Map.of(
             RequestLifecycleState.QUEUED, EnumSet.of(
@@ -94,6 +95,7 @@ final class RequestLifecycle {
         }
         if (batchEnqueueStartedAtMs == 0) {
             batchEnqueueStartedAtMs = System.currentTimeMillis();
+            afterLifecycleMutation();
         }
     }
 
@@ -155,22 +157,14 @@ final class RequestLifecycle {
         return transition(RequestLifecycleState.CANCELLED, message);
     }
 
-    synchronized boolean isTerminal() {
-        return state.isTerminal();
-    }
-
-    /**
-     * Whether delivery has crossed the point where an external caller or
-     * engine may observe the request. A claim is acquired before either an
-     * EnqueueBatch invocation or a route decision becomes visible.
-     */
-    synchronized boolean hasDeliveryClaim() {
-        return deliveryClaimKind.isClaimed();
-    }
-
     synchronized RequestLifecycleSnapshot snapshot() {
         return new RequestLifecycleSnapshot(requestId, state, deliveryClaimKind, batchId,
                 createdAtMs, updatedAtMs, detail);
+    }
+
+    /** Aggregate hook invoked while the exact lifecycle lock is still held. */
+    void afterLifecycleMutation() {
+        // Standalone lifecycle instances have no aggregate invariants.
     }
 
     private void requireCompatibleDelivery(DeliveryClaimKind requestedKind, long requestedBatchId) {
@@ -200,6 +194,7 @@ final class RequestLifecycle {
         state = next;
         detail = message == null ? "" : message;
         updatedAtMs = System.currentTimeMillis();
+        afterLifecycleMutation();
         return snapshot();
     }
 }

@@ -58,7 +58,7 @@
             "minimumToleranceMs": 20,
             "outlierRejection": {
               "maxPendingVsAverageMultiplier": 3.0,
-              "maxWaitVsAverageMultiplier": 3.0
+              "maxProjectedDrainVsAverageMultiplier": 3.0
             }
           }
         },

@@ -1,6 +1,6 @@
 package org.flexlb.config;
 
-import org.flexlb.balance.strategy.PrefillTimeFormula;
+import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.flexlb.config.RoutingConfig.BestOnlyConfig;
 import org.flexlb.config.RoutingConfig.CacheAffinityConfig;
 import org.flexlb.config.RoutingConfig.DecodeAvailabilityConfig;
@@ -26,13 +26,10 @@ final class FlexlbConfigValidator {
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
         require(config.getObservability() != null, "observability", "is required");
 
-        if (config.isDirect()) {
-            require(config.getDispatcher() instanceof NonBatchDispatcherConfig,
-                    "dispatcher.type", "DIRECT requires NON_BATCH");
-        } else {
+        if (!config.isDirect()) {
             validateQueue(config.queueScheduler());
         }
-        validateDispatcher(config);
+        config.getDispatcher().validateFor(config.getScheduler());
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
@@ -50,7 +47,8 @@ final class FlexlbConfigValidator {
                 "scheduler.capacity.maxWaitingRequestsPerPrefillWorker");
         DecisionPolicyConfig decision = queue.getDecision();
         if (decision instanceof FixedWindowDecisionConfig fixedWindow) {
-            positive(fixedWindow.getMaxRequests(),
+            range(fixedWindow.getMaxRequests(), 1,
+                    FixedWindowDecisionConfig.MAX_REQUESTS,
                     "scheduler.decision.maxRequests");
             nonNegative(fixedWindow.getMaxCollectionWaitMs(),
                     "scheduler.decision.maxCollectionWaitMs");
@@ -90,26 +88,6 @@ final class FlexlbConfigValidator {
                             "scheduler.ordering.preemption.engineCancellation",
                             "is allowed only when DECODE_ENGINE_OWNED is allowed");
                 }
-            }
-        }
-    }
-
-    private static void validateDispatcher(FlexlbConfig config) {
-        DispatcherConfig dispatcher = config.getDispatcher();
-        if (dispatcher instanceof BatchDispatcherConfig batch) {
-            positive(batch.getEnqueueRpcTimeoutMs(), "dispatcher.enqueueRpcTimeoutMs");
-            if (batch.getMaxInflightBatchesPerPrefillWorker() != null) {
-                positive(batch.getMaxInflightBatchesPerPrefillWorker(),
-                        "dispatcher.maxInflightBatchesPerPrefillWorker");
-            }
-        } else {
-            Integer maximum = ((NonBatchDispatcherConfig) dispatcher)
-                    .getMaxInflightRequestsPerPrefillWorker();
-            if (maximum != null) {
-                require(config.isQueue(),
-                        "dispatcher.maxInflightRequestsPerPrefillWorker",
-                        "is supported only with QUEUE");
-                positive(maximum, "dispatcher.maxInflightRequestsPerPrefillWorker");
             }
         }
     }
@@ -224,9 +202,9 @@ final class FlexlbConfigValidator {
         positive(outlierRejection.getMaxPendingVsAverageMultiplier(),
                 "router.roles.prefill.selector.candidateChoice.outlierRejection"
                         + ".maxPendingVsAverageMultiplier");
-        positive(outlierRejection.getMaxWaitVsAverageMultiplier(),
+        positive(outlierRejection.getMaxProjectedDrainVsAverageMultiplier(),
                 "router.roles.prefill.selector.candidateChoice.outlierRejection"
-                        + ".maxWaitVsAverageMultiplier");
+                        + ".maxProjectedDrainVsAverageMultiplier");
     }
 
     private static void validateWorkerRegistry(WorkerRegistryConfig workers) {

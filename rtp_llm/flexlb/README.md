@@ -160,7 +160,7 @@ export FLEXLB_CONFIG='{
             "minimumToleranceMs": 20,
             "outlierRejection": {
               "maxPendingVsAverageMultiplier": 3.0,
-              "maxWaitVsAverageMultiplier": 3.0
+              "maxProjectedDrainVsAverageMultiplier": 3.0
             }
           }
         },
@@ -221,6 +221,10 @@ export FLEXLB_CONFIG='{
 }'
 ```
 
+`maxProjectedDrainVsAverageMultiplier` limits estimated-TTFT outliers by the
+endpoint's known projected drain time. Candidates whose drain cannot be modeled
+are excluded from this particular outlier axis.
+
 `MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
 not a second FlexLB behavior configuration:
 
@@ -278,7 +282,8 @@ request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests fo
 one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
 sends them.
 
-`FIXED_WINDOW` is bounded by `maxRequests`, `maxCollectionWaitMs`, and the optional
+`FIXED_WINDOW` is bounded by `maxRequests` (1–1024),
+`maxCollectionWaitMs`, and the optional
 inclusive group-growth cap `maxPredictedExecutionMs`: reaching the cap dispatches
 the group without waiting for the collection window; another request is not
 added when it would exceed the cap, although an indivisible singleton may
@@ -333,9 +338,22 @@ The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
 `{"type":"FIXED","workers":2}`. Decode selector types are `RANDOM` and
 `KV_USAGE_WEIGHTED_RANDOM`; VIT currently supports `RANDOM`.
 
+`ESTIMATED_TTFT` is a deterministic frozen-snapshot projection, not a promise
+about future wall-clock latency. It inserts the incoming request using the live
+FIFO/PRIORITY order, reuses the production decision-group planner, overlaps
+collection deadlines with already committed work, and assumes no later arrivals,
+cancellations, predictor revisions, or resource changes. An exact admission block
+observed on the current head is represented as a structured blocked state. The
+model does not invent a release time for delivery capacity that is currently
+unobservable; otherwise its service timeline is conditional on later admission.
+
 Cache affinity is enabled by including `router.roles.prefill.cacheAffinity` and is
-valid only with `ESTIMATED_TTFT`. Omit the object to disable it. Decode admission is
-controlled by the optional positive
+valid only with `ESTIMATED_TTFT`. A cache leader is preferred only when its
+endpoint-specific reusable prefix meets `minPrefixHitPercent` and its frozen
+projected TTFT is no more than `maxExtraTtftMs` above the best candidate. The
+percentage uses predictor-effective reusable tokens (the final cache block remains
+compute work), not the raw routing-prefix match. Omit the object to disable it.
+Decode admission is controlled by the optional positive
 `router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
 request-count cap.
 

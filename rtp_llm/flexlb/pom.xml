@@ -376,10 +376,7 @@
                                 <id>default-test</id>
                                 <configuration combine.self="override">
                                     <includes>
-                                        <include>**/RequestExpirationTimerPerformanceTest.java</include>
-                                        <include>**/AutoTpmSchedulingOverheadPerfTest.java</include>
-                                        <include>**/CostBasedPrefillRoutingPerformanceTest.java</include>
-                                        <include>**/PrefillQueueManagerPerformanceTest.java</include>
+                                        <include>**/WorkerBatcherPerformanceTest.java</include>
                                     </includes>
                                     <groups>performance-regression</groups>
                                     <forkCount>1</forkCount>

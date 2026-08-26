@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Prioritized;
@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * A single inference request queued for a priority scheduling decision.
  *
- * <p>Extracted from {@link PriorityScheduler} to reduce coupling
+ * <p>Extracted from {@link RequestScheduler} to reduce coupling
  * with {@link WorkerBatcher}. A decision group may be delivered through a
  * batch RPC or returned as individual route decisions.
  *
@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code EndpointRegistry} lookups by ip+port.
  *
  */
-public final class BatchItem implements Prioritized {
+public final class BatchItem implements DeliveryItem, Prioritized {
 
     private static final AtomicLong ENQUEUE_SEQUENCE = new AtomicLong();
 
@@ -38,13 +38,17 @@ public final class BatchItem implements Prioritized {
     private final ServerStatus decode;
     private final PrefillEndpoint prefillEp;
     private final DecodeEndpoint decodeEp;
+    private final DecodeEndpoint.ReservationHandle decodeReservation;
     private final long enqueuedAtMs;
     private final long enqueueSequence;
-    private final DeliveryMode deliveryMode;
+    private final long requestId;
+    private final int priority;
+    private final long expiresAtMs;
+    private final long seqLen;
+    private final long hitCache;
     private final long maxDecodeEngineRequests;
     private final long maxDecodeKvUsagePercent;
-    private final int maxPrefillRequestsPerWorker;
-    private final int maxInflightBatchesPerPrefillWorker;
+    private final int maxInflightDeliveriesPerPrefillWorker;
 
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
@@ -53,19 +57,27 @@ public final class BatchItem implements Prioritized {
                      ServerStatus decode,
                      PrefillEndpoint prefillEp,
                      DecodeEndpoint decodeEp,
+                     DecodeEndpoint.ReservationHandle decodeReservation,
                      long enqueuedAtMs) {
-        this.ctx = ctx;
+        this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
         this.decode = decode;
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
+        this.decodeReservation = decodeReservation;
         this.enqueuedAtMs = enqueuedAtMs;
         this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
+        Request request = ctx.getRequest();
+        this.requestId = request == null ? 0L : request.getRequestId();
+        this.priority = request == null && ctx.schedulingMetadata() == null
+                ? 0 : ctx.getPriority();
+        this.expiresAtMs = ctx.getRequestExpiresAtMs();
+        this.seqLen = request == null ? 0L : request.getSeqLen();
+        this.hitCache = hitCacheOf(prefill);
         FlexlbConfig schedulingConfig = Objects.requireNonNull(
                 ctx.getConfig(), "request scheduling config");
-        this.deliveryMode = DeliveryMode.from(schedulingConfig);
         RoutingConfig.DecodeAvailabilityConfig decodeAvailability =
                 schedulingConfig.getRouter().getRoles()
                 .getDecode().getAvailability();
@@ -74,18 +86,10 @@ public final class BatchItem implements Prioritized {
                 ? 0L : configuredDecodeLimit;
         this.maxDecodeKvUsagePercent =
                 decodeAvailability.getMaxKvUsagePercent();
-        Integer configuredPrefillLimit = schedulingConfig.getDispatcher()
-                instanceof NonBatchDispatcherConfig nonBatch
-                ? nonBatch.getMaxInflightRequestsPerPrefillWorker()
-                : null;
-        this.maxPrefillRequestsPerWorker = configuredPrefillLimit == null
-                ? 0 : configuredPrefillLimit;
-        Integer configuredBatchLimit = schedulingConfig.getDispatcher()
-                instanceof BatchDispatcherConfig batch
-                ? batch.getMaxInflightBatchesPerPrefillWorker()
-                : null;
-        this.maxInflightBatchesPerPrefillWorker = configuredBatchLimit == null
-                ? 0 : configuredBatchLimit;
+        Integer configuredDeliveryLimit = schedulingConfig.getDispatcher()
+                .maxInflightDeliveriesPerPrefillWorker();
+        this.maxInflightDeliveriesPerPrefillWorker =
+                configuredDeliveryLimit == null ? 0 : configuredDeliveryLimit;
     }
 
     // -- accessors --
@@ -97,13 +101,19 @@ public final class BatchItem implements Prioritized {
     public ServerStatus decode() { return decode; }
     public PrefillEndpoint prefillEp() { return prefillEp; }
     public DecodeEndpoint decodeEp() { return decodeEp; }
+    public DecodeEndpoint.ReservationHandle decodeReservation() {
+        return decodeReservation;
+    }
+    @Override
     public long enqueuedAtMs() { return enqueuedAtMs; }
-    DeliveryMode deliveryMode() { return deliveryMode; }
-    long maxDecodeEngineRequests() { return maxDecodeEngineRequests; }
-    long maxDecodeKvUsagePercent() { return maxDecodeKvUsagePercent; }
-    int maxPrefillRequestsPerWorker() { return maxPrefillRequestsPerWorker; }
-    int maxInflightBatchesPerPrefillWorker() {
-        return maxInflightBatchesPerPrefillWorker;
+    public long expiresAtMs() { return expiresAtMs; }
+    public boolean requestExpired(long nowMs) {
+        return expiresAtMs <= 0L || nowMs >= expiresAtMs;
+    }
+    public long maxDecodeEngineRequests() { return maxDecodeEngineRequests; }
+    public long maxDecodeKvUsagePercent() { return maxDecodeKvUsagePercent; }
+    public int maxInflightDeliveriesPerPrefillWorker() {
+        return maxInflightDeliveriesPerPrefillWorker;
     }
 
     /**
@@ -113,7 +123,7 @@ public final class BatchItem implements Prioritized {
      */
     @Override
     public int priority() {
-        return ctx != null ? ctx.getPriority() : 0;
+        return priority;
     }
 
     /**
@@ -128,20 +138,21 @@ public final class BatchItem implements Prioritized {
 
     // -- derived accessors --
 
+    @Override
     public long requestId() {
-        return ctx != null && ctx.getRequest() != null
-                ? ctx.getRequest().getRequestId() : 0;
+        return requestId;
     }
 
     /** Total sequence length of this request. */
+    @Override
     public long seqLen() {
-        return ctx != null && ctx.getRequest() != null
-                ? ctx.getRequest().getSeqLen() : 0;
+        return seqLen;
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
+    @Override
     public long hitCache() {
-        return hitCacheOf(prefill);
+        return hitCache;
     }
 
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */

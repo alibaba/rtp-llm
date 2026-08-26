@@ -2,11 +2,12 @@ package org.flexlb.cache.service.impl;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.KvCacheManager;
+import org.flexlb.cache.domain.CacheMatch;
+import org.flexlb.cache.domain.EngineGeneration;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -26,100 +27,186 @@ import java.util.Set;
 @Service
 public class DefaultCacheAwareService implements CacheAwareService {
 
-    @Autowired
-    private KvCacheManager kvCacheManager;
+    private final KvCacheManager kvCacheManager;
+    private final CacheMetricsReporter cacheMetricsReporter;
 
     @Autowired
-    private CacheMetricsReporter cacheMetricsReporter;
+    public DefaultCacheAwareService(
+            KvCacheManager kvCacheManager,
+            CacheMetricsReporter cacheMetricsReporter) {
+        this.kvCacheManager = kvCacheManager;
+        this.cacheMetricsReporter = cacheMetricsReporter;
+    }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
-        RoleType roleType, String group) {
+    public Map<EngineGeneration, CacheMatch> findMatchingEngines(
+            List<Long> blockCacheKeys,
+            RoleType roleType,
+            List<EngineGeneration> candidates) {
 
         long startTime = System.nanoTime() / 1000;
 
         try {
-            if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
+            if (blockCacheKeys == null || blockCacheKeys.isEmpty()
+                    || candidates == null || candidates.isEmpty()) {
                 return Collections.emptyMap();
             }
 
-            Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> resultMap
-                = kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group);
+            Map<EngineGeneration, CacheMatch> resultMap =
+                    kvCacheManager.findMatchingEngines(
+                            blockCacheKeys, candidates);
 
-            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "0");
+            reportFindMetric(roleType, startTime, "0");
 
             return resultMap;
         } catch (Exception e) {
-            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "1");
+            reportFindMetric(roleType, startTime, "1");
             log.error("Error finding matching engines for role: {}", roleType, e);
             return Collections.emptyMap();
         }
     }
 
+    /** Query telemetry must never erase a successfully computed match set. */
+    private void reportFindMetric(RoleType roleType, long startTime, String outcome) {
+        try {
+            cacheMetricsReporter.reportFindMatchingEnginesRT(
+                    roleType, startTime, outcome);
+        } catch (RuntimeException metricFailure) {
+            log.warn("Failed to report cache lookup metric for role: {}", roleType,
+                    metricFailure);
+        }
+    }
+
     @Override
-    public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
+    public boolean activateEngineGeneration(
+            String engineIpPort,
+            RoleType roleType,
+            long generationId) {
+        if (!ownsCache(roleType)) {
+            return true;
+        }
+        try {
+            return kvCacheManager.activateEngineGeneration(
+                    engineIpPort, generationId);
+        } catch (RuntimeException e) {
+            log.error("Error activating cache generation for {}#{}",
+                    engineIpPort, generationId, e);
+            return false;
+        }
+    }
+
+    @Override
+    public WorkerCacheUpdateResult updateEngineBlockCache(
+            String engineIpPort,
+            RoleType roleType,
+            long generationId,
+            CacheStatus cacheStatus) {
         long startTime = System.nanoTime() / 1000;
-        String engineIpPort = workerStatus.getIpPort();
-        String role = workerStatus.getRole().getCode();
+        String role = roleType == null ? "unknown" : roleType.getCode();
 
         try {
-            if (workerStatus.getCacheStatus() == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
+            if (engineIpPort == null || engineIpPort.isBlank()
+                    || generationId <= 0L || roleType == null
+                    || cacheStatus == null) {
+                WorkerCacheUpdateResult result = buildResult(
+                        WorkerCacheUpdateResult.Outcome.INVALID_INPUT,
+                        engineIpPort,
+                        cacheStatus,
+                        "Engine identity, role, generation and cache status are required");
+                reportUpdateMetric(role, startTime, "0");
                 return result;
             }
-
-            String ipPort = workerStatus.getIpPort();
-            CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus.getCachedKeys() == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
+                WorkerCacheUpdateResult result = buildResult(
+                        WorkerCacheUpdateResult.Outcome.INVALID_INPUT,
+                        engineIpPort,
+                        cacheStatus,
+                        "Worker cached keys are null");
+                reportUpdateMetric(role, startTime, "0");
                 return result;
             }
 
             Set<Long> cachedKeys = cacheStatus.getCachedKeys();
+            boolean applied = kvCacheManager.updateEngineCache(
+                    engineIpPort,
+                    generationId,
+                    roleType,
+                    cachedKeys);
+            if (!applied) {
+                reportUpdateMetric(role, startTime, "stale");
+                return buildResult(
+                        WorkerCacheUpdateResult.Outcome.STALE_GENERATION,
+                        engineIpPort,
+                        cacheStatus,
+                        "Engine generation is no longer active");
+            }
 
-            // Update cache
-            kvCacheManager.updateEngineCache(ipPort, role, cachedKeys);
-
-            WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
-
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "1");
-
-            return result;
+            reportUpdateMetric(role, startTime, "1");
+            return buildResult(
+                    WorkerCacheUpdateResult.Outcome.APPLIED,
+                    engineIpPort,
+                    cacheStatus,
+                    null);
 
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", engineIpPort, e);
-
-            WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());
-
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
-
-            return result;
+            reportUpdateMetric(role, startTime, "0");
+            return buildResult(
+                    WorkerCacheUpdateResult.Outcome.FAILED,
+                    engineIpPort,
+                    cacheStatus,
+                    e.getMessage());
         }
     }
 
-    /**
-     * Build success result
-     */
-    private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
-        return WorkerCacheUpdateResult.builder()
-            .success(true)
-            .engineIpPort(workerStatus.getIpPort())
-            .cacheBlockCount(cacheStatus.getCachedKeys() != null ? cacheStatus.getCachedKeys().size() : 0)
-            .availableKvCache(cacheStatus.getAvailableKvCache())
-            .totalKvCache(cacheStatus.getTotalKvCache())
-            .cacheVersion(cacheStatus.getVersion())
-            .build();
+    /** Metrics are observational and must not change an already committed result. */
+    private void reportUpdateMetric(String role, long startTime, String outcome) {
+        try {
+            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                    role, startTime, outcome);
+        } catch (RuntimeException metricFailure) {
+            log.warn("Failed to report cache update metric for role: {}", role,
+                    metricFailure);
+        }
     }
 
-    /**
-     * Build failure result
-     */
-    private WorkerCacheUpdateResult buildFailureResult(String engineIpPort, String errorMessage) {
+    @Override
+    public boolean retireEngineGeneration(
+            String engineIpPort,
+            RoleType roleType,
+            long generationId) {
+        if (!ownsCache(roleType)) {
+            return true;
+        }
+        try {
+            return kvCacheManager.retireEngineGeneration(
+                    engineIpPort, generationId);
+        } catch (RuntimeException e) {
+            log.error("Error retiring cache generation for {}#{}",
+                    engineIpPort, generationId, e);
+            return false;
+        }
+    }
+
+    private static boolean ownsCache(RoleType roleType) {
+        return roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION;
+    }
+
+    private WorkerCacheUpdateResult buildResult(
+            WorkerCacheUpdateResult.Outcome outcome,
+            String engineIpPort,
+            CacheStatus cacheStatus,
+            String errorMessage) {
         return WorkerCacheUpdateResult.builder()
-            .success(false)
+            .outcome(outcome)
             .engineIpPort(engineIpPort)
+            .cacheBlockCount(cacheStatus == null || cacheStatus.getCachedKeys() == null
+                    ? 0 : cacheStatus.getCachedKeys().size())
+            .availableKvCache(cacheStatus == null
+                    ? 0 : cacheStatus.getAvailableKvCache())
+            .totalKvCache(cacheStatus == null
+                    ? 0 : cacheStatus.getTotalKvCache())
+            .cacheVersion(cacheStatus == null ? -1 : cacheStatus.getVersion())
             .errorMessage(errorMessage)
             .build();
     }

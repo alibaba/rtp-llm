@@ -11,11 +11,8 @@ import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.junit.jupiter.api.Assertions;
@@ -44,40 +41,33 @@ class CostBasedDecodeStrategyTest {
     }
 
     WorkerStatus createWorkerStatus(String ip) {
+        return createWorkerStatus(ip, null);
+    }
 
-        WorkerStatus workerStatus = new WorkerStatus();
-
-        workerStatus.setIp(ip);
-        workerStatus.setPort(8080);
-        workerStatus.setSite("na61");
-        workerStatus.setAlive(true);
-        return workerStatus;
+    WorkerStatus createWorkerStatus(String ip, String group) {
+        return StrategyTestSupport.workerStatus(
+                RoleType.DECODE, group, ip, 8080, 9090,
+                true, 0L, 0L);
     }
 
     /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
-        EndpointRegistry registry = new EndpointRegistry(configService, () -> null,
-                Mockito.mock(BatchSchedulerReporter.class));
+        EndpointRegistry registry = StrategyTestSupport.endpointRegistry(configService);
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
-            ws.setGrpcPort(9090);
-            DecodeEndpoint ep = (DecodeEndpoint) registry.ensureEndpoint(
+            registry.registerPreinitializedEndpoint(
                     RoleType.DECODE, entry.getKey(), ws);
-            // Initialize reported KV cache from status
-            ep.onWorkerStatusUpdate(ws, new WorkerStatusResponse());
         }
         return registry;
     }
 
     private void allowDecodeSelection(DecodeResourceMeasure measure) {
         Mockito.when(measure.isResourceAvailable(any())).thenReturn(true);
-        Mockito.when(measure.isQueuePlacementAvailable(any())).thenReturn(true);
     }
 
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
-        EndpointRegistry emptyRegistry = new EndpointRegistry(configService, () -> null,
-                Mockito.mock(BatchSchedulerReporter.class));
+        EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
@@ -92,10 +82,10 @@ class CostBasedDecodeStrategyTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(
+                costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
-        Assertions.assertFalse(status.isSuccess());
-        Assertions.assertNotNull(status.getMessage());
+        Assertions.assertNull(status);
     }
 
     @Test
@@ -103,14 +93,11 @@ class CostBasedDecodeStrategyTest {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getTotalKvCacheTokens().set(10000);
-        worker1.getAvailableKvCacheTokens().set(9000);
+        setKv(worker1, 10_000, 9_000);
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getTotalKvCacheTokens().set(10000);
-        worker2.getAvailableKvCacheTokens().set(9000);
+        setKv(worker2, 10_000, 9_000);
         WorkerStatus worker3 = createWorkerStatus("127.0.0.3");
-        worker3.getTotalKvCacheTokens().set(10000);
-        worker3.getAvailableKvCacheTokens().set(9000);
+        setKv(worker3, 10_000, 9_000);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -133,7 +120,8 @@ class CostBasedDecodeStrategyTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(
+                costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
@@ -144,16 +132,13 @@ class CostBasedDecodeStrategyTest {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getTotalKvCacheTokens().set(10000);
-        worker1.getAvailableKvCacheTokens().set(9500);
+        setKv(worker1, 10_000, 9_500);
 
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getTotalKvCacheTokens().set(10000);
-        worker2.getAvailableKvCacheTokens().set(8500);
+        setKv(worker2, 10_000, 8_500);
 
         WorkerStatus worker3 = createWorkerStatus("127.0.0.3");
-        worker3.getTotalKvCacheTokens().set(10000);
-        worker3.getAvailableKvCacheTokens().set(9000);
+        setKv(worker3, 10_000, 9_000);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -176,7 +161,8 @@ class CostBasedDecodeStrategyTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(
+                costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
@@ -186,8 +172,7 @@ class CostBasedDecodeStrategyTest {
     void should_handle_group_selection_when_group_parameter_provided() {
         ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
 
-        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.setGroup("group-a");
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1", "group-a");
 
         modelStatus.getDecodeStatusMap().put("127.0.0.1:8080", worker1);
 
@@ -208,7 +193,8 @@ class CostBasedDecodeStrategyTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, "group-a");
+        ServerStatus status = selectStatus(
+                costBasedDecodeStrategy, balanceContext, RoleType.DECODE, "group-a");
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
@@ -219,12 +205,10 @@ class CostBasedDecodeStrategyTest {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getTotalKvCacheTokens().set(10000);
-        worker1.getAvailableKvCacheTokens().set(9500);
+        setKv(worker1, 10_000, 9_500);
 
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getTotalKvCacheTokens().set(10000);
-        worker2.getAvailableKvCacheTokens().set(8500);
+        setKv(worker2, 10_000, 8_500);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -250,21 +234,17 @@ class CostBasedDecodeStrategyTest {
 
         for (int i = 0; i < totalRuns; i++) {
             balanceContext.getRequest().setRequestId(1000L + i);
-            ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+            ServerStatus status = selectStatus(
+                    costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
-                costBasedDecodeStrategy.rollBack(
-                        registry.get(RoleType.DECODE, selectedIp + ":8080"), 1000L + i);
             }
         }
 
         int worker1Count = selectionCount.getOrDefault("127.0.0.1", 0);
         int worker2Count = selectionCount.getOrDefault("127.0.0.2", 0);
-        log.info("Exponential decay weight distribution verification: worker1={} ({}%), worker2={} ({}%)",
-                worker1Count, worker1Count * 100.0 / totalRuns, worker2Count, worker2Count * 100.0 / totalRuns);
-
         Assertions.assertTrue(worker1Count > worker2Count,
                 "Worker with lower cache usage should be selected more frequently");
 
@@ -281,10 +261,9 @@ class CostBasedDecodeStrategyTest {
         for (int i = 1; i <= workerCount; i++) {
             String ip = "127.0.0." + i;
             WorkerStatus worker = createWorkerStatus(ip);
-            worker.getTotalKvCacheTokens().set(1_000_000);
             // With 15 workers using 800K tokens and one empty worker, the previous
             // average-centered formula evaluated exp(750), which overflows to Infinity.
-            worker.getAvailableKvCacheTokens().set(i == 1 ? 1_000_000 : 200_000);
+            setKv(worker, 1_000_000, i == 1 ? 1_000_000 : 200_000);
             decodeMap.put(ip + ":8080", worker);
         }
 
@@ -308,13 +287,13 @@ class CostBasedDecodeStrategyTest {
             long requestId = 10_000L + i;
             req.setRequestId(requestId);
             ServerStatus status = Assertions.assertDoesNotThrow(
-                    () -> costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null));
+                    () -> selectStatus(
+                            costBasedDecodeStrategy, balanceContext,
+                            RoleType.DECODE, null));
 
             Assertions.assertTrue(status.isSuccess());
             Assertions.assertEquals("127.0.0.1", status.getServerIp(),
                     "The worker with the lowest KV usage should have the highest stable weight");
-            costBasedDecodeStrategy.rollBack(
-                    registry.get(RoleType.DECODE, status.getServerIp() + ":8080"), requestId);
         }
     }
 
@@ -324,12 +303,10 @@ class CostBasedDecodeStrategyTest {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getTotalKvCacheTokens().set(1000);
-        worker1.getAvailableKvCacheTokens().set(100);
+        setKv(worker1, 1_000, 100);
 
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getTotalKvCacheTokens().set(1000);
-        worker2.getAvailableKvCacheTokens().set(800);
+        setKv(worker2, 1_000, 800);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -351,7 +328,8 @@ class CostBasedDecodeStrategyTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(
+                costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.2", status.getServerIp());
@@ -363,12 +341,10 @@ class CostBasedDecodeStrategyTest {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
-        worker1.getTotalKvCacheTokens().set(1000);
-        worker1.getAvailableKvCacheTokens().set(50);
+        setKv(worker1, 1_000, 50);
 
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
-        worker2.getTotalKvCacheTokens().set(1000);
-        worker2.getAvailableKvCacheTokens().set(100);
+        setKv(worker2, 1_000, 100);
 
         decodeMap.put("127.0.0.1:8080", worker1);
         decodeMap.put("127.0.0.2:8080", worker2);
@@ -390,10 +366,10 @@ class CostBasedDecodeStrategyTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = selectStatus(
+                costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
-        Assertions.assertFalse(status.isSuccess());
-        Assertions.assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), status.getCode());
+        Assertions.assertNull(status);
     }
 
     @Test
@@ -401,17 +377,16 @@ class CostBasedDecodeStrategyTest {
         Map<String, WorkerStatus> decodeMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
-        worker.getTotalKvCacheTokens().set(1_000);
-        worker.getAvailableKvCacheTokens().set(1_000);
+        setKv(worker, 1_000, 1_000);
         decodeMap.put("127.0.0.1:8080", worker);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
         DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
-        endpoint.reserveQueued(1L, 400, 700, 50);
-        endpoint.reserveQueued(2L, 400, 700, 50);
+        reserveQueued(endpoint, 1L, 400, 700, 50);
+        reserveQueued(endpoint, 2L, 400, 700, 50);
 
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
-        Assertions.assertFalse(measure.isResourceAvailable(endpoint));
+        Assertions.assertFalse(measure.isResourceAvailable(endpoint.routingView()));
 
         ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
         Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
@@ -425,16 +400,50 @@ class CostBasedDecodeStrategyTest {
         context.setRequest(request);
         context.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus fifoResult = strategy.select(context, RoleType.DECODE, null);
+        SelectedRole fifoSelection = strategy.select(
+                context, RoleType.DECODE, null);
+        ServerStatus fifoResult = fifoSelection.serverStatus();
         Assertions.assertTrue(fifoResult.isSuccess());
-        Assertions.assertTrue(endpoint.layeredAdmissionView().queued().contains(3L));
+        Assertions.assertEquals(1_000L, fifoSelection.decodeTotalKv());
+        Assertions.assertFalse(endpoint.layeredAdmissionView().queued().contains(3L),
+                "selection must not mutate Decode reservation ownership");
+        fifoSelection.close();
 
-        strategy.rollBack(endpoint, 3L);
         configService.loadBalanceConfig().queueScheduler()
                 .setOrdering(new PriorityOrderingConfig());
         request.setRequestId(4L);
-        ServerStatus priorityResult = strategy.select(context, RoleType.DECODE, null);
-        Assertions.assertFalse(priorityResult.isSuccess(),
+        ServerStatus priorityResult = selectStatus(
+                strategy, context, RoleType.DECODE, null);
+        Assertions.assertNull(priorityResult,
                 "PRIORITY must preserve the inclusive admission gate for preemption/classification");
+    }
+
+    private static void setKv(
+            WorkerStatus worker, long totalKv, long availableKv) {
+        StrategyTestSupport.publish(worker, StrategyTestSupport.response(
+                RoleType.DECODE, true, availableKv, totalKv,
+                Math.max(1L, worker.appliedStatusCursor().statusVersion() + 1L)));
+    }
+
+    private static void reserveQueued(
+            DecodeEndpoint endpoint,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority) {
+        try (var pin = endpoint.tryPinGeneration()) {
+            endpoint.reserveQueuedPinned(
+                    pin, requestId, kvTokens, expectedKvTokens, priority);
+        }
+    }
+
+    private static ServerStatus selectStatus(
+            CostBasedDecodeStrategy strategy,
+            BalanceContext context,
+            RoleType role,
+            String group) {
+        try (SelectedRole selected = strategy.select(context, role, group)) {
+            return selected == null ? null : selected.serverStatus();
+        }
     }
 }

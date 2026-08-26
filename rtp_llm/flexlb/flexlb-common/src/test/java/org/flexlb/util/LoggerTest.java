@@ -164,6 +164,19 @@ class LoggerTest {
     }
 
     @Test
+    @DisplayName("isTraceEnabled follows the runtime logback level")
+    void isTraceEnabled_followsRuntimeLevel() {
+        Logger.setLevel(LogLevel.TRACE);
+        assertTrue(Logger.isTraceEnabled());
+
+        Logger.setLevel(LogLevel.DEBUG);
+        assertFalse(Logger.isTraceEnabled());
+
+        Logger.setLevel(LogLevel.WARN);
+        assertFalse(Logger.isTraceEnabled());
+    }
+
+    @Test
     @DisplayName("Static block logic handles case-insensitive and whitespace correctly")
     void staticBlock_logicVerification() {
         String[] testInputs = {"debug", "DEBUG", "Debug", "  INFO  ", "warn", "ERROR"};

@@ -1,0 +1,123 @@
+package org.flexlb.balance.delivery;
+
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.function.Supplier;
+
+/** Exact request-generation ownership required by delivery strategies. */
+public interface SlotDeliveryPort {
+
+    /** Execute preparation only while the exact item is still queue-owned. */
+    <T> Optional<T> prepareIfOwned(
+            DeliveryItem exactItem,
+            Supplier<T> preparation);
+
+    /**
+     * Atomically transfer endpoint admission and commit the slot
+     * point-of-no-return. Returns {@code null} if another reducer already owns
+     * this exact request generation.
+     */
+    Claim tryCommit(
+            DeliveryItem exactItem,
+            Identity identity,
+            EndpointTransfer endpointTransfer);
+
+    /**
+     * Apply one terminal completion to the exact claim. An unknown, stale, or
+     * already-completed claim is an illegal lifecycle transition and must
+     * throw.
+     */
+    void complete(Claim exactClaim, Completion completion);
+
+    /** Terminally reduce an exact prepared item which acquired no claim. */
+    void failPrepared(DeliveryItem exactItem, Throwable cause);
+
+    /** Opaque proof of the exact slot point-of-no-return. */
+    interface Claim {
+
+        DeliveryItem item();
+    }
+
+    /** Canonical delivery identity installed at the point-of-no-return. */
+    record Identity(
+            ConfirmationBoundary boundary,
+            OptionalLong correlationId) {
+
+        public Identity {
+            boundary = Objects.requireNonNull(boundary, "boundary");
+            correlationId = Objects.requireNonNull(
+                    correlationId, "correlationId");
+            if (correlationId.isPresent()
+                    && correlationId.getAsLong() <= 0L) {
+                throw new IllegalArgumentException(
+                        "delivery correlation id must be positive");
+            }
+            if ((boundary == ConfirmationBoundary.EXTERNAL_ACK)
+                    != correlationId.isPresent()) {
+                throw new IllegalArgumentException(
+                        "external acknowledgement requires one correlation id");
+            }
+        }
+
+        public static Identity externalAcknowledgement(long correlationId) {
+            return new Identity(
+                    ConfirmationBoundary.EXTERNAL_ACK,
+                    OptionalLong.of(correlationId));
+        }
+
+        public static Identity commitConfirmation() {
+            return new Identity(
+                    ConfirmationBoundary.COMMIT_CONFIRMED,
+                    OptionalLong.empty());
+        }
+
+        public long requiredCorrelationId() {
+            return correlationId.orElseThrow(() ->
+                    new IllegalStateException(
+                            "delivery identity has no correlation id"));
+        }
+
+        public enum ConfirmationBoundary {
+            EXTERNAL_ACK,
+            COMMIT_CONFIRMED
+        }
+    }
+
+    /** Terminal transport result for one exact claim. */
+    sealed interface Completion permits Completion.Delivered,
+            Completion.Failed, Completion.TimedOut, Completion.Uncertain {
+
+        enum Delivered implements Completion {
+            INSTANCE
+        }
+
+        record Failed(Throwable cause) implements Completion {
+
+            public Failed {
+                cause = Objects.requireNonNull(cause, "cause");
+            }
+        }
+
+        record TimedOut(Throwable cause) implements Completion {
+
+            public TimedOut {
+                cause = Objects.requireNonNull(cause, "cause");
+            }
+        }
+
+        record Uncertain(Throwable cause) implements Completion {
+
+            public Uncertain {
+                cause = Objects.requireNonNull(cause, "cause");
+            }
+        }
+    }
+
+    /** Exact endpoint handoff which invokes the supplied slot commit once. */
+    @FunctionalInterface
+    interface EndpointTransfer {
+
+        boolean commit(Runnable pointOfNoReturn);
+    }
+}

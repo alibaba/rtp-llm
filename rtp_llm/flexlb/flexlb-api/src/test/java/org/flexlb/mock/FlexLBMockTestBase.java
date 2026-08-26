@@ -1,15 +1,18 @@
 package org.flexlb.mock;
 
+import com.google.protobuf.ByteString;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.QueueRoutingResult;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.scheduler.Router;
-import org.flexlb.balance.scheduler.priority.UnsupportedEngineCancelChannel;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.InternalRuntimeSettings;
@@ -21,10 +24,13 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineGrpcClientTestAccess;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,8 +44,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -47,7 +53,7 @@ import static org.mockito.Mockito.when;
 /**
  * Base class for mock-worker integration tests.
  *
- * <p>Sets up a real {@link PriorityScheduler} backed by a real
+ * <p>Sets up a real {@link RequestScheduler} backed by a real
  * {@link EngineGrpcClient} that creates real Netty gRPC channels to
  * mock workers.  No Spring Boot context, no model loading, no GPU.
  *
@@ -56,7 +62,7 @@ import static org.mockito.Mockito.when;
  *
  * <p>Architecture:
  * <pre>
- * Real PriorityScheduler (direct construction)
+ * Real RequestScheduler (test-only composition root)
  *   ├── Real DefaultBatchDispatcher
  *   │     └── Real EngineGrpcClient (real Netty channels)
  *   │           ↕  real gRPC (Netty)
@@ -74,7 +80,7 @@ public abstract class FlexLBMockTestBase {
 
     protected MockPrefillWorker mockPrefillWorker;
     protected MockDecodeWorker mockDecodeWorker;
-    protected PriorityScheduler scheduler;
+    protected RequestScheduler scheduler;
     protected EndpointRegistry endpointRegistry;
     protected FlexlbConfig config;
     protected ConfigService configService;
@@ -83,6 +89,7 @@ public abstract class FlexLBMockTestBase {
     protected DefaultBatchDispatcher dispatcher;
     protected BatchSchedulerReporter reporter;
     protected EngineWorkerStatus engineWorkerStatus;
+    private RequestSchedulerTestRuntime schedulerRuntime;
 
     private NioEventLoopGroup eventLoopGroup;
     private ThreadPoolExecutor grpcExecutor;
@@ -152,13 +159,10 @@ public abstract class FlexLBMockTestBase {
                 new LinkedBlockingQueue<>(runtime.getGrpcClientExecutorQueueCapacity()));
 
         CustomNameResolver nameResolver = (listener) -> { /* no-op */ };
-        GrpcReporter grpcReporter = mock(GrpcReporter.class);
-        EngineLocalView engineLocalView = mock(EngineLocalView.class);
-        GlobalCacheIndex globalCacheIndex = mock(GlobalCacheIndex.class);
-
-        grpcClient = new EngineGrpcClient(
+        GrpcReporter grpcReporter = new GrpcReporter(new NoOpFlexMonitor());
+        grpcClient = EngineGrpcClientTestAccess.create(
                 nameResolver, grpcExecutor, eventLoopGroup,
-                engineLocalView, globalCacheIndex, grpcReporter);
+                grpcReporter, 1_000);
 
         // 4. Create real dispatcher
         dispatcher = createDispatcher();
@@ -166,51 +170,51 @@ public abstract class FlexLBMockTestBase {
         // 5. Reporter (metrics no-op by default)
         reporter = createBatchSchedulerReporter();
 
-        // 6. Create real EndpointRegistry (scheduler=null for now, replaced below)
-        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        // 6. Compose the real request lifecycle and endpoint runtime. The
+        // router is bound after endpoints and the registry-backed status view
+        // exist, matching production's constructor graph without reopening it.
+        schedulerRuntime = new RequestSchedulerTestRuntime(
+                configService,
+                dispatcher,
+                reporter,
+                createRequestSchedulerReporter(),
+                new UnsupportedCancelStub());
+        endpointRegistry = schedulerRuntime.endpointRegistry();
+        scheduler = schedulerRuntime.scheduler();
 
         // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed view.
         engineWorkerStatus = createEngineWorkerStatus();
 
         // 8. Build WorkerStatus for prefill and decode mock workers
-        WorkerStatus prefillWs = new WorkerStatus();
-        prefillWs.setIp(prefillIp);
-        prefillWs.setPort(prefillHttpPort);
-        prefillWs.setGrpcPort(prefillGrpcPort);
-        prefillWs.setRole(RoleType.PREFILL);
-        prefillWs.setAlive(true);
-        prefillWs.setGroup("test-group");
-        prefillWs.setDpRank(0);
-        prefillWs.setAvailableKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(1_000_000L));
-        prefillWs.setTotalKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(2_000_000L));
+        WorkerStatus prefillWs = discoveredWorkerStatus(
+                RoleType.PREFILL,
+                prefillIp,
+                prefillHttpPort,
+                prefillGrpcPort,
+                0L,
+                1_000_000L,
+                2_000_000L);
 
-        WorkerStatus decodeWs = new WorkerStatus();
-        decodeWs.setIp(decodeIp);
-        decodeWs.setPort(decodeHttpPort);
-        decodeWs.setGrpcPort(decodeGrpcPort);
-        decodeWs.setRole(RoleType.DECODE);
-        decodeWs.setAlive(true);
-        decodeWs.setGroup("test-group");
-        decodeWs.setDpRank(0);
-        decodeWs.setAvailableKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(1_000_000L));
-        decodeWs.setTotalKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(2_000_000L));
+        WorkerStatus decodeWs = discoveredWorkerStatus(
+                RoleType.DECODE,
+                decodeIp,
+                decodeHttpPort,
+                decodeGrpcPort,
+                0L,
+                1_000_000L,
+                2_000_000L);
 
         // 9. Register decode endpoint (no scheduler dependency)
-        endpointRegistry.ensureEndpoint(RoleType.DECODE, decodeIpPort, decodeWs);
+        endpointRegistry.registerPreinitializedEndpoint(RoleType.DECODE, decodeIpPort, decodeWs);
 
-        // 10. Fixed routing by default; E2E subclasses can install the production router.
+        // 10. Register Prefill against the already-composed exact lifecycle.
+        endpointRegistry.registerPreinitializedEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
+
+        // 11. Fixed routing by default; E2E subclasses can install production routing.
         router = createRouter();
+        schedulerRuntime.bindRouter(router);
 
-        // 11. Create real scheduler
-        scheduler = new PriorityScheduler(
-                configService, router,
-                endpointRegistry, dispatcher, reporter, null, null,
-                new UnsupportedEngineCancelChannel());
-
-        // 12. Register prefill endpoint with the real scheduler as DecisionGroupHandler
-        endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
-
-        // 13. Register in EngineWorkerStatus static map for completeness
+        // 12. Register in EngineWorkerStatus static map for completeness
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(prefillIpPort, prefillWs);
@@ -220,8 +224,8 @@ public abstract class FlexLBMockTestBase {
     @AfterEach
     public void tearDownBase() {
         // Stop scheduler-owned work before tearing down its dispatcher or workers.
-        if (scheduler != null) {
-            scheduler.shutdown();
+        if (schedulerRuntime != null) {
+            schedulerRuntime.close();
         }
         if (dispatcher != null) {
             dispatcher.shutdown();
@@ -268,6 +272,10 @@ public abstract class FlexLBMockTestBase {
 
     // ==================== Override points ====================
 
+    protected final NioEventLoopGroup grpcClientEventLoopGroup() {
+        return eventLoopGroup;
+    }
+
     /**
      * Override to configure prefill worker behavior.
      * Default: immediate response, no failures.
@@ -290,33 +298,31 @@ public abstract class FlexLBMockTestBase {
 
     protected Router createRouter() {
         Router fixedRouter = mock(Router.class);
-        when(fixedRouter.route(any(BalanceContext.class))).thenAnswer(inv -> {
+        when(fixedRouter.routeForQueue(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
-            reserveDecode(ctx);
-            return successRoute(ctx.getRequestId());
+            return schedulerRuntime.admittedRoute(
+                    ctx, successRoute(ctx.getRequestId()));
         });
         return fixedRouter;
+    }
+
+    /** Build the exact pinned queue admission for a fixture response. */
+    protected final QueueRoutingResult admittedRoute(
+            BalanceContext context, Response response) {
+        return schedulerRuntime.admittedRoute(context, response);
     }
 
     protected BatchSchedulerReporter createBatchSchedulerReporter() {
         return mock(BatchSchedulerReporter.class);
     }
 
+    protected RequestSchedulerReporter createRequestSchedulerReporter() {
+        return mock(RequestSchedulerReporter.class);
+    }
+
     /** Override when an integration fixture needs deterministic dispatcher sizing. */
     protected DefaultBatchDispatcher createDispatcher() {
         return new DefaultBatchDispatcher(grpcClient, configService, null);
-    }
-
-    /** Mirror the Decode ownership side effect performed by production routing strategies. */
-    protected void reserveDecode(BalanceContext ctx) {
-        DecodeEndpoint decodeEndpoint = getDecodeEndpoint();
-        long seqLen = ctx.getRequest().getSeqLen();
-        long expectedKvTokens = config.decodeKvReservationTokens(
-                seqLen,
-                ctx.getRequest().getMaxNewTokens(),
-                decodeEndpoint.realKvTotal());
-        decodeEndpoint.reserve(ctx.getRequestId(), Math.max(0L, seqLen),
-                expectedKvTokens, ctx.getPriority());
     }
 
     /**
@@ -327,7 +333,9 @@ public abstract class FlexLBMockTestBase {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.fixedWindowDecision().setMaxRequests(1); // single request triggers dispatch
         cfg.fixedWindowDecision().setMaxCollectionWaitMs(300);
-        cfg.batchDispatcher().setEnqueueRpcTimeoutMs(5_000L);
+        BatchDispatcherConfig dispatcher = assertInstanceOf(
+                BatchDispatcherConfig.class, cfg.getDispatcher());
+        dispatcher.setEnqueueRpcTimeoutMs(5_000L);
         cfg.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(300_000L);
         return cfg;
     }
@@ -346,13 +354,6 @@ public abstract class FlexLBMockTestBase {
      */
     protected CompletableFuture<Response> submitRequest(long requestId, long seqLen) {
         return scheduler.submit(createBalanceContext(requestId, seqLen));
-    }
-
-    /**
-     * Trigger inflight TTL cleanup manually (simulates @Scheduled in production).
-     */
-    protected void triggerTtlCleanup() {
-        scheduler.cleanupInflight();
     }
 
     // ==================== Helper: endpoint accessors ====================
@@ -378,31 +379,36 @@ public abstract class FlexLBMockTestBase {
      * @return the started {@link MockPrefillWorker}
      */
     protected MockPrefillWorker addPrefillWorker(MockWorkerBehavior behavior) throws IOException {
+        return addPrefillWorker(behavior, 0);
+    }
+
+    /** Start an additional Prefill worker on an exact gRPC port. */
+    protected MockPrefillWorker addPrefillWorker(
+            MockWorkerBehavior behavior,
+            int grpcPort) throws IOException {
         MockPrefillWorker worker = new MockPrefillWorker(behavior);
-        worker.start(0);
-        int grpcPort = worker.getPort();
-        int httpPort = grpcPort - 1;
+        worker.start(grpcPort);
+        int actualGrpcPort = worker.getPort();
+        int httpPort = actualGrpcPort - 1;
         String ip = "127.0.0.1";
         String ipPort = ip + ":" + httpPort;
 
-        WorkerStatus ws = new WorkerStatus();
-        ws.setIp(ip);
-        ws.setPort(httpPort);
-        ws.setGrpcPort(grpcPort);
-        ws.setRole(RoleType.PREFILL);
-        ws.setAlive(true);
-        ws.setGroup("test-group");
-        ws.setDpRank(0);
-        ws.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
-        ws.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
+        WorkerStatus ws = discoveredWorkerStatus(
+                RoleType.PREFILL,
+                ip,
+                httpPort,
+                actualGrpcPort,
+                0L,
+                1_000_000L,
+                2_000_000L);
 
-        endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
+        endpointRegistry.registerPreinitializedEndpoint(RoleType.PREFILL, ipPort, ws);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort, ws);
 
         additionalPrefillWorkers.add(worker);
         additionalPrefillIpPorts.add(ipPort);
 
-        log.info("Additional prefill worker started: {} (grpc={})", ipPort, grpcPort);
+        log.info("Additional prefill worker started: {} (grpc={})", ipPort, actualGrpcPort);
         return worker;
     }
 
@@ -439,19 +445,16 @@ public abstract class FlexLBMockTestBase {
         int grpcPort = httpPort + 1;
         String ipPort = ip + ":" + httpPort;
 
-        WorkerStatus ws = new WorkerStatus();
-        ws.setIp(ip);
-        ws.setPort(httpPort);
-        ws.setGrpcPort(grpcPort);
-        ws.setRole(RoleType.DECODE);
-        ws.setAlive(true);
-        ws.setGroup("test-group");
-        ws.setDpRank(workerIndex);
-        ws.setAvailableKvCacheTokens(new AtomicLong(1_000_000_000L));
-        ws.setTotalKvCacheTokens(new AtomicLong(2_000_000_000L));
+        WorkerStatus ws = discoveredWorkerStatus(
+                RoleType.DECODE,
+                ip,
+                httpPort,
+                grpcPort,
+                workerIndex,
+                1_000_000_000L,
+                2_000_000_000L);
 
-        DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.ensureEndpoint(RoleType.DECODE, ipPort, ws);
-        endpoint.onWorkerStatusUpdate(ws, new WorkerStatusResponse());
+        DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.registerPreinitializedEndpoint(RoleType.DECODE, ipPort, ws);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort, ws);
         additionalDecodeIpPorts.add(ipPort);
         return endpoint;
@@ -474,7 +477,7 @@ public abstract class FlexLBMockTestBase {
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
         ctx.setConfig(config);
-        ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
+        ctx.setGenerateInputPb(ByteString.copyFrom(generateInputBytes(requestId)));
         return ctx;
     }
 
@@ -489,6 +492,80 @@ public abstract class FlexLBMockTestBase {
                         .build())
                 .build();
         return input.toByteArray();
+    }
+
+    /** Apply one strictly newer response through the production transaction. */
+    protected final void applyWorkerStatusResponse(
+            WorkerStatus status, WorkerStatusResponse response) {
+        schedulerRuntime.applyStatus(status, response);
+    }
+
+    /** Publish a synthetic Decode capacity observation for integration setup. */
+    protected final void publishDecodeCapacity(long available, long total) {
+        WorkerStatus status = getDecodeEndpoint().getStatus();
+        WorkerStatusResponse response = workerStatusResponse(
+                RoleType.DECODE,
+                status.getDpRank(),
+                available,
+                total,
+                status.appliedStatusCursor().statusVersion() + 1L);
+        schedulerRuntime.applyStatus(status, response);
+    }
+
+    private static WorkerStatus discoveredWorkerStatus(
+            RoleType role,
+            String ip,
+            int httpPort,
+            int grpcPort,
+            long dpRank,
+            long availableKv,
+            long totalKv) {
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                role, "test-group", ip, httpPort, grpcPort, null);
+        WorkerStatusResponse initial = workerStatusResponse(
+                role, dpRank, availableKv, totalKv, 1L);
+        status.lock.lock();
+        try {
+            WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
+                    status.freezeStatusResponse(initial));
+            status.publishPreparedStatus(prepared);
+        } finally {
+            status.lock.unlock();
+        }
+        return status;
+    }
+
+    private static WorkerStatusResponse workerStatusResponse(
+            RoleType role,
+            long dpRank,
+            long availableKv,
+            long totalKv,
+            long statusVersion) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(role);
+        response.setAlive(true);
+        response.setDpRank(dpRank);
+        response.setAvailableKvCacheTokens(availableKv);
+        response.setTotalKvCacheTokens(totalKv);
+        response.setStatusVersion(statusVersion);
+        response.setLatestFinishedVersion(0L);
+        return response;
+    }
+
+    /** Test-local fail-closed cancel transport for fixtures without preemption. */
+    private static final class UnsupportedCancelStub
+            implements EngineCancelChannel {
+        @Override
+        public boolean isSupported(DecodeEndpoint endpoint) {
+            return false;
+        }
+
+        @Override
+        public CompletableFuture<CancelOutcome> cancel(
+                CancelTarget target, long requestId, long timeoutMs) {
+            return CompletableFuture.completedFuture(
+                    CancelOutcome.unsupported());
+        }
     }
 
     private Response successRoute(long requestId) {

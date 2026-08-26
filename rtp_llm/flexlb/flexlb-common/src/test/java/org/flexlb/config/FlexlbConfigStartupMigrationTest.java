@@ -90,7 +90,9 @@ class FlexlbConfigStartupMigrationTest {
         assertEquals(60_000L, config.queueScheduler().getQueueTimeoutMs());
         assertEquals(500_000, config.queueScheduler().getLifecycle()
                 .getMaxDeliveredNotAcceptedRequestsGlobal());
-        assertEquals(128, config.nonBatchDispatcher()
+        NonBatchDispatcherConfig dispatcher = assertInstanceOf(
+                NonBatchDispatcherConfig.class, config.getDispatcher());
+        assertEquals(128, dispatcher
                 .getMaxInflightRequestsPerPrefillWorker());
         assertEquals(11L, config.getRouter().getAvailabilityHysteresisPercent());
         assertEquals(321L, config.getRouter().getRoles().getPrefill()
@@ -152,9 +154,11 @@ class FlexlbConfigStartupMigrationTest {
         assertEquals(0L, config.fixedWindowDecision().getMaxCollectionWaitMs());
         assertEquals(55, config.queueScheduler().getCapacity()
                 .getMaxWaitingRequestsPerPrefillWorker());
-        assertEquals(3, config.batchDispatcher()
+        BatchDispatcherConfig dispatcher = assertInstanceOf(
+                BatchDispatcherConfig.class, config.getDispatcher());
+        assertEquals(3, dispatcher
                 .getMaxInflightBatchesPerPrefillWorker());
-        assertEquals(4321L, config.batchDispatcher().getEnqueueRpcTimeoutMs());
+        assertEquals(4321L, dispatcher.getEnqueueRpcTimeoutMs());
     }
 
     @Test
@@ -290,7 +294,7 @@ class FlexlbConfigStartupMigrationTest {
                 }
                 """);
         assertTrue(defaultBatch.isSingleDecision());
-        assertTrue(defaultBatch.isBatchDispatch());
+        assertInstanceOf(BatchDispatcherConfig.class, defaultBatch.getDispatcher());
 
         FlexlbConfig singleBatch = ConfigService.parse("""
                 {
@@ -308,7 +312,7 @@ class FlexlbConfigStartupMigrationTest {
                 }
                 """);
         assertTrue(singleBatch.isSingleDecision());
-        assertTrue(singleBatch.isBatchDispatch());
+        assertInstanceOf(BatchDispatcherConfig.class, singleBatch.getDispatcher());
 
         FlexlbConfig fixedWindowNonBatch = ConfigService.parse("""
                 {
@@ -329,7 +333,9 @@ class FlexlbConfigStartupMigrationTest {
                 .getMaxRequests());
         assertEquals(20L, fixedWindowNonBatch.fixedWindowDecision()
                 .getMaxCollectionWaitMs());
-        assertFalse(fixedWindowNonBatch.isBatchDispatch());
+        assertInstanceOf(
+                NonBatchDispatcherConfig.class,
+                fixedWindowNonBatch.getDispatcher());
     }
 
     @Test
@@ -407,7 +413,7 @@ class FlexlbConfigStartupMigrationTest {
         assertEquals(2, config.getSchemaVersion());
         assertTrue(config.isDirect());
         assertFalse(config.isQueue());
-        assertFalse(config.isBatchDispatch());
+        assertInstanceOf(NonBatchDispatcherConfig.class, config.getDispatcher());
     }
 
     private static void assertInvalidIgnoredLegacyField(String field) {

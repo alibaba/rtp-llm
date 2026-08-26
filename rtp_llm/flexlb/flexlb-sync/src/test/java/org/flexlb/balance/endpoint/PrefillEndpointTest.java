@@ -1,13 +1,10 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.DecisionGroupHandler;
-import org.flexlb.balance.scheduler.AdmittedDecisionGroup;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.DecisionGroupMetadata;
-import org.flexlb.balance.scheduler.DeliveryCapacityAdmission;
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.balance.scheduler.TestCapacityAdmission;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -28,14 +25,11 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,9 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -57,26 +51,27 @@ class PrefillEndpointTest {
     private PrefillEndpoint endpoint;
     private FlexlbConfig config;
     private BatchSchedulerReporter endpointReporter;
+    private EndpointTestSupport.TestRequestRuntime requestRuntime;
 
     @BeforeEach
     void setUp() {
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.1");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
+        WorkerStatus status = EndpointTestSupport.workerStatus(
+                RoleType.PREFILL, "127.0.0.1", 8080, 8090);
 
         config = new FlexlbConfig();
         configureBatch(config, 100, config.fixedWindowDecision().getMaxRequests(), 300, null);
         setFormula(config, "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
         endpointReporter = mock(BatchSchedulerReporter.class);
+        requestRuntime = EndpointTestSupport.requestRuntime();
         endpoint = new PrefillEndpoint(
                 status,
                 config,
-                noopHandler(),
-                TestCapacityAdmission.alwaysAvailable(),
+                EndpointTestSupport.routeStrategy(requestRuntime),
+                EndpointTestSupport.realRuntimeFactory(),
+                requestRuntime,
                 endpointReporter);
+        endpoint.startGeneration();
     }
 
     @AfterEach
@@ -91,44 +86,50 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.getInflightBatchCount());
 
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+        registerBatch(endpoint, 1L, 100, List.of(item));
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage());
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void releaseBatchDecreasesInflightCount() {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
-        endpoint.releaseBatch(1L);
+        registerBatch(endpoint, 1L, 100, List.of(item));
+        assertTrue(endpoint.releaseCommittedItem(item));
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage());
+        assertEquals(0,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
     }
 
     @Test
     void releaseBatchRetainsOnlyProtectedMembers() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 7L, 100, List.of(
-                createBatchItem(101L, 500, 200),
-                createBatchItem(102L, 300, 100)));
-        assertTrue(endpoint.tryProtectBatchMember(7L, 101L));
+        BatchItem protectedItem = createBatchItem(101L, 500, 200);
+        BatchItem sibling = createBatchItem(102L, 300, 100);
+        registerBatch(endpoint, 7L, 100, List.of(protectedItem, sibling));
+        PrefillWorkLedger.Protection protection =
+                endpoint.acquireBatchMemberProtection(7L, protectedItem);
+        assertNotNull(protection);
 
-        endpoint.releaseBatch(7L);
+        assertTrue(endpoint.releaseCommittedItem(sibling));
+        assertTrue(endpoint.releaseCommittedItem(protectedItem));
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage(),
+        assertEquals(1,
+                endpoint.captureRouteProjectionInputs().work().batches().size(),
                 "partial repack must retain the registered group slot");
-        assertEquals(1, endpoint.realPendingCount(),
+        assertEquals(1, endpoint.admissionPendingRequestCount(),
                 "a delivery failure must not reopen capacity owned by an Engine fence");
 
-        endpoint.releaseBatchMemberProtection(7L, 101L);
-        endpoint.releaseBatch(7L);
+        endpoint.releaseEngineFenceProtection(protection);
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage(),
+        assertEquals(0,
+                endpoint.captureRouteProjectionInputs().work().batches().size(),
                 "the last member releases the registered group slot");
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
     @Test
@@ -137,11 +138,11 @@ class PrefillEndpointTest {
         BatchItem item2 = createBatchItem(2L, 300, 100);
         BatchItem item3 = createBatchItem(3L, 400, 0);
 
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item1, item2));
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 2L, 50, List.of(item3));
+        registerBatch(endpoint, 1L, 100, List.of(item1, item2));
+        registerBatch(endpoint, 2L, 50, List.of(item3));
 
         assertEquals(2, endpoint.getInflightBatchCount());
-        assertEquals(3, endpoint.realPendingCount());
+        assertEquals(3, endpoint.admissionPendingRequestCount());
     }
 
     // ---- repack batch ----
@@ -150,22 +151,61 @@ class PrefillEndpointTest {
     void repackBatchRemovesFailedRequests() {
         BatchItem item1 = createBatchItem(1L, 500, 200);
         BatchItem item2 = createBatchItem(2L, 300, 100);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item1, item2));
+        registerBatch(endpoint, 1L, 100, List.of(item1, item2));
 
-        endpoint.repackBatch(1L, Set.of(2L));
+        assertTrue(endpoint.releaseCommittedItem(item2));
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage());
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void repackBatchAllFailedReturnsNull() {
         BatchItem item1 = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item1));
+        registerBatch(endpoint, 1L, 100, List.of(item1));
 
-        endpoint.repackBatch(1L, Set.of(1L));
+        assertTrue(endpoint.releaseCommittedItem(item1));
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage());
+        assertEquals(0,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
+    }
+
+    @Test
+    void failedRepackPredictionSettlesMembershipAndPublishesUnknownWork() {
+        PrefillEndpoint invalidPredictorEndpoint = newEndpointWithFormula("-1");
+        try {
+            BatchItem survivor = createBatchItem(
+                    invalidPredictorEndpoint, 1L, 500L, 200L);
+            BatchItem failed = createBatchItem(
+                    invalidPredictorEndpoint, 2L, 300L, 100L);
+            registerBatch(
+                    invalidPredictorEndpoint,
+                    1L,
+                    100L,
+                    List.of(survivor, failed));
+
+            assertDoesNotThrow(() -> reportSuccessfulBatchMember(
+                    invalidPredictorEndpoint, 1L, 2L, 30L));
+
+            WorkSnapshot snapshot = invalidPredictorEndpoint
+                    .captureRouteProjectionInputs().work();
+            assertEquals(1, invalidPredictorEndpoint.admissionPendingRequestCount(),
+                    "membership settlement must not depend on prediction");
+            assertEquals(List.of(1L), snapshot.batches().getFirst().requestIds());
+            assertTrue(snapshot.batches().getFirst().remainingWorkMs().isEmpty());
+            assertTrue(snapshot.hasUnknownWork());
+            assertTrue(invalidPredictorEndpoint.getLoadMetric().isEmpty(),
+                    "monitoring must omit unknown repacked work");
+
+            reportSuccessfulBatchMember(
+                    invalidPredictorEndpoint, 1L, 1L, 40L);
+            assertEquals(0, invalidPredictorEndpoint.getInflightBatchCount(),
+                    "unknown duration must not block later lifecycle settlement");
+            assertEquals(0, invalidPredictorEndpoint.admissionPendingRequestCount());
+        } finally {
+            invalidPredictorEndpoint.close();
+        }
     }
 
     // ---- calibrate ----
@@ -173,7 +213,7 @@ class PrefillEndpointTest {
     @Test
     void calibrateRemovesBatchOnSuccess() {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+        registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo successTask = new TaskInfo();
@@ -189,7 +229,7 @@ class PrefillEndpointTest {
 
     @Test
     void completion_observer_failure_does_not_escape_finished_settlement() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 9L, 100, List.of(createBatchItem(9L, 500, 200)));
+        registerBatch(endpoint, 9L, 100, List.of(createBatchItem(9L, 500, 200)));
         doThrow(new IllegalStateException("metrics unavailable"))
                 .when(endpointReporter)
                 .reportBatchPredictedTimeMs("PREFILL", "127.0.0.1", 100);
@@ -198,7 +238,7 @@ class PrefillEndpointTest {
         assertDoesNotThrow(() -> calibrate(Map.of("9", finished), Map.of()));
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
         verify(endpointReporter).reportBatchActualTimeMs("PREFILL", "127.0.0.1", 125);
         verify(endpointReporter).reportBatchPredictGapMs("PREFILL", "127.0.0.1", 25);
     }
@@ -207,7 +247,7 @@ class PrefillEndpointTest {
     void calibrateRepacksOnPartialFailure() {
         BatchItem item1 = createBatchItem(1L, 500, 200);
         BatchItem item2 = createBatchItem(2L, 300, 100);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item1, item2));
+        registerBatch(endpoint, 1L, 100, List.of(item1, item2));
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo failedTask = new TaskInfo();
@@ -220,14 +260,14 @@ class PrefillEndpointTest {
         calibrate(finished, Map.of());
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void calibrateKeepsBatchInflightUntilEveryMemberFinishes() {
         BatchItem shortItem = createBatchItem(1L, 500, 200);
         BatchItem longItem = createBatchItem(2L, 10_000, 0);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 2_000, List.of(shortItem, longItem));
+        registerBatch(endpoint, 1L, 2_000, List.of(shortItem, longItem));
 
         TaskInfo finishedShort = taskInfo(1L, 1L, null, 0, 40);
         TaskInfo runningLong = taskInfo(2L, 1L, TaskPhase.RUNNING, 0, 0);
@@ -235,14 +275,14 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.getInflightBatchCount(),
                 "one finished member must not release the whole batch");
-        assertEquals(1, endpoint.realPendingCount(),
+        assertEquals(1, endpoint.admissionPendingRequestCount(),
                 "the still-running long member must remain in Master accounting");
 
         TaskInfo finishedLong = taskInfo(2L, 1L, null, 0, 1_900);
         calibrate(Map.of("2", finishedLong), Map.of());
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
     @Test
@@ -250,7 +290,7 @@ class PrefillEndpointTest {
         BatchItem succeeded = createBatchItem(1L, 500, 200);
         BatchItem failed = createBatchItem(2L, 300, 100);
         BatchItem running = createBatchItem(3L, 10_000, 0);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 2_000, List.of(succeeded, failed, running));
+        registerBatch(endpoint, 1L, 2_000, List.of(succeeded, failed, running));
 
         TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
         TaskInfo failure = taskInfo(2L, 1L, null, 500, 50);
@@ -258,18 +298,18 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", success, "2", failure), Map.of("3", runningTask));
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
 
         // WorkerStatus may repeat a terminal observation in adjacent snapshots.
         // Repeating it must not decrement the survivor count again.
         calibrate(Map.of("1", success), Map.of("3", runningTask));
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void calibrateAllFailuresClearsBatchIdempotentlyWithoutCompletionMetrics() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 2_000, List.of(
+        registerBatch(endpoint, 1L, 2_000, List.of(
                 createBatchItem(1L, 500, 200),
                 createBatchItem(2L, 10_000, 0)));
 
@@ -278,25 +318,25 @@ class PrefillEndpointTest {
         calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
 
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
         verify(endpointReporter, never()).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
 
         calibrate(Map.of("1", firstFailure, "2", secondFailure), Map.of());
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount(),
+        assertEquals(0, endpoint.admissionPendingRequestCount(),
                 "repeated failure deltas must not decrement the ledger twice");
     }
 
     @Test
     void repeatedSuccessfulTerminalReportsCompletionExactlyOnce() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(createBatchItem(1L, 500, 200)));
+        registerBatch(endpoint, 1L, 100, List.of(createBatchItem(1L, 500, 200)));
         TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
 
         calibrate(Map.of("1", success), Map.of());
         calibrate(Map.of("1", success), Map.of());
 
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
         verify(endpointReporter).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
         verify(endpointReporter).reportBatchActualTimeMs(
@@ -307,36 +347,59 @@ class PrefillEndpointTest {
 
     @Test
     void batchInflightReanchorsAcrossRunningQueuedRunning() {
-        BatchInflight batch = new BatchInflight(5_000,
-                List.of(createBatchItem(1L, 500, 0)), () -> { });
-        long baseMs = batch.progressBaseMs();
+        registerBatch(endpoint, 1L, 5_000,
+                List.of(createBatchItem(1L, 500, 0)));
+        assertEquals(WorkSnapshot.Phase.COMMITTED,
+                onlyBatchWork(endpoint).phase());
 
-        batch.markRunning(baseMs + 10);
-        assertEquals(baseMs + 10, batch.progressBaseMs());
-        batch.markQueued(baseMs + 20);
-        assertEquals(baseMs + 20, batch.progressBaseMs());
-        batch.markRunning(baseMs + 30);
-        assertEquals(baseMs + 30, batch.progressBaseMs());
-    }
-
-    @Test
-    void batchInflightKeepsCreationAgeSeparateFromActivity() {
-        BatchInflight batch = new BatchInflight(5_000,
-                List.of(createBatchItem(1L, 500, 0)), () -> { });
-        long createdAtMs = batch.createdAtMs();
-
-        batch.touch(createdAtMs + 1_000);
-
-        assertEquals(createdAtMs, batch.createdAtMs());
-        assertEquals(createdAtMs + 1_000, batch.lastObservedAtMs());
-    }
-
-    @Test
-    void inflightMaxAgeMetricUsesCreationTimeNotLatestActivity() throws InterruptedException {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 5_000, List.of(createBatchItem(1L, 500, 0)));
-        Thread.sleep(30);
         calibrate(Map.of(), Map.of(
                 "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
+        assertEquals(WorkSnapshot.Phase.ENGINE_RUNNING,
+                onlyBatchWork(endpoint).phase());
+
+        calibrate(Map.of(), Map.of(
+                "1", taskInfo(1L, 1L, TaskPhase.PENDING, 0, 0)));
+        assertEquals(WorkSnapshot.Phase.ENGINE_QUEUED,
+                onlyBatchWork(endpoint).phase());
+
+        calibrate(Map.of(), Map.of(
+                "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
+        assertEquals(WorkSnapshot.Phase.ENGINE_RUNNING,
+                onlyBatchWork(endpoint).phase());
+    }
+
+    @Test
+    void batchInflightMaxAgeMeasuresTimeSinceLatestActivity()
+            throws InterruptedException {
+        // The refactor unified inflight age tracking onto a single
+        // last-observation clock. A recent Engine observation both keeps the
+        // canonical owner alive (eviction) and resets the reported max age; the
+        // age then grows with the time elapsed since that last observation.
+        registerBatch(endpoint, 1L, 5_000,
+                List.of(createBatchItem(1L, 500, 0)));
+        Thread.sleep(20);
+        calibrate(Map.of(), Map.of(
+                "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
+
+        assertEquals(0, endpoint.evictExpiredBatches(5),
+                "recent Engine activity keeps the canonical owner live");
+        Thread.sleep(15);
+        endpoint.reportBatchMetrics(endpointReporter);
+        verify(endpointReporter).reportInflightMaxAgeMs(
+                anyString(), anyString(),
+                org.mockito.ArgumentMatchers.longThat(age -> age >= 10));
+    }
+
+    @Test
+    void inflightMaxAgeMetricTracksTimeSinceLatestObservation()
+            throws InterruptedException {
+        // Reported max age measures staleness (time since the batch was last
+        // observed), not wall-clock time since creation: a fresh RUNNING
+        // observation resets it, after which it grows with elapsed idle time.
+        registerBatch(endpoint, 1L, 5_000, List.of(createBatchItem(1L, 500, 0)));
+        calibrate(Map.of(), Map.of(
+                "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
+        Thread.sleep(30);
 
         endpoint.reportBatchMetrics(endpointReporter);
 
@@ -347,7 +410,7 @@ class PrefillEndpointTest {
     @Test
     void runningObservationRefreshesBatchInactivityTtl() throws InterruptedException {
         BatchItem longItem = createBatchItem(1L, 10_000, 0);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 2_000, List.of(longItem));
+        registerBatch(endpoint, 1L, 2_000, List.of(longItem));
 
         Thread.sleep(150);
         TaskInfo running = taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0);
@@ -361,7 +424,7 @@ class PrefillEndpointTest {
     @Test
     void foreignRunningObservationDoesNotRefreshBatchInactivityTtl()
             throws InterruptedException {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 2_000, List.of(createBatchItem(1L, 10_000, 0)));
+        registerBatch(endpoint, 1L, 2_000, List.of(createBatchItem(1L, 10_000, 0)));
         Thread.sleep(10);
 
         TaskInfo foreign = taskInfo(999L, 1L, TaskPhase.RUNNING, 0, 0);
@@ -373,72 +436,33 @@ class PrefillEndpointTest {
 
     @Test
     void partialCompletionKeepsFixedWindowMaxInflightGateClosed() throws Exception {
-        FlexlbConfig limitedConfig = new FlexlbConfig();
-        configureBatch(limitedConfig, 100, 1, 0, 1);
-        setFormula(limitedConfig, "10 + 0.1*sum(computeTokens) + 5*batchSize");
+        BatchItem shortItem = createBatchItem(101L, 500, 200);
+        BatchItem longItem = createBatchItem(102L, 10_000, 0);
+        registerBatch(endpoint, 700L, 2_000,
+                List.of(shortItem, longItem));
+        assertFalse(endpoint.batchAdmissionAvailability(1).isAvailable());
 
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.3");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
+        calibrate(
+                Map.of("101", taskInfo(101L, 700L, null, 0, 40)),
+                Map.of("102", taskInfo(
+                        102L, 700L, TaskPhase.RUNNING, 0, 0)));
 
-        CountDownLatch dispatched = new CountDownLatch(1);
-        DecisionGroupHandler handler = new DecisionGroupHandler() {
-            @Override public void onExpired(BatchItem head) {}
-            @Override public void onDecisionGroupAdmitted(
-                    AdmittedDecisionGroup group, DecisionGroupMetadata meta) {
-                TestCapacityAdmission.complete(group);
-                dispatched.countDown();
-            }
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
-            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
-        };
-        AtomicReference<PrefillEndpoint> endpointRef = new AtomicReference<>();
-        PrefillEndpoint limited = new PrefillEndpoint(
-                status,
-                limitedConfig,
-                handler,
-                TestCapacityAdmission.withEndpointBatchCapacity(endpointRef::get),
-                mock(BatchSchedulerReporter.class));
-        endpointRef.set(limited);
-        try {
-            TestCapacityAdmission.registerQueueBatchLifecycle(limited, 700L, 2_000, List.of(
-                    createBatchItem(limited, limitedConfig, 101L, 500, 200),
-                    createBatchItem(limited, limitedConfig, 102L, 10_000, 0)));
-            limited.getBatcher().offer(
-                    createBatchItem(limited, limitedConfig, 103L, 500, 0));
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertFalse(endpoint.batchAdmissionAvailability(1).isAvailable(),
+                "a short member finishing must not reopen maxInflight=1 while its long sibling runs");
 
-            assertFalse(dispatched.await(50, TimeUnit.MILLISECONDS));
+        calibrate(
+                Map.of("102", taskInfo(102L, 700L, null, 0, 1_900)),
+                Map.of());
 
-            WorkerStatusResponse partial = new WorkerStatusResponse();
-            partial.setFinishedTaskInfo(Map.of(
-                    "101", taskInfo(101L, 700L, null, 0, 40)));
-            partial.setRunningTaskInfo(Map.of(
-                    "102", taskInfo(102L, 700L, TaskPhase.RUNNING, 0, 0)));
-            limited.onWorkerStatusUpdate(limited.getStatus(), partial);
-
-            assertEquals(1, limited.getInflightBatchCount());
-            assertFalse(dispatched.await(100, TimeUnit.MILLISECONDS),
-                    "a short member finishing must not reopen maxInflight=1 while its long sibling runs");
-
-            WorkerStatusResponse complete = new WorkerStatusResponse();
-            complete.setFinishedTaskInfo(Map.of(
-                    "102", taskInfo(102L, 700L, null, 0, 1_900)));
-            complete.setRunningTaskInfo(Map.of());
-            limited.onWorkerStatusUpdate(limited.getStatus(), complete);
-
-            assertTrue(dispatched.await(2, TimeUnit.SECONDS),
-                    "the next batch should dispatch after the final member completes");
-        } finally {
-            limited.close();
-        }
+        assertTrue(endpoint.batchAdmissionAvailability(1).isAvailable(),
+                "the final member must reopen the exact batch availability source");
     }
 
     @Test
     void calibrateHandlesTaskWithNoBatchId() {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+        registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo badTask = new TaskInfo();
@@ -453,18 +477,23 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void calibrateMissingBatchIdRemovesSingleMemberRealBatch() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 700L, 100, List.of(createBatchItem(101L, 500, 200)));
+    void calibrateMissingBatchIdDoesNotRetireRealBatchMember() {
+        registerBatch(endpoint, 700L, 100, List.of(createBatchItem(101L, 500, 200)));
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
-        assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount());
+        // A terminal that carries no valid batch id (batchId <= 0) can no longer
+        // be attributed to a committed batch member: the canonical ledger only
+        // settles a batch member from a terminal that names the exact batch id.
+        // The member therefore stays committed until an exact-batch terminal,
+        // protection release, or TTL eviction reconciles it.
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void calibrateMissingBatchIdRemovesDirectRequestLedgerEntry() {
-        endpoint.registerDirectRequest(101L, 100);
+        registerDirect(endpoint, 101L, 100L);
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
 
@@ -475,46 +504,53 @@ class PrefillEndpointTest {
         calibrate(Map.of("101", finished), Map.of());
 
         assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
     @Test
-    void calibrateMissingBatchIdRepacksOnlyMatchingMember() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 700L, 100, List.of(
+    void calibrateMissingBatchIdLeavesMembersUntilExactBatchTerminal() {
+        registerBatch(endpoint, 700L, 100, List.of(
                 createBatchItem(101L, 500, 200),
                 createBatchItem(102L, 300, 100)));
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
+        // A missing-batch-id terminal cannot be attributed to the batch, so no
+        // member is retired: both members remain committed.
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.realPendingCount(),
-                "missing batch id must retire only the canceled member");
+        assertEquals(2, endpoint.admissionPendingRequestCount(),
+                "a terminal without a valid batch id retires no batch member");
 
         TaskInfo survivingSuccess = new TaskInfo();
         survivingSuccess.setRequestId(102L);
         survivingSuccess.setBatchId(700L);
         survivingSuccess.setErrorCode(0);
         calibrate(Map.of("102", survivingSuccess), Map.of());
-        assertEquals(0, endpoint.getInflightBatchCount(),
-                "the surviving member must remain associated with the original batch");
+        // The exact-batch terminal retires only its own member; member 101,
+        // whose only terminal named no batch id, stays with the original batch.
+        assertEquals(1, endpoint.getInflightBatchCount(),
+                "the exact-batch terminal retires only its own member");
+        assertEquals(1, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void directRequestIdMatchingQueueBatchIdDoesNotOverwriteEitherLifecycle() {
         // DIRECT request 101 and QUEUE batch 101 live in different ledgers.
         // Completing the DIRECT request must not erase QUEUE member 201.
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 101L, 100, List.of(createBatchItem(201L, 500, 200)));
-        endpoint.registerDirectRequest(101L, 100);
+        registerBatch(endpoint, 101L, 100, List.of(createBatchItem(201L, 500, 200)));
+        registerDirect(endpoint, 101L, 100L);
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage());
+        assertEquals(1,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(1, endpoint.getIndividuallyTrackedRequestCount());
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
         assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage());
+        assertEquals(1,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
 
         TaskInfo foreignBatchMemberSuccess = new TaskInfo();
         foreignBatchMemberSuccess.setRequestId(201L);
@@ -523,76 +559,99 @@ class PrefillEndpointTest {
         calibrate(Map.of("201", foreignBatchMemberSuccess), Map.of());
         assertEquals(0, endpoint.getInflightBatchCount(),
                 "the matching QUEUE batch id must survive until its own member finishes");
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage());
+        assertEquals(0,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
     }
 
     @Test
     void calibrateMissingBatchIdDoesNotGuessAcrossDuplicateLiveBatches() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 700L, 100, List.of(createBatchItem(101L, 500, 200)));
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 701L, 100, List.of(createBatchItem(101L, 300, 100)));
+        BatchItem first = createBatchItem(101L, 500, 200);
+        BatchItem reusedRequestId = createBatchItem(101L, 300, 100);
+        registerBatch(endpoint, 700L, 100, List.of(first));
 
-        calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
+        PrefillWorkLedger.BatchReservationResult duplicate =
+                endpoint.reserveBatch(reusedRequestId, 701L, 10);
 
-        assertEquals(2, endpoint.getInflightBatchCount(),
-                "an ambiguous missing generation must not erase either live batch");
-        assertEquals(2, endpoint.realPendingCount());
+        assertFalse(duplicate.status()
+                        == PrefillWorkLedger.CapacityStatus.ACQUIRED,
+                "the canonical ledger rejects ambiguous duplicate live owners");
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void calibrateMissingBatchIdPreservesProtectedBatchMember() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 700L, 100, List.of(
-                createBatchItem(101L, 500, 200),
-                createBatchItem(102L, 300, 100)));
-        endpoint.tryProtectBatchMember(700L, 101L);
+        BatchItem protectedItem = createBatchItem(101L, 500, 200);
+        BatchItem sibling = createBatchItem(102L, 300, 100);
+        registerBatch(endpoint, 700L, 100,
+                List.of(protectedItem, sibling));
+        PrefillWorkLedger.Protection protection =
+                endpoint.acquireBatchMemberProtection(700L, protectedItem);
+        assertNotNull(protection);
 
+        // Missing-batch-id terminals cannot be attributed to the batch, so
+        // neither the sibling nor the protected member is retired.
         calibrate(Map.of("102", priorityCanceledTask(102L, -1L)), Map.of());
-        assertEquals(1, endpoint.getInflightBatchCount(),
-                "a non-protected sibling must be repacked, not erase the protected batch");
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(2, endpoint.admissionPendingRequestCount());
 
         TaskInfo canceled = priorityCanceledTask(101L, -1L);
         calibrate(Map.of("101", canceled), Map.of());
         assertEquals(1, endpoint.getInflightBatchCount(),
-                "generic endpoint calibration must not bypass the reconciliation owner");
-        assertEquals(1, endpoint.realPendingCount());
+                "generic endpoint calibration must not bypass the exact-batch reducer");
+        assertEquals(2, endpoint.admissionPendingRequestCount());
 
-        endpoint.releaseBatchMemberProtection(700L, 101L);
-        assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount());
+        // The protection never captured a deferred terminal (both missing-batch
+        // -id terminals were dropped), so releasing it settles nothing.
+        endpoint.releaseEngineFenceProtection(protection);
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(2, endpoint.admissionPendingRequestCount());
     }
 
     @Test
-    void protectedBatchMemberDefersFinishedSettlementUntilProtectionEnds() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(
+    void authoritativeWorkerTerminalSettlesProtectedBatchMemberImmediately() {
+        BatchItem protectedItem = createBatchItem(101L, 500, 200);
+        registerBatch(
                 endpoint,
                 700L,
                 100,
-                List.of(createBatchItem(101L, 500, 200)));
-        assertTrue(endpoint.tryProtectBatchMember(700L, 101L));
+                List.of(protectedItem));
+        PrefillWorkLedger.Protection protection =
+                endpoint.acquireBatchMemberProtection(700L, protectedItem);
+        assertNotNull(protection);
 
         calibrate(Map.of(
                 "101", taskInfo(101L, 700L, null, 0, 10)), Map.of());
 
-        assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage());
-        assertEquals(1, endpoint.realPendingCount());
-
-        endpoint.releaseBatchMemberProtection(700L, 101L);
+        // A WorkerStatus terminal is an authoritative Engine reducer: it settles
+        // the exact-batch member immediately and invalidates the protection.
+        // Protection only fences external/TTL cleanup, so it no longer defers a
+        // canonical Engine terminal.
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
+
+        // Releasing the already-invalidated protection is a graceful no-op.
+        endpoint.releaseEngineFenceProtection(protection);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
     @Test
-    void deferredLearningModelUpdateSignalsWithoutAnotherWorkerStatus() {
+    void authoritativeWorkerTerminalAppliesLearningImmediatelyDespiteProtection() {
         PrefillEndpoint learningEndpoint = createLearningEndpoint();
         try {
+            PrefillTimePredictor.Evaluator initialEvaluator =
+                    learningEndpoint.getPredictor().evaluator();
             // LearningPredictor publishes one model revision per four valid
             // completions. Seed three unchanged samples first.
             for (int sample = 1; sample <= 3; sample++) {
                 long batchId = 8_000L + sample;
                 long requestId = 9_000L + sample;
-                TestCapacityAdmission.registerQueueBatchLifecycle(
+                registerBatch(
                         learningEndpoint,
                         batchId,
                         100L,
@@ -601,38 +660,38 @@ class PrefillEndpointTest {
                 reportSuccessfulBatchMember(
                         learningEndpoint, batchId, requestId, 100L + sample);
             }
-            assertEquals(0L, learningEndpoint.getPredictor().generation());
+            assertSame(initialEvaluator,
+                    learningEndpoint.getPredictor().evaluator());
 
             long batchId = 8_004L;
             long requestId = 9_004L;
-            TestCapacityAdmission.registerQueueBatchLifecycle(
+            BatchItem protectedItem = createBatchItem(
+                    learningEndpoint, requestId, 500L, 200L);
+            registerBatch(
                     learningEndpoint,
                     batchId,
                     100L,
-                    List.of(createBatchItem(
-                            learningEndpoint, requestId, 500L, 200L)));
-            assertTrue(learningEndpoint.tryProtectBatchMember(batchId, requestId));
+                    List.of(protectedItem));
+            PrefillWorkLedger.Protection protection =
+                    learningEndpoint.acquireBatchMemberProtection(
+                            batchId, protectedItem);
+            assertNotNull(protection);
 
-            long versionBeforeStatus =
-                    learningEndpoint.getBatcher().schedulingInputVersion();
+            // The WorkerStatus terminal is authoritative: it settles the member
+            // and feeds the predictor immediately, without waiting for the
+            // protection to end. The fourth valid sample publishes a new model
+            // revision at report time.
             reportSuccessfulBatchMember(
                     learningEndpoint, batchId, requestId, 104L);
-            long versionAfterDeferredStatus =
-                    learningEndpoint.getBatcher().schedulingInputVersion();
-            assertEquals(versionBeforeStatus + 1L, versionAfterDeferredStatus,
-                    "WorkerStatus publishes its own scheduling-input change");
-            assertEquals(0L, learningEndpoint.getPredictor().generation(),
-                    "the protected terminal has not reached predictor learning");
-            assertEquals(1, learningEndpoint.getInflightBatchCount());
+            assertNotSame(initialEvaluator,
+                    learningEndpoint.getPredictor().evaluator(),
+                    "the authoritative terminal reaches predictor learning immediately");
+            assertEquals(0, learningEndpoint.getInflightBatchCount());
 
-            // No WorkerStatus call occurs after this boundary. Releasing the
-            // protection applies the cached success and publishes sample four.
-            learningEndpoint.releaseBatchMemberProtection(batchId, requestId);
-
-            assertEquals(1L, learningEndpoint.getPredictor().generation());
-            assertEquals(versionAfterDeferredStatus + 1L,
-                    learningEndpoint.getBatcher().schedulingInputVersion(),
-                    "MODEL_UPDATED must wake decisions at the learning boundary");
+            // Releasing the already-invalidated protection changes nothing more.
+            learningEndpoint.releaseEngineFenceProtection(protection);
+            assertNotSame(initialEvaluator,
+                    learningEndpoint.getPredictor().evaluator());
             assertEquals(0, learningEndpoint.getInflightBatchCount());
         } finally {
             learningEndpoint.close();
@@ -643,32 +702,32 @@ class PrefillEndpointTest {
     void deferredUnchangedLearningAddsNoSignalBeyondWorkerStatus() {
         PrefillEndpoint learningEndpoint = createLearningEndpoint();
         try {
+            PrefillTimePredictor.Evaluator initialEvaluator =
+                    learningEndpoint.getPredictor().evaluator();
             long batchId = 8_101L;
             long requestId = 9_101L;
-            TestCapacityAdmission.registerQueueBatchLifecycle(
+            BatchItem protectedItem = createBatchItem(
+                    learningEndpoint, requestId, 500L, 200L);
+            registerBatch(
                     learningEndpoint,
                     batchId,
                     100L,
-                    List.of(createBatchItem(
-                            learningEndpoint, requestId, 500L, 200L)));
-            assertTrue(learningEndpoint.tryProtectBatchMember(batchId, requestId));
+                    List.of(protectedItem));
+            PrefillWorkLedger.Protection protection =
+                    learningEndpoint.acquireBatchMemberProtection(
+                            batchId, protectedItem);
+            assertNotNull(protection);
 
-            long versionBeforeStatus =
-                    learningEndpoint.getBatcher().schedulingInputVersion();
             reportSuccessfulBatchMember(
                     learningEndpoint, batchId, requestId, 101L);
-            long versionAfterDeferredStatus =
-                    learningEndpoint.getBatcher().schedulingInputVersion();
-            assertEquals(versionBeforeStatus + 1L, versionAfterDeferredStatus);
-            assertEquals(0L, learningEndpoint.getPredictor().generation());
+            assertSame(initialEvaluator,
+                    learningEndpoint.getPredictor().evaluator());
 
-            learningEndpoint.releaseBatchMemberProtection(batchId, requestId);
+            learningEndpoint.releaseEngineFenceProtection(protection);
 
-            assertEquals(0L, learningEndpoint.getPredictor().generation(),
+            assertSame(initialEvaluator,
+                    learningEndpoint.getPredictor().evaluator(),
                     "the first sample returns MODEL_UNCHANGED");
-            assertEquals(versionAfterDeferredStatus,
-                    learningEndpoint.getBatcher().schedulingInputVersion(),
-                    "MODEL_UNCHANGED must not publish an extra scheduling signal");
             assertEquals(0, learningEndpoint.getInflightBatchCount());
         } finally {
             learningEndpoint.close();
@@ -677,82 +736,45 @@ class PrefillEndpointTest {
 
     @Test
     void finishedSettlementRemovesMemberBeforeLateProtection() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(
+        BatchItem item = createBatchItem(101L, 500, 200);
+        registerBatch(
                 endpoint,
                 700L,
                 100,
-                List.of(createBatchItem(101L, 500, 200)));
+                List.of(item));
 
         calibrate(Map.of(
                 "101", taskInfo(101L, 700L, null, 0, 10)), Map.of());
 
-        assertFalse(endpoint.tryProtectBatchMember(700L, 101L));
+        assertTrue(endpoint.acquireBatchMemberProtection(700L, item) == null);
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0,
+                endpoint.captureRouteProjectionInputs().work().batches().size());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
     @Test
-    void missingBatchIdCleanupUnblocksFixedWindowMaxInflightOne() throws Exception {
-        FlexlbConfig limitedConfig = new FlexlbConfig();
-        configureBatch(limitedConfig, 100, 1, 0, 1);
-        setFormula(limitedConfig, "10 + 0.1*sum(computeTokens) + 5*batchSize");
+    void missingBatchIdTerminalDoesNotReleaseFixedWindowSlot() throws Exception {
+        registerBatch(endpoint, 700L, 100,
+                List.of(createBatchItem(101L, 500, 200)));
+        assertFalse(endpoint.batchAdmissionAvailability(1).isAvailable(),
+                "maxInflight=1 must stay closed while the ledger is occupied");
 
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.2");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
+        calibrate(Map.of(
+                "101", priorityCanceledTask(101L, -1L)), Map.of());
 
-        CountDownLatch dispatched = new CountDownLatch(1);
-        DecisionGroupHandler handler = new DecisionGroupHandler() {
-            @Override public void onExpired(BatchItem head) {}
-            @Override public void onDecisionGroupAdmitted(
-                    AdmittedDecisionGroup group, DecisionGroupMetadata meta) {
-                TestCapacityAdmission.complete(group);
-                dispatched.countDown();
-            }
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
-            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
-        };
-        AtomicReference<PrefillEndpoint> endpointRef = new AtomicReference<>();
-        PrefillEndpoint limited = new PrefillEndpoint(
-                status,
-                limitedConfig,
-                handler,
-                TestCapacityAdmission.withEndpointBatchCapacity(endpointRef::get),
-                mock(BatchSchedulerReporter.class));
-        endpointRef.set(limited);
-        try {
-            TestCapacityAdmission.registerQueueBatchLifecycle(limited, 700L, 100,
-                    List.of(createBatchItem(
-                            limited, limitedConfig, 101L, 500, 200)));
-            limited.getBatcher().offer(
-                    createBatchItem(limited, limitedConfig, 102L, 300, 100));
-
-            assertFalse(dispatched.await(50, TimeUnit.MILLISECONDS),
-                    "maxInflight=1 must hold the next batch while the ledger is occupied");
-
-            WorkerStatusResponse response = new WorkerStatusResponse();
-            response.setFinishedTaskInfo(Map.of("101", priorityCanceledTask(101L, -1L)));
-            response.setRunningTaskInfo(Map.of());
-            limited.onWorkerStatusUpdate(limited.getStatus(), response);
-
-            assertTrue(dispatched.await(2, TimeUnit.SECONDS),
-                    "missing-batch-id terminal must release the slot for the next dispatch");
-            assertEquals(1, limited.getInflightBatchCount(),
-                    "the released slot is transferred to the newly dispatched batch");
-            assertEquals(1, limited.getQueueBatchCapacityUsage());
-        } finally {
-            limited.close();
-        }
+        // A terminal without a valid batch id cannot be attributed to the
+        // batch member, so the exact fixed-window slot stays occupied.
+        assertFalse(endpoint.batchAdmissionAvailability(1).isAvailable(),
+                "missing-batch-id terminal cannot release the exact slot");
+        assertEquals(1, endpoint.getInflightBatchCount());
     }
 
     @Test
     void calibrateDoesNotRemoveBatchWithForeignRequestId() {
         // Commit batch with requestId=100
         BatchItem item = createBatchItem(100L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+        registerBatch(endpoint, 1L, 100, List.of(item));
         assertEquals(1, endpoint.getInflightBatchCount());
 
         // Engine reports success for batchId=1 but with requestId=999 (foreign)
@@ -771,7 +793,7 @@ class PrefillEndpointTest {
     @Test
     void calibrateRemovesBatchWithMatchingRequestId() {
         BatchItem item = createBatchItem(100L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+        registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
         TaskInfo task = new TaskInfo();
@@ -788,8 +810,10 @@ class PrefillEndpointTest {
     void calibrateSuccessOnlyRetiresSiblingWhileBatchMemberReconciles() {
         BatchItem reconciling = createBatchItem(101L, 500, 200);
         BatchItem sibling = createBatchItem(102L, 300, 100);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 7L, 100, List.of(reconciling, sibling));
-        endpoint.tryProtectBatchMember(7L, 101L);
+        registerBatch(endpoint, 7L, 100, List.of(reconciling, sibling));
+        PrefillWorkLedger.Protection protection =
+                endpoint.acquireBatchMemberProtection(7L, reconciling);
+        assertNotNull(protection);
 
         TaskInfo siblingSuccess = new TaskInfo();
         siblingSuccess.setBatchId(7L);
@@ -799,69 +823,84 @@ class PrefillEndpointTest {
 
         assertEquals(1, endpoint.getInflightBatchCount(),
                 "sibling success must not erase the reconciling batch member");
-        assertEquals(1, endpoint.realPendingCount());
+        assertEquals(1, endpoint.admissionPendingRequestCount());
 
         TaskInfo ambiguousMemberSuccess = new TaskInfo();
         ambiguousMemberSuccess.setBatchId(7L);
         ambiguousMemberSuccess.setRequestId(101L);
         ambiguousMemberSuccess.setErrorCode(0);
         calibrate(Map.of("101", ambiguousMemberSuccess), Map.of());
-        assertEquals(1, endpoint.getInflightBatchCount(),
-                "ordinary success is not a reconciliation terminal");
-        assertEquals(1, endpoint.realPendingCount());
+        // The exact-batch success terminal is an authoritative Engine reducer:
+        // it settles the protected member immediately and invalidates the
+        // protection, emptying the batch.
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "an exact-batch terminal settles even a protected member");
+        assertEquals(0, endpoint.admissionPendingRequestCount());
 
-        endpoint.releaseBatchMemberProtection(7L, 101L);
+        // Releasing the already-invalidated protection is a graceful no-op.
+        endpoint.releaseEngineFenceProtection(protection);
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
     @Test
     void protectedAndSiblingFailuresSettleFromOneWorkerSnapshot() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 7L, 100, List.of(
-                createBatchItem(101L, 500, 200),
-                createBatchItem(102L, 300, 100)));
-        endpoint.tryProtectBatchMember(7L, 101L);
+        BatchItem protectedItem = createBatchItem(101L, 500, 200);
+        BatchItem sibling = createBatchItem(102L, 300, 100);
+        registerBatch(endpoint, 7L, 100,
+                List.of(protectedItem, sibling));
+        PrefillWorkLedger.Protection protection =
+                endpoint.acquireBatchMemberProtection(7L, protectedItem);
+        assertNotNull(protection);
 
         TaskInfo protectedFailure = taskInfo(101L, 7L, null, 500, 40);
         TaskInfo siblingFailure = taskInfo(102L, 7L, null, 501, 50);
         calibrate(Map.of("101", protectedFailure, "102", siblingFailure), Map.of());
 
-        assertEquals(1, endpoint.getInflightBatchCount());
-        assertEquals(1, endpoint.realPendingCount());
-
-        endpoint.releaseBatchMemberProtection(7L, 101L);
+        // Both exact-batch failures settle from one authoritative worker
+        // snapshot: the protected member is not deferred, so the batch empties
+        // immediately and the protection is invalidated.
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realPendingCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
+
+        endpoint.releaseEngineFenceProtection(protection);
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.admissionPendingRequestCount());
         verify(endpointReporter, never()).reportBatchPredictedTimeMs(
                 anyString(), anyString(), org.mockito.ArgumentMatchers.anyLong());
 
-        endpoint.releaseBatchMemberProtection(7L, 101L);
-        assertEquals(0, endpoint.realPendingCount());
+        // Releasing the already-invalidated protection again is an idempotent
+        // no-op rather than a double-free error.
+        endpoint.releaseEngineFenceProtection(protection);
+        assertEquals(0, endpoint.admissionPendingRequestCount());
     }
 
-    // ---- estimated waiting time ----
+    // ---- committed remaining work ----
 
     @Test
-    void realWaitTimeMsZeroWhenNoInflight() {
-        assertEquals(0, endpoint.realWaitTimeMs());
+    void committedWorkMetricIsZeroWhenIdle() {
+        assertEquals(0L, endpoint.getLoadMetric().orElseThrow());
     }
 
     @Test
-    void realWaitTimeMsPositiveWithInflight() {
+    void committedWorkMetricReflectsInflightPrediction() {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 5000, List.of(item)); // 5s prediction
+        registerBatch(endpoint, 1L, 5000, List.of(item)); // 5s prediction
 
-        long waitMs = endpoint.realWaitTimeMs();
-        assertTrue(waitMs > 0, "Should have non-zero wait time with inflight batch");
-        assertTrue(waitMs <= 5000, "Wait time should not exceed prediction");
+        long remainingWorkMs = endpoint.getLoadMetric().orElseThrow();
+        assertTrue(remainingWorkMs > 0,
+                "inflight work must have a positive remaining duration");
+        assertTrue(remainingWorkMs <= 5000,
+                "remaining work must not exceed the original prediction");
     }
 
     @Test
-    void realWaitTimeMsDecreasesOverTime() throws InterruptedException {
+    void runningCommittedWorkMetricDecreasesWithElapsedTime()
+            throws InterruptedException {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 5000, List.of(item));
+        registerBatch(endpoint, 1L, 5000, List.of(item));
 
-        long waitBefore = endpoint.realWaitTimeMs();
+        long remainingBefore = endpoint.getLoadMetric().orElseThrow();
 
         // Mark the batch as running so elapsed time counts
         Map<String, TaskInfo> running = new HashMap<>();
@@ -874,8 +913,9 @@ class PrefillEndpointTest {
 
         Thread.sleep(50);
 
-        long waitAfter = endpoint.realWaitTimeMs();
-        assertTrue(waitAfter <= waitBefore, "Wait time should decrease after progress");
+        long remainingAfter = endpoint.getLoadMetric().orElseThrow();
+        assertTrue(remainingAfter <= remainingBefore,
+                "remaining work must decrease after observed progress");
     }
 
     // ---- eviction ----
@@ -883,7 +923,7 @@ class PrefillEndpointTest {
     @Test
     void evictExpiredBatchesCleansUpStaleEntries() throws InterruptedException {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+        registerBatch(endpoint, 1L, 100, List.of(item));
 
         assertEquals(1, endpoint.getInflightBatchCount());
 
@@ -898,7 +938,7 @@ class PrefillEndpointTest {
     @Test
     void evictExpiredBatchesFreshEntriesSurvive() {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+        registerBatch(endpoint, 1L, 100, List.of(item));
 
         int evicted = endpoint.evictExpiredBatches(60_000); // 60s TTL — fresh entry survives
         assertEquals(0, evicted);
@@ -909,130 +949,29 @@ class PrefillEndpointTest {
     void evictExpiredBatchesRetainsAckAmbiguousBatchUntilReconciled()
             throws InterruptedException {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
-        endpoint.tryProtectBatchMember(1L, item.requestId());
+        registerBatch(endpoint, 1L, 100, List.of(item));
+        PrefillWorkLedger.Protection protection =
+                endpoint.acquireBatchMemberProtection(1L, item);
+        assertNotNull(protection);
         Thread.sleep(10);
 
         assertEquals(0, endpoint.evictExpiredBatches(1));
         assertEquals(1, endpoint.getInflightBatchCount());
 
-        endpoint.releaseBatchMemberProtection(1L, item.requestId());
-        assertEquals(0, endpoint.evictExpiredBatches(1),
-                "authoritative reconciliation settlement refreshes batch activity");
-        Thread.sleep(10);
-        assertEquals(1, endpoint.evictExpiredBatches(1));
+        endpoint.releaseEngineFenceProtection(protection);
+        // The protection captured no deferred terminal, so releasing it does
+        // not refresh batch activity. The already-aged batch therefore becomes
+        // immediately evictable once the fence is gone.
+        assertEquals(1, endpoint.evictExpiredBatches(1),
+                "releasing an unreconciled protection does not refresh activity");
         assertEquals(0, endpoint.getInflightBatchCount());
     }
 
-    // ---- realPendingCount ----
+    // ---- admissionPendingRequestCount ----
 
     @Test
-    void batchLoadPublicationPreventsLowLoadSnapshotDuringCallbackHandoff()
-            throws Exception {
-        FlexlbConfig handoffConfig = new FlexlbConfig();
-        configureBatch(handoffConfig, 100, 1, 0, null);
-        setFormula(handoffConfig, "0");
-
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.4");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
-
-        long batchId = 8_001L;
-        CountDownLatch callbackEntered = new CountDownLatch(1);
-        CountDownLatch lifecycleMayBeEstablished = new CountDownLatch(1);
-        CountDownLatch lifecycleEstablished = new CountDownLatch(1);
-        CountDownLatch callbackMayReturn = new CountDownLatch(1);
-        AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
-        DecisionGroupHandler handler = new DecisionGroupHandler() {
-            @Override public void onExpired(BatchItem head) { }
-
-            @Override
-            public void onDecisionGroupAdmitted(
-                    AdmittedDecisionGroup group,
-                    DecisionGroupMetadata metadata) {
-                callbackEntered.countDown();
-                try {
-                    assertTrue(lifecycleMayBeEstablished.await(2, TimeUnit.SECONDS));
-                    for (AdmittedDecisionGroup.AdmittedItem member : group.members()) {
-                        assertTrue(member.transferCapacityToEndpointLifecycle());
-                    }
-                    group.transferBatchCapacityToLifecycle(
-                            batchId, 0L, group.requests());
-                    for (AdmittedDecisionGroup.AdmittedItem member : group.members()) {
-                        assertTrue(member.completeDeliveryHandoff());
-                    }
-                    lifecycleEstablished.countDown();
-                    assertTrue(callbackMayReturn.await(2, TimeUnit.SECONDS));
-                } catch (Throwable failure) {
-                    callbackFailure.compareAndSet(null, failure);
-                }
-            }
-
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {
-                callbackFailure.compareAndSet(null, error);
-            }
-
-            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {
-                callbackFailure.compareAndSet(null, error);
-            }
-        };
-
-        AtomicReference<PrefillEndpoint> handoffEndpointRef = new AtomicReference<>();
-        PrefillEndpoint handoffEndpoint = new PrefillEndpoint(
-                status,
-                handoffConfig,
-                handler,
-                TestCapacityAdmission.withEndpointBatchCapacity(
-                        handoffEndpointRef::get),
-                mock(BatchSchedulerReporter.class));
-        handoffEndpointRef.set(handoffEndpoint);
-        try {
-            BatchItem item = createBatchItem(
-                    handoffEndpoint, handoffConfig, 8_001L, 128, 0);
-            assertTrue(handoffEndpoint.getBatcher().tryOffer(item));
-            assertTrue(callbackEntered.await(2, TimeUnit.SECONDS));
-
-            assertEquals(0, handoffEndpoint.getBatcher().queueSize(),
-                    "the request must already have left ACTIVE before the callback runs");
-            assertEquals(1, handoffEndpoint.getLocallyOwnedRequestCount(),
-                    "callback-owned batch members remain visible to endpoint load accounting");
-            assertEquals(0, handoffEndpoint.getInflightBatchCount(),
-                    "the real BatchInflight has not been registered yet");
-            assertEquals(Long.MAX_VALUE, handoffEndpoint.realPendingCount());
-            assertEquals(Long.MAX_VALUE, handoffEndpoint.realWaitTimeMs());
-
-            lifecycleMayBeEstablished.countDown();
-            assertTrue(lifecycleEstablished.await(2, TimeUnit.SECONDS));
-            assertEquals(1, handoffEndpoint.getInflightBatchCount());
-            assertEquals(1, handoffEndpoint.getLocallyOwnedRequestCount());
-            assertEquals(Long.MAX_VALUE, handoffEndpoint.realPendingCount(),
-                    "the transition stays unpublished until the callback returns");
-            assertEquals(Long.MAX_VALUE, handoffEndpoint.realWaitTimeMs());
-
-            callbackMayReturn.countDown();
-            long exactPending = awaitFinitePendingCount(handoffEndpoint);
-            assertEquals(1, exactPending);
-            assertEquals(1, handoffEndpoint.getLocallyOwnedRequestCount());
-            assertEquals(0, handoffEndpoint.realWaitTimeMs());
-            assertTrue(callbackFailure.get() == null,
-                    () -> String.valueOf(callbackFailure.get()));
-
-            handoffEndpoint.releaseBatch(batchId);
-            assertEquals(0, handoffEndpoint.getLocallyOwnedRequestCount());
-            assertEquals(0, handoffEndpoint.realPendingCount());
-            assertEquals(0, handoffEndpoint.realWaitTimeMs());
-        } finally {
-            lifecycleMayBeEstablished.countDown();
-            callbackMayReturn.countDown();
-            handoffEndpoint.close();
-        }
-    }
-
-    @Test
-    void realPendingCountUnionsEngineTasksWithLocalLedger() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(
+    void admissionPendingRequestCountUnionsEngineTasksWithLocalLedger() {
+        registerBatch(endpoint, 1L, 100, List.of(
                 createBatchItem(101L, 500, 0),
                 createBatchItem(102L, 500, 0)));
 
@@ -1051,33 +990,35 @@ class PrefillEndpointTest {
                 "901", untrackedTwo,
                 "900b", duplicateUntracked,
                 "999", overlayOnly));
-        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+        EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(4, endpoint.realPendingCount(),
+        assertEquals(4, endpoint.admissionPendingRequestCount(),
                 "two local requests plus two unique Engine-only tasks");
 
         response.setRunningTaskInfo(Map.of());
-        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
-        assertEquals(2, endpoint.realPendingCount());
+        EndpointTestSupport.applyStatus(endpoint, response);
+        assertEquals(2, endpoint.admissionPendingRequestCount());
     }
 
     @Test
-    void realPendingCountFallsBackToEngineQueryLengthScalars() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(createBatchItem(101L, 500, 0)));
+    void admissionPendingRequestCountFallsBackToEngineQueryLengthScalars() {
+        registerBatch(endpoint, 1L, 100, List.of(createBatchItem(101L, 500, 0)));
 
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setFinishedTaskInfo(Map.of());
         response.setRunningTaskInfo(Map.of());
         response.setWaitingQueryLen(3);
         response.setRunningQueryLen(2);
-        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+        EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(5, endpoint.realPendingCount());
+        assertEquals(5, endpoint.admissionPendingRequestCount(),
+                "the local prefill batch is unioned with, not added on top of, the "
+                        + "scalar Engine work: pending = 1 local + max(0, 5 reported - 1 local)");
     }
 
     @Test
-    void realPendingCountUsesConservativeScalarBoundForPartialTaskDetails() {
-        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(createBatchItem(101L, 500, 0)));
+    void admissionPendingRequestCountUsesConservativeScalarBoundForPartialTaskDetails() {
+        registerBatch(endpoint, 1L, 100, List.of(createBatchItem(101L, 500, 0)));
 
         TaskInfo overlapping = taskInfo(101L, 1L, TaskPhase.RUNNING, 0, 0);
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -1085,25 +1026,68 @@ class PrefillEndpointTest {
         response.setRunningTaskInfo(Map.of("101", overlapping));
         response.setWaitingQueryLen(3);
         response.setRunningQueryLen(2);
-        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+        EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertEquals(5, endpoint.realPendingCount(),
+        assertEquals(5, endpoint.admissionPendingRequestCount(),
                 "scalar active count must cover a partial detail list without double-counting local tasks");
     }
 
     @Test
-    void realPendingCountIncludesBatcherQueue() throws InterruptedException {
-        // Initially, batcher queue is empty
-        assertEquals(0, endpoint.realPendingCount());
+    void admissionPendingRequestCountIncludesBatcherQueue() throws InterruptedException {
+        PrefillEndpoint queuedEndpoint = newFixedWindowEndpoint(60_000L);
+        try {
+            assertEquals(0, queuedEndpoint.admissionPendingRequestCount());
+            BatchItem item = createBatchItem(
+                    queuedEndpoint, 1L, 500L, 200L);
+            assertTrue(EndpointTestSupport.offer(queuedEndpoint, item));
 
-        BatchItem item = createBatchItem(1L, 500, 200);
-        endpoint.getBatcher().offer(item);
-
-        long deadlineMs = System.currentTimeMillis() + 100;
-        while (endpoint.realPendingCount() == 0 && System.currentTimeMillis() < deadlineMs) {
-            Thread.sleep(1);
+            assertEquals(1, queuedEndpoint.admissionPendingRequestCount(),
+                    "pending count includes the canonical ACTIVE queue owner");
+        } finally {
+            queuedEndpoint.close();
         }
-        assertTrue(endpoint.realPendingCount() > 0, "Pending count should include batcher queue");
+    }
+
+    @Test
+    void admissionPendingRequestCountConservativelyCoversPublishedWorkBeforeActiveRemoval() {
+        PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
+        try {
+            BatchItem active = createBatchItem(handoffEndpoint, 111L, 500L, 0L);
+            assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
+
+            org.flexlb.balance.projection.RouteProjection.Inputs snapshot =
+                    handoffEndpoint.captureRouteProjectionInputs();
+            assertEquals(1, snapshot.queue().activeItems().size());
+            assertEquals(1L, snapshot.pendingRequestCount(),
+                    "queue/work/pending are materialized at one ownership boundary");
+            assertEquals(111L,
+                    snapshot.queue().activeItems().getFirst().requestId());
+        } finally {
+            handoffEndpoint.close();
+        }
+    }
+
+    @Test
+    void admissionPendingRequestCountCannotMissActiveToCommittedHandoff()
+            throws Exception {
+        PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
+        long requestId = 222L;
+        try {
+            BatchItem active = createBatchItem(
+                    handoffEndpoint, requestId, 500L, 0L);
+            assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
+            assertTrue(handoffEndpoint.removeQueued(
+                    active, "test exact ownership handoff"));
+            registerDirect(handoffEndpoint, requestId, 100L);
+
+            assertEquals(1L, handoffEndpoint.admissionPendingRequestCount());
+            assertEquals(0, handoffEndpoint.queuedRequestCount());
+            assertEquals(1,
+                    handoffEndpoint.captureRouteProjectionInputs()
+                            .work().requests().size());
+        } finally {
+            handoffEndpoint.close();
+        }
     }
 
     // ---- batch metrics reporting ----
@@ -1113,8 +1097,11 @@ class PrefillEndpointTest {
         // Long fixed window so offered items stay queued during the assertions
         PrefillEndpoint slowEndpoint = newFixedWindowEndpoint(60_000);
         try {
-            slowEndpoint.getBatcher().offer(createPriorityBatchItem(1L, 70));
-            slowEndpoint.getBatcher().offer(createBatchItem(2L, 300, 0)); // legacy: budget=null -> priority 0
+            assertTrue(EndpointTestSupport.offer(
+                    slowEndpoint, createPriorityBatchItem(slowEndpoint, 1L, 70)));
+            assertTrue(EndpointTestSupport.offer(
+                    slowEndpoint,
+                    createBatchItem(slowEndpoint, 2L, 300, 0)));
 
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
             slowEndpoint.reportBatchMetrics(reporter);
@@ -1142,17 +1129,14 @@ class PrefillEndpointTest {
     // ---- WorkerEndpoint inherited behavior ----
 
     @Test
-    void onWorkerStatusUpdateUpdatesAliveStatus() {
+    void applyWorkerStatusResponseUpdatesAliveStatusOnSameGeneration() {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.1");
-        status.setPort(8080);
-        status.setAlive(true);
+        response.setAlive(true);
 
-        endpoint.onWorkerStatusUpdate(status, response);
+        EndpointTestSupport.applyStatus(endpoint, response);
 
-        assertTrue(endpoint.getStatus().isAlive());
+        assertTrue(endpoint.getStatus().pollHealth().reportedAlive());
     }
 
     // ---- close ----
@@ -1162,60 +1146,46 @@ class PrefillEndpointTest {
             throws Exception {
         FlexlbConfig retirementConfig = new FlexlbConfig();
         configureBatch(retirementConfig, 100, 1, 0, null);
-        SchedulingTestConfig.useNonBatchDispatcher(retirementConfig);
+        retirementConfig.setDispatcher(new NonBatchDispatcherConfig());
 
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.5");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
+        WorkerStatus status = EndpointTestSupport.workerStatus(
+                RoleType.PREFILL, "127.0.0.5", 8080, 8090);
 
-        CountDownLatch admissionBlocked = new CountDownLatch(1);
         CountDownLatch reentrantCloseEntered = new CountDownLatch(1);
         CountDownLatch reentrantCloseReturned = new CountDownLatch(1);
         AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
         AtomicReference<PrefillEndpoint> retirementEndpointRef = new AtomicReference<>();
-        DecisionGroupHandler handler = new DecisionGroupHandler() {
-            @Override public void onExpired(BatchItem head) { }
-
+        EndpointTestSupport.TestRequestRuntime runtime =
+                new EndpointTestSupport.TestRequestRuntime() {
             @Override
-            public void onDecisionGroupAdmitted(
-                    AdmittedDecisionGroup group,
-                    DecisionGroupMetadata metadata) {
-                callbackFailure.compareAndSet(null,
-                        new AssertionError("capacity-blocked request was admitted"));
-            }
-
-            @Override
-            public void onOfferFailure(BatchItem item, Throwable error) {
+            public void onOfferFailure(
+                    org.flexlb.balance.delivery.DeliveryItem item,
+                    Throwable error) {
                 reentrantCloseEntered.countDown();
-                retirementEndpointRef.get().close();
-                reentrantCloseReturned.countDown();
-            }
-
-            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {
-                callbackFailure.compareAndSet(null, error);
+                try {
+                    retirementEndpointRef.get().close();
+                    reentrantCloseReturned.countDown();
+                } catch (Throwable failure) {
+                    callbackFailure.compareAndSet(null, failure);
+                }
             }
         };
-        DeliveryCapacityAdmission blockedAdmission = item -> {
-            admissionBlocked.countDown();
-            return new DeliveryCapacityAdmission.CapacityUnavailable(
-                    DeliveryCapacityAdmission.CapacityResource.PREFILL_REQUEST,
-                    () -> false);
-        };
+        EndpointTestSupport.ControllableAdmission blockedAdmission =
+                new EndpointTestSupport.ControllableAdmission(false);
         PrefillEndpoint retirementEndpoint = new PrefillEndpoint(
                 status,
                 retirementConfig,
-                handler,
-                blockedAdmission,
+                EndpointTestSupport.routeStrategy(runtime, blockedAdmission),
+                EndpointTestSupport.realRuntimeFactory(),
+                runtime,
                 mock(BatchSchedulerReporter.class));
         retirementEndpointRef.set(retirementEndpoint);
+        retirementEndpoint.startGeneration();
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
             BatchItem item = createBatchItem(
                     retirementEndpoint, retirementConfig, 8_101L, 128, 0);
-            assertTrue(retirementEndpoint.getBatcher().tryOffer(item));
-            assertTrue(admissionBlocked.await(2, TimeUnit.SECONDS));
+            assertTrue(EndpointTestSupport.offer(retirementEndpoint, item));
 
             Future<?> outerClose = executor.submit(retirementEndpoint::close);
             outerClose.get(2, TimeUnit.SECONDS);
@@ -1225,12 +1195,17 @@ class PrefillEndpointTest {
             assertTrue(callbackFailure.get() == null,
                     () -> String.valueOf(callbackFailure.get()));
 
-            PrefillEndpoint.RequestCapacityReservationAcquisition rejected =
-                    retirementEndpoint.acquireRequestCapacityReservation(
-                            8_102L, 0L, 1);
             assertEquals(
-                    PrefillEndpoint.RequestCapacityReservationStatus.ENDPOINT_RETIRED,
-                    rejected.status());
+                    PrefillWorkLedger.CapacityStatus.ENDPOINT_RETIRED,
+                    retirementEndpoint.reserveRoute(
+                            createBatchItem(
+                                    retirementEndpoint,
+                                    retirementConfig,
+                                    8_102L,
+                                    128,
+                                    0),
+                            0L,
+                            1).status());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();
@@ -1244,164 +1219,157 @@ class PrefillEndpointTest {
         configureBatch(retirementConfig, 100, 1, 0, null);
         setFormula(retirementConfig, "0");
 
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.6");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
+        WorkerStatus status = EndpointTestSupport.workerStatus(
+                RoleType.PREFILL, "127.0.0.6", 8080, 8090);
 
-        CountDownLatch callbackCloseReturned = new CountDownLatch(1);
         CountDownLatch callbackResolved = new CountDownLatch(1);
-        CountDownLatch callbackMayReturn = new CountDownLatch(1);
         AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
         AtomicReference<PrefillEndpoint> retirementEndpointRef = new AtomicReference<>();
-        DecisionGroupHandler handler = new DecisionGroupHandler() {
-            @Override public void onExpired(BatchItem head) { }
-
+        EndpointTestSupport.TestRequestRuntime runtime =
+                new EndpointTestSupport.TestRequestRuntime() {
             @Override
-            public void onDecisionGroupAdmitted(
-                    AdmittedDecisionGroup group,
-                    DecisionGroupMetadata metadata) {
-                boolean restoreInterrupt = false;
+            public void onDeliveryCommitted(
+                    org.flexlb.balance.delivery.CommittedDelivery delivery,
+                    org.flexlb.balance.delivery.DeliveryMetadata metadata) {
                 try {
                     retirementEndpointRef.get().close();
-                    callbackCloseReturned.countDown();
-                    restoreInterrupt = Thread.interrupted();
-                    TestCapacityAdmission.complete(group);
-                    callbackResolved.countDown();
-                    assertTrue(callbackMayReturn.await(2, TimeUnit.SECONDS));
                 } catch (Throwable failure) {
                     callbackFailure.compareAndSet(null, failure);
                 } finally {
-                    if (restoreInterrupt) {
-                        Thread.currentThread().interrupt();
-                    }
+                    delivery.deliver(metadata);
+                    callbackResolved.countDown();
                 }
-            }
-
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {
-                callbackFailure.compareAndSet(null, error);
-            }
-
-            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {
-                callbackFailure.compareAndSet(null, error);
             }
         };
         PrefillEndpoint retirementEndpoint = new PrefillEndpoint(
                 status,
                 retirementConfig,
-                handler,
-                TestCapacityAdmission.withEndpointBatchCapacity(
-                        retirementEndpointRef::get),
+                EndpointTestSupport.routeStrategy(runtime),
+                EndpointTestSupport.realRuntimeFactory(),
+                runtime,
                 mock(BatchSchedulerReporter.class));
         retirementEndpointRef.set(retirementEndpoint);
-        ExecutorService executor = Executors.newSingleThreadExecutor();
+        retirementEndpoint.startGeneration();
         try {
             BatchItem admitted = createBatchItem(
                     retirementEndpoint, retirementConfig, 8_201L, 128, 0);
-            assertTrue(retirementEndpoint.getBatcher().tryOffer(admitted));
-            assertTrue(callbackCloseReturned.await(2, TimeUnit.SECONDS),
-                    "close inside an admitted callback must return synchronously");
+            assertTrue(EndpointTestSupport.offer(retirementEndpoint, admitted));
             assertTrue(callbackResolved.await(2, TimeUnit.SECONDS));
-
-            Future<?> concurrentClose = executor.submit(retirementEndpoint::close);
-            assertThrows(TimeoutException.class,
-                    () -> concurrentClose.get(100, TimeUnit.MILLISECONDS),
-                    "a non-owner close must wait for the callback's handoff permit");
-
-            callbackMayReturn.countDown();
-            concurrentClose.get(2, TimeUnit.SECONDS);
-            assertTrue(callbackFailure.get() == null,
-                    () -> String.valueOf(callbackFailure.get()));
-
-            PrefillEndpoint.QueueBatchSlotAdmissionFailed rejected = assertInstanceOf(
-                    PrefillEndpoint.QueueBatchSlotAdmissionFailed.class,
-                    retirementEndpoint.tryReserveQueueBatchSlot(admitted, 1));
-            assertInstanceOf(EndpointGenerationRetiredException.class, rejected.cause());
+            assertInstanceOf(IllegalStateException.class, callbackFailure.get(),
+                    "a worker callback must fail fast instead of self-awaiting");
         } finally {
-            callbackMayReturn.countDown();
             retirementEndpoint.close();
-            executor.shutdownNow();
         }
     }
 
     @Test
     void closePreservesRegisteredLifecycleAndRejectsNewBatchReservations() {
         BatchItem item = createBatchItem(1L, 500, 200);
-        TestCapacityAdmission.registerQueueBatchLifecycle(
+        registerBatch(
                 endpoint,
                 1L,
                 100,
                 List.of(item));
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage());
+        assertEquals(1, endpoint.getInflightBatchCount());
 
         endpoint.close();
-        assertEquals(1, endpoint.getInflightBatchCount(),
-                "close must not erase an Engine-owned batch lifecycle");
-        assertEquals(1, endpoint.getQueueBatchCapacityUsage());
-        PrefillEndpoint.QueueBatchSlotAdmissionFailed retired = assertInstanceOf(
-                PrefillEndpoint.QueueBatchSlotAdmissionFailed.class,
-                endpoint.tryReserveQueueBatchSlot(item, 2));
-        assertInstanceOf(EndpointGenerationRetiredException.class, retired.cause(),
-                "retirement is a delivery failure, not silent request-ownership loss");
-
-        endpoint.releaseBatch(1L);
         assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage());
+        EndpointEvent.PrefillGenerationRetired retirement =
+                requestRuntime.events().stream()
+                        .filter(EndpointEvent.PrefillGenerationRetired.class::isInstance)
+                        .map(EndpointEvent.PrefillGenerationRetired.class::cast)
+                        .findFirst()
+                        .orElseThrow();
+        assertTrue(retirement.ownedItems().contains(item),
+                "retirement must publish the exact canonical owner");
+        assertEquals(PrefillWorkLedger.CapacityStatus.ENDPOINT_RETIRED,
+                endpoint.reserveBatch(item, 2L, 1).status());
         endpoint.close();
-        assertEquals(0, endpoint.getQueueBatchCapacityUsage());
     }
 
     @Test
     void closeRetiresDirectAccountingAndPreservesCommittedQueueRoute() {
-        endpoint.registerDirectRequest(100L, 100);
-        assertTrue(TestCapacityAdmission.commitRouteRequest(
-                endpoint, 200L, 200, 1));
+        registerDirect(endpoint, 100L, 100L);
+        BatchItem route = createBatchItem(200L, 200L, 0L);
+        // A queue route can only be reserved after its canonical item has been
+        // offered into the ACTIVE queue; reserveRoute rejects a non-active
+        // identity with REQUEST_NOT_ACTIVE.
+        assertTrue(EndpointTestSupport.offer(endpoint, route));
+        List<PrefillWorkLedger.CommittedHandoff> handoffs =
+                EndpointTestSupport.commitRoutes(
+                        endpoint, 200L, List.of(route));
+        handoffs.forEach(PrefillWorkLedger.CommittedHandoff::close);
         assertEquals(2, endpoint.getIndividuallyTrackedRequestCount());
-        assertEquals(1, endpoint.getQueueRouteCapacityUsage());
 
         endpoint.close();
 
-        assertEquals(1, endpoint.getIndividuallyTrackedRequestCount(),
-                "the retired generation must discard DIRECT load accounting");
-        assertEquals(1, endpoint.getQueueRouteCapacityUsage(),
-                "committed QUEUE_ROUTE ownership must outlive endpoint selection");
-        assertFalse(endpoint.releaseRequest(100L));
-        assertTrue(endpoint.releaseRequest(200L));
         assertEquals(0, endpoint.getIndividuallyTrackedRequestCount());
-        assertEquals(0, endpoint.getQueueRouteCapacityUsage());
+        EndpointEvent.PrefillGenerationRetired retirement =
+                requestRuntime.events().stream()
+                        .filter(EndpointEvent.PrefillGenerationRetired.class::isInstance)
+                        .map(EndpointEvent.PrefillGenerationRetired.class::cast)
+                        .findFirst()
+                        .orElseThrow();
+        assertEquals(List.of(route), retirement.ownedItems(),
+                "only the canonical item-bearing route owner crosses retirement");
     }
 
     @Test
     void closeShutsDownBatcher() {
-        assertNotNull(endpoint.getBatcher());
         endpoint.close();
-        // After close, offering should fail (batcher is stopped)
         BatchItem item = createBatchItem(1L, 500, 200);
-        endpoint.getBatcher().offer(item);
-        // Should not throw — batcher handles stopped state
+        assertFalse(EndpointTestSupport.offer(endpoint, item));
+        assertEquals(0, endpoint.queuedRequestCount());
     }
 
     // ---- helpers ----
 
     private PrefillEndpoint newFixedWindowEndpoint(long fixedWaitMs) {
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.1");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
+        WorkerStatus status = EndpointTestSupport.workerStatus(
+                RoleType.PREFILL, "127.0.0.1", 8080, 8090);
 
         FlexlbConfig slowConfig = new FlexlbConfig();
         configureBatch(slowConfig, 100, 100, fixedWaitMs, null);
-        return new PrefillEndpoint(
+        EndpointTestSupport.TestRequestRuntime runtime =
+                EndpointTestSupport.requestRuntime();
+        PrefillEndpoint created = new PrefillEndpoint(
                 status,
                 slowConfig,
-                noopHandler(),
-                TestCapacityAdmission.alwaysAvailable(),
+                EndpointTestSupport.routeStrategy(runtime),
+                EndpointTestSupport.realRuntimeFactory(),
+                runtime,
                 mock(BatchSchedulerReporter.class));
+        created.startGeneration();
+        return created;
     }
 
-    private BatchItem createPriorityBatchItem(long requestId, int priority) {
+    private static PrefillEndpoint newEndpointWithFormula(String expression) {
+        WorkerStatus status = EndpointTestSupport.workerStatus(
+                RoleType.PREFILL, "127.0.0.9", 8089, 8099);
+
+        FlexlbConfig endpointConfig = new FlexlbConfig();
+        configureBatch(
+                endpointConfig,
+                100,
+                endpointConfig.fixedWindowDecision().getMaxRequests(),
+                300L,
+                null);
+        setFormula(endpointConfig, expression);
+        EndpointTestSupport.TestRequestRuntime runtime =
+                EndpointTestSupport.requestRuntime();
+        PrefillEndpoint created = new PrefillEndpoint(
+                status,
+                endpointConfig,
+                EndpointTestSupport.routeStrategy(runtime),
+                EndpointTestSupport.realRuntimeFactory(),
+                runtime,
+                mock(BatchSchedulerReporter.class));
+        created.startGeneration();
+        return created;
+    }
+
+    private BatchItem createPriorityBatchItem(
+            PrefillEndpoint owner, long requestId, int priority) {
         long now = System.currentTimeMillis();
         Request request = new Request();
         request.setRequestId(requestId);
@@ -1413,14 +1381,15 @@ class PrefillEndpointTest {
         ctx.setConfig(config);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 60_000));
 
-        return new BatchItem(ctx, null, null, null, null, null, null, now);
+        return new BatchItem(
+                ctx, null, null, null, null, owner, null, null, now);
     }
 
     private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setFinishedTaskInfo(finished);
         response.setRunningTaskInfo(running);
-        endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
+        EndpointTestSupport.applyStatus(endpoint, response);
     }
 
     private static void reportSuccessfulBatchMember(
@@ -1433,15 +1402,12 @@ class PrefillEndpointTest {
                 Long.toString(requestId),
                 taskInfo(requestId, batchId, null, 0, executionTimeMs)));
         response.setRunningTaskInfo(Map.of());
-        target.onWorkerStatusUpdate(target.getStatus(), response);
+        EndpointTestSupport.applyStatus(target, response);
     }
 
     private static PrefillEndpoint createLearningEndpoint() {
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.8");
-        status.setPort(8080);
-        status.setGrpcPort(8090);
-        status.setRole(RoleType.PREFILL);
+        WorkerStatus status = EndpointTestSupport.workerStatus(
+                RoleType.PREFILL, "127.0.0.8", 8080, 8090);
 
         FlexlbConfig learningConfig = new FlexlbConfig();
         configureBatch(
@@ -1453,25 +1419,25 @@ class PrefillEndpointTest {
         learningConfig.getRouter().getRoles().getPrefill()
                 .setExecutionTimeEstimator(
                         new RoutingConfig.LearningEstimatorConfig());
-        return new PrefillEndpoint(
+        EndpointTestSupport.TestRequestRuntime runtime =
+                EndpointTestSupport.requestRuntime();
+        PrefillEndpoint created = new PrefillEndpoint(
                 status,
                 learningConfig,
-                noopHandler(),
-                TestCapacityAdmission.alwaysAvailable(),
+                EndpointTestSupport.routeStrategy(runtime),
+                EndpointTestSupport.realRuntimeFactory(),
+                runtime,
                 mock(BatchSchedulerReporter.class));
+        created.startGeneration();
+        return created;
     }
 
-    private static long awaitFinitePendingCount(PrefillEndpoint target) {
-        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        long pending;
-        do {
-            pending = target.realPendingCount();
-            if (pending != Long.MAX_VALUE) {
-                return pending;
-            }
-            Thread.onSpinWait();
-        } while (System.nanoTime() < deadlineNanos);
-        throw new AssertionError("batch load publication did not close");
+    private static WorkSnapshot.BatchWork onlyBatchWork(
+            PrefillEndpoint target) {
+        List<WorkSnapshot.BatchWork> batches =
+                target.captureRouteProjectionInputs().work().batches();
+        assertEquals(1, batches.size());
+        return batches.get(0);
     }
 
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen) {
@@ -1509,7 +1475,16 @@ class PrefillEndpointTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, null, null, prefill, null, owner, null, System.currentTimeMillis());
+        return new BatchItem(
+                ctx,
+                null,
+                null,
+                prefill,
+                null,
+                owner,
+                null,
+                null,
+                System.currentTimeMillis());
     }
 
     private static void configureBatch(
@@ -1522,7 +1497,8 @@ class PrefillEndpointTest {
                 .setMaxWaitingRequestsPerPrefillWorker(maxWaiting);
         target.fixedWindowDecision().setMaxRequests(maxRequests);
         target.fixedWindowDecision().setMaxCollectionWaitMs(maxCollectionWaitMs);
-        target.batchDispatcher().setMaxInflightBatchesPerPrefillWorker(maxInflightBatches);
+        ((org.flexlb.config.BatchDispatcherConfig) target.getDispatcher())
+                .setMaxInflightBatchesPerPrefillWorker(maxInflightBatches);
     }
 
     private static void setFormula(FlexlbConfig target, String expression) {
@@ -1556,16 +1532,33 @@ class PrefillEndpointTest {
         return task;
     }
 
-    private static DecisionGroupHandler noopHandler() {
-        return new DecisionGroupHandler() {
-            @Override public void onExpired(BatchItem head) {}
-            @Override public void onDecisionGroupAdmitted(
-                    AdmittedDecisionGroup group, DecisionGroupMetadata meta) {
-                TestCapacityAdmission.complete(group);
+    private static void registerBatch(
+            PrefillEndpoint target,
+            long batchId,
+            long predictedMs,
+            List<BatchItem> items) {
+        for (BatchItem item : items) {
+            if (!EndpointTestSupport.offer(target, item)) {
+                throw new IllegalStateException(
+                        "test item could not be offered to the endpoint queue");
             }
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
-            @Override public void onDeliveryFailure(BatchItem item, Throwable error) {}
-        };
+        }
+        try (PrefillWorkLedger.CommittedHandoff ignored =
+                     EndpointTestSupport.commitBatch(
+                             target, batchId, predictedMs, items)) {
+            // Keep canonical ledger ownership; release only the generation pin.
+        }
+    }
+
+    private static void registerDirect(
+            PrefillEndpoint target,
+            long requestId,
+            long predictedMs) {
+        try (PrefillWorkLedger.DirectRegistration registration =
+                     EndpointTestSupport.registerDirect(
+                             target, requestId, predictedMs)) {
+            registration.commit();
+        }
     }
 
 }

@@ -4,11 +4,10 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
-import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
+import static org.flexlb.enums.ResourceMeasureIndicatorEnum.PREFILL_PENDING_REQUESTS;
 
 /**
  * Public FLEXLB_CONFIG contract, organized by stable responsibility owner.
@@ -45,11 +44,6 @@ public final class FlexlbConfig {
     public boolean isPriorityOrdering() {
         return isQueue()
                 && ((QueueSchedulerConfig) scheduler).getOrdering() instanceof PriorityOrderingConfig;
-    }
-
-    @JsonIgnore
-    public boolean isBatchDispatch() {
-        return dispatcher instanceof BatchDispatcherConfig;
     }
 
     /** Resolve the QUEUE decision policy from its single configuration owner. */
@@ -100,30 +94,9 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public BatchDispatcherConfig batchDispatcher() {
-        if (dispatcher instanceof BatchDispatcherConfig batch) {
-            return batch;
-        }
-        throw new IllegalStateException("batch dispatcher configuration is not active");
-    }
-
-    @JsonIgnore
-    public NonBatchDispatcherConfig nonBatchDispatcher() {
-        if (dispatcher instanceof NonBatchDispatcherConfig nonBatch) {
-            return nonBatch;
-        }
-        throw new IllegalStateException("non-batch dispatcher configuration is not active");
-    }
-
-    @JsonIgnore
-    public LoadBalanceStrategyEnum strategyFor(RoleType role) {
-        return router.strategyFor(role);
-    }
-
-    @JsonIgnore
     public ResourceMeasureIndicatorEnum resourceMeasureFor(RoleType role) {
         return switch (role) {
-            case PREFILL, PDFUSION, VIT -> WAIT_TIME;
+            case PREFILL, PDFUSION, VIT -> PREFILL_PENDING_REQUESTS;
             case DECODE -> REMAINING_KV_CACHE;
             case FRONTEND -> null;
         };

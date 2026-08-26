@@ -19,9 +19,11 @@ is the peer of `FIXED_WINDOW`, and `NON_BATCH` is the peer of `BATCH`. `DIRECT`
 requires `NON_BATCH` and cannot configure a decision policy. Every
 ordering/decision/dispatcher combination is valid under `QUEUE`.
 
-The Java class is still named `PriorityScheduler`, but it is the common QUEUE
-implementation for both FIFO and PRIORITY. That class name is an implementation
-detail, not another public mode.
+`RequestScheduler` is the public QUEUE facade for both FIFO and PRIORITY.
+`RequestLifecycleCoordinator` owns the exact request lifecycle, while the
+ordering-specific admission and preemption ports stay behind that facade. The
+Java type names therefore match the configuration model; there is no separate
+"priority scheduler" service.
 
 ## Class model
 
@@ -29,35 +31,38 @@ detail, not another public mode.
 classDiagram
     class RouteService
     class DefaultRouter
-    class PriorityScheduler {
+    class ConfiguredLoadBalanceSelector
+    class RequestScheduler {
         +submit(context) Future~Response~
-        +onDecisionGroupAdmitted(group, metadata)
     }
-    class PriorityAdmissionScheduler
-    class WorkerBatcher
-    class SingleRequestBatcherAlgorithm
-    class FixedWindowBatcherAlgorithm
-    class RouteDecisionDelivery
-    class BatchEnqueueDelivery
-    class BatchDispatcher
+    class RequestLifecycleCoordinator
+    class EvictionManager
+    class PrefillGenerationRuntime
+    class SingleRequestGroupPolicy
+    class FixedWindowGroupPolicy
+    class RouteDeliveryStrategy
+    class BatchDeliveryStrategy
+    class BatchSubmissionPort
     class PrefillEndpoint
     class DecodeEndpoint
 
     RouteService --> DefaultRouter : DIRECT
-    RouteService --> PriorityScheduler : QUEUE
-    PriorityScheduler --> DefaultRouter : FIFO placement
-    PriorityScheduler --> PriorityAdmissionScheduler : PRIORITY placement/preemption
-    PriorityScheduler --> WorkerBatcher : per-Prefill queue
-    WorkerBatcher --> SingleRequestBatcherAlgorithm : SINGLE
-    WorkerBatcher --> FixedWindowBatcherAlgorithm : FIXED_WINDOW
-    PriorityScheduler --> RouteDecisionDelivery : NON_BATCH
-    PriorityScheduler --> BatchEnqueueDelivery : BATCH
-    BatchEnqueueDelivery --> BatchDispatcher : EnqueueBatch RPC
-    PriorityScheduler --> PrefillEndpoint : accounting
-    PriorityScheduler --> DecodeEndpoint : reservation/accounting
+    RouteService --> RequestScheduler : QUEUE
+    DefaultRouter --> ConfiguredLoadBalanceSelector : exactly-one selector
+    RequestScheduler --> RequestLifecycleCoordinator : lifecycle
+    RequestScheduler --> DefaultRouter : ordinary placement
+    RequestScheduler --> EvictionManager : priority fallback
+    RequestLifecycleCoordinator --> PrefillGenerationRuntime : per-generation queue
+    PrefillGenerationRuntime --> SingleRequestGroupPolicy : SINGLE
+    PrefillGenerationRuntime --> FixedWindowGroupPolicy : FIXED_WINDOW
+    PrefillGenerationRuntime --> RouteDeliveryStrategy : NON_BATCH
+    PrefillGenerationRuntime --> BatchDeliveryStrategy : BATCH
+    BatchDeliveryStrategy --> BatchSubmissionPort : EnqueueBatch RPC
+    RequestLifecycleCoordinator --> PrefillEndpoint : exact accounting
+    RequestLifecycleCoordinator --> DecodeEndpoint : exact reservation/accounting
 ```
 
-`DIRECT` skips QUEUE admission and `WorkerBatcher`, but it uses the same
+`DIRECT` skips QUEUE admission and the per-generation queue runtime, but it uses the same
 `router.groupSelector` and `router.roles` worker-selection configuration as
 QUEUE. PDFUSION follows the prefill role configuration.
 
@@ -111,13 +116,13 @@ valid candidate. Reaching the prediction cap stops collection immediately
 instead of waiting for the collection window.
 
 Candidates are not a final decision. The worker reserves hard capacity from the
-front in order. Only the largest successfully reserved prefix becomes an
-`AdmittedDecisionGroup`; the unreserved suffix remains `ACTIVE` with its
-original ordering key. The dispatcher then chooses who sends the admitted group:
+front in order. Only the largest successfully reserved prefix becomes a
+committed delivery group; the unreserved suffix remains `ACTIVE` with its
+original ordering key. The delivery strategy then chooses who sends the group:
 the frontend calls `GenerateStream` for `NON_BATCH`, while the Master calls
 `EnqueueBatch` for `BATCH`.
 
-Waiting is event driven. Decision algorithms return the exact resource event,
+Waiting is event driven. Group policies return the exact resource event,
 queue/status/model generation, or absolute collection/expiration deadline that
 can change their answer. They do not sleep and retry on a fixed polling interval.
 
@@ -139,7 +144,7 @@ FIFO orders by enqueue sequence. PRIORITY orders by normalized priority
 (1–100, higher first) and then by enqueue sequence. `defaultPriority` is used
 only when the caller did not supply a priority.
 
-Ordering is scoped to one Prefill `WorkerBatcher`. Its ordered snapshot is the
+Ordering is scoped to one Prefill generation runtime. Its ordered snapshot is the
 selection boundary for one decision. A queue insertion that linearizes after
 that snapshot belongs to the next decision and does not revoke the captured
 group. Removal or expiration of a member that would enter the admitted prefix,
@@ -393,8 +398,8 @@ The role-local prefill, decode, and VIT selectors shown in the top-level
     `maxInflightBatchesPerPrefillWorker` slot and one task already accepted by
     the bounded local dispatcher. Before the admitted members leave `ACTIVE`,
     they enter callback-owned Prefill load accounting. Load snapshots remain
-    conservative until the callback either replaces that ownership with one
-    real `BatchInflight` record or releases it after a terminal failure. Filling
+    conservative until the callback either transfers that ownership into the
+    canonical committed-batch ledger or releases it after a terminal failure. Filling
     the accepted dispatcher task performs no second executor-capacity check.
     The endpoint slot remains owned through transport-unknown and protected
     survivor states, and batch settlement signals the exact blocked resource.

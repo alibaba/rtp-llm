@@ -22,7 +22,7 @@ class ConfigServiceTest {
 
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
-        assertTrue(config.isBatchDispatch());
+        assertInstanceOf(BatchDispatcherConfig.class, config.getDispatcher());
         assertTrue(config.isFixedWindowDecision());
         assertEquals(2, config.getSchemaVersion());
     }
@@ -111,7 +111,7 @@ class ConfigServiceTest {
                             "minimumToleranceMs": 10,
                             "outlierRejection": {
                               "maxPendingVsAverageMultiplier": 2.0,
-                              "maxWaitVsAverageMultiplier": 2.5
+                              "maxProjectedDrainVsAverageMultiplier": 2.5
                             }
                           }
                         },
@@ -165,7 +165,8 @@ class ConfigServiceTest {
                 """);
 
         assertTrue(config.isPriorityOrdering());
-        assertTrue(config.isBatchDispatch());
+        BatchDispatcherConfig dispatcher = assertInstanceOf(
+                BatchDispatcherConfig.class, config.getDispatcher());
         assertEquals(60, config.priorityOrdering().getDefaultPriority());
         assertEquals(75, config.priorityOrdering().getPreemption()
                 .getEngineCancellation().getAckTimeoutMs());
@@ -177,7 +178,7 @@ class ConfigServiceTest {
                 .getMaxPredictedExecutionMs().longValue());
         assertEquals(192, config.queueScheduler().getCapacity()
                 .getMaxWaitingRequestsPerPrefillWorker());
-        assertEquals(2, config.batchDispatcher()
+        assertEquals(2, dispatcher
                 .getMaxInflightBatchesPerPrefillWorker().intValue());
         FormulaEstimatorConfig estimator = assertInstanceOf(FormulaEstimatorConfig.class,
                 config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator());
@@ -190,7 +191,11 @@ class ConfigServiceTest {
         assertEquals(2.0, candidateChoice.getOutlierRejection()
                 .getMaxPendingVsAverageMultiplier());
         assertEquals(2.5, candidateChoice.getOutlierRejection()
-                .getMaxWaitVsAverageMultiplier());
+                .getMaxProjectedDrainVsAverageMultiplier());
+        RoutingConfig.CacheAffinityConfig cacheAffinity =
+                config.getRouter().getRoles().getPrefill().getCacheAffinity();
+        assertEquals(25L, cacheAffinity.getMaxExtraTtftMs());
+        assertEquals(10.0, cacheAffinity.getMinPrefixHitPercent());
         assertEquals(128L, config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
@@ -222,7 +227,7 @@ class ConfigServiceTest {
                       "type":"LEAST_RECENTLY_USED_IN_POOL",
                       "outlierRejection":{
                         "maxPendingVsAverageMultiplier":2.0,
-                        "maxWaitVsAverageMultiplier":2.0
+                        "maxProjectedDrainVsAverageMultiplier":2.0
                       }
                     }
                   }}}}
@@ -327,6 +332,27 @@ class ConfigServiceTest {
     }
 
     @Test
+    void validates_cache_affinity_bounds_from_json() {
+        assertInvalidCacheAffinity(-1, 5);
+        assertInvalidCacheAffinity(0, -0.1);
+        assertInvalidCacheAffinity(0, 100.1);
+    }
+
+    private static void assertInvalidCacheAffinity(
+            long maxExtraTtftMs, double minPrefixHitPercent) {
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{
+                    "cacheAffinity":{
+                      "maxExtraTtftMs":%d,
+                      "minPrefixHitPercent":%s
+                    }
+                  }}}
+                }
+                """.formatted(maxExtraTtftMs, minPrefixHitPercent)));
+    }
+
+    @Test
     void omission_is_the_only_unbounded_representation() {
         FlexlbConfig config = ConfigService.parse("""
                 {
@@ -336,7 +362,9 @@ class ConfigServiceTest {
                 }
                 """);
 
-        assertNull(config.nonBatchDispatcher().getMaxInflightRequestsPerPrefillWorker());
+        NonBatchDispatcherConfig dispatcher = assertInstanceOf(
+                NonBatchDispatcherConfig.class, config.getDispatcher());
+        assertNull(dispatcher.getMaxInflightRequestsPerPrefillWorker());
         assertNull(config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
     }

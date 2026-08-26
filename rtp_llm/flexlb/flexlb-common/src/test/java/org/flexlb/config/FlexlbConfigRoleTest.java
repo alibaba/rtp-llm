@@ -1,13 +1,17 @@
 package org.flexlb.config;
 
 import org.flexlb.config.RoutingConfig.LeastRecentlyUsedInPoolConfig;
+import org.flexlb.config.RoutingConfig.EstimatedTtftSelectorConfig;
+import org.flexlb.config.RoutingConfig.KvUsageWeightedRandomConfig;
 import org.flexlb.config.RoutingConfig.RandomDecodeSelectorConfig;
 import org.flexlb.config.RoutingConfig.RandomPrefillSelectorConfig;
+import org.flexlb.config.RoutingConfig.RandomVitSelectorConfig;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class FlexlbConfigRoleTest {
 
@@ -15,37 +19,34 @@ class FlexlbConfigRoleTest {
     void maps_role_selectors_to_current_router_implementations() {
         FlexlbConfig config = new FlexlbConfig();
 
-        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL,
-                config.strategyFor(RoleType.PREFILL));
-        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL,
-                config.strategyFor(RoleType.PDFUSION));
-        assertEquals(LoadBalanceStrategyEnum.COST_BASED_DECODE,
-                config.strategyFor(RoleType.DECODE));
-        assertEquals(LoadBalanceStrategyEnum.RANDOM,
-                config.strategyFor(RoleType.VIT));
+        assertInstanceOf(EstimatedTtftSelectorConfig.class,
+                config.getRouter().selectorFor(RoleType.PREFILL));
+        assertSame(config.getRouter().selectorFor(RoleType.PREFILL),
+                config.getRouter().selectorFor(RoleType.PDFUSION));
+        assertInstanceOf(KvUsageWeightedRandomConfig.class,
+                config.getRouter().selectorFor(RoleType.DECODE));
+        assertInstanceOf(RandomVitSelectorConfig.class,
+                config.getRouter().selectorFor(RoleType.VIT));
 
         config.getRouter().getRoles().getPrefill()
                 .setSelector(new RandomPrefillSelectorConfig());
         config.getRouter().getRoles().getDecode()
                 .setSelector(new RandomDecodeSelectorConfig());
-        assertEquals(LoadBalanceStrategyEnum.RANDOM,
-                config.strategyFor(RoleType.PREFILL));
-        assertEquals(LoadBalanceStrategyEnum.RANDOM,
-                config.strategyFor(RoleType.DECODE));
+        assertInstanceOf(RandomPrefillSelectorConfig.class,
+                config.getRouter().selectorFor(RoleType.PREFILL));
+        assertInstanceOf(RandomDecodeSelectorConfig.class,
+                config.getRouter().selectorFor(RoleType.DECODE));
     }
 
     @Test
     void pdfusion_reuses_prefill_configuration() {
-        RoutingConfig.EstimatedTtftSelectorConfig selector =
-                new RoutingConfig.EstimatedTtftSelectorConfig();
+        EstimatedTtftSelectorConfig selector = new EstimatedTtftSelectorConfig();
         selector.setCandidateChoice(new LeastRecentlyUsedInPoolConfig());
         FlexlbConfig config = new FlexlbConfig();
         config.getRouter().getRoles().getPrefill().setSelector(selector);
 
-        assertEquals(LoadBalanceStrategyEnum.SHORTEST_TTFT,
-                config.strategyFor(RoleType.PREFILL));
-        assertEquals(LoadBalanceStrategyEnum.SHORTEST_TTFT,
-                config.strategyFor(RoleType.PDFUSION));
+        assertSame(selector, config.getRouter().selectorFor(RoleType.PREFILL));
+        assertSame(selector, config.getRouter().selectorFor(RoleType.PDFUSION));
     }
 
     @Test

@@ -88,9 +88,9 @@ class BaselineParityE2ETest {
                     "with all switches off the dispatch order must be exactly FIFO");
 
             // 无任何抢占痕迹
-            verify(h.priorityReporter, never()).reportVictim(anyInt(), anyInt(),
+            verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),
                     anyString(), anyString());
-            verify(h.priorityReporter, never()).reportPriorityPreempt(anyString());
+            verify(h.requestReporter, never()).reportPriorityPreempt(anyString());
 
             // 对照数据：三档平均调度延迟应该同量级（仅输出，不做脆断言）
             Map<Integer, Double> avgLatencyMs = new HashMap<>();

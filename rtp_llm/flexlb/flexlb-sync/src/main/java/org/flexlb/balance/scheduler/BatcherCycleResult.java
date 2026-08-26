@@ -1,5 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryMetadata;
+
 import java.util.List;
 import java.util.Objects;
 
@@ -15,7 +18,7 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
     }
 
     /** The exact ordered prefix which reserved capacity and entered delivery. */
-    record Admitted(List<BatchItem> items, DecisionGroupMetadata metadata)
+    record Admitted(List<BatchItem> items, DeliveryMetadata metadata)
             implements BatcherCycleResult {
         public Admitted {
             items = List.copyOf(items);
@@ -29,7 +32,7 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
     /** The ordered head remains active because this exact resource is full. */
     record CapacityBlocked(
             BatchItem item,
-            DeliveryCapacityAdmission.CapacityUnavailable unavailable)
+            CapacityBoundary.Unavailable unavailable)
             implements BatcherCycleResult {
         public CapacityBlocked {
             Objects.requireNonNull(item, "blocked item");

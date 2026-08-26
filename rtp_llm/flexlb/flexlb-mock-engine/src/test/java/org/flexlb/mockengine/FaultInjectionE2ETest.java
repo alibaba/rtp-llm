@@ -226,17 +226,20 @@ class FaultInjectionE2ETest {
                 BASE_PORT + 60, 1, 1, "5", 1.0, false, new SingleDecisionConfig())) {
             JavaMockEngineCluster.FastRpcService decode = h.decodeEngines.get(0);
             long totalKv = decode.getTotalKvTokens();
+            // The scheduler fixture is already published at status version 1.
+            // Consume the engine's matching baseline before asserting a newer snapshot.
+            h.pumpOnce();
             decode.setFaultConfig(FaultInjectionConfig.builder()
                     .kvPressureTokens(totalKv)
                     .build());
 
             h.pumpOnce();
-            assertEquals(0L, h.decodeEndpoint(0).getStatus().getAvailableKvCacheTokens().get(),
+            assertEquals(0L, h.decodeEndpoint(0).getStatus().getAvailableKvCacheTokens(),
                     "full KV pressure must surface as zero available tokens in WorkerStatus");
 
             decode.clearFaultConfig();
             h.pumpOnce();
-            assertEquals(totalKv, h.decodeEndpoint(0).getStatus().getAvailableKvCacheTokens().get(),
+            assertEquals(totalKv, h.decodeEndpoint(0).getStatus().getAvailableKvCacheTokens(),
                     "clearing the pressure must restore the full capacity view");
         }
     }

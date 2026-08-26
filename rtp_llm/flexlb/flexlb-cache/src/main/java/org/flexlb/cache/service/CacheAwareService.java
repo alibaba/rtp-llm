@@ -1,7 +1,9 @@
 package org.flexlb.cache.service;
 
+import org.flexlb.cache.domain.CacheMatch;
+import org.flexlb.cache.domain.EngineGeneration;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -19,17 +21,40 @@ public interface CacheAwareService {
      * Find matching engines
      *
      * @param blockCacheKeys List of cache block IDs to query
-     * @param roleType       Engine role to query
-     * @param group          Engine group to query
-     * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
+     * @param roleType       Engine role used for lookup telemetry
+     * @param candidates     Exact endpoint generations eligible for this request
+     * @return prefix matches keyed by the same exact generation identity
      */
-    Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group);
+    Map<EngineGeneration, CacheMatch> findMatchingEngines(
+            List<Long> blockCacheKeys,
+            RoleType roleType,
+            List<EngineGeneration> candidates);
     
     /**
-     * Update engine block KV cache status
-     *
-     * @param workerStatus Worker status information
-     * @return Update result
+     * Publish a newly discovered engine generation before any cache poll is
+     * submitted for it. Repeating the active generation is idempotent; an
+     * older generation is rejected.
      */
-    WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
+    boolean activateEngineGeneration(
+            String engineIpPort,
+            RoleType roleType,
+            long generationId);
+
+    /**
+     * Replace the cache view of one exact engine generation.
+     */
+    WorkerCacheUpdateResult updateEngineBlockCache(
+            String engineIpPort,
+            RoleType roleType,
+            long generationId,
+            CacheStatus cacheStatus);
+
+    /**
+     * Retire one exact generation. A delayed retirement cannot clear a newer
+     * generation published at the same address.
+     */
+    boolean retireEngineGeneration(
+            String engineIpPort,
+            RoleType roleType,
+            long generationId);
 }

@@ -138,8 +138,8 @@ python3 -m unittest discover -s tools/online_eval/tests
 
 普通 `./mvnw test` 只运行功能测试，并排除 `performance-regression` tag。性能回归分为两个显式 profile，必须分别运行：
 
-- `sync-performance-regression`：`RequestExpirationTimerPerformanceTest`、`AutoTpmSchedulingOverheadPerfTest`、`CostBasedPrefillRoutingPerformanceTest` 和 `PrefillQueueManagerPerformanceTest`。其中 cost-based 测试覆盖 750 个 prefill endpoint 的选点热路径，queue-manager 测试覆盖不同队列深度下的等待时间估算开销。
-- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路；cost-based prefill 热路径由 Sync profile 的 750-endpoint 门禁独立覆盖。
+- `sync-performance-regression`：`WorkerBatcherPerformanceTest`，覆盖不同真实非空队列深度下 projection input capture 与 immutable materialization 的延迟和分配上限。
+- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路。类内先运行单 worker 的真实 payload burst，再运行 engine-scale 矩阵，避免大规模 fixture 的回收状态污染 burst 基线。
 
 分别运行两组门禁：
 
@@ -147,6 +147,19 @@ python3 -m unittest discover -s tools/online_eval/tests
 ./mvnw test -P '!internal,sync-performance-regression' -pl flexlb-sync -am
 ./mvnw test -P '!internal,api-performance-regression' -pl flexlb-api -am
 ```
+
+需要在 UT 中复核 750 Prefill / 500 Decode 拓扑时，必须显式覆盖矩阵；默认
+矩阵只到 16 / 32：
+
+```bash
+./mvnw -P 'opensource,!internal,api-performance-regression' \
+  -pl flexlb-api -am \
+  -Dflexlb.perf.engine-matrix-topologies=750x500 \
+  -Dflexlb.perf.engine-matrix-target-qps=1000,2000,5000,10000 test
+```
+
+如果一次指定多个 topology，应按 Prefill、Decode 数量均不下降的顺序排列；
+同一测试 fixture 只增加 endpoint，不在参数项之间缩减已注册的拓扑。
 
 profile 已内置精确的测试类 includes；不需要手写 `-Dtest`。上游无匹配性能类的模块会正常放行，每个性能类都在不可复用的新 fork 中执行。
 

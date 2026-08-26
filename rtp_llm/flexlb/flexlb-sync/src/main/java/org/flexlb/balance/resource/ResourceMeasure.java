@@ -1,30 +1,21 @@
 package org.flexlb.balance.resource;
 
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
 import java.util.Map;
 
 /**
- * Resource measure interface
- * Uses different resource availability logic based on RoleType
+ * Resource telemetry contract shared by role-specific measures.
+ *
+ * <p>Routing availability is intentionally exposed only by the concrete role
+ * measure because Prefill and Decode consume different immutable snapshot
+ * types. This interface owns no cross-request availability state.
  *
  * @author saichen.sm
  * @since 2025/12/23
  */
 public interface ResourceMeasure {
-
-    /**
-     * Check if specified endpoint has available resources.
-     * Concrete implementations should override with type-specific logic.
-     */
-    default boolean isResourceAvailable(WorkerEndpoint endpoint) {
-        if (endpoint == null) {
-            return false;
-        }
-        return endpoint.getStatus().isAlive();
-    }
 
     /**
      * Get resource evaluation indicator

@@ -1,31 +1,38 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
+import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
+import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityOrdering;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Per-worker scheduling queue that owns request grouping and hard-capacity admission,
- * delegating grouping decisions to a {@link BatcherAlgorithm}.
+ * delegating grouping decisions to a {@link GroupPolicy}.
  *
- * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and grouped by the configured decision policy. A
+ * <p>One instance per Prefill worker. Exact requests enter through the neutral
+ * {@link PrefillGenerationRuntime} boundary and are grouped by the configured
+ * decision policy. A
  * group may independently be delivered through
  * EnqueueBatch or as individual route decisions.
  *
@@ -37,7 +44,15 @@ import java.util.concurrent.locks.ReentrantLock;
  * lock-holding methods here). A monotonic mutation generation lets snapshots
  * and diagnostics identify queue-state changes.
  */
-public class WorkerBatcher {
+final class WorkerBatcher implements PrefillGenerationRuntime {
+
+    private enum RuntimeState {
+        NEW,
+        STARTING,
+        RUNNING,
+        STOPPING,
+        STOPPED
+    }
 
     /**
      * PRIORITY queue order: delegates to
@@ -56,10 +71,19 @@ public class WorkerBatcher {
     public static final Comparator<BatchItem> FIFO_QUEUE_ORDER =
             Comparator.comparingLong(BatchItem::enqueueSeq);
 
+    private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
+            (left, right) -> PriorityOrdering.compareWithRequestId(
+                    left.priority(), left.enqueueSeq(), left.requestId(),
+                    right.priority(), right.enqueueSeq(), right.requestId());
+    private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
+            Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
+                    .thenComparingLong(GroupPlanner.Item::requestId);
+
     private final String key;
-    private final DecisionGroupHandler decisionHandler;
+    private final PrefillEndpoint prefillEndpoint;
+    private final DeliveryStrategy deliveryStrategy;
+    private final DeliveryLifecyclePort deliveryLifecycle;
     private final PriorityBlockingQueue<BatchItem> queue;
-    private final AtomicInteger queueDepth = new AtomicInteger();
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
      * delivery and drain. It is exposed in diagnostic snapshots.
@@ -72,6 +96,8 @@ public class WorkerBatcher {
      * every ordering mode has the same mutation guarantees.
      */
     private final ReentrantLock queueLock = new ReentrantLock();
+    /** Canonical request ownership guarded exclusively by {@link #queueLock}. */
+    private final PrefillWorkRegistry workRegistry;
     /**
      * One per-worker condition for new queue work and endpoint-capacity release.
      * Every predicate transition and signal is serialized by queueLock, so a
@@ -79,118 +105,140 @@ public class WorkerBatcher {
      */
     private final Condition stateChanged = queueLock.newCondition();
     private final Thread workerThread;
-    private final AtomicBoolean terminationStarted = new AtomicBoolean();
+    /** Constructed before this endpoint generation can begin retirement. */
+    private final CancellationException normalStopFailure;
+    /** Fixed diagnostic for an impossible exact stop acknowledgement loss. */
+    private final IllegalStateException stopAcknowledgementFailure;
+    private boolean terminationStarted;
+    private boolean terminationFinished;
+    private Thread terminationOwner;
+    private volatile RuntimeState runtimeState = RuntimeState.NEW;
+    private Throwable stopFailure;
     private volatile boolean stopped;
-    private volatile boolean waitingForSignal;
-    private final BatcherAlgorithm algorithm;
+    private final GroupPolicy groupPolicy;
     private final BatcherContext ctx;
-    private final PrefillQueueManager queueManager;
     private final Runnable capacityAvailableSignal =
             this::signalDeliveryCapacityAvailable;
     /** Exact resource event source for the currently blocked active head. */
-    private DeliveryCapacityAdmission.CapacityAvailability
+    private CapacityBoundary.Availability
             subscribedCapacityAvailability;
     /** Exact active head for which this worker is waiting on a capacity event. */
     private BatcherCycleResult.CapacityBlocked capacityBlockedHead;
 
-    public WorkerBatcher(String key, PrefillEndpoint prefillEp, FlexlbConfig config,
-                         DecisionGroupHandler decisionHandler,
-                         DeliveryCapacityAdmission capacityAdmission,
-                         BatchSchedulerReporter reporter) {
+    WorkerBatcher(
+            String key,
+            PrefillEndpoint prefillEp,
+            FlexlbConfig config,
+            DeliveryStrategy deliveryStrategy,
+            DeliveryLifecyclePort deliveryLifecycle) {
         this.key = key;
-        this.decisionHandler = decisionHandler;
-        Comparator<BatchItem> queueOrder = config.isPriorityOrdering()
+        this.prefillEndpoint = prefillEp;
+        boolean queueScheduling = config.isQueue();
+        boolean priorityOrdering = config.isPriorityOrdering();
+        this.deliveryStrategy = deliveryStrategy;
+        this.deliveryLifecycle = deliveryLifecycle;
+        Comparator<BatchItem> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
+        Comparator<GroupPlanner.Item> projectionOrder =
+                priorityOrdering
+                        ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.queue = new PriorityBlockingQueue<>(11, queueOrder);
-        this.algorithm = config.isSingleDecision()
-                ? new SingleRequestBatcherAlgorithm()
-                : new FixedWindowBatcherAlgorithm();
+        this.workRegistry = new PrefillWorkRegistry(
+                queueLock, queue, capacityAvailableSignal);
+        this.groupPolicy = config.isSingleDecision()
+                ? new SingleRequestGroupPolicy()
+                : new FixedWindowGroupPolicy();
         this.ctx = new BatcherContext(
-                key, prefillEp, config, decisionHandler, capacityAdmission,
-                queue, queueDepth, queueVersion, queueLock, queueOrder, reporter);
-        this.queueManager = new PrefillQueueManager(this, ctx);
+                key, prefillEp, config, deliveryLifecycle,
+                queue, queueVersion, queueLock, queueOrder,
+                projectionOrder, queueScheduling, deliveryStrategy,
+                workRegistry);
+        this.normalStopFailure = new CancellationException(
+                "FlexLB worker scheduling queue stopped: " + key);
+        this.stopAcknowledgementFailure = new IllegalStateException(
+                "FlexLB worker stop callback lost its exact retained owner: "
+                        + key);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
                 Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, e));
     }
 
-    public void start() {
-        workerThread.start();
-    }
-
-    public void offer(BatchItem item) {
-        if (stopped) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
-            return;
+    @Override
+    public synchronized void start() {
+        if (runtimeState != RuntimeState.NEW) {
+            throw new IllegalStateException(
+                    "Prefill generation runtime cannot start from "
+                            + runtimeState);
         }
-        int maxSize = ctx.maxQueueCapacity();
-        if (!reserveQueueSlot(maxSize)) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException(
-                            "FlexLB worker scheduling queue full, maxSize=" + maxSize));
-            return;
-        }
-        if (!enqueue(item)) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
-        }
-    }
-
-    /**
-     * priority scheduling variant of {@link #offer(BatchItem)} that reports failure via
-     * return value instead of the {@link DecisionGroupHandler#onOfferFailure}
-     * callback, letting the caller (PlanCommitter) roll back its decode
-     * reservation and decide on retry.
-     *
-     * @return true when the item was enqueued; false when the worker queue is
-     *         stopped or the queue is full (item not enqueued)
-     */
-    public boolean tryOffer(BatchItem item) {
-        if (stopped) {
-            return false;
-        }
-        if (!reserveQueueSlot(ctx.maxQueueCapacity())) {
-            return false;
-        }
-        return enqueue(item);
-    }
-
-    private boolean enqueue(BatchItem item) {
+        runtimeState = RuntimeState.STARTING;
         try {
-            algorithm.onOffer(ctx, item, System.currentTimeMillis());
-            queueLock.lock();
-            try {
-                // Linearize the final stopped check with shutdown/drain. An
-                // offer that reserved capacity just before shutdown must not
-                // enqueue after the drain has completed.
-                if (stopped) {
-                    queueDepth.decrementAndGet();
-                    return false;
-                }
-                queue.add(item);
-                queueVersion.incrementAndGet();
-                stateChanged.signal();
-                return true;
-            } finally {
-                queueLock.unlock();
-            }
-        } catch (RuntimeException | Error e) {
-            queueDepth.decrementAndGet();
-            throw e;
+            workerThread.start();
+            runtimeState = RuntimeState.RUNNING;
+        } catch (RuntimeException | Error startFailure) {
+            Throwable cleanupFailure = stopAndDrain(
+                    startFailure,
+                    false);
+            runtimeState = RuntimeState.STOPPED;
+            notifyAll();
+            addSuppressedNoFail(startFailure, cleanupFailure);
+            throw startFailure;
         }
     }
 
+    @Override
+    public boolean offer(DeliveryItem exactItem) {
+        BatchItem item = (BatchItem) exactItem;
+        assert item.prefillEp() == prefillEndpoint
+                : "incoming item belongs to another Prefill generation";
+        if (runtimeState != RuntimeState.RUNNING || stopped) {
+            return false;
+        }
+        return enqueue(item, ctx.maxQueueCapacity()) == OfferResult.OFFERED;
+    }
+
+    private enum OfferResult {
+        OFFERED,
+        FULL,
+        STOPPED
+    }
+
+    private OfferResult enqueue(BatchItem item, int maximumQueueSize) {
+        queueLock.lock();
+        try {
+            return enqueueUnderLock(item, maximumQueueSize);
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private OfferResult enqueueUnderLock(
+            BatchItem item, int maximumQueueSize) {
+        if (stopped) {
+            return OfferResult.STOPPED;
+        }
+        if (maximumQueueSize > 0 && queue.size() >= maximumQueueSize) {
+            return OfferResult.FULL;
+        }
+        if (!ctx.publishActiveIndexUnderLock(item)) {
+            return OfferResult.STOPPED;
+        }
+        stateChanged.signal();
+        return OfferResult.OFFERED;
+    }
+
+    @Override
     public int queueSize() {
-        return queueDepth.get();
+        return queue.size();
     }
 
     /**
      * Snapshot of the current active queue depth bucketed by normalized
      * scheduling priority. Only priorities present in the queue appear in the
-     * result, matching the empty-bucket behavior of wait-time metrics.
+     * result, matching the tagged queue-depth metric behavior.
      */
+    @Override
     public Map<Integer, Integer> queueSizeByPriority() {
         Map<Integer, Integer> sizeByPriority = new HashMap<>();
         for (BatchItem item : queue) {
@@ -209,173 +257,363 @@ public class WorkerBatcher {
         return ctx.schedulingInputVersionValue();
     }
 
+    PrefillWorkLedger ownedLedger() {
+        return workRegistry;
+    }
+
+    @Override
+    public RouteProjection.Inputs captureRouteProjectionInputs() {
+        return ctx.captureRouteProjectionInputs(this::admissionBlockUnderLock);
+    }
+
+    /** Immutable delivery semantics used by a pure route projection. */
+    @Override
+    public RouteProjection.DeliveryProjection deliveryProjection() {
+        return deliveryStrategy.projectionPolicy();
+    }
+
     /**
-     * Estimated time a new request would wait in the queue before delivery.
-     * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
+     * Capture only an admission rejection whose worker wait predicate still
+     * holds. The availability read is the already-subscribed wait predicate;
+     * it neither previews nor reserves capacity.
+     *
+     * <p>Caller holds {@link #queueLock}.
      */
-    public long queueWaitMs() {
-        return algorithm.queueWaitMs(ctx);
+    private AdmissionBlock admissionBlockUnderLock() {
+        assert queueLock.isHeldByCurrentThread()
+                : "capacity block snapshot requires queueLock";
+        BatcherCycleResult.CapacityBlocked blocked = capacityBlockedHead;
+        if (blocked == null
+                || ctx.peek() != blocked.item()
+                || blocked.item().requestExpired(ctx.now())
+                || blocked.unavailable().availability().isAvailable()) {
+            return null;
+        }
+        return new AdmissionBlock(
+                blocked.item().requestId(),
+                blocked.item().enqueueSeq(),
+                blocked.unavailable().projectionSemantics());
     }
 
-    /** priority scheduling queue facade (snapshot / estimateWait / atomic replace). */
-    public PrefillQueueManager queueManager() {
-        return queueManager;
-    }
-
-    int callbackOwnedRequestCount() {
-        return ctx.callbackOwnedRequestCount();
-    }
-
-    public void shutdown() {
-        stopAndDrain(
-                "FlexLB worker scheduling queue stopped: " + key,
-                null,
+    @Override
+    public Throwable stopAndAwait() {
+        if (Thread.currentThread() == workerThread) {
+            throw new IllegalStateException(
+                    "Prefill runtime cannot await its own worker thread");
+        }
+        Throwable failure = stopAndDrain(
+                normalStopFailure,
                 true);
+        boolean interrupted = false;
+        while (true) {
+            try {
+                workerThread.join();
+                break;
+            } catch (InterruptedException interruption) {
+                interrupted = true;
+            }
+        }
+        synchronized (this) {
+            runtimeState = RuntimeState.STOPPED;
+            notifyAll();
+            failure = stopFailure;
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        return failure;
     }
 
     private void stopAfterUnexpectedLoopFailure(Throwable loopFailure) {
-        Logger.error("WorkerBatcher[{}] stopped after an unexpected loop failure",
-                key, loopFailure);
-        stopAndDrain(
-                "FlexLB worker scheduling queue failed: " + key,
+        try {
+            Logger.error("WorkerBatcher[{}] stopped after an unexpected loop failure",
+                    key, loopFailure);
+        } catch (Throwable ignoredLoggingFailure) {
+            // The exact stop transaction must still run.
+        }
+        Throwable cleanupFailure = stopAndDrain(
                 loopFailure,
                 false);
+        if (cleanupFailure != null) {
+            try {
+                Logger.error("WorkerBatcher[{}] failure cleanup exposed invariants",
+                        key, cleanupFailure);
+            } catch (Throwable ignoredLoggingFailure) {
+                // Cleanup is already complete.
+            }
+        }
     }
 
-    private void stopAndDrain(
-            String failureMessage,
-            Throwable failureCause,
+    private Throwable stopAndDrain(
+            Throwable terminalFailure,
             boolean interruptWorker) {
-        stopped = true;
-        if (!terminationStarted.compareAndSet(false, true)) {
-            if (interruptWorker && Thread.currentThread() != workerThread) {
-                workerThread.interrupt();
+        Objects.requireNonNull(terminalFailure, "terminalFailure");
+        boolean interrupted = false;
+        synchronized (this) {
+            stopped = true;
+            if (terminationStarted) {
+                if (!terminationFinished
+                        && terminationOwner == Thread.currentThread()) {
+                    throw new IllegalStateException(
+                            "Prefill runtime cannot await its active stop transaction");
+                }
+                while (!terminationFinished) {
+                    try {
+                        wait();
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
+                }
+                Throwable completedFailure = stopFailure;
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return completedFailure;
             }
-            return;
+            terminationStarted = true;
+            terminationOwner = Thread.currentThread();
+            runtimeState = runtimeState == RuntimeState.NEW
+                    ? RuntimeState.STOPPED : RuntimeState.STOPPING;
         }
-        List<BatchItem> remaining = new ArrayList<>();
-        ctx.stopAndDrainTo(remaining);
+
+        Throwable cleanupFailure = null;
+        try {
+            boolean queueLocked = false;
+            try {
+                queueLock.lock();
+                queueLocked = true;
+                ctx.stopAcceptingUnderLock();
+                try {
+                    unsubscribeFromBlockedCapacity();
+                } catch (Throwable subscriptionFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, subscriptionFailure);
+                }
+                capacityBlockedHead = null;
+                stateChanged.signalAll();
+            } catch (Throwable wakeFailure) {
+                cleanupFailure = appendCleanupFailure(
+                        cleanupFailure, wakeFailure);
+            } finally {
+                if (queueLocked) {
+                    try {
+                        queueLock.unlock();
+                    } catch (Throwable unlockFailure) {
+                        cleanupFailure = appendCleanupFailure(
+                                cleanupFailure, unlockFailure);
+                    }
+                }
+            }
+
+            if (interruptWorker && Thread.currentThread() != workerThread) {
+                try {
+                    workerThread.interrupt();
+                } catch (Throwable interruptFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, interruptFailure);
+                }
+            }
+
+            while (true) {
+                BatchItem item;
+                try {
+                    item = detachNextStoppedItem();
+                } catch (Throwable claimFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, claimFailure);
+                    break;
+                }
+                if (item == null) {
+                    break;
+                }
+                try {
+                    deliveryLifecycle.onOfferFailure(item, terminalFailure);
+                } catch (Throwable callbackFailure) {
+                    try {
+                        Logger.error("WorkerBatcher[{}] shutdown callback failed request_id={}",
+                                key, item.requestId(), callbackFailure);
+                    } catch (Throwable ignoredLoggingFailure) {
+                        // Cleanup ownership cannot depend on diagnostics.
+                    }
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, callbackFailure);
+                    // Do not acknowledge: generation retirement still owns
+                    // this exact pending identity and will project it again.
+                    continue;
+                }
+                try {
+                    if (!acknowledgeStoppedItem(item)) {
+                        cleanupFailure = appendCleanupFailure(
+                                cleanupFailure,
+                                stopAcknowledgementFailure);
+                    }
+                } catch (Throwable acknowledgementFailure) {
+                    // The terminal fact was already delivered. If the exact
+                    // entry remains, generation retirement converges it as a
+                    // stale/idempotent replay.
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, acknowledgementFailure);
+                }
+            }
+        } catch (Throwable unexpectedCleanupFailure) {
+            cleanupFailure = appendCleanupFailure(
+                    cleanupFailure, unexpectedCleanupFailure);
+        } finally {
+            synchronized (this) {
+                stopFailure = cleanupFailure;
+                terminationFinished = true;
+                terminationOwner = null;
+                notifyAll();
+            }
+        }
+        return cleanupFailure;
+    }
+
+    /**
+     * Detach one exact ACTIVE queue index after the stop gate is closed while
+     * retaining its canonical entry. The callback result decides whether that
+     * entry is acknowledged or carried into generation retirement.
+     */
+    private BatchItem detachNextStoppedItem() {
         queueLock.lock();
         try {
-            unsubscribeFromBlockedCapacity();
-            capacityBlockedHead = null;
+            BatchItem item = ctx.detachNextStopTerminalUnderLock();
             stateChanged.signalAll();
+            return item;
         } finally {
             queueLock.unlock();
         }
-        if (interruptWorker && Thread.currentThread() != workerThread) {
-            workerThread.interrupt();
+    }
+
+    /** Acknowledge only the retained owner whose terminal callback returned. */
+    private boolean acknowledgeStoppedItem(BatchItem item) {
+        queueLock.lock();
+        try {
+            return ctx.acknowledgeStopTerminalUnderLock(item);
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private static Throwable appendCleanupFailure(
+            Throwable first,
+            Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        // Preserve cleanup totality under allocation failure. The first causal
+        // failure is sufficient; later leaves were still all attempted.
+        return first;
+    }
+
+    private static void addSuppressedNoFail(
+            Throwable primary,
+            Throwable leaf) {
+        if (primary == null || leaf == null || primary == leaf) {
+            return;
         }
         try {
-            algorithm.onShutdown(ctx);
-        } catch (Throwable shutdownFailure) {
-            Logger.error("WorkerBatcher[{}] algorithm shutdown failed", key, shutdownFailure);
-        }
-        for (BatchItem item : remaining) {
-            try {
-                decisionHandler.onOfferFailure(item,
-                        failureCause == null
-                                ? new CancellationException(failureMessage)
-                                : new IllegalStateException(
-                                        failureMessage, failureCause));
-            } catch (Throwable callbackFailure) {
-                Logger.error("WorkerBatcher[{}] shutdown callback failed request_id={}",
-                        key, item.requestId(), callbackFailure);
-            }
+            primary.addSuppressed(leaf);
+        } catch (Throwable ignoredAggregationFailure) {
+            // The start transaction already drained every acquired leaf.
         }
     }
 
     // ==================== priority scheduling queue operations ====================
 
-    /** Idempotently remove queued requests during cancellation or expiration. */
-    List<BatchItem> tryRemove(List<Long> requestIds, String reason) {
+    @Override
+    public boolean removeQueued(
+            DeliveryItem exactItem,
+            String reason) {
+        BatchItem item = (BatchItem) exactItem;
+        assert item.prefillEp() == prefillEndpoint
+                : "queued item belongs to another Prefill generation";
+        Objects.requireNonNull(reason, "reason");
+        boolean removed;
         queueLock.lock();
         try {
-            List<BatchItem> removed = new ArrayList<>(requestIds.size());
-            for (long requestId : requestIds) {
-                BatchItem item = findQueued(requestId);
-                if (item != null && ctx.remove(item)) {
-                    removed.add(item);
-                }
-            }
-            if (!removed.isEmpty()) {
-                // External cancellation/expiration may replace a
-                // capacity-blocked route head with processable batch work.
-                // Publish that predicate transition under the same lock as
-                // the removal so the worker cannot miss the wakeup.
+            removed = runtimeState == RuntimeState.RUNNING
+                    && !stopped
+                    && ctx.removeUnderLock(item);
+            if (removed) {
                 stateChanged.signal();
-                Logger.debug("[priority-scheduler] queue remove: worker={} reason={} removed={}",
-                        key, reason, removed.size());
             }
-            return removed;
+        } finally {
+            queueLock.unlock();
+        }
+        if (removed) {
+            try {
+                Logger.debug(
+                        "[request-scheduler] exact queue remove: worker={} reason={} request_id={}",
+                        key, reason, item.requestId());
+            } catch (Throwable ignoredLoggingFailure) {
+                // Diagnostics cannot turn a committed exact removal into failure.
+            }
+        }
+        return removed;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public QueueReplacement replaceQueued(
+            List<DeliveryItem> exactVictims,
+            DeliveryItem incoming) {
+        List<BatchItem> victims =
+                (List<BatchItem>) (List<?>) exactVictims;
+        BatchItem incomingItem = (BatchItem) incoming;
+        QueueReplacement committed = new QueueReplacement(
+                QueueReplacementStatus.SUCCESS);
+        queueLock.lock();
+        try {
+            if (runtimeState != RuntimeState.RUNNING || stopped) {
+                return new QueueReplacement(
+                        QueueReplacementStatus.DECLINED);
+            }
+            int maximumQueueSize = ctx.maxQueueCapacity();
+            int victimsRequiredNow = maximumQueueSize <= 0
+                    ? 0
+                    : Math.max(0, queue.size() + 1 - maximumQueueSize);
+            if (victimsRequiredNow == 0
+                    || victims.size() != victimsRequiredNow) {
+                return new QueueReplacement(
+                        QueueReplacementStatus.DECLINED);
+            }
+            int postSwapSize = queue.size() - victims.size() + 1;
+            if (postSwapSize < 0
+                    || (maximumQueueSize > 0
+                    && postSwapSize > maximumQueueSize)) {
+                return new QueueReplacement(
+                        QueueReplacementStatus.DECLINED);
+            }
+            PrefillWorkRegistry.ActiveReplaceStatus replacement =
+                    workRegistry.replaceActiveExact(victims, incomingItem);
+            if (replacement
+                    == PrefillWorkRegistry.ActiveReplaceStatus.CONFLICT) {
+                return new QueueReplacement(
+                        QueueReplacementStatus.CONFLICT);
+            }
+            queueVersion.incrementAndGet();
+            stateChanged.signal();
+            return committed;
         } finally {
             queueLock.unlock();
         }
     }
 
-    private BatchItem findQueued(long requestId) {
-        return ctx.findQueued(requestId);
-    }
-
-    /**
-     * Atomic victim replacement with a victim-level presence guard: under the queue
-     * lock, verify every victim is still queued — any missing victim aborts
-     * with a zero-side-effect {@code VICTIM_GONE} (nothing removed, incoming
-     * not enqueued) — then remove all victims and enqueue the incoming item.
-     *
-     * <p>"Still queued" is a sufficient guard: a BatchItem leaves the queue
-     * only via delivery / eviction / drop, all under {@link #queueLock} and
-     * all removing it from the queue — so an in-lock {@code findQueued} hit
-     * proves the victim has not been delivered. Unrelated queue mutations do
-     * not abort the commit.
-     */
-    PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresent(
-            List<Long> victimIds, BatchItem incoming) {
-        List<BatchItem> removed = new ArrayList<>(victimIds.size());
-        boolean queueChanged = false;
+    @Override
+    @SuppressWarnings("unchecked")
+    public QueueSnapshot captureQueueSnapshot() {
         queueLock.lock();
         try {
-            if (stopped) {
-                // Shutdown: zero-side-effect abort (caller replans / fails fast).
-                return PrefillQueueManager.ReplaceOutcome.victimGone(List.copyOf(victimIds));
-            }
-            List<BatchItem> present = new ArrayList<>(victimIds.size());
-            List<Long> missing = new ArrayList<>();
-            for (long victimId : victimIds) {
-                BatchItem victim = findQueued(victimId);
-                if (victim == null) {
-                    missing.add(victimId);
-                } else {
-                    present.add(victim);
-                }
-            }
-            if (!missing.isEmpty()) {
-                return PrefillQueueManager.ReplaceOutcome.victimGone(missing);
-            }
-            for (BatchItem victim : present) {
-                if (!ctx.remove(victim)) {
-                    // Unreachable under the lock discipline; victims already
-                    // removed stay out (no re-insert, design doc 9.5).
-                    return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
-                }
-                removed.add(victim);
-                queueChanged = true;
-            }
-            if (!tryOffer(incoming)) {
-                return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
-            }
-            return PrefillQueueManager.ReplaceOutcome.success(removed);
-        } catch (RuntimeException | Error e) {
-            Logger.error("WorkerBatcher[{}] presence-guarded victim replace failed", key, e);
-            return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
+            List<BatchItem> queued = ctx.activeItemsInSchedulingOrder();
+            List<DeliveryItem> items =
+                    (List<DeliveryItem>) (List<?>) queued;
+            return new QueueSnapshot(
+                    key,
+                    queueVersion.get(),
+                    ctx.maxQueueCapacity(),
+                    items);
         } finally {
-            if (queueChanged) {
-                // A partial replacement may remove the route head without a
-                // successful incoming offer. Wake the condition waiter so a
-                // newly exposed active head is not hidden until the removed
-                // request's old expiration deadline.
-                stateChanged.signal();
-            }
             queueLock.unlock();
         }
     }
@@ -383,18 +621,25 @@ public class WorkerBatcher {
     // ==================== Internal: Run loop ====================
 
     private void runLoop() {
-        while (!stopped && !Thread.currentThread().isInterrupted()) {
-            try {
-                runOneCycle();
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (Throwable t) {
-                // Every expected delivery failure is terminalized inside the
-                // typed cycle. An escaping Throwable is therefore an invariant
-                // failure; retrying the same ACTIVE state can only spin.
-                stopAfterUnexpectedLoopFailure(t);
-                return;
+        try {
+            while (!stopped && !Thread.currentThread().isInterrupted()) {
+                try {
+                    runOneCycle();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (Throwable t) {
+                    // Every expected delivery failure is terminalized inside the
+                    // typed cycle. An escaping Throwable is therefore an invariant
+                    // failure; retrying the same ACTIVE state can only spin.
+                    stopAfterUnexpectedLoopFailure(t);
+                    return;
+                }
+            }
+        } finally {
+            synchronized (this) {
+                runtimeState = RuntimeState.STOPPED;
+                notifyAll();
             }
         }
     }
@@ -405,7 +650,7 @@ public class WorkerBatcher {
             return;
         }
 
-        BatcherCycleResult result = algorithm.processQueue(ctx);
+        BatcherCycleResult result = groupPolicy.processQueue(ctx);
         if (result instanceof BatcherCycleResult.CapacityBlocked blocked) {
             awaitBlockedHeadCapacity(blocked);
         } else if (result
@@ -433,7 +678,7 @@ public class WorkerBatcher {
      */
     private void subscribeToBlockedCapacity(
             BatcherCycleResult.CapacityBlocked blocked) {
-        DeliveryCapacityAdmission.CapacityAvailability nextSource =
+        CapacityBoundary.Availability nextSource =
                 blocked.unavailable().availability();
         if (nextSource != subscribedCapacityAvailability) {
             unsubscribeFromBlockedCapacity();
@@ -444,7 +689,7 @@ public class WorkerBatcher {
 
     /** Caller holds queueLock. */
     private void unsubscribeFromBlockedCapacity() {
-        DeliveryCapacityAdmission.CapacityAvailability source =
+        CapacityBoundary.Availability source =
                 subscribedCapacityAvailability;
         if (source == null) {
             return;
@@ -472,9 +717,9 @@ public class WorkerBatcher {
             subscribeToBlockedCapacity(blocked);
             while (!stopped
                     && ctx.peek() == blocked.item()
-                    && !blocked.item().ctx().requestExpired(System.currentTimeMillis())
+                    && !blocked.item().requestExpired(System.currentTimeMillis())
                     && !blocked.unavailable().availability().isAvailable()) {
-                long expiresAtMs = blocked.item().ctx().getRequestExpiresAtMs();
+                long expiresAtMs = blocked.item().expiresAtMs();
                 long nowMs = System.currentTimeMillis();
                 if (expiresAtMs <= nowMs) {
                     return;
@@ -493,7 +738,7 @@ public class WorkerBatcher {
     }
 
     /**
-     * Wait for the exact queue/input generation captured by the algorithm or
+     * Wait for the exact queue/input generation captured by the policy or
      * for its deadline. Every predicate and signal is serialized by queueLock.
      */
     private void awaitSchedulingChange(
@@ -522,22 +767,12 @@ public class WorkerBatcher {
     }
 
     private void awaitStateChange() throws InterruptedException {
-        waitingForSignal = true;
-        try {
-            stateChanged.await();
-        } finally {
-            waitingForSignal = false;
-        }
+        stateChanged.await();
     }
 
     private void awaitStateChangeUntil(long remainingMs) throws InterruptedException {
-        waitingForSignal = true;
-        try {
-            stateChanged.awaitNanos(TimeUnit.MILLISECONDS.toNanos(
-                    Math.max(1L, remainingMs)));
-        } finally {
-            waitingForSignal = false;
-        }
+        stateChanged.awaitNanos(TimeUnit.MILLISECONDS.toNanos(
+                Math.max(1L, remainingMs)));
     }
 
     /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
@@ -553,6 +788,7 @@ public class WorkerBatcher {
     }
 
     /** Wake decisions whose advisory worker-status or predictor input changed. */
+    @Override
     public void signalSchedulingInputsChanged() {
         queueLock.lock();
         try {
@@ -563,24 +799,4 @@ public class WorkerBatcher {
         }
     }
 
-    /** Package-private deterministic wait-state probe for scheduler tests. */
-    boolean isWaitingForSignal() {
-        return waitingForSignal;
-    }
-
-    private boolean reserveQueueSlot(int maxSize) {
-        if (maxSize <= 0) {
-            queueDepth.incrementAndGet();
-            return true;
-        }
-        while (true) {
-            int current = queueDepth.get();
-            if (current >= maxSize) {
-                return false;
-            }
-            if (queueDepth.compareAndSet(current, current + 1)) {
-                return true;
-            }
-        }
-    }
 }

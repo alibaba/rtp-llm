@@ -105,7 +105,7 @@ public class ConfigService {
                 : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
         String decision = config.isDirect() ? "N/A"
                 : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
-        String dispatcher = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
+        String dispatcher = config.getDispatcher().typeName();
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
                         + "dispatcher={}, "
                         + "prefillSelector={}, decodeSelector={}, groupRules={}",

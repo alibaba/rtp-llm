@@ -22,29 +22,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EndpointGenerationLifecycleTest {
 
     @Test
-    void finalPermitReleaseRunsDeferredRetirementActionExactlyOnce()
+    void finalPermitReleaseWakesTheSingleCleanupOwnerExactlyOnce()
             throws Exception {
         EndpointGenerationLifecycle lifecycle = new EndpointGenerationLifecycle();
         EndpointGenerationLifecycle.HandoffPermit accepted =
                 lifecycle.tryAcquireHandoff();
         assertNotNull(accepted);
-        assertTrue(lifecycle.tryBeginRetirement());
+        lifecycle.beginRetirement();
+        assertTrue(lifecycle.tryClaimCleanup());
+        assertFalse(lifecycle.tryClaimCleanup());
 
         AtomicInteger actionRuns = new AtomicInteger();
         AtomicReference<Thread> actionThread = new AtomicReference<>();
         CountDownLatch actionRan = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<?> actionInstallation = executor.submit(() ->
-                    lifecycle.runWhenAcceptedHandoffsDrain(() -> {
-                        actionThread.set(Thread.currentThread());
-                        actionRuns.incrementAndGet();
-                        lifecycle.completeRetirement();
-                        actionRan.countDown();
-                    }));
-            actionInstallation.get(1, TimeUnit.SECONDS);
+            Future<?> cleanup = executor.submit(() -> {
+                lifecycle.beginCleanup();
+                lifecycle.awaitHandoffs();
+                actionThread.set(Thread.currentThread());
+                actionRuns.incrementAndGet();
+                lifecycle.completeRetirement(null);
+                actionRan.countDown();
+            });
             assertEquals(0, actionRuns.get(),
-                    "installing deferred retirement must not wait for the permit");
+                    "cleanup must wait for the accepted permit");
 
             CountDownLatch waiterStarted = new CountDownLatch(1);
             Future<?> concurrentClose = executor.submit(() -> {
@@ -54,13 +56,12 @@ class EndpointGenerationLifecycleTest {
             assertTrue(waiterStarted.await(1, TimeUnit.SECONDS));
             assertFalse(concurrentClose.isDone());
 
-            Thread releasingThread = Thread.currentThread();
             accepted.close();
             assertTrue(actionRan.await(1, TimeUnit.SECONDS));
+            cleanup.get(1, TimeUnit.SECONDS);
             concurrentClose.get(1, TimeUnit.SECONDS);
             assertEquals(1, actionRuns.get());
-            assertSame(releasingThread, actionThread.get(),
-                    "the final permit releaser owns deferred cleanup execution");
+            assertNotNull(actionThread.get());
 
             accepted.close();
             assertEquals(1, actionRuns.get(),
@@ -76,14 +77,16 @@ class EndpointGenerationLifecycleTest {
         EndpointGenerationLifecycle.HandoffPermit accepted =
                 lifecycle.tryAcquireHandoff();
         assertNotNull(accepted);
-        assertTrue(lifecycle.tryBeginRetirement());
+        lifecycle.beginRetirement();
+        assertTrue(lifecycle.tryClaimCleanup());
         assertNull(lifecycle.tryAcquireHandoff());
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             Future<?> retiringOwner = executor.submit(() -> {
-                lifecycle.awaitAcceptedHandoffs();
-                lifecycle.completeRetirement();
+                lifecycle.beginCleanup();
+                lifecycle.awaitHandoffs();
+                lifecycle.completeRetirement(null);
             });
             CountDownLatch waiterStarted = new CountDownLatch(1);
             Future<?> concurrentClose = executor.submit(() -> {
@@ -106,7 +109,8 @@ class EndpointGenerationLifecycleTest {
     @Test
     void emptyHandoffSetDoesNotMeanRetirementIsComplete() throws Exception {
         EndpointGenerationLifecycle lifecycle = new EndpointGenerationLifecycle();
-        assertTrue(lifecycle.tryBeginRetirement());
+        lifecycle.beginRetirement();
+        assertTrue(lifecycle.tryClaimCleanup());
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -120,9 +124,10 @@ class EndpointGenerationLifecycleTest {
             assertFalse(concurrentClose.isDone(),
                     "close must wait for generation cleanup after handoffs reach zero");
 
-            lifecycle.awaitAcceptedHandoffs();
+            lifecycle.beginCleanup();
+            lifecycle.awaitHandoffs();
             assertFalse(concurrentClose.isDone());
-            lifecycle.completeRetirement();
+            lifecycle.completeRetirement(null);
             concurrentClose.get(1, TimeUnit.SECONDS);
         } finally {
             executor.shutdownNow();
@@ -136,10 +141,9 @@ class EndpointGenerationLifecycleTest {
         EndpointGenerationLifecycle.HandoffPermit accepted =
                 lifecycle.tryAcquireHandoff();
         assertNotNull(accepted);
-        assertTrue(lifecycle.tryBeginRetirement());
+        lifecycle.beginRetirement();
+        assertTrue(lifecycle.tryClaimCleanup());
         IllegalStateException failure = new IllegalStateException("retirement failed");
-        lifecycle.runWhenAcceptedHandoffsDrain(
-                () -> lifecycle.completeRetirement(failure));
 
         CountDownLatch waiterStarted = new CountDownLatch(1);
         ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -152,7 +156,10 @@ class EndpointGenerationLifecycleTest {
             assertFalse(concurrentClose.isDone(),
                     "a non-owner close must wait while an accepted handoff is active");
 
+            lifecycle.beginCleanup();
             accepted.close();
+            lifecycle.awaitHandoffs();
+            lifecycle.completeRetirement(failure);
             ExecutionException observed = assertThrows(
                     ExecutionException.class,
                     () -> concurrentClose.get(1, TimeUnit.SECONDS));

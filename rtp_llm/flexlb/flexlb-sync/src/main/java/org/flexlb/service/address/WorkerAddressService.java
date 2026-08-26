@@ -8,12 +8,10 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -66,13 +64,15 @@ public class WorkerAddressService {
     }
 
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
-        ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(IdUtils.getServiceIdByModelName(modelName));
-        if (serviceRoute == null) {
-            logger.info("modelName={} service route not found", modelName);
-            return new ArrayList<>();
-        }
         List<WorkerHost> workerHosts = new ArrayList<>();
-        List<Pair<String, Endpoint>> endpoints = serviceRoute.getAllEndpointsWithGroup(modelEndpointType);
+        List<Pair<String, Endpoint>> endpoints =
+                modelMetaConfig.endpointsWithGroup(
+                        modelName, modelEndpointType);
+        if (endpoints.isEmpty()) {
+            logger.info("modelName={} role={} service route not found",
+                    modelName, modelEndpointType);
+            return workerHosts;
+        }
         for (Pair<String, Endpoint> endpointTuple : endpoints) {
             String groupName = endpointTuple.getLeft();
             Endpoint endpoint = endpointTuple.getRight();
