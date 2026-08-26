@@ -7,7 +7,10 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -37,7 +40,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 
 class ShortestTTFTStrategyTest {
 
@@ -67,7 +69,8 @@ class ShortestTTFTStrategyTest {
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(prefillResourceMeasure);
         Mockito.when(prefillResourceMeasure.isResourceAvailable(any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(new HashMap<>());
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
 
         strategy = new ShortestTTFTStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
@@ -174,7 +177,8 @@ class ShortestTTFTStrategyTest {
         // estimateMs(1000, 768) = (1000-768) + 0.3*768 = 232 + 230 = 462  <  estimateMs(1000, 0) = 1000
         Map<String, Integer> cacheResults = new HashMap<>();
         cacheResults.put("10.0.0.2:8080", 3);
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(cacheResults);
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(localMatches(cacheResults, 256L));
 
         ServerStatus result = strategy.select(buildContext(1000, 1L), RoleType.PREFILL, null);
 
@@ -185,11 +189,14 @@ class ShortestTTFTStrategyTest {
     @Test
     void rollBackReleasesInflight() {
         PrefillEndpoint mockEp = Mockito.mock(PrefillEndpoint.class);
+        WorkerStatus workerStatus = Mockito.mock(WorkerStatus.class);
+        Mockito.when(mockEp.getStatus()).thenReturn(workerStatus);
         long requestId = 42L;
 
         strategy.rollBack(mockEp, requestId);
 
         Mockito.verify(mockEp).releaseBatch(requestId);
+        Mockito.verify(workerStatus).removeLocalTask(String.valueOf(requestId));
     }
 
     @Test
@@ -305,10 +312,10 @@ class ShortestTTFTStrategyTest {
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 5000));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
 
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(Map.of(
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(localMatches(Map.of(
                         "10.0.0.1:8080", 4,
-                        "10.0.0.2:8080", 1));
+                        "10.0.0.2:8080", 1), 1024L));
 
         BalanceContext context = buildContext(4096, 1L);
         context.getRequest().setCacheKeyBlockSize(1024L);
@@ -346,6 +353,15 @@ class ShortestTTFTStrategyTest {
                     List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
         }
         return w;
+    }
+
+    private static CacheMatchResult localMatches(
+            Map<String, Integer> matches, long blockSize) {
+        return new CacheMatchResult(
+                org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                CacheMatchSource.LOCAL_SYNC,
+                0L,
+                blockSize);
     }
 
     private BatchItem batchItem(long requestId, long seqLen, long hitCache) {

@@ -22,14 +22,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.lang.reflect.Field;
-import java.util.Map;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.eq;
@@ -82,28 +78,26 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
 
         // Mock config service
-        when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        when(loadBalanceConfig.strategyFor(any(RoleType.class))).thenAnswer(inv -> {
+        lenient().when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
+        lenient().when(loadBalanceConfig.strategyFor(any(RoleType.class))).thenAnswer(inv -> {
             RoleType roleType = inv.getArgument(0);
             return switch (roleType) {
                 case DECODE -> LoadBalanceStrategyEnum.COST_BASED_DECODE;
                 case PDFUSION -> LoadBalanceStrategyEnum.RANDOM;
-                case PREFILL, VIT -> LoadBalanceStrategyEnum.COST_BASED_PREFILL;
+                case PREFILL -> LoadBalanceStrategyEnum.COST_BASED_PREFILL;
+                case VIT -> LoadBalanceStrategyEnum.SHORTEST_TTFT;
                 case FRONTEND -> null;
             };
         });
 
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, prefillStrategy);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, decodeStrategy);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, vitStrategy);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, vitStrategy);
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionStrategy);
 
         // Create scheduler instance
         lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
         defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, endpointRegistry);
-
-        // Mock LoadBalanceStrategyFactory to return our mock load balancers
-        mockStaticLoadBalanceStrategyFactory();
 
         // Mock balance context
         lenient().when(balanceContext.getRequest()).thenReturn(request);
@@ -117,26 +111,6 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
-    }
-
-    // Helper method to mock the static LoadBalanceStrategyFactory
-    private void mockStaticLoadBalanceStrategyFactory() {
-        try {
-            // Use reflection to set the loadBalanceStrategyMap in DefaultRouter
-            Field loadBalanceStrategyMapField = DefaultRouter.class.getDeclaredField("loadBalanceStrategyMap");
-            loadBalanceStrategyMapField.setAccessible(true);
-
-            @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap = (Map<RoleType, LoadBalanceStrategy>) loadBalanceStrategyMapField.get(defaultRouter);
-
-            // Put mocked LoadBalanceStrategy instances into the map
-            loadBalanceStrategyMap.put(RoleType.PREFILL, prefillStrategy);
-            loadBalanceStrategyMap.put(RoleType.DECODE, decodeStrategy);
-            loadBalanceStrategyMap.put(RoleType.VIT, vitStrategy);
-            loadBalanceStrategyMap.put(RoleType.PDFUSION, fusionStrategy);
-        } catch (Exception e) {
-            fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
-        }
     }
 
     @Test
