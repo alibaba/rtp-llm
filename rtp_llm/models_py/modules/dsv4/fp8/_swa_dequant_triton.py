@@ -46,6 +46,7 @@ class CPByteSlicedSwaPrefixPending:
     gathered: torch.Tensor
     unique_blocks: torch.Tensor
     compact_slots: torch.Tensor
+    gather_lens: torch.Tensor
     gather_lens_cpu: list
     work: Any
     stream: Any
@@ -284,7 +285,17 @@ def dequantize_and_gather_k_cache(
     )
 
 
-@triton.jit(do_not_specialize=["offset", "max_gather_len"])
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "out_stride1",
+        "slot_mapping_stride0",
+        "offset",
+        "max_gather_len",
+        "block_stride",
+        "num_cache_blocks",
+    ]
+)
 def _dequantize_and_gather_k_slots_kernel(
     out_ptr,
     out_stride0,
@@ -301,8 +312,8 @@ def _dequantize_and_gather_k_slots_kernel(
     quant_block: tl.constexpr,
     cache_block_size: tl.constexpr,
     token_data_size: tl.constexpr,
-    block_stride: tl.constexpr,
-    num_cache_blocks: tl.constexpr,
+    block_stride,
+    num_cache_blocks,
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
@@ -341,11 +352,12 @@ def _dequantize_and_gather_k_slots_kernel(
             physical_block_idx = slot // cache_block_size
             pos_in_block = slot % cache_block_size
 
-            if physical_block_idx >= num_cache_blocks:
+            if physical_block_idx >= num_cache_blocks.to(tl.int64):
                 _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
             cache_block_ptr = (
-                k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+                k_cache_ptr
+                + physical_block_idx.to(tl.int64) * block_stride.to(tl.int64)
             )
             token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
             token_scale_ptr = (
@@ -461,6 +473,92 @@ def dequantize_and_gather_k_cache_slots(
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
     )
+
+
+def cp_swa_direct_dequant_scatter_enabled() -> bool:
+    """Whether CP byte-sliced SWA dequant writes directly to the workspace."""
+    return os.environ.get("DSV4_CP_SWA_DIRECT_DEQUANT_SCATTER", "1") != "0"
+
+
+def try_dequantize_and_gather_k_cache_slots_to_workspace(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    gather_lens: torch.Tensor,
+    offset: int,
+) -> bool:
+    """Dequantize compact slots directly into their final workspace rows.
+
+    Unsupported layouts return ``False`` without modifying ``out``. The
+    caller can then retain the previous temporary-dequant + copy fallback.
+    """
+    if not cp_swa_direct_dequant_scatter_enabled():
+        return False
+
+    tensors = (out, k_cache, slot_mapping, gather_lens)
+    if (
+        any(not tensor.is_cuda for tensor in tensors)
+        or any(tensor.device != out.device for tensor in tensors[1:])
+        or out.dim() != 3
+        or out.dtype != torch.bfloat16
+        or int(out.shape[-1]) != HEAD_DIM
+        or int(out.stride(2)) != 1
+        or k_cache.dim() != 3
+        or k_cache.dtype != torch.uint8
+        or int(k_cache.shape[-1]) != ENTRY_BYTES
+        or int(k_cache.stride(2)) != 1
+        or int(k_cache.stride(1)) != ENTRY_BYTES
+        or int(k_cache.shape[0]) <= 0
+        or int(k_cache.shape[1]) <= 0
+        or slot_mapping.dim() != 2
+        or slot_mapping.dtype != torch.int64
+        or not slot_mapping.is_contiguous()
+        or int(slot_mapping.shape[0]) != int(out.shape[0])
+        or gather_lens.dim() != 1
+        or gather_lens.dtype != torch.int32
+        or not gather_lens.is_contiguous()
+        or int(gather_lens.shape[0]) != int(slot_mapping.shape[0])
+        or int(offset) < 0
+        or int(offset) + int(slot_mapping.shape[1]) > int(out.shape[1])
+    ):
+        return False
+
+    batch_size = int(slot_mapping.shape[0])
+    max_gather_len = int(slot_mapping.shape[1])
+    if batch_size == 0 or max_gather_len == 0:
+        return True
+
+    validate_slot_mapping(
+        "swa.dequantize_and_gather.workspace_slot_mapping",
+        slot_mapping.reshape(-1),
+        block_size=int(k_cache.shape[1]),
+        num_blocks=int(k_cache.shape[0]),
+        negative_mode="skip_any",
+    )
+    NUM_WORKERS = 128
+    _dequantize_and_gather_k_slots_kernel[(batch_size, NUM_WORKERS)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        slot_mapping,
+        slot_mapping.stride(0),
+        int(offset),
+        gather_lens,
+        max_gather_len,
+        fp8_dim=NOPE_DIM,
+        bf16_dim=ROPE_DIM,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+        quant_block=TILE_SIZE,
+        cache_block_size=int(k_cache.shape[1]),
+        token_data_size=TOKEN_DATA_SIZE,
+        block_stride=int(k_cache.stride(0)),
+        num_cache_blocks=int(k_cache.shape[0]),
+        fp8_max=FP8_MAX,
+        n_quant_blocks=NOPE_TILES,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+    )
+    return True
 
 
 @triton.jit(
@@ -1217,6 +1315,27 @@ def dequantize_slots_to_bf16(
     return out
 
 
+def _device_gather_lens(
+    gather_lens: Optional[torch.Tensor],
+    *,
+    batch_size: int,
+    max_gather_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    if gather_lens is None:
+        return torch.full(
+            (batch_size,),
+            max_gather_len,
+            dtype=torch.int32,
+            device=device,
+        )
+    assert int(gather_lens.numel()) == batch_size, (
+        f"gather_lens must contain one value per request ({batch_size}); "
+        f"got shape={tuple(gather_lens.shape)}"
+    )
+    return gather_lens.reshape(-1).to(device=device, dtype=torch.int32).contiguous()
+
+
 def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     *,
     k_cache_raw: torch.Tensor,
@@ -1231,7 +1350,6 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     profile_name: str = "dsv4.cp.all_gather.swa_prefix",
 ) -> Optional[CPByteSlicedSwaPrefixPending]:
     """Launch only the NCCL stage for CP byte-sliced SWA prefix reads."""
-    del gather_lens  # per-request lengths are baked into compaction.
     assert slot_mapping.dim() == 2
     full_entries_per_block = int(full_entries_per_block)
     cp_size = int(cp_size)
@@ -1263,6 +1381,12 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         )
 
     device = k_cache_raw.device
+    gather_lens_i32 = _device_gather_lens(
+        gather_lens,
+        batch_size=B,
+        max_gather_len=W,
+        device=device,
+    )
     current_stream = torch.cuda.current_stream(device)
     if stream is None:
         raise ValueError("CP byte-sliced SWA async gather requires a stream")
@@ -1305,6 +1429,7 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         gathered=gathered,
         unique_blocks=unique_blocks,
         compact_slots=compact_slots,
+        gather_lens=gather_lens_i32,
         gather_lens_cpu=compaction.gather_lens_cpu,
         work=work,
         stream=gather_stream,
@@ -1339,6 +1464,7 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         pending.gathered.record_stream(assemble_stream)
         pending.local_slices.record_stream(assemble_stream)
         pending.compact_slots.record_stream(assemble_stream)
+        pending.gather_lens.record_stream(assemble_stream)
         out.record_stream(assemble_stream)
         full_raw = (
             pending.gathered.view(
@@ -1361,18 +1487,30 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             ),
             (int(full_raw.shape[1]), ENTRY_BYTES, 1),
         )
-        restored = dequantize_slots_to_bf16(
+        if not try_dequantize_and_gather_k_cache_slots_to_workspace(
+            out,
             full_view,
-            pending.compact_slots.reshape(-1),
-        )
-        restored_3d = restored.view(pending.B, pending.W, HEAD_DIM)
-        # gather_lens_cpu is metadata captured during compaction.  Do not
-        # replace this with per-request .item() calls in the hot path.
-        for b, gl in enumerate(pending.gather_lens_cpu):
-            if gl > 0:
-                out[b, pending.offset : pending.offset + gl, :].copy_(
-                    restored_3d[b, :gl, :]
-                )
+            pending.compact_slots,
+            pending.gather_lens,
+            pending.offset,
+        ):
+            restored = dequantize_slots_to_bf16(
+                full_view,
+                pending.compact_slots.reshape(-1),
+            )
+            restored_3d = restored.view(pending.B, pending.W, HEAD_DIM)
+            if pending.gather_lens_cpu:
+                # CPU lengths are captured during compaction; avoid per-request
+                # device synchronizations in the fallback hot path.
+                for b, gl in enumerate(pending.gather_lens_cpu):
+                    if gl > 0:
+                        out[b, pending.offset : pending.offset + gl, :].copy_(
+                            restored_3d[b, :gl, :]
+                        )
+            else:
+                out[
+                    :, pending.offset : pending.offset + pending.W, :
+                ].copy_(restored_3d)
         ready_event = torch.cuda.Event()
         ready_event.record(assemble_stream)
     pending.ready_event = ready_event
@@ -1480,6 +1618,20 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         (int(unique_blocks.numel()), full_entries_per_block, ENTRY_BYTES),
         (int(full_raw.shape[1]), ENTRY_BYTES, 1),
     )
+    gather_lens_i32 = _device_gather_lens(
+        gather_lens,
+        batch_size=B,
+        max_gather_len=W,
+        device=out.device,
+    )
+    if try_dequantize_and_gather_k_cache_slots_to_workspace(
+        out,
+        full_view,
+        compact_slots,
+        gather_lens_i32,
+        offset,
+    ):
+        return
     restored = dequantize_slots_to_bf16(full_view, compact_slots.reshape(-1))
     restored_3d = restored.view(B, W, HEAD_DIM)
     if gather_lens is None:

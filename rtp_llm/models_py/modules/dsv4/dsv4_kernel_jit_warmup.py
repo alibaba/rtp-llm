@@ -2308,7 +2308,10 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
 
     from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
         ENTRY_BYTES,
+        HEAD_DIM,
+        cp_swa_direct_dequant_scatter_enabled,
         dequantize_slots_to_bf16,
+        try_dequantize_and_gather_k_cache_slots_to_workspace,
     )
 
     full_stride_bytes = int(local_slice_bytes) * cp_size
@@ -2320,7 +2323,13 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             ENTRY_BYTES,
         )
         return
-    warmup_key = (int(full_stride_bytes), int(entries_per_block), str(device))
+    direct_scatter_enabled = cp_swa_direct_dequant_scatter_enabled()
+    warmup_key = (
+        int(full_stride_bytes),
+        int(entries_per_block),
+        bool(direct_scatter_enabled),
+        str(device),
+    )
     if warmup_key in _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS:
         return
 
@@ -2342,6 +2351,27 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     )
     slot_indices = torch.tensor([0, -1], dtype=torch.long, device=device)
     out = dequantize_slots_to_bf16(full_view, slot_indices)
+    if direct_scatter_enabled:
+        slot_mapping = torch.tensor(
+            [[0, 1], [1, -1]], dtype=torch.long, device=device
+        )
+        gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
+        workspace = torch.empty(
+            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
+        )
+        direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
+            out=workspace,
+            k_cache=full_view,
+            slot_mapping=slot_mapping,
+            gather_lens=gather_lens,
+            offset=1,
+        )
+        if not direct_scatter:
+            raise RuntimeError(
+                "DSV4 SWA direct dequant-scatter is enabled but unsupported during "
+                "JIT warmup"
+            )
+        del slot_mapping, gather_lens, workspace
     del full_raw, full_view, slot_indices, out
     _sync_cuda(device)
     if rank == 0:

@@ -1380,14 +1380,15 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
     def test_slot_dequant_warmup_uses_padded_cp_full_stride(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
 
-        calls = []
+        fallback_calls = []
+        direct_calls = []
         local_slice_bytes = 74880
         cp_size = 2
         expected_full_stride = local_slice_bytes * cp_size
         expected_entries = expected_full_stride // _swa_dequant_triton.ENTRY_BYTES
 
         def fake_dequantize(pool_3d, slot_indices):
-            calls.append(
+            fallback_calls.append(
                 (
                     tuple(pool_3d.shape),
                     tuple(pool_3d.stride()),
@@ -1399,6 +1400,25 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 dtype=torch.bfloat16,
                 device=pool_3d.device,
             )
+
+        def fake_direct_scatter(
+            *, out, k_cache, slot_mapping, gather_lens, offset
+        ):
+            direct_calls.append(
+                (
+                    tuple(k_cache.shape),
+                    tuple(k_cache.stride()),
+                    tuple(slot_mapping.shape),
+                    slot_mapping.dtype,
+                    slot_mapping.tolist(),
+                    gather_lens.dtype,
+                    gather_lens.tolist(),
+                    tuple(out.shape),
+                    out.dtype,
+                    offset,
+                )
+            )
+            return True
 
         def with_patch(obj, name, value):
             old = getattr(obj, name)
@@ -1457,6 +1477,28 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     ),
                 )
             )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "cp_swa_direct_dequant_scatter_enabled",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "cp_swa_direct_dequant_scatter_enabled",
+                        lambda: True,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "try_dequantize_and_gather_k_cache_slots_to_workspace",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "try_dequantize_and_gather_k_cache_slots_to_workspace",
+                        fake_direct_scatter,
+                    ),
+                )
+            )
             warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
 
             warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
@@ -1470,7 +1512,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
 
         self.assertEqual(
-            calls,
+            fallback_calls,
             [
                 (
                     (1, expected_entries, _swa_dequant_triton.ENTRY_BYTES),
@@ -1480,6 +1522,27 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                         1,
                     ),
                     [0, -1],
+                )
+            ],
+        )
+        self.assertEqual(
+            direct_calls,
+            [
+                (
+                    (1, expected_entries, _swa_dequant_triton.ENTRY_BYTES),
+                    (
+                        expected_full_stride,
+                        _swa_dequant_triton.ENTRY_BYTES,
+                        1,
+                    ),
+                    (2, 2),
+                    torch.int64,
+                    [[0, 1], [1, -1]],
+                    torch.int32,
+                    [2, 1],
+                    (2, 4, _swa_dequant_triton.HEAD_DIM),
+                    torch.bfloat16,
+                    1,
                 )
             ],
         )
@@ -1535,6 +1598,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertIn('"num_cache_blocks"', dequant_src)
         self.assertNotIn("pool_block_stride: tl.constexpr", dequant_src)
         self.assertNotIn("num_cache_blocks: tl.constexpr", dequant_src)
+
+        self.assertEqual(
+            set(
+                _swa_dequant_triton._dequantize_and_gather_k_slots_kernel.do_not_specialize
+            ),
+            {
+                "out_stride0",
+                "out_stride1",
+                "slot_mapping_stride0",
+                "offset",
+                "max_gather_len",
+                "block_stride",
+                "num_cache_blocks",
+            },
+        )
 
         self.assertEqual(
             set(

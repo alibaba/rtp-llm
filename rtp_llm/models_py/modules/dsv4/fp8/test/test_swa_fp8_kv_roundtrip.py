@@ -32,6 +32,7 @@ from unittest import mock
 import torch
 from torch.profiler import ProfilerActivity, profile
 
+from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     build_cp_byte_sliced_slot_compaction,
 )
@@ -811,6 +812,191 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 self._assert_rope_exact(expected, recovered)
                 self._assert_nope_within_ue8m0_bound(expected, recovered)
         self.assertTrue(torch.all(out[1, 3:] == -7))
+
+    def test_cp_byte_sliced_direct_scatter_matches_fallback_bitwise(self):
+        """Direct dequant-scatter preserves the complete workspace contract."""
+        cases = [
+            {
+                "name": "reuse_b10_w127",
+                "batch": 10,
+                "width": 127,
+                "unique_blocks": 7,
+                "entries_per_block": 132,
+                "offset": 5,
+                "workspace_len": 145,
+                "gather_lens": [0, 1, 17, 63, 126, 127, 5, 88, 42, 120],
+            },
+            {
+                "name": "small_u2_w9",
+                "batch": 3,
+                "width": 9,
+                "unique_blocks": 2,
+                "entries_per_block": 16,
+                "offset": 3,
+                "workspace_len": 17,
+                "gather_lens": [9, 0, 4],
+            },
+            {
+                "name": "mixed_u5_w37",
+                "batch": 4,
+                "width": 37,
+                "unique_blocks": 5,
+                "entries_per_block": 64,
+                "offset": 1,
+                "workspace_len": 43,
+                "gather_lens": [1, 22, 37, 5],
+            },
+        ]
+        gate = "DSV4_CP_SWA_DIRECT_DEQUANT_SCATTER"
+        marker = -29
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                B = case["batch"]
+                W = case["width"]
+                U = case["unique_blocks"]
+                entries_per_block = case["entries_per_block"]
+                cp_size = 2
+                num_blocks = U + 1
+                local_slice_bytes = entries_per_block * HEAD_BYTES // cp_size
+
+                write_slots = (
+                    torch.arange(
+                        1,
+                        num_blocks,
+                        dtype=torch.int64,
+                        device=self.device,
+                    ).unsqueeze(1)
+                    * entries_per_block
+                    + torch.arange(
+                        entries_per_block,
+                        dtype=torch.int64,
+                        device=self.device,
+                    ).unsqueeze(0)
+                ).reshape(-1)
+                values = torch.randn(
+                    write_slots.numel(),
+                    HEAD_DIM,
+                    dtype=torch.bfloat16,
+                    device=self.device,
+                )
+                raw_by_rank = [
+                    torch.zeros(
+                        num_blocks,
+                        local_slice_bytes,
+                        dtype=torch.uint8,
+                        device=self.device,
+                    )
+                    for _ in range(cp_size)
+                ]
+                write_compaction = build_cp_byte_sliced_slot_compaction(
+                    write_slots,
+                    full_entries_per_block=entries_per_block,
+                    num_blocks=num_blocks,
+                    validation_site=f"test.{case['name']}.write",
+                    negative_mode="skip_minus_one",
+                )
+                for cp_rank, raw in enumerate(raw_by_rank):
+                    quantize_and_insert_k_cache_cp_byte_sliced(
+                        values,
+                        raw,
+                        write_slots,
+                        full_entries_per_block=entries_per_block,
+                        cp_rank=cp_rank,
+                        cp_size=cp_size,
+                        compaction=write_compaction,
+                    )
+
+                linear = torch.arange(B * W, device=self.device).view(B, W)
+                read_slots = (
+                    1 + linear.remainder(U)
+                ) * entries_per_block + (linear * 17 + 3).remainder(
+                    entries_per_block
+                )
+                gather_lens = torch.tensor(
+                    case["gather_lens"], dtype=torch.int32, device=self.device
+                )
+                # Put -1 inside each non-empty valid range. The direct kernel
+                # must write zero there, while leaving every i >= gather_len
+                # untouched even though those tail slots remain non-negative.
+                for batch_idx, gather_len in enumerate(case["gather_lens"]):
+                    if gather_len > 0:
+                        read_slots[batch_idx, gather_len // 2] = -1
+                read_slots = read_slots.to(torch.int64).contiguous()
+                read_compaction = build_cp_byte_sliced_slot_compaction(
+                    read_slots,
+                    full_entries_per_block=entries_per_block,
+                    num_blocks=num_blocks,
+                    validation_site=f"test.{case['name']}.read",
+                    negative_mode="skip_any",
+                    gather_lens=gather_lens,
+                )
+                self.assertEqual(int(read_compaction.unique_blocks.numel()), U)
+
+                def fake_all_gather(tensor, group):
+                    del group
+                    expected_local = raw_by_rank[0].index_select(
+                        0, read_compaction.unique_blocks
+                    )
+                    self.assertTrue(torch.equal(tensor, expected_local))
+                    return torch.cat(
+                        [
+                            raw.index_select(0, read_compaction.unique_blocks)
+                            for raw in raw_by_rank
+                        ],
+                        dim=0,
+                    )
+
+                def run(enabled: bool) -> tuple[torch.Tensor, int]:
+                    out = torch.full(
+                        (B, case["workspace_len"], HEAD_DIM),
+                        marker,
+                        dtype=torch.bfloat16,
+                        device=self.device,
+                    )
+                    with mock.patch.dict(
+                        "os.environ", {gate: "1" if enabled else "0"}
+                    ), mock.patch(
+                        "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                        side_effect=fake_all_gather,
+                    ), mock.patch.object(
+                        _swa_dequant_triton,
+                        "dequantize_slots_to_bf16",
+                        wraps=_swa_dequant_triton.dequantize_slots_to_bf16,
+                    ) as fallback_dequant:
+                        dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                            out=out,
+                            k_cache_raw=raw_by_rank[0],
+                            slot_mapping=read_slots,
+                            gather_lens=gather_lens,
+                            offset=case["offset"],
+                            full_entries_per_block=entries_per_block,
+                            cp_rank=0,
+                            cp_size=cp_size,
+                            compaction=read_compaction,
+                        )
+                    return out, fallback_dequant.call_count
+
+                fallback, fallback_calls = run(enabled=False)
+                direct, direct_fallback_calls = run(enabled=True)
+                self.assertEqual(fallback_calls, 1)
+                self.assertEqual(direct_fallback_calls, 0)
+                self.assertTrue(
+                    torch.equal(direct.view(torch.int16), fallback.view(torch.int16))
+                )
+
+                columns = torch.arange(
+                    case["workspace_len"], device=self.device
+                ).unsqueeze(0)
+                valid_output = (columns >= case["offset"]) & (
+                    columns < case["offset"] + gather_lens.unsqueeze(1)
+                )
+                self.assertTrue(torch.all(direct[~valid_output] == marker))
+                relative_columns = columns - case["offset"]
+                relative_in_range = relative_columns.clamp(0, W - 1)
+                negative_slot = read_slots.gather(1, relative_in_range.expand(B, -1)) < 0
+                zero_output = valid_output & negative_slot
+                self.assertTrue(torch.all(direct[zero_output] == 0))
 
     def test_cp_byte_sliced_runtime_requires_compaction(self):
         cp_size = 2
