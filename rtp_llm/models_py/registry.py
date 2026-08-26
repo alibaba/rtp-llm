@@ -103,6 +103,12 @@ def list_models():
     return sorted(set(MODEL_REGISTRY) | set(_LAZY_MODEL_REGISTRY))
 
 
+def is_model_registered(model_type: str) -> bool:
+    """Return whether ``model_type`` has an explicit NewLoader implementation."""
+    model_type = _validate_model_type(model_type)
+    return model_type in MODEL_REGISTRY or model_type in _LAZY_MODEL_REGISTRY
+
+
 register_lazy_model(
     "qwen_3",
     "rtp_llm.models_py.new_models.qwen3",
@@ -216,4 +222,14 @@ register_lazy_model(
     "kimi_linear",
     "rtp_llm.models_py.new_models.kimi_linear",
     "KimiLinearForCausalLM",
+)
+register_lazy_model(
+    "bert",
+    "rtp_llm.models_py.new_models.bert",
+    "BertForEmbedding",
+)
+register_lazy_model(
+    "roberta",
+    "rtp_llm.models_py.new_models.bert",
+    "RobertaForEmbedding",
 )
