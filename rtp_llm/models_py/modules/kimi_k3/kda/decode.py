@@ -146,7 +146,7 @@ class KimiK3KDADecode(nn.Module):
             k.reshape(indexed_shape),
             v.reshape(indexed_shape),
             raw_gate.reshape(indexed_shape),
-            raw_beta.float().reshape(batch, sequence_length, self.local_heads),
+            raw_beta.reshape(batch, sequence_length, self.local_heads),
             initial_state=ssm_cache,
             A_log=self.weights[W.linear_attn_alog],
             dt_bias=self.weights[W.linear_attn_dt_b_kda],
