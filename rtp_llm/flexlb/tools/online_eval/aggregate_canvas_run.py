@@ -19,7 +19,9 @@ per-engine Gini/CV/Lorenz/window Gini) plus compact time series:
 stage_latency_ts (master 10s stage p95 rows), engine_exec_ts (mock
 prefill/decode execution windows), process_ts (mock/master/client CPU+RSS),
 inflight_ts (G4 scheduler/prefill/decode), inflight_age_ts / kv_ts /
-batcher_ts (G3 master prometheus). All series are rebased to the first
+batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
+per-second dispatch rate derived from the dispatch_reason_total counters).
+All series are rebased to the first
 per-request send time (negative t = pre-send warmup).
 """
 import glob
@@ -496,6 +498,45 @@ def prom_ts_extract(base_name, agg="sum"):
     return pts
 
 
+def prom_ts_extract_labeled(base_name, label_name):
+    """G3 prometheus timeline -> {label_value: [(epoch_ms, value)]}.
+
+    Unlike prom_ts_extract (which folds label variants into one series),
+    this splits them by one label — e.g. the dispatch reason counter's
+    reason="..." tag. Same-(ts,label) variants (extra labels on the same
+    base name) are summed, so both single- and multi-extra-label shapes
+    yield the right per-label value.
+    """
+    label_re = re.compile(r"(?:^|,)" + re.escape(label_name) + r'="([^"]*)"(?:,|$)')
+    series = {}
+    for grp in prom_ts:
+        if not isinstance(grp, dict):
+            continue
+        metrics = grp.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        try:
+            ts = float(grp.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        for k, v in metrics.items():
+            if not isinstance(v, (int, float)):
+                continue
+            key = str(k)
+            name, brace, labels = key.partition("{")
+            if name != base_name or not brace:
+                continue
+            # partition keeps the trailing "}" on the labels fragment —
+            # strip it, else a label sitting last (reason="x"}) fails the
+            # (?:,|$) anchor in label_re.
+            m = label_re.search(labels.rstrip("}"))
+            if not m:
+                continue
+            bucket = series.setdefault(m.group(1), {})
+            bucket[ts] = bucket.get(ts, 0.0) + float(v)
+    return {label: sorted(points.items()) for label, points in series.items()}
+
+
 # master 10s ServerScheduleLatencyRecorder rows (SERVER_LAT). The row itself
 # carries no ts: parse the log-line datetime prefix (written by the same host
 # the aggregation runs on, so local tz matches). Prefix-less rows are stapled
@@ -750,6 +791,26 @@ if batcher_pts or routing_pts:
         b_rows.append((ts, row))
     batcher_ts = [{"t": t, **row} for t, row in rel_axis(b_rows)]
 
+# G3 dispatch reason counters -> per-second dispatch rate per reason.
+# dispatch_reason_total{reason=...} is a monotonically increasing counter
+# sampled once per second by the master prometheus poller; the positive
+# delta between consecutive samples divided by the sample gap is the
+# per-second dispatch rate of that decision reason. A counter reset
+# (negative delta) drops that interval instead of fabricating a spike.
+DISPATCH_REASON_BASE = "flexlb_app_engine_balancing_master_dispatch_reason_total"
+reason_series = prom_ts_extract_labeled(DISPATCH_REASON_BASE, "reason")
+reason_rate_rows = []
+if reason_series:
+    rate_by_ts = defaultdict(dict)
+    for reason, pts in reason_series.items():
+        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+            dt_s = (t1 - t0) / 1000.0
+            if dt_s <= 0 or v1 < v0:
+                continue
+            rate_by_ts[t1][reason] = round((v1 - v0) / dt_s, 2)
+    reason_rate_rows = sorted(rate_by_ts.items())
+dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)]
+
 out = {
     "meta": {
         "run_dir": os.path.basename(run_dir),
@@ -794,5 +855,6 @@ out = {
     "inflight_age_ts": inflight_age_ts,
     "kv_ts": kv_ts,
     "batcher_ts": batcher_ts,
+    "dispatch_reason_ts": dispatch_reason_ts,
 }
 json.dump(out, sys.stdout)

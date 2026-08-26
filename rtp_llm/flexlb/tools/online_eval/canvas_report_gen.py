@@ -390,6 +390,7 @@ def main():
     inflight_age = agg.get("inflight_age_ts") or []
     kv_ts = agg.get("kv_ts") or []
     batcher_ts = agg.get("batcher_ts") or []
+    dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     schedule_only = (agg.get("meta") or {}).get("schedule_only")
     mock_last = (agg.get("batch") or {}).get("mock_last") or {}
     if not mock_last and slo:
@@ -1073,12 +1074,19 @@ def main():
                 ),
             )
         )
-        # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）
+        # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）。
+        # batcher 队列按 avg/engine 口径画（集群总量 ÷ prefill 引擎数）+
+        # maxWaitingRequestsPerPrefillWorker 容量线；routing 保持集群总量。
         if batcher_ts:
             BT = const("BT", str_arr(sparse_cats([r.get("t", 0) for r in batcher_ts])))
-            batcher_q = const(
-                "batcherQueue",
-                num_arr([r.get("batcher_queue", 0) or 0 for r in batcher_ts]),
+            batcher_q_avg = const(
+                "batcherQueueAvg",
+                num_arr(
+                    [
+                        round((r.get("batcher_queue", 0) or 0) / p_engines, 2)
+                        for r in batcher_ts
+                    ]
+                ),
             )
             routing_q = const(
                 "routingQueue",
@@ -1086,17 +1094,89 @@ def main():
             )
             queue_containers.append(
                 emit_container(
-                    "master 队列深度：batcher / routing（集群总量）",
-                    "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）",
+                    "master 队列深度：batcher（avg/engine）",
+                    "x = 压测时间（s，1s 采样）；y = 队列深度 / 引擎（集群总量 ÷ "
+                    + num(p_engines)
+                    + "）；容量线 = maxWaitingRequestsPerPrefillWorker 128",
                     emit_chart(
                         "LineChart",
                         BT,
                         230,
                         [
-                            ("bq", "batcher 队列", batcher_q, "info"),
-                            ("rq", "routing 队列", routing_q, "warning"),
+                            ("bq", "batcher 队列（avg/engine）", batcher_q_avg, "info"),
+                            (
+                                "cap",
+                                "容量 128",
+                                const("batchCap", num_arr([128] * len(batcher_ts))),
+                                "danger",
+                            ),
                         ],
                     ),
+                )
+            )
+            queue_containers.append(
+                emit_container(
+                    "master 队列深度：routing（集群总量）",
+                    "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）",
+                    emit_chart(
+                        "LineChart",
+                        BT,
+                        230,
+                        [("rq", "routing 队列", routing_q, "warning")],
+                    ),
+                )
+            )
+        # dispatch 决策原因构成（G3 dispatch_reason_total counter 差分出的
+        # 每秒 dispatch 速率；与 batcher 队列同 grid 便于对照）
+        if dispatch_reason_ts:
+            DRT = const(
+                "DRT",
+                str_arr(sparse_cats([r.get("t", 0) for r in dispatch_reason_ts])),
+            )
+            dr_known = (
+                ("fixed_window_timeout", "fixed_window_timeout", "warning"),
+                ("batch_full", "batch_full", "info"),
+                ("predicted_execution_cap", "predicted_execution_cap", "success"),
+            )
+            dr_lines = [
+                (
+                    key,
+                    label,
+                    const(
+                        "dr" + key,
+                        num_arr([r.get(key, 0) or 0 for r in dispatch_reason_ts]),
+                    ),
+                    color,
+                )
+                for key, label, color in dr_known
+            ]
+            other_keys = set()
+            for r in dispatch_reason_ts:
+                for k in r:
+                    if k != "t" and all(k != key for key, _, _ in dr_known):
+                        other_keys.add(k)
+            if other_keys:
+                dr_lines.append(
+                    (
+                        "drOther",
+                        "其他 reason",
+                        const(
+                            "drOther",
+                            num_arr(
+                                [
+                                    sum((r.get(k, 0) or 0) for k in other_keys)
+                                    for r in dispatch_reason_ts
+                                ]
+                            ),
+                        ),
+                        "neutral",
+                    )
+                )
+            queue_containers.append(
+                emit_container(
+                    "dispatch 决策原因（每秒批次数）",
+                    "x = 压测时间（s，1s 采样）；y = dispatch 批次数 / 秒（按 reason）",
+                    emit_chart("LineChart", DRT, 230, dr_lines),
                 )
             )
         lines.append("      <Divider />")
@@ -1615,11 +1695,30 @@ def main():
         ]
         b_parts = []
         if bq_vals:
-            b_parts.append("batcher " + num(max(bq_vals)))
+            b_parts.append(
+                "batcher " + num(round(max(bq_vals) / p_engines, 2)) + "/引擎"
+            )
         if rq_vals:
-            b_parts.append("routing " + num(max(rq_vals)))
+            b_parts.append("routing " + num(max(rq_vals)) + "（集群）")
         if b_parts:
             rows.append(["master 队列深度峰值", " / ".join(b_parts)])
+    if dispatch_reason_ts:
+        dr_sums = {}
+        for r in dispatch_reason_ts:
+            for k, v in r.items():
+                if k != "t" and v:
+                    dr_sums[k] = dr_sums.get(k, 0.0) + v
+        dr_order = [
+            "fixed_window_timeout",
+            "batch_full",
+            "predicted_execution_cap",
+        ]
+        dr_order += sorted(k for k in dr_sums if k not in dr_order)
+        dr_parts = [
+            k + " " + num(round(dr_sums[k], 1)) for k in dr_order if dr_sums.get(k)
+        ]
+        if dr_parts:
+            rows.append(["dispatch reason 批次数", " / ".join(dr_parts)])
     if mock_last:
         rows.append(
             [
@@ -1696,7 +1795,7 @@ def main():
         sections.append("latency")
     if queue_ts:
         sections.append("queue")
-    if batcher_ts:
+    if batcher_ts or dispatch_reason_ts:
         sections.append("batcher")
     if p_wg_pts or d_wg_pts:
         sections.append("balance")
