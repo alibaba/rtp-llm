@@ -45,9 +45,11 @@ from rtp_llm.models_py.modules.dsv4.cp import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     ENTRY_BYTES,
+    cp_direct_flat_pack_enabled,
     dequantize_and_gather_k_cache,
     dequantize_packed_k_cache_flat,
     gather_k_cache_packed,
+    try_gather_k_cache_packed_to_flat,
     try_restore_dequantize_scatter_packed_k_cache_flat,
 )
 
@@ -405,6 +407,23 @@ class CPShardedPoolReader(CompressedKPoolReader):
             local_seq_lens_padded = local_seq_lens_padded.to(device=device)
         if local_seq_lens_actual.device != device:
             local_seq_lens_actual = local_seq_lens_actual.to(device=device)
+        if cp_direct_flat_pack_enabled():
+            local_flat = torch.empty(
+                (cfg.total_local_kv, ENTRY_BYTES),
+                dtype=torch.uint8,
+                device=device,
+            )
+            if try_gather_k_cache_packed_to_flat(
+                local_flat,
+                k_cache,
+                block_table,
+                local_seq_lens_padded,
+                local_seq_lens_actual,
+                block_size=block_size,
+                has_actual_tokens=bool(cfg.has_local_seq_len_actual),
+            ):
+                return local_flat
+
         # Use the rank's existing block_table directly — Stage 5a guarantees
         # block_table[r, :] holds this rank's local entries in compact form.
         # zeros() (not empty()) so the [actual, padded) tail of each request

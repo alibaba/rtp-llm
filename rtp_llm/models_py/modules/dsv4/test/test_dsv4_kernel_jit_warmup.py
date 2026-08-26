@@ -117,6 +117,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
 
         pool_calls = []
+        pool_direct_calls = []
         indexer_calls = []
         compressor_calls = []
         swa_slot_batches = []
@@ -167,6 +168,29 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     tuple(out_q.shape),
                     tuple(out_scale.shape),
                     total_actual_tokens,
+                )
+            )
+            return True
+
+        def fake_pool_direct_gather(
+            out,
+            cache,
+            block_table,
+            padded_lens,
+            actual_lens,
+            *,
+            block_size,
+            has_actual_tokens,
+        ):
+            pool_direct_calls.append(
+                (
+                    tuple(out.shape),
+                    tuple(cache.shape),
+                    tuple(block_table.shape),
+                    tuple(padded_lens.tolist()),
+                    tuple(actual_lens.tolist()),
+                    block_size,
+                    has_actual_tokens,
                 )
             )
             return True
@@ -250,6 +274,14 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             "try_restore_dequantize_scatter_packed_k_cache_flat",
             side_effect=fake_pool_restore,
         ), mock.patch.object(
+            _swa_dequant_triton,
+            "cp_direct_flat_pack_enabled",
+            return_value=True,
+        ), mock.patch.object(
+            _swa_dequant_triton,
+            "try_gather_k_cache_packed_to_flat",
+            side_effect=fake_pool_direct_gather,
+        ), mock.patch.object(
             _indexer_cp_gather_triton,
             "try_gather_indexer_k_to_padded",
             side_effect=fake_indexer_gather,
@@ -288,6 +320,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     (2 * batch_size,),
                     (2,) * batch_size,
                     0,
+                )
+                for batch_size in batch_blocks
+            ],
+        )
+        self.assertEqual(
+            pool_direct_calls,
+            [
+                (
+                    (2 * batch_size, 584),
+                    (2, 4, 584),
+                    (batch_size, 1),
+                    (2,) * batch_size,
+                    (1,) * batch_size,
+                    4,
+                    True,
                 )
                 for batch_size in batch_blocks
             ],

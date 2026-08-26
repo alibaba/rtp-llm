@@ -598,6 +598,207 @@ def gather_k_cache_packed(
     )
 
 
+def cp_direct_flat_pack_enabled() -> bool:
+    """Whether CP pool reads use the direct rank-local flat gather."""
+    return os.environ.get("DSV4_CP_DIRECT_FLAT_PACK", "1") != "0"
+
+
+@triton.jit(
+    do_not_specialize=[
+        "batch_size",
+        "total_local_tokens",
+        "block_table_stride_b",
+        "max_blocks_per_request",
+        "cache_block_size",
+        "cache_stride_b",
+        "num_cache_blocks",
+    ]
+)
+def _gather_k_cache_packed_to_flat_kernel(
+    out_ptr,
+    k_cache_ptr,
+    block_table_ptr,
+    padded_lens_ptr,
+    actual_lens_ptr,
+    batch_size,
+    total_local_tokens,
+    block_table_stride_b,
+    max_blocks_per_request,
+    cache_block_size,
+    cache_stride_b,
+    num_cache_blocks,
+    token_data_size: tl.constexpr,
+    scale_dim: tl.constexpr,
+    entry_bytes: tl.constexpr,
+    BATCH_BLOCK: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+):
+    """Gather grouped cache bytes directly into padded rank-local flat order."""
+    token_idx = tl.program_id(0).to(tl.int64)
+    if token_idx >= total_local_tokens:
+        return
+
+    batch_offsets = tl.arange(0, BATCH_BLOCK)
+    batch_mask = batch_offsets < batch_size
+    padded_lens = tl.load(
+        padded_lens_ptr + batch_offsets, mask=batch_mask, other=0
+    ).to(tl.int64)
+    padded_ends = tl.cumsum(padded_lens, axis=0)
+    batch_idx = tl.sum((token_idx >= padded_ends).to(tl.int32), axis=0)
+    padded_start = tl.sum(
+        tl.where(batch_offsets == batch_idx, padded_ends - padded_lens, 0),
+        axis=0,
+    )
+    token_in_request = token_idx - padded_start
+    actual_len = tl.sum(
+        tl.where(
+            batch_offsets == batch_idx,
+            tl.load(actual_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+                tl.int64
+            ),
+            0,
+        ),
+        axis=0,
+    )
+
+    is_actual = token_in_request < actual_len
+    logical_block_idx = token_in_request // cache_block_size
+    valid_table_lookup = is_actual & (logical_block_idx < max_blocks_per_request)
+    cache_block_idx = tl.load(
+        block_table_ptr
+        + batch_idx.to(tl.int64) * block_table_stride_b
+        + logical_block_idx,
+        mask=valid_table_lookup,
+        other=-1,
+    ).to(tl.int64)
+    valid_cache_block = (
+        valid_table_lookup
+        & (cache_block_idx >= 0)
+        & (cache_block_idx < num_cache_blocks)
+    )
+    if valid_table_lookup & ~valid_cache_block:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+
+    safe_cache_block_idx = tl.where(valid_cache_block, cache_block_idx, 0)
+    token_in_block = token_in_request % cache_block_size
+    cache_block_base = k_cache_ptr + safe_cache_block_idx * cache_stride_b
+    output_row = out_ptr + token_idx * entry_bytes
+
+    data_offsets = tl.arange(0, 1024)
+    data_mask = data_offsets < token_data_size
+    cache_data = tl.load(
+        cache_block_base + token_in_block * token_data_size + data_offsets,
+        mask=valid_cache_block & data_mask,
+        other=0,
+    )
+    tl.store(output_row + data_offsets, cache_data, mask=data_mask)
+
+    scale_offsets = tl.arange(0, 8)
+    scale_mask = scale_offsets < scale_dim
+    cache_scales = tl.load(
+        cache_block_base
+        + cache_block_size * token_data_size
+        + token_in_block * scale_dim
+        + scale_offsets,
+        mask=valid_cache_block & scale_mask,
+        other=0,
+    )
+    tl.store(
+        output_row + token_data_size + scale_offsets,
+        cache_scales,
+        mask=scale_mask,
+    )
+
+
+def try_gather_k_cache_packed_to_flat(
+    out: torch.Tensor,
+    k_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    per_req_padded_lens: torch.Tensor,
+    per_req_actual_lens: torch.Tensor,
+    *,
+    block_size: int,
+    has_actual_tokens: bool,
+) -> bool:
+    """Fuse paged gather, zero padding, and flattening for CP all-gather.
+
+    Unsupported layouts return ``False`` without modifying ``out`` so callers
+    can use the previous padded-gather implementation as a fallback.
+    """
+    if not cp_direct_flat_pack_enabled():
+        return False
+
+    batch_size = int(per_req_padded_lens.numel())
+    total_local_tokens = int(out.shape[0]) if out.dim() == 2 else -1
+    block_size = int(block_size)
+    tensors = (
+        out,
+        k_cache,
+        block_table,
+        per_req_padded_lens,
+        per_req_actual_lens,
+    )
+    if (
+        batch_size <= 0
+        or batch_size > 64
+        or total_local_tokens < 0
+        or any(not tensor.is_cuda for tensor in tensors)
+        or any(tensor.device != out.device for tensor in tensors[1:])
+        or out.dtype != torch.uint8
+        or tuple(out.shape) != (total_local_tokens, ENTRY_BYTES)
+        or not out.is_contiguous()
+        or k_cache.dim() != 3
+        or k_cache.dtype != torch.uint8
+        or int(k_cache.shape[-1]) != ENTRY_BYTES
+        or int(k_cache.stride(2)) != 1
+        or int(k_cache.stride(1)) != ENTRY_BYTES
+        or int(k_cache.shape[1]) != block_size
+        or block_table.dim() != 2
+        or block_table.dtype != torch.int32
+        or int(block_table.shape[0]) < batch_size
+        or int(block_table.stride(1)) != 1
+        or per_req_padded_lens.dim() != 1
+        or per_req_padded_lens.dtype != torch.int32
+        or not per_req_padded_lens.is_contiguous()
+        or per_req_actual_lens.dim() != 1
+        or int(per_req_actual_lens.numel()) != batch_size
+        or per_req_actual_lens.dtype != torch.int32
+        or not per_req_actual_lens.is_contiguous()
+    ):
+        return False
+    if total_local_tokens == 0:
+        return True
+    if (
+        int(k_cache.shape[0]) <= 0
+        or int(k_cache.shape[1]) <= 0
+        or (bool(has_actual_tokens) and int(block_table.shape[1]) <= 0)
+    ):
+        return False
+
+    batch_block = triton.next_power_of_2(batch_size)
+    _gather_k_cache_packed_to_flat_kernel[(total_local_tokens,)](
+        out,
+        k_cache,
+        block_table,
+        per_req_padded_lens,
+        per_req_actual_lens,
+        batch_size,
+        total_local_tokens,
+        int(block_table.stride(0)),
+        int(block_table.shape[1]),
+        block_size,
+        int(k_cache.stride(0)),
+        int(k_cache.shape[0]),
+        token_data_size=TOKEN_DATA_SIZE,
+        scale_dim=SCALE_BYTES_PER_TOKEN,
+        entry_bytes=ENTRY_BYTES,
+        BATCH_BLOCK=batch_block,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        num_warps=4,
+    )
+    return True
+
+
 @triton.jit
 def _dequantize_packed_k_cache_flat_kernel(
     out_ptr,
