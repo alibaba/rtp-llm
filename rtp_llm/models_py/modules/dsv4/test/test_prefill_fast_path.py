@@ -1,5 +1,5 @@
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
+from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 
 
 class _FakeAttention(AttentionFP8):
@@ -90,6 +91,7 @@ class _FakeV4:
         self._prefill_ws_idx_w = 0
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        self.capture_aux_hidden_layer_ids = ()
         self.norm = lambda h: h + 100
 
     def _propagate_cp_ctx(self, cp_ctx):
@@ -104,6 +106,82 @@ class _FakeV4:
 
 
 class PrefillFastPathTest(unittest.TestCase):
+    def test_cp_prepare_skips_dead_framework_positions(self):
+        v4 = SimpleNamespace(_cp_info=None, _cp_size=1)
+        attn = SimpleNamespace(
+            position_ids=None,
+            cu_seqlens=torch.tensor([0, 4], dtype=torch.int32),
+            input_lengths=torch.tensor([2], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+        )
+        inputs = SimpleNamespace(
+            attention_inputs=attn,
+            input_ids=torch.arange(4, dtype=torch.int32),
+        )
+        captured = {}
+
+        def fake_set_cp_info(*_args, **_kwargs):
+            v4._cp_info = object()
+            v4._cp_size = 2
+
+        def fake_forward_layers(
+            _v4, _kv_cache, _input_ids, positions, *_args, **_kwargs
+        ):
+            captured["positions"] = positions
+            return torch.empty((4, 1))
+
+        with patch.object(
+            prefill_forward, "set_cp_info", fake_set_cp_info
+        ), patch.object(
+            prefill_forward, "_cp_prepare_fusion_supported", return_value=True
+        ), patch.object(
+            prefill_forward, "build_block_tables_batched", return_value={}
+        ), patch.object(
+            prefill_forward, "forward_layers", fake_forward_layers
+        ), patch.object(
+            prefill_forward, "PyModelOutputs", side_effect=lambda hidden: hidden
+        ), patch.object(
+            prefill_forward, "_build_positions_from_lengths"
+        ) as build_positions:
+            output = prefill_forward.forward_prefill(
+                v4=v4,
+                kv_cache=None,
+                parallelism_config=SimpleNamespace(),
+                inputs=inputs,
+            )
+
+        build_positions.assert_not_called()
+        self.assertEqual(captured["positions"].numel(), 0)
+        self.assertEqual(tuple(output.shape), (4, 1))
+
+    def test_cp_context_setters_are_cached(self):
+        class Sink:
+            def __init__(self):
+                self.values = []
+
+            def set_cp_ctx(self, value):
+                self.values.append(value)
+
+        def make_transformer():
+            attn = Sink()
+            attn.compressor = Sink()
+            attn.indexer = Sink()
+            attn.indexer.compressor = Sink()
+            return SimpleNamespace(layers=[SimpleNamespace(attn=attn)]), (
+                attn,
+                attn.compressor,
+                attn.indexer,
+                attn.indexer.compressor,
+            )
+
+        transformer, sinks = make_transformer()
+        V4Transformer._propagate_cp_ctx(transformer, "first")
+        setters = transformer._cp_ctx_setters
+        V4Transformer._propagate_cp_ctx(transformer, "second")
+        self.assertIs(setters, transformer._cp_ctx_setters)
+        for sink in sinks:
+            self.assertEqual(sink.values, ["first", "second"])
+
     def test_disable_record_function_ranges_is_scoped(self):
         calls = []
 
@@ -343,6 +421,57 @@ class PrefillFastPathTest(unittest.TestCase):
         )
         build_meta.assert_called_once()
         clear_meta.assert_called_once_with(v4)
+
+    def test_fast_path_keeps_only_outer_layer_ranges(self):
+        v4 = _FakeV4()
+        input_ids = torch.tensor([3, 4], dtype=torch.long)
+        positions = torch.tensor([7, 8], dtype=torch.long)
+        cu_seqlens = torch.tensor([0, 2], dtype=torch.long)
+        events = []
+        nested_range_enabled = []
+
+        for layer in v4.layers:
+            original = layer.forward_prefill_fast
+
+            def wrapped(*args, _original=original, **kwargs):
+                nested_range_enabled.append(_profiler.record_function_ranges_enabled())
+                return _original(*args, **kwargs)
+
+            layer.forward_prefill_fast = wrapped
+
+        @contextmanager
+        def layer_range(layer_idx):
+            events.append(("enter", layer_idx))
+            try:
+                yield
+            finally:
+                events.append(("exit", layer_idx))
+
+        with patch.dict(prefill_forward.os.environ, {}, clear=True), patch.object(
+            prefill_forward._rt, "ENABLED", False
+        ), patch.object(
+            prefill_forward._fwd_dbg, "enabled", lambda: False
+        ), patch.object(
+            prefill_forward, "build_and_propagate_prefill_meta_fp8"
+        ), patch.object(
+            prefill_forward, "clear_prefill_meta_shared_fp8"
+        ), patch.object(
+            _profiler, "make_layer_forward_range", return_value=layer_range
+        ):
+            prefill_forward.forward_layers(
+                v4,
+                kv_cache=None,
+                input_ids=input_ids,
+                positions=positions,
+                cu_seqlens=cu_seqlens,
+                block_tables_by_type=None,
+            )
+
+        self.assertEqual(
+            events,
+            [("enter", 0), ("exit", 0), ("enter", 1), ("exit", 1)],
+        )
+        self.assertEqual(nested_range_enabled, [False, False])
 
     def test_forward_layers_fast_path_preserves_varlen_batch_metadata(self):
         v4 = _FakeV4()

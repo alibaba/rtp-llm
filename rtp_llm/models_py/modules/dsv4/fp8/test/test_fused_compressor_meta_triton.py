@@ -9,6 +9,7 @@ Triton path against the Python reference path for both CSA/indexer
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -43,17 +44,34 @@ def _shell(
     kv_bt: Optional[torch.Tensor],
     kv_eb: int,
     pool_rows: int = 0,
+    state_eb: int = STATE_EB,
+    state_tokens_per_block: int = STATE_EB,
+    kv_tokens_per_block: int = 0,
+    kv_owner_tokens_per_block: int = 0,
+    cp_size: int = 1,
+    cp_rank: int = 0,
 ) -> CompressorFP8:
     cmp = CompressorFP8.__new__(CompressorFP8)
     object.__setattr__(cmp, "compress_ratio", ratio)
     object.__setattr__(cmp, "_state_block_table", state_bt)
-    object.__setattr__(cmp, "_state_eb", STATE_EB)
-    object.__setattr__(cmp, "_state_tokens_per_block", STATE_EB)
+    object.__setattr__(cmp, "_state_eb", state_eb)
+    object.__setattr__(cmp, "_state_tokens_per_block", state_tokens_per_block)
     object.__setattr__(cmp, "_kv_block_table", kv_bt)
     object.__setattr__(cmp, "_kv_eb", kv_eb)
-    object.__setattr__(cmp, "_kv_tokens_per_block", kv_eb * ratio if kv_eb > 0 else 0)
-    object.__setattr__(cmp, "_kv_cache_sharded", False)
-    object.__setattr__(cmp, "_cp_ctx", None)
+    kv_tpb = kv_tokens_per_block or (kv_eb * ratio if kv_eb > 0 else 0)
+    object.__setattr__(cmp, "_kv_tokens_per_block", kv_tpb)
+    object.__setattr__(
+        cmp,
+        "_kv_owner_tokens_per_block",
+        kv_owner_tokens_per_block or kv_tpb,
+    )
+    object.__setattr__(cmp, "_kv_cache_sharded", cp_size > 1)
+    object.__setattr__(
+        cmp,
+        "_cp_ctx",
+        None if cp_size <= 1 else SimpleNamespace(cp_size=cp_size, cp_rank=cp_rank),
+    )
+    object.__setattr__(cmp, "_state_pool_3d", None)
     if pool_rows > 0 and kv_eb > 0:
         assert pool_rows % kv_eb == 0
         pool = torch.empty(
@@ -361,6 +379,110 @@ def test_ratio128_q_len_4():
 
 
 @requires_cuda
+def test_cp_sharded_slot_mapping_matches_python_reference_exact():
+    starts = torch.tensor([3, 253, 767], dtype=torch.long, device=DEVICE)
+    lengths = (13, 10, 20)
+    positions = torch.cat(
+        [torch.arange(s, s + n, device=DEVICE) for s, n in zip(starts, lengths)]
+    ).to(torch.long)
+    b_idx = torch.cat(
+        [torch.full((n,), b, device=DEVICE) for b, n in enumerate(lengths)]
+    ).to(torch.long)
+    cu_seq = torch.tensor(
+        [0, lengths[0], lengths[0] + lengths[1], sum(lengths)],
+        dtype=torch.int64,
+        device=DEVICE,
+    )
+    state_bt = torch.tensor(
+        [[1, 2, 3, 4], [5, 6, 0, 8], [9, 10, 11, 12]],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    kv_bt = torch.tensor(
+        [[13, 14, 15, 16], [17, 0, 19, 20], [21, 22, 23, 24]],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+
+    for ratio, state_eb, kv_eb, kv_tpb in (
+        (4, 3, 16, 64),
+        (128, 65, 1, 128),
+    ):
+        for cp_rank in range(4):
+            cmp = _shell(
+                ratio=ratio,
+                state_bt=state_bt,
+                kv_bt=kv_bt,
+                kv_eb=kv_eb,
+                state_eb=state_eb,
+                state_tokens_per_block=256,
+                kv_tokens_per_block=kv_tpb,
+                kv_owner_tokens_per_block=256,
+                cp_size=4,
+                cp_rank=cp_rank,
+            )
+            seq_end = starts + torch.tensor(lengths, device=DEVICE)
+            expected_state = cmp._compute_state_slot_mapping(
+                positions, b_idx, seq_end
+            )
+            expected_kv = cmp._compute_kv_slot_mapping(positions, b_idx)
+            got = cmp.prepare_metadata(
+                positions,
+                b_idx,
+                has_prefix=True,
+                is_batched=True,
+                seq_start_per_req=starts,
+                cu_seq_per_req=cu_seq,
+            )
+            assert torch.equal(got.state_slots, expected_state)
+            assert torch.equal(got.kv_slots, expected_kv)
+            assert torch.equal(got.token_to_req, b_idx.to(torch.int32))
+
+
+@requires_cuda
+def test_cp_runtime_shapes_reuse_one_triton_specialization():
+    kernel = _fused_compressor_meta_triton._compressor_slot_mapping_kernel
+    kernel.device_caches.clear()
+    state_bt = torch.ones((4, 8), dtype=torch.int32, device=DEVICE)
+    kv_bt = torch.ones((4, 8), dtype=torch.int32, device=DEVICE)
+
+    def launch(batch_size: int, n: int, ratio: int, cp_rank: int) -> None:
+        positions = torch.arange(n, dtype=torch.long, device=DEVICE)
+        b_idx = torch.arange(n, device=DEVICE, dtype=torch.long) % batch_size
+        counts = torch.bincount(b_idx, minlength=batch_size).to(torch.int32)
+        cu_seq = torch.cat(
+            [
+                torch.zeros(1, device=DEVICE, dtype=torch.int64),
+                counts.to(torch.int64).cumsum(0),
+            ]
+        )
+        starts = torch.arange(batch_size, device=DEVICE, dtype=torch.int64) * 257
+        _fused_compressor_meta_triton.fused_compressor_slot_mapping(
+            positions,
+            b_idx,
+            state_bt[:batch_size],
+            3 if ratio == 4 else 65,
+            kv_bt[:batch_size],
+            16 if ratio == 4 else 1,
+            ratio,
+            starts,
+            cu_seq,
+            256,
+            pool_rows=4096,
+            kv_tokens_per_block=64 if ratio == 4 else 128,
+            cp_size=4,
+            cp_rank=cp_rank,
+            kv_owner_tokens_per_block=256,
+        )
+        torch.cuda.synchronize()
+
+    launch(1, 7, 4, 0)
+    cache_count = sum(len(cache) for cache in kernel.device_caches.values())
+    launch(4, 43, 128, 3)
+    assert sum(len(cache) for cache in kernel.device_caches.values()) == cache_count
+
+
+@requires_cuda
 def test_ratio128_q_len_gt_ratio():
     state_bt, kv_bt = _ratio128_bt()
     kv_bt = kv_bt.clone()
@@ -391,3 +513,5 @@ if __name__ == "__main__":
     test_ratio128_q_len_4()
     test_ratio128_q_len_gt_ratio()
     test_no_kv_context_writes_negative_kv_slots()
+    test_cp_sharded_slot_mapping_matches_python_reference_exact()
+    test_cp_runtime_shapes_reuse_one_triton_specialization()

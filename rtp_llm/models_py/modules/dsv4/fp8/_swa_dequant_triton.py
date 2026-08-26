@@ -16,6 +16,7 @@ so we dequant a per-request SWA window into a workspace buffer first
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -644,6 +645,83 @@ def _dequantize_packed_k_cache_flat_kernel(
         tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
+@triton.jit(
+    do_not_specialize=[
+        "out_stride0",
+        "out_stride1",
+        "batch_size",
+        "n_tokens",
+        "offset",
+    ]
+)
+def _restore_dequantize_scatter_packed_k_cache_flat_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    gathered_ptr,
+    restore_indices_ptr,
+    seq_lens_ptr,
+    batch_size,
+    n_tokens,
+    offset,
+    fp8_dim: tl.constexpr,
+    bf16_dim: tl.constexpr,
+    quant_block: tl.constexpr,
+    token_data_size: tl.constexpr,
+    entry_bytes: tl.constexpr,
+    n_quant_blocks: tl.constexpr,
+    BATCH_BLOCK: tl.constexpr,
+):
+    """Restore, dequantize, and scatter one packed row per program."""
+    token_idx = tl.program_id(0)
+    if token_idx >= n_tokens:
+        return
+
+    batch_offsets = tl.arange(0, BATCH_BLOCK)
+    batch_mask = batch_offsets < batch_size
+    seq_lens = tl.load(seq_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+        tl.int64
+    )
+    seq_ends = tl.cumsum(seq_lens, axis=0)
+    batch_idx = tl.sum((token_idx >= seq_ends).to(tl.int32), axis=0)
+    seq_start = tl.sum(
+        tl.where(batch_offsets == batch_idx, seq_ends - seq_lens, 0), axis=0
+    )
+    token_in_request = token_idx - seq_start
+
+    restored_idx = tl.load(restore_indices_ptr + token_idx)
+    token_ptr = gathered_ptr + restored_idx * entry_bytes
+    token_fp8_ptr = token_ptr
+    token_bf16_ptr = token_ptr + fp8_dim
+    token_scale_ptr = token_ptr + token_data_size
+    output_row_ptr = (
+        out_ptr + batch_idx * out_stride0 + (offset + token_in_request) * out_stride1
+    )
+
+    for qblock_idx in tl.static_range(n_quant_blocks):
+        qblock_start = qblock_idx * quant_block
+        if qblock_start < fp8_dim:
+            offsets = qblock_start + tl.arange(0, quant_block)
+            mask = offsets < fp8_dim
+
+            x_uint8 = tl.load(token_fp8_ptr + offsets, mask=mask, other=0)
+            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+            x_float = x_fp8.to(tl.float32)
+
+            encoded_scale = tl.load(token_scale_ptr + qblock_idx)
+            exponent = encoded_scale.to(tl.float32) - 127.0
+            scale = tl.exp2(exponent)
+            x_dequant = x_float * scale
+            tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+
+    bf16_output_offset = fp8_dim
+    bf16_cache_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
+    for j in tl.static_range(bf16_dim // 16):
+        chunk_offsets = j * 16 + tl.arange(0, 16)
+        bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
+        tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+
+
 def dequantize_packed_k_cache_flat(out: torch.Tensor, packed: torch.Tensor) -> None:
     """Dequant compact packed FP8 slots into flat BF16 rows.
 
@@ -675,6 +753,75 @@ def dequantize_packed_k_cache_flat(out: torch.Tensor, packed: torch.Tensor) -> N
         entry_bytes=ENTRY_BYTES,
         n_quant_blocks=NOPE_TILES,
     )
+
+
+def try_restore_dequantize_scatter_packed_k_cache_flat(
+    out: torch.Tensor,
+    gathered: torch.Tensor,
+    restore_indices: torch.Tensor,
+    seq_lens: torch.Tensor,
+    offset: int,
+) -> bool:
+    """Fuse CP packed-row restore, BF16 dequant, and workspace scatter.
+
+    Returns ``False`` for unsupported inputs so callers can retain the existing
+    PyTorch path as an exact fallback.
+    """
+    batch_size = int(seq_lens.numel())
+    n_tokens = int(restore_indices.numel())
+    if batch_size == 0:
+        return n_tokens == 0
+    tensors = (out, gathered, restore_indices, seq_lens)
+    if (
+        batch_size > 64
+        or any(not tensor.is_cuda for tensor in tensors)
+        or any(tensor.device != out.device for tensor in tensors[1:])
+        or out.dim() != 3
+        or out.dtype != torch.bfloat16
+        or int(out.shape[0]) < batch_size
+        or int(out.shape[-1]) != HEAD_DIM
+        or int(out.stride(2)) != 1
+        or gathered.dim() != 2
+        or gathered.dtype != torch.uint8
+        or int(gathered.shape[-1]) != ENTRY_BYTES
+        or tuple(gathered.stride()) != (ENTRY_BYTES, 1)
+        or restore_indices.dim() != 1
+        or restore_indices.dtype != torch.int64
+        or not restore_indices.is_contiguous()
+        or seq_lens.dim() != 1
+        # The prefill workspace contract supplies int32 lengths. Keeping the
+        # fused ABI exact avoids an un-warmed pointer-dtype specialization.
+        or seq_lens.dtype != torch.int32
+        or not seq_lens.is_contiguous()
+        or int(offset) < 0
+        or int(offset) >= int(out.shape[1])
+        or n_tokens > batch_size * (int(out.shape[1]) - int(offset))
+    ):
+        return False
+    if n_tokens == 0:
+        return True
+
+    batch_block = triton.next_power_of_2(batch_size)
+    _restore_dequantize_scatter_packed_k_cache_flat_kernel[(n_tokens,)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        gathered,
+        restore_indices,
+        seq_lens,
+        batch_size,
+        n_tokens,
+        int(offset),
+        fp8_dim=NOPE_DIM,
+        bf16_dim=ROPE_DIM,
+        quant_block=TILE_SIZE,
+        token_data_size=TOKEN_DATA_SIZE,
+        entry_bytes=ENTRY_BYTES,
+        n_quant_blocks=NOPE_TILES,
+        BATCH_BLOCK=batch_block,
+        num_warps=4,
+    )
+    return True
 
 
 def dequantize_swa_window_to_bf16(

@@ -872,6 +872,7 @@ class DeepSeekV4Model(GptModelBase):
                     warmup_fp8_mqa_logits_jit,
                     warmup_mhc_head_fused_jit,
                     warmup_mhc_prenorm_gemm_jit,
+                    warmup_prefill_cp_metadata_jit,
                 )
 
                 _jit_device = _torch.device(device_str)
@@ -935,6 +936,15 @@ class DeepSeekV4Model(GptModelBase):
                     int(getattr(self.parallelism_config, "tp_size", 1) or 1)
                     if _prefill_cp_enabled
                     else 1
+                )
+                warmup_prefill_cp_metadata_jit(
+                    is_decode_role=self._is_decode_role,
+                    cp_enabled=_prefill_cp_enabled,
+                    cp_size=_prefill_cp_size,
+                    max_batch_size=int(self._max_context_batch_size),
+                    fp8_kv_cache=self.fp8_kv_cache,
+                    kv_cache_sharded=_prefill_kv_cache_sharded,
+                    device=_jit_device,
                 )
                 _dense_gemm_max_m = resolve_dense_gemm_warmup_max_m(
                     max_seq_len=int(self._v4_args.max_seq_len),
