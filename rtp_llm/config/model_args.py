@@ -65,5 +65,6 @@ class ModelArgs:
         self.enable_output_vocab_pruning: bool = False
         # None selects the model registry default; bool is an explicit override.
         self.use_new_loader: Optional[bool] = None
-        # Route to a loader that supports the online UpdateWeights RPC.
-        self.require_weight_update: bool = False
+        # None means the deployment has not declared whether UpdateWeights is
+        # required.  Automatic NewLoader routing requires an explicit choice.
+        self.require_weight_update: Optional[bool] = None

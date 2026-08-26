@@ -884,8 +884,9 @@ service RpcService {
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
-    // Returns UNIMPLEMENTED when the selected loader has no weight manager
-    // (currently the NewLoader path). Disable NewLoader to use weight hot-reload.
+    // Returns UNIMPLEMENTED when the selected loader has no weight manager.
+    // Set --require_weight_update true (recommended) or --use_new_loader false
+    // before startup to retain legacy-loader weight hot-reload.
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
     rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
     rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);

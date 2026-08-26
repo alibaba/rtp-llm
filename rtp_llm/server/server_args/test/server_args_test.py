@@ -84,7 +84,18 @@ class ServerArgsSetTest(TestCase):
         py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
 
         self.assertIsNone(py_env_configs.model_args.use_new_loader)
-        self.assertFalse(py_env_configs.model_args.require_weight_update)
+        self.assertIsNone(py_env_configs.model_args.require_weight_update)
+
+    def test_weight_update_policy_accepts_explicit_env_false(self):
+        os.environ["REQUIRE_WEIGHT_UPDATE"] = "false"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertIs(py_env_configs.model_args.require_weight_update, False)
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""

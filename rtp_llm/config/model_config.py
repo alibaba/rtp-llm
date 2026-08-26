@@ -569,7 +569,9 @@ class ModelConfig(CppModelConfig):
         self.quant_config = None
         # None selects the model registry default; bool is an explicit override.
         self.use_new_loader: Optional[bool] = None
-        self.require_weight_update: bool = False
+        # None means the deployment has not declared whether UpdateWeights is
+        # required.  Automatic NewLoader routing requires an explicit choice.
+        self.require_weight_update: Optional[bool] = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.

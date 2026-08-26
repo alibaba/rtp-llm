@@ -203,16 +203,17 @@ The following legacy options and environment variables were removed and must no 
 | `--loader_recycle_handles` | ROCm + safetensors only: close consumed main-model shard handles to release mmap memory. Requires layer-numbered tensors and copies safetensors data out before closing; no effect on fastsafetensors, ViT, EPLB, or .bin weights. (`LOADER_RECYCLE_HANDLES`) | True |
 | `--moe_pure_tp_preshard` | Disabled by default. Set true to pre-shard supported Qwen3-Next / Qwen3.5 MoE and offline FP8 weights under pure TP (`tp>1, dp=1, ep=1`) before device copy. Unsupported sources or layouts warn and use legacy full reads. (`MOE_PURE_TP_PRESHARD`) | False |
 | `--use_new_loader` | Select the loader explicitly. When unset, registered models use NewLoader only when the model, quantization, and requested loading capabilities are supported; unsupported configurations fall back to the legacy loader. Set true to require NewLoader or false to force rollback. NewLoader currently does not support online `UpdateWeights`; use `--require_weight_update true` for deployments that need it. (`USE_NEW_LOADER`) | Auto |
-| `--require_weight_update` | Require online weight updates through the `UpdateWeights` RPC. In automatic mode this routes registered models to the legacy loader; combining it with `--use_new_loader true` fails during startup. (`REQUIRE_WEIGHT_UPDATE`) | False |
+| `--require_weight_update` | Declare whether the deployment requires online `UpdateWeights`. When undeclared, automatic routing preserves the legacy loader. Set false to confirm that online updates are not needed and opt in to automatic NewLoader routing; true retains legacy. Combining true with `--use_new_loader true` fails during startup. (`REQUIRE_WEIGHT_UPDATE`) | Undeclared (legacy) |
 | `--keep_mla_checkpoint_weights` | Requires NewLoader. For DeepSeek and Kimi MLA models, retain checkpoint weights after conversion to the runtime layout. This increases device memory usage and reduces available KV-cache blocks; it has no effect on other models and is intended for debugging only. (`KEEP_MLA_CHECKPOINT_WEIGHTS`) | False |
 
 ### NewLoader upgrade note
 
-Registered models now select NewLoader automatically when their runtime
-configuration is supported. NewLoader does not provide the online
-`UpdateWeights` RPC. Existing RL, training-serving, or other deployments that
-update weights without restarting must set `--require_weight_update true`; auto
-mode will then retain the legacy loader. Use `--use_new_loader false` for an
-explicit full rollback. At startup, the backend emits
+NewLoader does not provide the online `UpdateWeights` RPC, so upgrades preserve
+the legacy loader while `--require_weight_update` is undeclared. Set
+`--require_weight_update false` to confirm that the deployment does not update
+weights online and opt registered, compatible models into automatic NewLoader
+routing. Set it to true to keep legacy explicitly, or use `--use_new_loader true`
+to force NewLoader. This capability declaration prevents an upgrade from
+silently disabling weight updates. At startup, rank 0 emits
 `py_rtp_update_weights_available` (`1` for legacy, `0` for NewLoader) and logs
-`CAPABILITY_DISABLED` at ERROR level when the selected route lacks this RPC.
+`CAPABILITY_DISABLED` at WARNING level when the selected route lacks this RPC.

@@ -514,6 +514,10 @@ class BaseModel(object):
             parallelism_config=self.parallelism_config,
         )
 
+    def _legacy_loader_unsupported_reason(self) -> Optional[str]:
+        """Return why this checkpoint cannot use the legacy loader."""
+        return None
+
     def _use_new_loader(self, *, skip_python_model: bool = False) -> bool:
         from rtp_llm.models_py.registry import is_model_registered
 
@@ -527,6 +531,13 @@ class BaseModel(object):
                 skip_python_model=skip_python_model
             )
             if unsupported_reason is not None:
+                legacy_reason = self._legacy_loader_unsupported_reason()
+                if legacy_reason is not None:
+                    raise ValueError(
+                        "No compatible loader route is available: NewLoader is "
+                        f"unsupported because {unsupported_reason}; legacy loader "
+                        f"is unsupported because {legacy_reason}."
+                    )
                 enabled = False
                 logging.warning(
                     "NewLoader is registered for model_type=%s but the current "
@@ -564,7 +575,7 @@ class BaseModel(object):
             GaugeMetrics.UPDATE_WEIGHTS_AVAILABLE_METRIC,
             1 if available else 0,
             {
-                "loader": "legacy" if available else "newloader",
+                "loader": "newloader" if self._uses_new_loader else "legacy",
                 "model_type": self.model_config.model_type,
             },
         )
@@ -678,12 +689,20 @@ class BaseModel(object):
         self.weight_manager = None
         self.py_eplb = None
         self._report_update_weights_capability(available=False)
-        logging.error(
-            "CAPABILITY_DISABLED: NewLoader does not support the online "
-            "UpdateWeights RPC. Deployments that require online updates must set "
-            "--require_weight_update true; use --use_new_loader false to force "
-            "the legacy loader."
-        )
+        if self.parallelism_config.world_rank == 0:
+            route_source = (
+                "automatic route"
+                if self.model_config.use_new_loader is None
+                else "explicit override"
+            )
+            logging.warning(
+                "CAPABILITY_DISABLED: NewLoader does not support the online "
+                "UpdateWeights RPC (model_type=%s, source=%s). Deployments that "
+                "require online updates must set --require_weight_update true; "
+                "use --use_new_loader false to force the legacy loader.",
+                self.model_config.model_type,
+                route_source,
+            )
         logging.info("NewModelLoader: model loaded successfully")
 
     def _build_new_loader_weight_view(self, module: torch.nn.Module) -> ModelWeights:
