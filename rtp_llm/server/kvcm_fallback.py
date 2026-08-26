@@ -1,9 +1,8 @@
-"""Lightweight KVCM cache-affinity fallback for :mod:`master_client`.
+"""Lightweight KVCM + WorkerStatus availability fallback for MasterClient.
 
-The client deliberately does not recreate FlexLB load accounting.  It queries
-KVCM only after a FlexLB availability failure and selects the worker with the
-largest positive local prefix match.  Callers retain their existing final
-domain/upstream fallback when KVCM cannot provide a route.
+The implementation reuses FlexLB CacheAffinityFirst semantics but scores only
+a bounded worker subset: the caller's local worker plus KVCM cache hits.
+WorkerStatus responses are never cached; gRPC channels are reused.
 """
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ import asyncio
 import hashlib
 import ipaddress
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Optional
 
@@ -20,15 +19,19 @@ import grpc
 
 from rtp_llm.server.kvcm_proto import kvcm_meta_service_pb2 as kvcm_pb2
 from rtp_llm.server.kvcm_proto import kvcm_meta_service_pb2_grpc as kvcm_pb2_grpc
+from rtp_llm.server.worker_status_proto import worker_status_service_pb2 as status_pb2
+from rtp_llm.server.worker_status_proto import (
+    worker_status_service_pb2_grpc as status_pb2_grpc,
+)
 
 
 class KvcmFallbackError(RuntimeError):
-    """KVCM could not produce a trustworthy cache route."""
+    """KVCM could not produce a trustworthy fallback decision."""
 
 
 @dataclass(frozen=True)
 class KvcmFallbackConfig:
-    """Static metadata required to query one KVCM cache namespace."""
+    """Metadata, bounded probe settings, and FlexLB-compatible thresholds."""
 
     instance_id: str
     block_size: int
@@ -36,28 +39,73 @@ class KvcmFallbackConfig:
     leader_refresh_interval_ms: int = 10_000
     p2p_host_count: int = 0
     worker_grpc_port_override: Optional[int] = None
+    worker_status_port_override: Optional[int] = None
     lookahead_tokens: int = 0
     minimum_local_blocks: int = 1
+    candidate_pool_size: int = 3
+    hot_candidate_pool_size: int = 2
+    worker_status_concurrency: int = 3
+    worker_status_timeout_ms: int = 200
+    prefill_queue_size_threshold: int = 1_024
+    p2p_hit_discount: float = 0.2
+    cache_affinity_first_max_extra_work_tokens: int = 0
+    outstanding_uncached_tokens_threshold: int = 0
+    cache_affinity_first_min_hit_rate: float = 5.0
 
     def __post_init__(self) -> None:
         if not self.instance_id.strip():
             raise ValueError("KVCM instance_id must not be empty")
-        if self.block_size <= 0:
-            raise ValueError("KVCM block_size must be positive")
-        if self.request_timeout_ms <= 0:
-            raise ValueError("KVCM request_timeout_ms must be positive")
-        if self.leader_refresh_interval_ms <= 0:
-            raise ValueError("KVCM leader_refresh_interval_ms must be positive")
-        if self.p2p_host_count < 0:
-            raise ValueError("KVCM p2p_host_count must not be negative")
-        if self.lookahead_tokens < 0:
-            raise ValueError("KVCM lookahead_tokens must not be negative")
+        for name, value in (
+            ("block_size", self.block_size),
+            ("request_timeout_ms", self.request_timeout_ms),
+            ("leader_refresh_interval_ms", self.leader_refresh_interval_ms),
+            ("candidate_pool_size", self.candidate_pool_size),
+            ("hot_candidate_pool_size", self.hot_candidate_pool_size),
+            ("worker_status_concurrency", self.worker_status_concurrency),
+            ("worker_status_timeout_ms", self.worker_status_timeout_ms),
+            ("prefill_queue_size_threshold", self.prefill_queue_size_threshold),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"KVCM {name} must be positive")
+        for name, value in (
+            ("p2p_host_count", self.p2p_host_count),
+            ("lookahead_tokens", self.lookahead_tokens),
+            (
+                "cache_affinity_first_max_extra_work_tokens",
+                self.cache_affinity_first_max_extra_work_tokens,
+            ),
+            (
+                "outstanding_uncached_tokens_threshold",
+                self.outstanding_uncached_tokens_threshold,
+            ),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"KVCM {name} must not be negative")
         if self.minimum_local_blocks <= 0:
             raise ValueError("KVCM minimum_local_blocks must be positive")
-        if self.worker_grpc_port_override is not None and not (
-            1 <= self.worker_grpc_port_override <= 65_535
+        for name, value in (
+            ("worker_grpc_port_override", self.worker_grpc_port_override),
+            ("worker_status_port_override", self.worker_status_port_override),
         ):
-            raise ValueError("KVCM worker_grpc_port_override must be a valid port")
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 1 <= value <= 65_535
+            ):
+                raise ValueError(f"KVCM {name} must be a valid port")
+        for name, value in (
+            ("p2p_hit_discount", self.p2p_hit_discount),
+            (
+                "cache_affinity_first_min_hit_rate",
+                self.cache_affinity_first_min_hit_rate,
+            ),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value < 0
+            ):
+                raise ValueError(f"KVCM {name} must not be negative")
 
 
 @dataclass(frozen=True)
@@ -65,16 +113,52 @@ class KvcmCacheCandidate:
     host_ip: str
     http_port: int
     grpc_port: int
+    worker_status_port: int
     local_blocks: int
     p2p_fetch_blocks: int
     p2p_total_match_blocks: int
 
     @property
     def host_ip_port(self) -> str:
-        address = ipaddress.ip_address(self.host_ip)
-        if address.version == 6:
-            return f"[{address.compressed}]:{self.http_port}"
-        return f"{address.compressed}:{self.http_port}"
+        return _format_target(self.host_ip, self.http_port)
+
+    @property
+    def route_target(self) -> str:
+        return _format_target(self.host_ip, self.grpc_port)
+
+    @property
+    def worker_status_target(self) -> str:
+        return _format_target(self.host_ip, self.worker_status_port)
+
+
+@dataclass(frozen=True)
+class WorkerLoadSnapshot:
+    candidate: KvcmCacheCandidate
+    role: str
+    alive: bool
+    waiting_task_count: int
+    outstanding_uncached_tokens: int
+    status_version: int
+
+
+@dataclass(frozen=True)
+class ScoredCandidate:
+    snapshot: WorkerLoadSnapshot
+    hit_cache_tokens: int
+    request_uncached_tokens: int
+    estimated_ttft_work: int
+
+    @property
+    def candidate(self) -> KvcmCacheCandidate:
+        return self.snapshot.candidate
+
+
+@dataclass(frozen=True)
+class CacheAffinityDecision:
+    selected: Optional[ScoredCandidate]
+    reason: str
+    available_count: int
+    eligible_count: int
 
 
 @dataclass(frozen=True)
@@ -84,6 +168,15 @@ class KvcmFallbackResult:
     candidate_count: int
     block_count: int
     latency_us: int
+    cache_query_outcome: str = ""
+    pool_candidate_count: int = 0
+    status_success_count: int = 0
+    status_latency_us: int = 0
+    selection_reason: Optional[str] = None
+    selected_hit_cache_tokens: int = 0
+    selected_outstanding_uncached_tokens: int = 0
+    selected_request_uncached_tokens: int = 0
+    selected_estimated_ttft_work: int = 0
 
 
 BootstrapResolver = Callable[[], Sequence[str]]
@@ -120,7 +213,7 @@ def _encode_vllm_hash_input(parent_hash: bytes, token_ids: Sequence[int]) -> byt
     encoded.extend(_cbor_head(4, len(token_ids)))
     for token_id in token_ids:
         encoded.extend(_cbor_int(token_id))
-    encoded.append(0xF6)  # CBOR null: vLLM's extra-hash field.
+    encoded.append(0xF6)
     return bytes(encoded)
 
 
@@ -129,12 +222,7 @@ def calculate_vllm_block_cache_keys(
     block_size: int,
     lookahead_tokens: int = 0,
 ) -> list[int]:
-    """Return vLLM ``sha256_cbor`` low-64 block keys.
-
-    This matches vLLM with ``prefix_caching_hash_algo=sha256_cbor`` and
-    ``PYTHONHASHSEED=0``.  Only complete stride blocks are returned; lookahead
-    tokens participate in each hash but do not change the stride.
-    """
+    """Return vLLM sha256_cbor low-64 keys for complete stride blocks."""
 
     if block_size <= 0:
         raise ValueError("block_size must be positive")
@@ -143,7 +231,6 @@ def calculate_vllm_block_cache_keys(
     if not input_ids or len(input_ids) < block_size:
         return []
 
-    # Canonical CBOR text string "0" is 0x61 0x30.
     parent_hash = hashlib.sha256(b"\x61\x30").digest()
     keys: list[int] = []
     full_block_count = len(input_ids) // block_size
@@ -151,9 +238,11 @@ def calculate_vllm_block_cache_keys(
         offset = block_index * block_size
         remaining_after_block = len(input_ids) - offset - block_size
         token_count = block_size + min(lookahead_tokens, remaining_after_block)
-        block_tokens = input_ids[offset : offset + token_count]
         parent_hash = hashlib.sha256(
-            _encode_vllm_hash_input(parent_hash, block_tokens)
+            _encode_vllm_hash_input(
+                parent_hash,
+                input_ids[offset : offset + token_count],
+            )
         ).digest()
         keys.append(int.from_bytes(parent_hash[-8:], "big", signed=True))
     return keys
@@ -163,7 +252,7 @@ def select_max_local_affinity(
     candidates: Sequence[KvcmCacheCandidate],
     minimum_local_blocks: int = 1,
 ) -> Optional[KvcmCacheCandidate]:
-    """Select the largest positive local match with a deterministic tie break."""
+    """Compatibility helper retained for raw KVCM affinity tests."""
 
     eligible = [
         candidate
@@ -176,6 +265,205 @@ def select_max_local_affinity(
         eligible,
         key=lambda candidate: (-candidate.local_blocks, candidate.host_ip_port),
     )
+
+
+def effective_cache_blocks(
+    candidate: KvcmCacheCandidate,
+    p2p_hit_discount: float,
+) -> float:
+    p2p_added = max(
+        0,
+        candidate.p2p_total_match_blocks - candidate.local_blocks,
+    )
+    return candidate.local_blocks + p2p_added * max(0.0, p2p_hit_discount)
+
+
+def build_candidate_pool(
+    candidates: Sequence[KvcmCacheCandidate],
+    local_candidate: Optional[KvcmCacheCandidate],
+    config: KvcmFallbackConfig,
+) -> list[KvcmCacheCandidate]:
+    """Build the bounded worker universe, always retaining the local worker."""
+
+    positive = [
+        candidate
+        for candidate in candidates
+        if candidate.local_blocks >= config.minimum_local_blocks
+        or candidate.p2p_total_match_blocks >= config.minimum_local_blocks
+    ]
+    positive.sort(
+        key=lambda candidate: (
+            -effective_cache_blocks(candidate, config.p2p_hit_discount),
+            -candidate.local_blocks,
+            candidate.host_ip_port,
+        )
+    )
+    hot = positive[: config.hot_candidate_pool_size]
+
+    pool: list[KvcmCacheCandidate] = []
+    seen_ips: set[str] = set()
+    if local_candidate is not None:
+        matching = next(
+            (
+                candidate
+                for candidate in positive
+                if candidate.host_ip == local_candidate.host_ip
+            ),
+            None,
+        )
+        if matching is None:
+            pool.append(local_candidate)
+        else:
+            pool.append(
+                KvcmCacheCandidate(
+                    host_ip=local_candidate.host_ip,
+                    http_port=matching.http_port,
+                    grpc_port=local_candidate.grpc_port,
+                    worker_status_port=local_candidate.worker_status_port,
+                    local_blocks=matching.local_blocks,
+                    p2p_fetch_blocks=matching.p2p_fetch_blocks,
+                    p2p_total_match_blocks=matching.p2p_total_match_blocks,
+                )
+            )
+        seen_ips.add(local_candidate.host_ip)
+
+    for candidate in hot:
+        if candidate.host_ip in seen_ips:
+            continue
+        if len(pool) >= config.candidate_pool_size:
+            break
+        pool.append(candidate)
+        seen_ips.add(candidate.host_ip)
+    return pool[: config.candidate_pool_size]
+
+
+def _task_uncached_tokens(task: status_pb2.TaskInfoPB) -> int:
+    input_tokens = max(0, int(task.input_length))
+    hit_tokens = max(0, min(input_tokens, int(task.prefix_length)))
+    if not task.is_waiting and task.HasField("remaining_prefill_tokens"):
+        return max(0, int(task.remaining_prefill_tokens))
+    return max(0, input_tokens - hit_tokens)
+
+
+def worker_load_snapshot(
+    candidate: KvcmCacheCandidate,
+    status: status_pb2.WorkerStatusPB,
+) -> WorkerLoadSnapshot:
+    tasks = list(status.running_task_info)
+    return WorkerLoadSnapshot(
+        candidate=candidate,
+        role=str(status.role),
+        alive=bool(status.alive),
+        waiting_task_count=sum(1 for task in tasks if task.is_waiting),
+        outstanding_uncached_tokens=sum(_task_uncached_tokens(task) for task in tasks),
+        status_version=int(status.status_version),
+    )
+
+
+def _matched_tokens(
+    candidate: KvcmCacheCandidate,
+    seq_len: int,
+    block_size: int,
+    p2p_hit_discount: float,
+) -> int:
+    # Java Math.round for a non-negative value is floor(value + 0.5).
+    tokens = int(effective_cache_blocks(candidate, p2p_hit_discount) * block_size + 0.5)
+    return min(max(0, seq_len), max(0, tokens))
+
+
+def select_cache_affinity_first(
+    snapshots: Sequence[WorkerLoadSnapshot],
+    *,
+    seq_len: int,
+    config: KvcmFallbackConfig,
+    last_selected_ns: Optional[Mapping[str, int]] = None,
+) -> CacheAffinityDecision:
+    """Run FlexLB CacheAffinityFirst semantics over the supplied subset."""
+
+    recent = last_selected_ns or {}
+    available: list[ScoredCandidate] = []
+    for snapshot in snapshots:
+        role = snapshot.role.upper()
+        if (
+            not snapshot.alive
+            or ("PREFILL" not in role and "PDFUSION" not in role)
+            or snapshot.waiting_task_count >= config.prefill_queue_size_threshold
+        ):
+            continue
+        hit_tokens = _matched_tokens(
+            snapshot.candidate,
+            seq_len,
+            config.block_size,
+            config.p2p_hit_discount,
+        )
+        request_uncached = max(0, seq_len - hit_tokens)
+        available.append(
+            ScoredCandidate(
+                snapshot=snapshot,
+                hit_cache_tokens=hit_tokens,
+                request_uncached_tokens=request_uncached,
+                estimated_ttft_work=(
+                    snapshot.outstanding_uncached_tokens + request_uncached
+                ),
+            )
+        )
+
+    if not available:
+        return CacheAffinityDecision(None, "NO_AVAILABLE_WORKER", 0, 0)
+
+    def ttft_key(worker: ScoredCandidate) -> tuple[int, int, str]:
+        return (
+            worker.estimated_ttft_work,
+            recent.get(worker.candidate.route_target, 0),
+            worker.candidate.route_target,
+        )
+
+    workers_by_ttft = sorted(available, key=ttft_key)
+    threshold = config.outstanding_uncached_tokens_threshold
+    eligible = (
+        [
+            worker
+            for worker in workers_by_ttft
+            if worker.snapshot.outstanding_uncached_tokens
+            + worker.request_uncached_tokens
+            <= threshold
+        ]
+        if threshold > 0
+        else list(workers_by_ttft)
+    )
+    if not eligible:
+        return CacheAffinityDecision(
+            workers_by_ttft[0],
+            "SHORTEST_TTFT_OUTSTANDING_GUARD_FALLBACK",
+            len(available),
+            0,
+        )
+
+    shortest = eligible[0]
+    cache_leader = min(
+        workers_by_ttft,
+        key=lambda worker: (
+            -worker.hit_cache_tokens,
+            worker.estimated_ttft_work,
+            recent.get(worker.candidate.route_target, 0),
+            worker.candidate.route_target,
+        ),
+    )
+    hit_rate_pct = (
+        cache_leader.hit_cache_tokens * 100.0 / seq_len if seq_len > 0 else 0.0
+    )
+    if hit_rate_pct < config.cache_affinity_first_min_hit_rate:
+        selected, reason = shortest, "SHORTEST_TTFT_LOW_CACHE_HIT"
+    elif cache_leader not in eligible:
+        selected, reason = shortest, "SHORTEST_TTFT_OUTSTANDING_GUARD"
+    elif (
+        cache_leader.estimated_ttft_work - shortest.estimated_ttft_work
+        <= config.cache_affinity_first_max_extra_work_tokens
+    ):
+        selected, reason = cache_leader, "CACHE_LEADER"
+    else:
+        selected, reason = shortest, "SHORTEST_TTFT"
+    return CacheAffinityDecision(selected, reason, len(available), len(eligible))
 
 
 def _split_ip_port(authority: str) -> tuple[str, int]:
@@ -210,7 +498,7 @@ def _format_target(host: str, port: int) -> str:
 
 
 class KvcmFallbackClient:
-    """Async KVCM client with lazy leader discovery and reusable channels."""
+    """KVCM and WorkerStatus client with reusable channels and fresh probes."""
 
     def __init__(
         self,
@@ -221,9 +509,12 @@ class KvcmFallbackClient:
         self._bootstrap_resolver = bootstrap_resolver
         self._channels: dict[str, grpc.aio.Channel] = {}
         self._stubs: dict[str, kvcm_pb2_grpc.MetaServiceStub] = {}
+        self._worker_status_channels: dict[str, grpc.aio.Channel] = {}
+        self._worker_status_stubs: dict[str, status_pb2_grpc.RpcServiceStub] = {}
         self._leader: Optional[str] = None
         self._leader_refreshed_at = 0.0
         self._leader_lock = asyncio.Lock()
+        self._last_selected_ns: dict[str, int] = {}
         self._closed = False
 
     def _stub_for(self, target: str) -> kvcm_pb2_grpc.MetaServiceStub:
@@ -244,12 +535,32 @@ class KvcmFallbackClient:
         self._stubs[target] = stub
         return stub
 
+    def _worker_status_stub_for(
+        self,
+        target: str,
+    ) -> status_pb2_grpc.RpcServiceStub:
+        if self._closed:
+            raise KvcmFallbackError("KVCM fallback client is closed")
+        stub = self._worker_status_stubs.get(target)
+        if stub is not None:
+            return stub
+        channel = grpc.aio.insecure_channel(
+            target,
+            options=(
+                ("grpc.keepalive_time_ms", 30_000),
+                ("grpc.keepalive_timeout_ms", 5_000),
+            ),
+        )
+        stub = status_pb2_grpc.RpcServiceStub(channel)
+        self._worker_status_channels[target] = channel
+        self._worker_status_stubs[target] = stub
+        return stub
+
     async def _resolve_leader(self, trace_id: str) -> str:
         now = time.monotonic()
         refresh_interval_s = self.config.leader_refresh_interval_ms / 1_000.0
         if self._leader and now - self._leader_refreshed_at < refresh_interval_s:
             return self._leader
-
         async with self._leader_lock:
             now = time.monotonic()
             if self._leader and now - self._leader_refreshed_at < refresh_interval_s:
@@ -275,9 +586,6 @@ class KvcmFallbackClient:
                 self._leader = _format_target(endpoint.host, endpoint.meta_rpc_port)
                 self._leader_refreshed_at = time.monotonic()
                 return self._leader
-
-            # A failed refresh should not discard a previously working target;
-            # the following query will cheaply prove whether it is still usable.
             if previous_leader:
                 self._leader_refreshed_at = time.monotonic()
                 return previous_leader
@@ -289,7 +597,8 @@ class KvcmFallbackClient:
             self._leader_refreshed_at = 0.0
 
     def _parse_candidates(
-        self, hosts: Sequence[kvcm_pb2.HostCacheMatch]
+        self,
+        hosts: Sequence[kvcm_pb2.HostCacheMatch],
     ) -> list[KvcmCacheCandidate]:
         candidates: list[KvcmCacheCandidate] = []
         for host in hosts:
@@ -298,13 +607,15 @@ class KvcmFallbackClient:
             except (TypeError, ValueError):
                 continue
             grpc_port = self.config.worker_grpc_port_override or http_port + 1
-            if grpc_port > 65_535:
+            status_port = self.config.worker_status_port_override or grpc_port
+            if grpc_port > 65_535 or status_port > 65_535:
                 continue
             candidates.append(
                 KvcmCacheCandidate(
                     host_ip=host_ip,
                     http_port=http_port,
                     grpc_port=grpc_port,
+                    worker_status_port=status_port,
                     local_blocks=max(0, int(host.local)),
                     p2p_fetch_blocks=max(0, int(host.p2p_1_fetch)),
                     p2p_total_match_blocks=max(0, int(host.p2p_1_total_match)),
@@ -312,32 +623,11 @@ class KvcmFallbackClient:
             )
         return candidates
 
-    async def query_and_select(
+    async def _query_cache_candidates(
         self,
-        *,
         request_id: str,
-        block_cache_keys: Sequence[int],
-        input_ids: Optional[Sequence[int]] = None,
-    ) -> KvcmFallbackResult:
-        """Query KVCM and return the maximum-local-affinity candidate."""
-
-        started_at = time.monotonic_ns()
-        keys = list(block_cache_keys)
-        if not keys and input_ids is not None:
-            keys = calculate_vllm_block_cache_keys(
-                input_ids,
-                self.config.block_size,
-                self.config.lookahead_tokens,
-            )
-        if not keys:
-            return KvcmFallbackResult(
-                outcome="no_complete_blocks",
-                selected=None,
-                candidate_count=0,
-                block_count=0,
-                latency_us=max(0, (time.monotonic_ns() - started_at) // 1_000),
-            )
-
+        keys: Sequence[int],
+    ) -> list[KvcmCacheCandidate]:
         leader = await self._resolve_leader(request_id)
         request = kvcm_pb2.GetHostCacheStateRequest(
             trace_id=request_id,
@@ -354,7 +644,6 @@ class KvcmFallbackClient:
         except (grpc.RpcError, asyncio.TimeoutError) as error:
             self._invalidate_leader(leader)
             raise KvcmFallbackError("KVCM GetHostCacheState RPC failed") from error
-
         code = response.header.status.code
         if code != kvcm_pb2.OK:
             if code == kvcm_pb2.SERVER_NOT_LEADER:
@@ -364,37 +653,150 @@ class KvcmFallbackClient:
                 f"code={kvcm_pb2.ErrorCode.Name(code)}, "
                 f"message={response.header.status.message}"
             )
+        return self._parse_candidates(response.hosts)
 
-        candidates = self._parse_candidates(response.hosts)
-        selected = select_max_local_affinity(
-            candidates,
-            self.config.minimum_local_blocks,
+    async def _probe_worker(
+        self,
+        candidate: KvcmCacheCandidate,
+        semaphore: asyncio.Semaphore,
+    ) -> Optional[WorkerLoadSnapshot]:
+        async with semaphore:
+            try:
+                response = await self._worker_status_stub_for(
+                    candidate.worker_status_target
+                ).GetWorkerStatus(
+                    status_pb2.StatusVersionPB(
+                        latest_cache_version=-1,
+                        latest_finished_version=-1,
+                    ),
+                    timeout=self.config.worker_status_timeout_ms / 1_000.0,
+                )
+            except (grpc.RpcError, asyncio.TimeoutError):
+                return None
+        return worker_load_snapshot(candidate, response)
+
+    async def query_and_select(
+        self,
+        *,
+        request_id: str,
+        block_cache_keys: Sequence[int],
+        input_ids: Optional[Sequence[int]] = None,
+        local_candidate: Optional[KvcmCacheCandidate] = None,
+    ) -> KvcmFallbackResult:
+        """Query KVCM, freshly probe the bounded pool, then select once."""
+
+        started_at = time.monotonic_ns()
+        keys = list(block_cache_keys)
+        if not keys and input_ids is not None:
+            keys = calculate_vllm_block_cache_keys(
+                input_ids,
+                self.config.block_size,
+                self.config.lookahead_tokens,
+            )
+        if keys:
+            raw_candidates = await self._query_cache_candidates(request_id, keys)
+            cache_query_outcome = (
+                "cache_candidates"
+                if any(
+                    candidate.local_blocks >= self.config.minimum_local_blocks
+                    or candidate.p2p_total_match_blocks
+                    >= self.config.minimum_local_blocks
+                    for candidate in raw_candidates
+                )
+                else "no_positive_match"
+            )
+        else:
+            raw_candidates = []
+            cache_query_outcome = "no_complete_blocks"
+
+        pool = build_candidate_pool(raw_candidates, local_candidate, self.config)
+        if not pool:
+            return KvcmFallbackResult(
+                outcome="no_candidates",
+                selected=None,
+                candidate_count=len(raw_candidates),
+                block_count=len(keys),
+                latency_us=max(0, (time.monotonic_ns() - started_at) // 1_000),
+                cache_query_outcome=cache_query_outcome,
+            )
+
+        status_started_at = time.monotonic_ns()
+        semaphore = asyncio.Semaphore(self.config.worker_status_concurrency)
+        probed = await asyncio.gather(
+            *(self._probe_worker(candidate, semaphore) for candidate in pool)
         )
+        snapshots = [snapshot for snapshot in probed if snapshot is not None]
+        status_latency_us = max(
+            0,
+            (time.monotonic_ns() - status_started_at) // 1_000,
+        )
+        seq_len = (
+            len(input_ids)
+            if input_ids is not None
+            else len(keys) * self.config.block_size
+        )
+        decision = select_cache_affinity_first(
+            snapshots,
+            seq_len=seq_len,
+            config=self.config,
+            last_selected_ns=self._last_selected_ns,
+        )
+        scored = decision.selected
+        if scored is not None:
+            self._last_selected_ns[scored.candidate.route_target] = time.monotonic_ns()
+
         return KvcmFallbackResult(
-            outcome="selected" if selected is not None else "no_positive_match",
-            selected=selected,
-            candidate_count=len(candidates),
+            outcome="selected" if scored is not None else "no_available_worker",
+            selected=None if scored is None else scored.candidate,
+            candidate_count=len(raw_candidates),
             block_count=len(keys),
             latency_us=max(0, (time.monotonic_ns() - started_at) // 1_000),
+            cache_query_outcome=cache_query_outcome,
+            pool_candidate_count=len(pool),
+            status_success_count=len(snapshots),
+            status_latency_us=status_latency_us,
+            selection_reason=decision.reason,
+            selected_hit_cache_tokens=0 if scored is None else scored.hit_cache_tokens,
+            selected_outstanding_uncached_tokens=(
+                0 if scored is None else scored.snapshot.outstanding_uncached_tokens
+            ),
+            selected_request_uncached_tokens=(
+                0 if scored is None else scored.request_uncached_tokens
+            ),
+            selected_estimated_ttft_work=(
+                0 if scored is None else scored.estimated_ttft_work
+            ),
         )
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        channels = list(self._channels.values())
+        channels = [
+            *self._channels.values(),
+            *self._worker_status_channels.values(),
+        ]
         self._channels.clear()
         self._stubs.clear()
+        self._worker_status_channels.clear()
+        self._worker_status_stubs.clear()
         for channel in channels:
             await channel.close()
 
 
 __all__ = [
+    "CacheAffinityDecision",
     "KvcmCacheCandidate",
     "KvcmFallbackClient",
     "KvcmFallbackConfig",
     "KvcmFallbackError",
     "KvcmFallbackResult",
+    "ScoredCandidate",
+    "WorkerLoadSnapshot",
+    "build_candidate_pool",
     "calculate_vllm_block_cache_keys",
+    "effective_cache_blocks",
+    "select_cache_affinity_first",
     "select_max_local_affinity",
+    "worker_load_snapshot",
 ]

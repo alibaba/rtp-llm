@@ -173,6 +173,9 @@ class MasterClient:
                 0,
             )
         )
+        worker_status_port = int(
+            getattr(self.master_config, "master_kvcm_worker_status_port", 0)
+        )
         if not service_id:
             raise ValueError(
                 "master_kvcm_service_id is required when KVCM fallback is enabled"
@@ -205,6 +208,58 @@ class MasterClient:
                 block_size=block_size,
                 request_timeout_ms=request_timeout_ms,
                 worker_grpc_port_override=(grpc_port_override or None),
+                worker_status_port_override=(worker_status_port or None),
+                candidate_pool_size=int(
+                    getattr(self.master_config, "master_kvcm_candidate_pool_size", 3)
+                ),
+                hot_candidate_pool_size=int(
+                    getattr(
+                        self.master_config,
+                        "master_kvcm_hot_candidate_pool_size",
+                        2,
+                    )
+                ),
+                worker_status_concurrency=int(
+                    getattr(
+                        self.master_config,
+                        "master_kvcm_worker_status_concurrency",
+                        3,
+                    )
+                ),
+                worker_status_timeout_ms=int(
+                    getattr(self.master_config, "master_sync_request_timeout_ms", 200)
+                ),
+                prefill_queue_size_threshold=int(
+                    getattr(
+                        self.master_config,
+                        "master_prefill_queue_size_threshold",
+                        1024,
+                    )
+                ),
+                p2p_hit_discount=float(
+                    getattr(self.master_config, "master_p2p_hit_discount", 0.2)
+                ),
+                cache_affinity_first_max_extra_work_tokens=int(
+                    getattr(
+                        self.master_config,
+                        "master_cache_affinity_first_max_extra_work_tokens",
+                        0,
+                    )
+                ),
+                outstanding_uncached_tokens_threshold=int(
+                    getattr(
+                        self.master_config,
+                        "master_outstanding_uncached_tokens_threshold",
+                        0,
+                    )
+                ),
+                cache_affinity_first_min_hit_rate=float(
+                    getattr(
+                        self.master_config,
+                        "master_cache_affinity_first_min_hit_rate",
+                        5.0,
+                    )
+                ),
             ),
             resolve_bootstrap_targets,
         )
@@ -266,15 +321,34 @@ class MasterClient:
         block_cache_keys: list[int],
         input: GenerateInput,
         request_id: int,
+        local_fallback_addr: Optional[RoleAddr] = None,
     ) -> Optional[FlexlbResponse]:
         if not self.kvcm_fallback_enabled or self._kvcm_fallback_client is None:
             return None
+
+        local_candidate = None
+        if local_fallback_addr is not None:
+            from rtp_llm.server.kvcm_fallback import KvcmCacheCandidate
+
+            status_port = int(
+                getattr(self.master_config, "master_kvcm_worker_status_port", 0)
+            ) or int(local_fallback_addr.grpc_port)
+            local_candidate = KvcmCacheCandidate(
+                host_ip=str(local_fallback_addr.ip),
+                http_port=int(local_fallback_addr.http_port),
+                grpc_port=int(local_fallback_addr.grpc_port),
+                worker_status_port=status_port,
+                local_blocks=0,
+                p2p_fetch_blocks=0,
+                p2p_total_match_blocks=0,
+            )
 
         try:
             result = await self._kvcm_fallback_client.query_and_select(
                 request_id=str(request_id),
                 block_cache_keys=block_cache_keys,
                 input_ids=self._input_ids_for_kvcm(input),
+                local_candidate=local_candidate,
             )
         except Exception as error:
             route_logger.warning(
@@ -303,15 +377,31 @@ class MasterClient:
             "p2p_total_match_blocks": selected.p2p_total_match_blocks,
             "block_count": result.block_count,
             "candidate_count": result.candidate_count,
+            "pool_candidate_count": getattr(result, "pool_candidate_count", 0),
+            "status_success_count": getattr(result, "status_success_count", 0),
+            "status_latency_us": getattr(result, "status_latency_us", 0),
+            "selection_reason": getattr(result, "selection_reason", None),
+            "hit_cache_tokens": getattr(result, "selected_hit_cache_tokens", 0),
+            "outstanding_uncached_tokens": getattr(
+                result, "selected_outstanding_uncached_tokens", 0
+            ),
+            "request_uncached_tokens": getattr(
+                result, "selected_request_uncached_tokens", 0
+            ),
+            "estimated_ttft_work": getattr(result, "selected_estimated_ttft_work", 0),
             "latency_us": result.latency_us,
         }
         route_logger.info(
             "KVCM fallback selected worker, request_id=%s, worker=%s, "
-            "local_blocks=%s, candidate_count=%s, latency_us=%s",
+            "local_blocks=%s, candidate_count=%s, pool_candidate_count=%s, "
+            "status_success_count=%s, selection_reason=%s, latency_us=%s",
             request_id,
             selected.host_ip_port,
             selected.local_blocks,
             result.candidate_count,
+            getattr(result, "pool_candidate_count", 0),
+            getattr(result, "status_success_count", 0),
+            getattr(result, "selection_reason", None),
             result.latency_us,
         )
         return FlexlbResponse.ok(
@@ -414,6 +504,7 @@ class MasterClient:
         block_cache_keys: list[int],
         input: GenerateInput,
         request_id: int,
+        local_fallback_addr: Optional[RoleAddr] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -493,6 +584,7 @@ class MasterClient:
                 block_cache_keys,
                 input,
                 request_id,
+                local_fallback_addr,
             )
             if kvcm_response is not None:
                 return kvcm_response

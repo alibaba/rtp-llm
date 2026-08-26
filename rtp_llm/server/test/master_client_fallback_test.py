@@ -97,10 +97,12 @@ class _KvcmClient:
         self.result = result
         self.error = error
         self.calls = 0
+        self.last_kwargs = None
         self.closed = False
 
     async def query_and_select(self, **kwargs):
         self.calls += 1
+        self.last_kwargs = kwargs
         if self.error is not None:
             raise self.error
         return self.result
@@ -151,6 +153,31 @@ def _selected_result():
 
 
 class MasterClientKvcmFallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_local_worker_is_added_to_kvcm_candidate_pool(self):
+        kvcm_client = _KvcmClient(result=_selected_result())
+        client = master_client.MasterClient(
+            host_service=_HostService(),
+            master_config=_config(),
+            kvcm_fallback_client=kvcm_client,
+        )
+        local = master_client.RoleAddr(
+            role=master_client.RoleType.PREFILL,
+            ip="10.0.0.9",
+            http_port=8000,
+            grpc_port=8001,
+        )
+        try:
+            result = await client.get_backend_role_addrs(
+                [], _input(), "request-local", local_fallback_addr=local
+            )
+            self.assertTrue(result.is_ok)
+            candidate = kvcm_client.last_kwargs["local_candidate"]
+            self.assertEqual("10.0.0.9", candidate.host_ip)
+            self.assertEqual(8001, candidate.worker_status_port)
+            self.assertEqual(0, candidate.local_blocks)
+        finally:
+            await client.close()
+
     async def test_no_master_uses_kvcm_max_affinity_route(self):
         kvcm_client = _KvcmClient(result=_selected_result())
         client = master_client.MasterClient(

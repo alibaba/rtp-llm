@@ -142,7 +142,7 @@ class LoraConfig:
         self.merge_lora: bool = True
 
     def to_string(self):
-        return f"lora_info: {self.lora_info}\n" f"merge_lora: {self.merge_lora}\n"
+        return f"lora_info: {self.lora_info}\nmerge_lora: {self.merge_lora}\n"
 
 
 class LoadConfig:
@@ -308,7 +308,7 @@ class QuantizationConfig:
         self.quantization: str = ""
 
     def to_string(self):
-        return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
+        return f"int8_mode: {self.int8_mode}\nquantization: {self.quantization}"
 
     def get_quantization(self):
         """Get quantization string with compatibility logic.
@@ -394,6 +394,17 @@ class MasterConfig:
         self.master_kvcm_block_size: int = 0
         self.master_kvcm_request_timeout_ms: int = 100
         self.master_kvcm_worker_grpc_port_override: int = 0
+        self.master_kvcm_worker_status_port: int = 0
+        self.master_kvcm_candidate_pool_size: int = 3
+        self.master_kvcm_hot_candidate_pool_size: int = 2
+        self.master_kvcm_worker_status_concurrency: int = 3
+        # Keep these values aligned with the colocated FlexLB configuration.
+        self.master_sync_request_timeout_ms: int = 200
+        self.master_prefill_queue_size_threshold: int = 1024
+        self.master_p2p_hit_discount: float = 0.2
+        self.master_cache_affinity_first_max_extra_work_tokens: int = 0
+        self.master_outstanding_uncached_tokens_threshold: int = 0
+        self.master_cache_affinity_first_min_hit_rate: float = 5.0
         # Static IP:port lists used by tests may opt out of VIP discovery.
         self.master_kvcm_use_local: bool = False
         # Zero preserves the legacy behavior of using the request TTFT timeout.
@@ -413,6 +424,22 @@ class MasterConfig:
             f"master_kvcm_request_timeout_ms: {self.master_kvcm_request_timeout_ms}\n"
             "master_kvcm_worker_grpc_port_override: "
             f"{self.master_kvcm_worker_grpc_port_override}\n"
+            f"master_kvcm_worker_status_port: {self.master_kvcm_worker_status_port}\n"
+            f"master_kvcm_candidate_pool_size: {self.master_kvcm_candidate_pool_size}\n"
+            "master_kvcm_hot_candidate_pool_size: "
+            f"{self.master_kvcm_hot_candidate_pool_size}\n"
+            "master_kvcm_worker_status_concurrency: "
+            f"{self.master_kvcm_worker_status_concurrency}\n"
+            f"master_sync_request_timeout_ms: {self.master_sync_request_timeout_ms}\n"
+            "master_prefill_queue_size_threshold: "
+            f"{self.master_prefill_queue_size_threshold}\n"
+            f"master_p2p_hit_discount: {self.master_p2p_hit_discount}\n"
+            "master_cache_affinity_first_max_extra_work_tokens: "
+            f"{self.master_cache_affinity_first_max_extra_work_tokens}\n"
+            "master_outstanding_uncached_tokens_threshold: "
+            f"{self.master_outstanding_uncached_tokens_threshold}\n"
+            "master_cache_affinity_first_min_hit_rate: "
+            f"{self.master_cache_affinity_first_min_hit_rate}\n"
             f"master_kvcm_use_local: {self.master_kvcm_use_local}\n"
             "master_flexlb_transport_timeout_ms: "
             f"{self.master_flexlb_transport_timeout_ms}"
