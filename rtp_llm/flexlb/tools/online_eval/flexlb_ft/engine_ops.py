@@ -141,7 +141,10 @@ class EngineOps:
         return self._channels[target]
 
     def next_request_id(self, base: Optional[int] = None) -> int:
-        if base is not None:
+        # Only raise the counter when base exceeds it: repeated calls with the
+        # same base (multi-request cases passing base each time) must yield
+        # distinct ids, not restart from the same value.
+        if base is not None and base > self._request_counter:
             self._request_counter = base
         self._request_counter += 1
         return self._request_counter

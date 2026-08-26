@@ -26,6 +26,11 @@ class CaseDef:
 class CaseContext:
     """Per-run context handed to every case function."""
 
+    # Monotonic counter across the whole process: every case invocation gets a
+    # fresh offset so request ids never collide with the master's dedup table
+    # when the environment (and its in-memory dedup state) is reused.
+    _case_seq = 0
+
     def __init__(
         self,
         env_manager: EnvManager,
@@ -33,6 +38,8 @@ class CaseContext:
         run_root: Path,
         log_fn: Optional[Callable[[str], None]] = None,
     ):
+        CaseContext._case_seq += 1
+        self.case_seq = CaseContext._case_seq
         self.env_manager = env_manager
         self.mode = mode  # batch | direct | queue
         self.run_root = run_root
@@ -94,4 +101,6 @@ RID_BASES = {
 
 
 def rid_base(ctx: CaseContext, family: str) -> int:
-    return RID_BASES[family][ctx.mode]
+    # ctx.case_seq makes each invocation of a case use a distinct id range
+    # (RID_BASES cover batch/direct/queue, case_seq lifts per re-run).
+    return RID_BASES[family][ctx.mode] + ctx.case_seq * 1_000_000

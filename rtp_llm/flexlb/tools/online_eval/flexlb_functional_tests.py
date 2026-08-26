@@ -82,6 +82,9 @@ def main():
         print(f"[{i}/{len(cases)}] {case.name} ... ", end="", flush=True)
         t0 = time.monotonic()
         try:
+            # Fresh id range per case (dedup table in a reused master).
+            CaseContext._case_seq += 1
+            ctx.case_seq = CaseContext._case_seq
             ok, detail = case.fn(ctx)
         except Exception as e:
             ok, detail = False, f"EXCEPTION: {e}\n{traceback.format_exc()}"
