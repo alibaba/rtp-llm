@@ -23,6 +23,13 @@ py_library(
 )
 
 py_library(
+    name = "repetition_monitor",
+    srcs = ["repetition_monitor.py"],
+    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "dash_sc_grpc_server",
     srcs = [
         "__init__.py",
@@ -42,7 +49,6 @@ py_library(
         "proxy/service_route.py",
         "proxy/service_route_config.py",
         "proxy/servicer.py",
-        "repetition_monitor.py",
         "server.py",
         "status.py",
         "structural_tag.py",
@@ -54,6 +60,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":repetition_monitor",
         ":xgrammar_core_dump_control",
         "//rtp_llm/server:server",
         ":grpcio",

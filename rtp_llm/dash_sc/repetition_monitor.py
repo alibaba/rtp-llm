@@ -1,4 +1,4 @@
-"""Low-overhead token tool-call loop monitor for frontend access logging.
+"""Low-overhead output and tool-call repetition monitoring for frontend logging.
 
 The production path calls a native C++/pybind detector once per completed
 request. Python owns token-id policy and access-log fields; C++ owns token-id
@@ -23,7 +23,7 @@ _NATIVE_TRACKER_MODULES = (
     "rtp_llm.cpp.repetition.libonline_repetition_tracker",
     "libonline_repetition_tracker",
 )
-_NATIVE_TRACKER_REQUIRED_API = "check_tool_call_loop"
+_NATIVE_TRACKER_REQUIRED_APIS = ("OnlineRepetitionConfig", "OnlineRepetitionTracker", "check_tool_call_loop")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,8 +49,9 @@ def _resolve_native_status() -> NativeModuleStatus:
             break
         except Exception as e:
             errors.append(f"{name}: {type(e).__name__}: {e}")
-    if module is not None and not hasattr(module, _NATIVE_TRACKER_REQUIRED_API):
-        errors.append(f"{module_name}: missing API {_NATIVE_TRACKER_REQUIRED_API}")
+    missing = [name for name in _NATIVE_TRACKER_REQUIRED_APIS if module is not None and not hasattr(module, name)]
+    if module is not None and missing:
+        errors.append(f"{module_name}: missing API {','.join(missing)}")
         module = None
         module_name = None
     if module is None:
@@ -82,6 +83,31 @@ class ToolCallMarkerConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class OutputRepetitionConfig:
+    enabled: bool = True
+    min_repeats: int = 3
+    min_duplicate_tokens: int = 32
+    max_period: int = 512
+    non_contiguous_min_span: int = 32
+    non_contiguous_min_occurrences: int = 3
+    non_contiguous_max_span: int = 256
+
+
+@dataclasses.dataclass(frozen=True)
+class OutputRepetitionResult:
+    hit: bool
+    repeat_unit_size: int
+    repeat_count: int
+    covered_token_count: int
+    duplicate_token_count: int
+    start_index: int
+    end_index: int
+    first_detect_index: int
+    non_contiguous: bool
+    occurrence_count: int
+
+
+@dataclasses.dataclass(frozen=True)
 class ToolCallLoopConfig:
     enabled: bool = True
     repeat_threshold: int = 5
@@ -101,6 +127,9 @@ DEFAULT_TOOL_CALL_LOOP_CONFIG = ToolCallLoopConfig()
 
 @dataclasses.dataclass(frozen=True)
 class RequestRepetitionMonitorConfig:
+    output_config: OutputRepetitionConfig = dataclasses.field(
+        default_factory=lambda: OutputRepetitionConfig(enabled=False)
+    )
     tool_loop_config: ToolCallLoopConfig = dataclasses.field(
         default_factory=ToolCallLoopConfig
     )
@@ -192,6 +221,7 @@ class RequestRepetitionMonitor:
         self.raw_mode = raw_mode
         self.input_ids: Sequence[int] = input_ids or ()
         self.tool_loop_config = tool_loop_config or config.tool_loop_config
+        self.output_config = config.output_config
         # Markers come from the service-level config unless a caller (tests)
         # passes them explicitly.
         self.tool_markers = (
@@ -204,17 +234,89 @@ class RequestRepetitionMonitor:
         self.tool_call_loop_check_ms: Optional[float] = None
         self.tool_call_loop_impl: Optional[str] = None
         self._tool_error: Optional[str] = None
+        self.output_repetition_result: Optional[OutputRepetitionResult] = None
+        self.output_repetition_check_ms: float = 0.0
+        self.output_repetition_impl: Optional[str] = None
+        self._output_error: Optional[str] = None
+        self._output_tracker = None
+        self._output_finalized = False
 
     def set_input_ids(self, input_ids: Optional[Sequence[int]]) -> None:
         self.input_ids = input_ids or ()
 
     def is_active(self) -> bool:
-        """Whether tool-call loop detection will actually run for this request."""
-        return (
-            not self.raw_mode
-            and self.tool_loop_config.enabled
-            and bool(self.tool_markers)
+        return not self.raw_mode and (
+            self.output_config.enabled
+            or (self.tool_loop_config.enabled and bool(self.tool_markers))
         )
+
+    def _ensure_output_tracker(self):
+        if self._output_tracker is not None:
+            return self._output_tracker
+        status = native_online_repetition_status()
+        if not status.available:
+            self.output_repetition_impl = "online_cpp_pybind_unavailable"
+            return None
+        native_config = status.module.OnlineRepetitionConfig()
+        native_config.min_repeats = max(3, int(self.output_config.min_repeats))
+        native_config.min_duplicate_tokens = max(0, int(self.output_config.min_duplicate_tokens))
+        native_config.max_period = max(1, int(self.output_config.max_period))
+        native_config.non_contiguous_min_span = max(8, int(self.output_config.non_contiguous_min_span))
+        native_config.non_contiguous_min_occurrences = max(2, int(self.output_config.non_contiguous_min_occurrences))
+        native_config.non_contiguous_max_span = max(
+            native_config.non_contiguous_min_span,
+            int(self.output_config.non_contiguous_max_span),
+        )
+        self._output_tracker = status.module.OnlineRepetitionTracker(native_config)
+        self.output_repetition_impl = "online_cpp_pybind"
+        return self._output_tracker
+
+    def update_output_delta(self, delta_ids: Sequence[int]) -> None:
+        if self.raw_mode or not self.output_config.enabled or not delta_ids or self._output_finalized:
+            return
+        begin = time.perf_counter()
+        try:
+            tracker = self._ensure_output_tracker()
+            if tracker is not None:
+                tracker.update_many([int(token_id) for token_id in delta_ids])
+        except Exception as e:
+            self._output_error = f"{type(e).__name__}: {e}"
+            self.output_repetition_impl = "online_cpp_pybind_unavailable"
+        finally:
+            self.output_repetition_check_ms += (time.perf_counter() - begin) * 1000.0
+
+    def finalize_output(self) -> None:
+        if self._output_finalized:
+            return
+        self._output_finalized = True
+        if self.raw_mode or not self.output_config.enabled:
+            self.output_repetition_impl = "disabled_raw_mode" if self.raw_mode else "disabled"
+            return
+        begin = time.perf_counter()
+        try:
+            tracker = self._ensure_output_tracker()
+            if tracker is None:
+                return
+            tracker.finalize()
+            result = tracker.result
+            if result.hit:
+                self.output_repetition_result = OutputRepetitionResult(
+                    hit=True,
+                    repeat_unit_size=int(result.repeat_unit_size),
+                    repeat_count=int(result.repeat_count),
+                    covered_token_count=int(result.covered_token_count),
+                    duplicate_token_count=int(result.duplicate_token_count),
+                    start_index=int(result.start_index),
+                    end_index=int(result.end_index),
+                    first_detect_index=int(result.first_detect_index),
+                    non_contiguous=bool(result.non_contiguous),
+                    occurrence_count=int(result.occurrence_count),
+                )
+        except Exception as e:
+            self._output_error = f"{type(e).__name__}: {e}"
+            self.output_repetition_impl = "online_cpp_pybind_unavailable"
+        finally:
+            self.output_repetition_check_ms += (time.perf_counter() - begin) * 1000.0
 
     def _tool_impl_name(self) -> str:
         if self.raw_mode:
@@ -248,18 +350,24 @@ class RequestRepetitionMonitor:
             self.tool_call_loop_check_ms = (time.perf_counter() - begin) * 1000.0
 
     def check_generated_ids(self, generated_ids: Sequence[int]) -> None:
+        self.finalize_output()
         self.check_tool_call_loop(generated_ids)
 
     def monitor_impl(self) -> str:
         if self.raw_mode:
             return "disabled_raw_mode"
-        if self.tool_loop_config.enabled and self.tool_markers:
-            return f"tool={self._tool_impl_name()}"
-        return "disabled"
+        output_impl = self.output_repetition_impl or ("online_cpp_pybind" if self.output_config.enabled else "disabled")
+        return f"output={output_impl},tool={self._tool_impl_name()}"
 
     def monitor_available(self) -> tuple[bool, Optional[str]]:
         if self.raw_mode:
             return False, "raw_mode"
+        if self.output_config.enabled:
+            status = native_online_repetition_status()
+            if not status.available:
+                return False, status.error or "native module unavailable"
+            if self._output_error:
+                return False, f"output: {self._output_error}"
         if self.tool_loop_config.enabled and self.tool_markers:
             status = native_online_repetition_status()
             if not status.available:
@@ -284,20 +392,44 @@ class RequestRepetitionMonitor:
             }
 
         tool_loop = self.tool_call_loop_result
-        hit = bool(tool_loop.hit) if tool_loop is not None else False
-        span = tool_loop.current_span_tokens if hit and tool_loop is not None else None
+        tool_hit = bool(tool_loop.hit) if tool_loop is not None else False
+        output = self.output_repetition_result
+        output_hit = bool(output.hit) if output is not None else False
+        hit = output_hit or tool_hit
+        repetition_tokens = (
+            output.duplicate_token_count
+            if output_hit and output is not None
+            else tool_loop.current_span_tokens
+            if tool_hit and tool_loop is not None
+            else None
+        )
+        tool_span = (
+            tool_loop.current_span_tokens
+            if tool_hit and tool_loop is not None
+            else None
+        )
+        output_kind = None
+        if output_hit and output is not None:
+            if output.non_contiguous:
+                output_kind = "non_contiguous_span_repeat"
+            elif output.repeat_unit_size == 1:
+                output_kind = "same_token_run"
+            elif output.repeat_unit_size <= 64:
+                output_kind = "exact_ngram_loop"
+            else:
+                output_kind = "long_span_repeat"
         return {
             "repetition_detected": hit,
             "repetition_alert": hit,
             "repetition_reason": (
-                f"tool_call_loop:repeat_count={tool_loop.repeat_count}"
-                if hit and tool_loop is not None
-                else None
+                f"output_repetition:{output_kind}:repeat_count={output.repeat_count}"
+                if output_hit and output is not None
+                else (f"tool_call_loop:repeat_count={tool_loop.repeat_count}" if tool_hit and tool_loop is not None else None)
             ),
-            "repetition_primary_source": "tool_call_loop" if hit else None,
-            "repetition_token_len": span,
-            "tool_call_loop_token_len": span,
-            "function_tool_repeated": hit,
+            "repetition_primary_source": "output_repetition" if output_hit else ("tool_call_loop" if tool_hit else None),
+            "repetition_token_len": repetition_tokens,
+            "tool_call_loop_token_len": tool_span,
+            "function_tool_repeated": tool_hit,
             "repetition_monitor_impl": self.monitor_impl(),
             "repetition_monitor_available": True,
             "repetition_monitor_unavailable_reason": None,
@@ -308,7 +440,7 @@ class RequestRepetitionMonitor:
                 if self.tool_call_loop_check_ms is not None
                 else None
             ),
-            "tool_call_loop_hit": hit,
+            "tool_call_loop_hit": tool_hit,
             "tool_call_loop_repeat_count": (
                 tool_loop.repeat_count if tool_loop is not None else None
             ),
@@ -318,4 +450,17 @@ class RequestRepetitionMonitor:
             "tool_call_loop_marker_index": (
                 tool_loop.marker_index if tool_loop is not None else None
             ),
+            "output_repetition": output_hit,
+            "output_repetition_kind": output_kind,
+            "output_repetition_impl": self.output_repetition_impl,
+            "output_repetition_error": self._output_error,
+            "output_repetition_check_ms": round(self.output_repetition_check_ms, 6),
+            "output_repetition_period": output.repeat_unit_size if output is not None else None,
+            "output_repetition_repeat_count": output.repeat_count if output is not None else None,
+            "output_repetition_occurrence_count": output.occurrence_count if output is not None else None,
+            "output_repetition_duplicate_token_count": output.duplicate_token_count if output is not None else None,
+            "output_repetition_covered_token_count": output.covered_token_count if output is not None else None,
+            "output_repetition_start_index": output.start_index if output is not None else None,
+            "output_repetition_end_index": output.end_index if output is not None else None,
+            "output_repetition_first_detect_index": output.first_detect_index if output is not None else None,
         }

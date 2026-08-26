@@ -89,8 +89,7 @@ py_test(
 py_test(
     name = "repetition_monitor_test",
     srcs = ["repetition_monitor_test.py"],
-    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm/dash_sc:repetition_monitor"],
     imports = [],
     exec_properties = {"gpu": "A10"},
 )

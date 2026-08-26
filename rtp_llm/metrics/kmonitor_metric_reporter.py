@@ -63,6 +63,8 @@ class AccMetrics(Enum):
     # Tool-call output fell into a repeated span. Reported once per request by the
     # frontend gRPC access-log interceptor; tags intentionally avoid request_id.
     TOOL_CALL_LOOP_QPS_METRIC = "py_rtp_tool_call_loop_qps"
+    OUTPUT_REPETITION_QPS_METRIC = "py_rtp_output_repetition_qps"
+    SAME_TOKEN_RUN_QPS_METRIC = "py_rtp_same_token_run_qps"
 
 
 class GaugeMetrics(Enum):
@@ -104,6 +106,10 @@ class GaugeMetrics(Enum):
         "py_rtp_tool_call_loop_current_span_tokens"
     )
     TOOL_CALL_LOOP_CHECK_RT_METRIC = "py_rtp_tool_call_loop_check_rt"
+    OUTPUT_REPETITION_CHECK_RT_METRIC = "py_rtp_output_repetition_check_rt"
+    OUTPUT_REPETITION_PERIOD_METRIC = "py_rtp_output_repetition_period"
+    OUTPUT_REPETITION_REPEAT_COUNT_METRIC = "py_rtp_output_repetition_repeat_count"
+    OUTPUT_REPETITION_DUPLICATE_TOKENS_METRIC = "py_rtp_output_repetition_duplicate_tokens"
 
 
 class MetricReporter(object):

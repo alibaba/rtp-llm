@@ -29,6 +29,7 @@ from rtp_llm.dash_sc.inference.servicer import (
 )
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 from rtp_llm.dash_sc.repetition_monitor import (
+    OutputRepetitionConfig,
     RequestRepetitionMonitorConfig,
     ToolCallLoopConfig,
     ToolCallMarkerConfig,
@@ -262,6 +263,15 @@ def _tokenize_marker_text(base_tok: Any, text: str) -> List[int]:
 def _build_repetition_monitor_config(
     config: Any, base_tok: Any = None
 ) -> RequestRepetitionMonitorConfig:
+    output_config = OutputRepetitionConfig(
+        enabled=config.output_repetition_monitor,
+        min_repeats=config.output_repetition_min_repeats,
+        min_duplicate_tokens=config.output_repetition_min_dup_tokens,
+        max_period=config.output_repetition_max_period,
+        non_contiguous_min_span=config.noncontig_repeat_min_span_tokens,
+        non_contiguous_min_occurrences=config.noncontig_repeat_min_occurrences,
+        non_contiguous_max_span=config.noncontig_repeat_max_span_tokens,
+    )
     tool_loop_config = ToolCallLoopConfig(
         enabled=config.tool_call_loop_monitor,
         repeat_threshold=config.tool_call_loop_threshold,
@@ -284,6 +294,7 @@ def _build_repetition_monitor_config(
         if begin_ids and end_ids:
             tool_markers = (ToolCallMarkerConfig(begin_ids=begin_ids, end_ids=end_ids),)
     return RequestRepetitionMonitorConfig(
+        output_config=output_config,
         tool_loop_config=tool_loop_config,
         tool_markers=tool_markers,
     )
