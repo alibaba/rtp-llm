@@ -41,10 +41,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
         REPORT_MUTABLE_QPS(name##_metric);                                                                             \
     }
 
-#define REPORT_GAUGE(name)                                                                                             \
-    if (collector->name) {                                                                                             \
-        REPORT_MUTABLE_METRIC(name##_metric, collector->name);                                                         \
-    }
+#define REPORT_GAUGE(name) REPORT_MUTABLE_METRIC(name##_metric, collector->name)
 
 bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_rpc_qps");
