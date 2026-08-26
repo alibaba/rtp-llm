@@ -1,3 +1,4 @@
+import importlib
 import os
 import unittest
 from contextlib import contextmanager
@@ -41,6 +42,54 @@ def _weights(hc: int, dim: int, device: str = "cpu"):
 
 
 class TestHCImpl(unittest.TestCase):
+    def test_static_tf32_rounding_is_exact_cached_and_versioned(self) -> None:
+        round_to_tf32 = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.mhc.norm_fn_kernel"
+        ).round_to_tf32
+
+        weight = torch.tensor(
+            [[0.1, -0.2], [1.5, -3.25]], dtype=torch.float32
+        )
+        with torch.inference_mode():
+            first = round_to_tf32(weight)
+            second = round_to_tf32(weight)
+        expected = (weight.view(torch.int32) + 0x1000).view(torch.float32)
+        self.assertTrue(torch.equal(first, expected))
+        self.assertEqual(first.data_ptr(), second.data_ptr())
+
+        weight.add_(1.0)
+        with torch.inference_mode():
+            updated = round_to_tf32(weight)
+        updated_expected = (weight.view(torch.int32) + 0x1000).view(torch.float32)
+        self.assertTrue(torch.equal(updated, updated_expected))
+        self.assertNotEqual(updated.data_ptr(), first.data_ptr())
+
+    def test_trainable_tf32_rounding_is_not_cached(self) -> None:
+        round_to_tf32 = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.mhc.norm_fn_kernel"
+        ).round_to_tf32
+
+        weight = torch.randn(2, 4, dtype=torch.float32, requires_grad=True)
+        first = round_to_tf32(weight)
+        second = round_to_tf32(weight)
+        self.assertTrue(torch.equal(first, second))
+        self.assertNotEqual(first.data_ptr(), second.data_ptr())
+
+    def test_inference_created_tf32_weight_is_cached(self) -> None:
+        round_to_tf32 = importlib.import_module(
+            "rtp_llm.models_py.3rdparty.tile_kernels.mhc.norm_fn_kernel"
+        ).round_to_tf32
+
+        with torch.inference_mode():
+            weight = torch.randn(2, 4, dtype=torch.float32)
+            first = round_to_tf32(weight)
+            second = round_to_tf32(weight)
+            expected = (weight.view(torch.int32) + 0x1000).view(torch.float32)
+
+        self.assertTrue(weight.is_inference())
+        self.assertTrue(torch.equal(first, expected))
+        self.assertEqual(first.data_ptr(), second.data_ptr())
+
     def test_factory_fallback_cpu_shapes(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)
