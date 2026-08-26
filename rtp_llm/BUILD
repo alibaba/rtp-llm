@@ -334,6 +334,7 @@ py_library(
         ":onnx",
         #":decord",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/metrics:metrics",
         "//rtp_llm/models_py:new_loader_core",
         "//rtp_llm/models_py:models",
         ":multimodal",
