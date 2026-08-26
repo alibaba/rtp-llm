@@ -304,6 +304,7 @@ py_library(
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
+        "//rtp_llm/models_py:new_loader_core",
         "//rtp_llm/models_py:deepseek_vl2_vision_loader",
         "//rtp_llm/models_py:qwen2_vl_vision_loader",
         "//rtp_llm/models_py:qwen3_vl_vision_loader",
@@ -339,6 +340,7 @@ py_library(
         ":onnx",
         #":decord",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py:new_loader_core",
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({

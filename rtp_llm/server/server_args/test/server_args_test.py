@@ -501,6 +501,15 @@ class ServerArgsSetTest(TestCase):
                 self.assertEqual(trace_config, parse_trace_config(trace_json))
                 self.assertTrue(trace_config.enabled)
                 self.assertEqual(trace_config.sampler_ratio, 0.25)
+    def test_new_loader_defaults_to_model_registry_selection(self):
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertIsNone(py_env_configs.model_args.use_new_loader)
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""

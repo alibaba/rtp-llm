@@ -19,6 +19,7 @@ from rtp_llm.models_py.model_loader import (
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import (
     get_model_class,
+    is_model_registered,
     register_lazy_model,
     register_model,
 )
@@ -27,6 +28,7 @@ from rtp_llm.models_py.weight_mapper import (
     get_all_weights,
     select_safetensor_files,
 )
+from rtp_llm.utils.new_loader import is_new_loader_enabled
 
 
 class _Block(RtpModule):
@@ -70,6 +72,27 @@ def _weights():
 
 
 class FoundationLoaderTest(unittest.TestCase):
+    def test_registry_reports_newloader_support_without_importing_lazy_model(self):
+        self.assertTrue(is_model_registered("qwen_3"))
+        self.assertTrue(is_model_registered("foundation_test_model"))
+        self.assertFalse(is_model_registered("legacy_only_test_model"))
+
+    def test_registry_default_and_explicit_loader_overrides(self):
+        config = types.SimpleNamespace(use_new_loader=None)
+        self.assertTrue(
+            is_new_loader_enabled(config, default_enabled=is_model_registered("qwen_3"))
+        )
+        self.assertFalse(
+            is_new_loader_enabled(
+                config,
+                default_enabled=is_model_registered("legacy_only_test_model"),
+            )
+        )
+        config.use_new_loader = False
+        self.assertFalse(is_new_loader_enabled(config, default_enabled=True))
+        config.use_new_loader = True
+        self.assertTrue(is_new_loader_enabled(config, default_enabled=False))
+
     def _loader(self, model_path, **kwargs):
         config = types.SimpleNamespace(model_type="foundation_test_model")
         load_config = NewLoaderConfig(
