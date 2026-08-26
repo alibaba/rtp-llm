@@ -86,7 +86,7 @@ py_test(
         "//rtp_llm/cpp/repetition:online_repetition_tracker",
         "//rtp_llm/libs:libth_transformer_config_so",
     ],
-    deps = ["//rtp_llm/dash_sc:dash_sc_grpc_server"],
+    deps = ["//rtp_llm/dash_sc:repetition_monitor"],
     imports = [],
 )
 
