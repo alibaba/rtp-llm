@@ -95,6 +95,42 @@ def test_kernel64_table_preserves_framework_expanded_ids():
     assert pool_2d.shape == (8, 64, INDEXER_ENTRY_BYTES)
 
 
+def test_kernel64_rejects_partial_owner_table_width():
+    pool = torch.zeros((8, 64, INDEXER_ENTRY_BYTES), dtype=torch.uint8)
+    table = torch.zeros((1, 6), dtype=torch.int32)
+    try:
+        validate_indexer_paged_layout(
+            pool,
+            table,
+            kernel_entries_per_block=64,
+            owner_tokens_per_block=1024,
+            compress_ratio=4,
+        )
+    except RuntimeError as error:
+        assert "width=6" in str(error)
+        assert "kernel_blocks_per_owner=4" in str(error)
+    else:
+        raise AssertionError("partial INDEXER owner table was unexpectedly accepted")
+
+
+def test_kernel64_rejects_partial_owner_pool_rows():
+    pool = torch.zeros((6, 64, INDEXER_ENTRY_BYTES), dtype=torch.uint8)
+    table = torch.zeros((1, 8), dtype=torch.int32)
+    try:
+        validate_indexer_paged_layout(
+            pool,
+            table,
+            kernel_entries_per_block=64,
+            owner_tokens_per_block=1024,
+            compress_ratio=4,
+        )
+    except RuntimeError as error:
+        assert "rows=6" in str(error)
+        assert "kernel_blocks_per_owner=4" in str(error)
+    else:
+        raise AssertionError("partial INDEXER owner pool was unexpectedly accepted")
+
+
 def test_kernel16_layout_is_rejected_instead_of_claiming_coalescing():
     pool = torch.zeros((16, 16, INDEXER_ENTRY_BYTES), dtype=torch.uint8)
     table = torch.arange(16, dtype=torch.int32).view(1, 16)
@@ -130,8 +166,8 @@ def test_sm100_keeps_legacy_kernel32_layout():
     assert torch.equal(actual_table, table)
 
 
-def test_kernel64_physical256_layout_runs_deepgemm():
-    """The online 1024/128 layout must execute, not only remap metadata."""
+def test_kernel64_split_owner_layout_runs_deepgemm():
+    """The online 1024-owner/256-kernel layout must execute end to end."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     if not has_fp8_paged_mqa_logits():
@@ -410,12 +446,14 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
 if __name__ == "__main__":
     test_decode_hot_path_has_no_tensor_scalar_reads()
     test_kernel64_table_preserves_framework_expanded_ids()
+    test_kernel64_rejects_partial_owner_table_width()
+    test_kernel64_rejects_partial_owner_pool_rows()
     test_kernel16_layout_is_rejected_instead_of_claiming_coalescing()
     if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10:
         test_sm100_keeps_legacy_kernel32_layout()
         test_fp8_paged_indexer_score_via_deepgemm(32)
     if torch.cuda.is_available() and has_fp8_paged_mqa_logits():
-        test_kernel64_physical256_layout_runs_deepgemm()
+        test_kernel64_split_owner_layout_runs_deepgemm()
         test_online_cuda_graph_max_geometry_runs_deepgemm()
         test_fp8_paged_indexer_score_via_deepgemm(64)
     print("OK")

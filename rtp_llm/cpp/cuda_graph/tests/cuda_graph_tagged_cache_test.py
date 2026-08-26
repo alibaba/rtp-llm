@@ -49,6 +49,21 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class TaggedBlockTableTailModel:
+    """Expose the captured INDEXER table tail after a focused refresh."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        indexer_tail = inputs.attention_inputs["full"].kv_cache_kernel_block_id_device[
+            0, -1
+        ]
+        return PyModelOutputs(
+            inputs.input_hiddens + indexer_tail.to(inputs.input_hiddens.dtype)
+        )
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -331,6 +346,41 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 table_width=8,
             ),
             18,
+        )
+
+    def test_focused_refresh_clears_split_geometry_table_tail(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTableTailModel(),
+            HIDDEN_SIZE,
+            1025,
+            1024,
+            256,
+            [2],
+            GROUP_TAGS,
+            False,
+            1,
+            [1024, 1024],
+            [256, 256],
+        )
+
+        # The captured INDEXER table has two owner columns expanded to eight
+        # kernel rows. First seed all eight rows, then emulate the MTP focused
+        # refresh with only one live owner (four rows). Rows [4:8] must not
+        # retain the previous request's expanded ids.
+        wide = _build_decode_inputs(
+            GROUP_TAGS, {"full": 7, "aux": 7}, table_width=8
+        )
+        runner.prepareAttentionInputs(wide)
+
+        narrow = _build_decode_inputs(
+            GROUP_TAGS, {"full": 2, "aux": 2}, table_width=4
+        )
+        runner.updateKVCacheKernelBlockId(narrow)
+        output = runner.forward(narrow)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.hidden_states, torch.zeros_like(output.hidden_states)
         )
 
     def test_decode_tagged_table_uses_shared_rectangular_owner_width(self) -> None:
