@@ -133,6 +133,8 @@ cc_library(
         ":layer_cache_buffer",
         ":metrics",
         ":p2p_connector_config",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",

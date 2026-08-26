@@ -38,6 +38,19 @@
 
 ## 2. 现状缺陷
 
+> **出处说明（重要）**：本节引用的行号与符号，绝大部分来自本地 commit
+> `2dc337ab10 feat(p2p): add CP-aware rank scheduling`（codex 实现，尚未合入主干；远端
+> `codex/dsv4-block-tree-p2p-region` 上的对应版本是 `732d3a66`）。也就是说 §2.1 / §2.4
+> 描述的不是「已发布代码的缺陷」，而是**那个 commit 刚引入的形态**。
+>
+> 该 commit 同时引入了本设计**依赖**的基础设施，这些一律**保留**：
+> `broadcastPerRank` + `RankLayerCacheBuffers`、`Meta::P2PRoutingContext::prefill_cp_size`
+> + `setPrefillCpSize`、`GetPeerInfoResponsePB.cp_size`、
+> `P2PConnectorSchedulerConfig::{cp_rank, cp_size}`、`allow_empty_projection`。
+>
+> 本设计要取代的只是它的**决策逻辑**：`P2PConnectorSchedulerDecode` 里的 CP 投影
+> （`worker_rank % cp_size`）与 §2.1 那条硬拒。管道不动，决策换成 planner。
+
 ### 2.1 CP size 不一致直接拒绝
 
 `P2PConnectorSchedulerDecode.cc:125` 硬拒 `prefill_cp_size != config_.cp_size`。因此 **prefill CP=4 + decode CP=1** 在 P2P 链路完全不可用，而它在 legacy `DecodeRpcServer::loadCache` 里是支持的。
@@ -735,6 +748,17 @@ message TransferRoutePB {
 
 - **P0 — 修 §2.3（可独立发布）**：`handleNP1D` 的 `local_partition_count → 1`、`local_partition_id → 0`，保留 `remote_partition_id` 用于 key 与目的端切分。补端到端字节数断言。这是唯一的现网正确性缺陷，不该等重构。
 - **P1 — 引入 planner，影子比对**：实现 `ShardLayout`/`TransferPlan`/planner，在两侧 scheduler 里算 plan 但**不上线**——与现有独立推导结果逐字段比对，不一致只打 WARNING + 上报 metric。跑满线上流量一个周期，证明 planner 在对称场景与现状等价。
+- **P1.5 — 编排接入但只影子运行（已落地）**：两侧 scheduler 算 plan、跑漂移断言、把 routes 随广播下发，
+  但**不驱动执行**，且 §2.1 的 CP 对称硬拒**保留**。
+  理由：删掉硬拒就允许非对称 CP 进来，而 worker 尚未按 route 执行，旧路径处理不了 → 会静默传错数据。
+  同理 `plan()` 失败时只 WARNING 不拒绝，否则会把当前可用的对称场景拖下水。
+  切换执行路径时，这两处要一起改成硬失败（代码注释已标注）。
+
+  **尾部裁剪的去重**：`LayerCacheBufferUtil::convertLayerTag` 里也有一段 `active_tail_blocks`
+  裁剪，服务的是仍在跑的旧路径，**不能直接删**（会回归）。改为新增
+  `convertLayerTagForRoute` / `convertTagForRoute`：接收编排层已用 `resolveKeys` 解析好的位置列表
+  （已含 `tail_count`），**不再自行施加** `active_tail_blocks`。旧函数等执行路径切完再删。
+
 - **P2 — 切换执行路径（硬切）**：下发 routes，两侧改为按 route 执行，`makeRouteLayerKey` 取代 `makePartitionLayerKey`。删除 `AsymmetricTpUtil` / `calculateRecvPartitionCount` / MLA 跳过分支 / `remote_tp_size` / `allow_empty_projection`。
   不引入灰度开关：`routes` 所在的是同部署单元协议，P/D 两端同时升级，无需双路径共存——留开关反而要维护两套 key 命名。P1 的影子比对是**正确性**闸门（不是兼容性闸门），仍建议保留一个周期后再删。
 - **P3 — 放开非对称 CP**：删除 §2.1 拒绝分支。planner 的 Step 3 已天然覆盖，无新逻辑。

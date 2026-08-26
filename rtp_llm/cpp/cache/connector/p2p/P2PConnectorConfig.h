@@ -34,10 +34,19 @@ struct P2PConnectorSchedulerConfig {
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
 
-    static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
-                                              const CacheStoreConfig& cache_store_config,
-                                              const PDSepConfig&      pd_sep_config) {
+    // 编排层（KVCacheTransferPlanner）需要完整的并行度与角色来构造本端 ShardLayout，
+    // 并由 ShardLayoutFactory::peerOf 推导对端布局 —— 这是「跨端协议零改动」的前提。
+    // cp_rank / cp_size 是它的投影，保留是为了旧执行路径。
+    ParallelismConfig parallelism_config;
+    RoleType          role_type = RoleType::PDFUSION;
+
+    static P2PConnectorSchedulerConfig create(const RuntimeConfig&     runtime_config,
+                                              const CacheStoreConfig&  cache_store_config,
+                                              const ParallelismConfig& parallelism_config,
+                                              const PDSepConfig&       pd_sep_config) {
         P2PConnectorSchedulerConfig config;
+        config.parallelism_config                     = parallelism_config;
+        config.role_type                              = pd_sep_config.role_type;
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
         config.p2p_worker_addrs                       = runtime_config.p2p_worker_addrs;
@@ -123,7 +132,7 @@ struct P2PConnectorConfig {
         config.role_type = pd_sep_config.role_type;
         config.tp_rank   = parallelism_config.tp_rank;
         config.scheduler_config =
-            P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, pd_sep_config);
+            P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, parallelism_config, pd_sep_config);
         config.worker_config = P2PConnectorWorkerConfig::create(
             cache_store_config, pd_sep_config, parallelism_config, layer_all_num, is_mla);
         return config;
