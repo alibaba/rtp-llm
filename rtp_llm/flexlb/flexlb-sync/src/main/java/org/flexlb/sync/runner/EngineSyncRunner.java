@@ -223,23 +223,28 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
-        WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
-        if (workerStatus == null) {
-            workerStatus = new WorkerStatus();
-            String[] split = workerIpPort.split(":");
-            workerStatus.setIp(split[0]);
+        // Atomic create: multiple execution flows (sync ticks whose tasks overlap in
+        // the engineSyncExecutor, the 30s address-calibration callback) can hit the
+        // same empty key concurrently — a plain get-then-put race produced multiple
+        // WorkerStatus instances for one worker, and the reference swap made
+        // EndpointRegistry.ensureEndpoint's identity comparison fail, replacing the
+        // endpoint and shutting down a healthy WorkerBatcher ("queue stopped").
+        WorkerStatus workerStatus = workerStatuses.computeIfAbsent(workerIpPort, key -> {
+            WorkerStatus created = new WorkerStatus();
+            String[] split = key.split(":");
+            created.setIp(split[0]);
             int httpPort = Integer.parseInt(split[1]);
-            workerStatus.setPort(httpPort);
+            created.setPort(httpPort);
             // Derive the gRPC port up front: status callbacks (GrpcWorkerStatusRunner)
             // publish the endpoint to EndpointRegistry before the next sync tick runs
             // EngineSyncRunner.ensureEndpoint, so a zero grpcPort here would leak into
             // dispatch (batch_enqueue channel to ip:0) for freshly discovered workers.
-            workerStatus.setGrpcPort(CommonUtils.toGrpcPort(httpPort));
-            workerStatus.setRole(roleType);
-            workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
-            workerStatuses.put(workerIpPort, workerStatus);
-            logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
-        }
+            created.setGrpcPort(CommonUtils.toGrpcPort(httpPort));
+            created.setRole(roleType);
+            created.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
+            logger.info("Created new WorkerStatus for worker: {}", key);
+            return created;
+        });
         // Cache and worker status checks run independently. Publish the role known
         // from service discovery before either callback can observe this object.
         if (workerStatus.getRole() == null) {
