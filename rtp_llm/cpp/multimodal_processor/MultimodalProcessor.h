@@ -64,7 +64,8 @@ private:
     ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
                                                const torch::Tensor&                        token_ids,
                                                const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                               torch::Tensor                               token_type_ids = {});
+                                               torch::Tensor                               token_type_ids = {},
+                                               bool                                        hash_features  = true);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 
@@ -78,7 +79,8 @@ public:
                                        const std::string&                           vit_role_addr);
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
-                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
+                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
+                                                         bool hash_features = true);
 };
 
 }  // namespace rtp_llm
