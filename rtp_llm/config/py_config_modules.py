@@ -403,6 +403,13 @@ class GenerateEnvConfig:
 
 class RepetitionDetectionConfig:
     def __init__(self):
+        self.output_repetition_monitor: bool = True
+        self.output_repetition_min_repeats: int = 3
+        self.output_repetition_min_dup_tokens: int = 32
+        self.output_repetition_max_period: int = 512
+        self.noncontig_repeat_min_span_tokens: int = 32
+        self.noncontig_repeat_min_occurrences: int = 3
+        self.noncontig_repeat_max_span_tokens: int = 256
         self.tool_call_loop_monitor: bool = True
         self.tool_call_loop_threshold: int = 5
         self.tool_call_loop_max_span_tokens: int = 16384
@@ -411,6 +418,13 @@ class RepetitionDetectionConfig:
 
     def to_string(self):
         return (
+            f"output_repetition_monitor: {self.output_repetition_monitor}\n"
+            f"output_repetition_min_repeats: {self.output_repetition_min_repeats}\n"
+            f"output_repetition_min_dup_tokens: {self.output_repetition_min_dup_tokens}\n"
+            f"output_repetition_max_period: {self.output_repetition_max_period}\n"
+            f"noncontig_repeat_min_span_tokens: {self.noncontig_repeat_min_span_tokens}\n"
+            f"noncontig_repeat_min_occurrences: {self.noncontig_repeat_min_occurrences}\n"
+            f"noncontig_repeat_max_span_tokens: {self.noncontig_repeat_max_span_tokens}\n"
             f"tool_call_loop_monitor: {self.tool_call_loop_monitor}\n"
             f"tool_call_loop_threshold: {self.tool_call_loop_threshold}\n"
             f"tool_call_loop_max_span_tokens: {self.tool_call_loop_max_span_tokens}\n"

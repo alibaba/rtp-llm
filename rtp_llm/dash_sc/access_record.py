@@ -517,6 +517,7 @@ class GrpcAccessRecord:
         """
         if token_ids:
             self.generated_ids.extend(token_ids)
+            self._repetition_monitor.update_output_delta(token_ids)
 
     def record_aux_info(self, aux_info: Any, *, overwrite: bool = True) -> None:
         """Keep the latest backend ``AuxInfo`` for the frontend access log."""
