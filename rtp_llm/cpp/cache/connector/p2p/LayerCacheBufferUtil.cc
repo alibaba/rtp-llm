@@ -53,10 +53,14 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayerTag(KVCacheR
         return nullptr;
     }
 
-    const size_t logical_begin = static_cast<size_t>(start_block_idx);
-    const size_t logical_end = block_count > 0 ?
-                                   std::min(cache_keys.size(), logical_begin + static_cast<size_t>(block_count)) :
-                                   cache_keys.size();
+    size_t       logical_begin = static_cast<size_t>(start_block_idx);
+    const size_t logical_end   = block_count > 0 ?
+                                     std::min(cache_keys.size(), logical_begin + static_cast<size_t>(block_count)) :
+                                     cache_keys.size();
+    if (group.policy.active_tail_blocks > 0) {
+        const size_t tail_count = static_cast<size_t>(group.policy.active_tail_blocks);
+        logical_begin           = std::max(logical_begin, logical_end > tail_count ? logical_end - tail_count : 0);
+    }
     const auto& block_ids = resource.blocksForLayer(layer_id, group.tag);
     auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
     for (size_t logical_pos = logical_begin; logical_pos < logical_end; ++logical_pos) {

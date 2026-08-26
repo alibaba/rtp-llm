@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 namespace rtp_llm {
 
 enum class ErrorCode {

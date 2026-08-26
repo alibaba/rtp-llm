@@ -638,6 +638,18 @@ void cudaSyncAndCheck() {
     runtimeSyncAndCheck();
 }
 
+void cudaCurrentStreamSyncAndCheck() {
+#if USING_CUDA
+    auto stream = at::cuda::getCurrentCUDAStream();
+    check_cuda_value(cudaStreamSynchronize(stream));
+    check_cuda_error();
+#elif USING_ROCM
+    auto stream = at::cuda::getCurrentCUDAStream();
+    ROCM_CHECK(hipStreamSynchronize(stream));
+    ROCM_CHECK_ERROR();
+#endif
+}
+
 void cudaCheckLastError() {
 #if USING_CUDA
     check_cuda_error();

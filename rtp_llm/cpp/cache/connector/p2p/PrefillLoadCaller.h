@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -63,6 +64,7 @@ public:
         void markCompletionQueueDrained();
 
     private:
+        void cancelLocked();
         bool pollCompletionQueue();
         void updateStreamFromResponse();
         /// Shutdown the CompletionQueue and drain remaining events.
@@ -101,6 +103,7 @@ public:
         bool completion_queue_shutdown_drained_{false};
 
     private:
+        std::atomic<bool>  cancel_requested_{false};
         mutable std::mutex state_mutex_;
     };
 

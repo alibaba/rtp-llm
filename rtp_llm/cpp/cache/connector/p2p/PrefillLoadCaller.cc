@@ -416,8 +416,7 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
     }
 }
 
-void PrefillLoadCaller::Result::cancel() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+void PrefillLoadCaller::Result::cancelLocked() {
     if (done_) {
         return;
     }
@@ -430,6 +429,15 @@ void PrefillLoadCaller::Result::cancel() {
     done_              = true;
     success_           = false;
     total_cost_time_us = currentTimeUs() - start_time_us;
+}
+
+void PrefillLoadCaller::Result::cancel() {
+    // Publish the cancellation intent before contending with the CQ poller. Otherwise a
+    // tight polling loop can repeatedly reacquire state_mutex_ until the RPC succeeds,
+    // causing cancel() to observe an already-successful result.
+    cancel_requested_.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    cancelLocked();
 }
 
 void PrefillLoadCaller::Result::markCompletionQueueDrained() {
@@ -539,12 +547,20 @@ void PrefillLoadCaller::Result::checkDone() {
     if (done_) {
         return;
     }
+    if (cancel_requested_.load(std::memory_order_acquire)) {
+        cancelLocked();
+        return;
+    }
     bool poll_ok = pollCompletionQueue();
     if (!poll_ok) {
         return;
     }
     if (!done_) {
         return;  // TIMEOUT — not finished yet
+    }
+    if (cancel_requested_.load(std::memory_order_acquire)) {
+        success_ = false;
+        return;
     }
 
     updateStreamFromResponse();

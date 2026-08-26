@@ -1,3 +1,4 @@
+load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//rtp_llm/cpp/cache/connector/p2p:__subpackages__"])
@@ -124,10 +125,10 @@ cc_library(
         "P2PConnectorWorkerPrefill.h",
         "P2PConnectorWorkerDecode.h",
         "P2PConnector.h",
-        "P2PKeyUtil.h",
     ],
     deps = [
         ":components",
+        ":p2p_key_util",
         ":layer_block_converter",
         ":layer_cache_buffer",
         ":metrics",
@@ -141,5 +142,14 @@ cc_library(
         "@havenask//aios/autil:net",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:backend_factory",
     ],
+    visibility = ["//visibility:public"],
+)
+
+# 无依赖的纯头：传输 key 的唯一生成点。独立成 target，让只需要它的测试
+# 不必链接整个 connector（后者会拖入 device / transfer backend）。
+cc_library(
+    name = "p2p_key_util",
+    hdrs = ["P2PKeyUtil.h"],
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
