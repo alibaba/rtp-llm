@@ -498,7 +498,59 @@ MODE_STRATEGY = {
     },
 }
 
+DEFAULT_FLEXLB_CONFIG = json.dumps(
+    {
+        "schemaVersion": 2,
+        "scheduler": {
+            "type": "QUEUE",
+            "ordering": {"type": "PRIORITY", "defaultPriority": 50},
+            "decision": {
+                "type": "FIXED_WINDOW",
+                "maxRequests": 32,
+                "maxCollectionWaitMs": 10,
+                "maxPredictedExecutionMs": 550,
+            },
+            "capacity": {
+                "maxOutstandingRequestsGlobal": 1000000,
+                "maxWaitingRequestsPerPrefillWorker": 1024,
+            },
+        },
+        "dispatcher": {"type": "BATCH", "enqueueRpcTimeoutMs": 5000},
+        "router": {
+            "availabilityHysteresisPercent": 30,
+            "roles": {
+                "prefill": {
+                    "availability": {"maxPendingRequests": 100000},
+                    "executionTimeEstimator": {"type": "FORMULA"},
+                    "selector": {
+                        "type": "ESTIMATED_TTFT",
+                        "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"},
+                    },
+                },
+                "decode": {
+                    "availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 132},
+                    "kvReservation": {"maxOutputTokensForEstimate": 1000},
+                    "selector": {"type": "KV_USAGE_WEIGHTED_RANDOM"},
+                },
+                "vit": {"selector": {"type": "RANDOM"}},
+            },
+        },
+        "observability": {
+            "cacheHit": {
+                "recentKeyWindow": {
+                    "writeEnabled": True,
+                    "durationMs": 1800000,
+                    "maxKeyOccurrences": 10000000,
+                },
+                "metricsEnabled": True,
+                "requestTraceLogEnabled": False,
+            }
+        },
+    }
+)
+
 BASE_MASTER_ENV = {
+    "FLEXLB_CONFIG": DEFAULT_FLEXLB_CONFIG,
     "DECODE_LOAD_BALANCE_STRATEGY": "COST_BASED_DECODE",
     "DECODE_CONCURRENCY_LIMIT": "132",
     "FLEXLB_BATCH_ALGORITHM": "fixed_window",
