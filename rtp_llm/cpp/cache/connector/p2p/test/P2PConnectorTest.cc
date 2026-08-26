@@ -26,6 +26,7 @@ namespace rtp_llm {
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
     std::vector<BlockInfo> convertIndexToBuffer(int /*layer_id*/,
+                                                const std::string& /*cache_tag*/,
                                                 int /*block_id*/,
                                                 int /*partition_count*/,
                                                 int /*partition_id*/) const override {
@@ -188,7 +189,9 @@ protected:
 // ==================== handleRead 测试 ====================
 
 TEST_F(P2PConnectorTest, AsyncWriteByLayer_ReturnsNullWhenWorkerRejectsDispatch) {
-    auto layer_context = std::make_shared<MockLayerContext>(createValidKVCacheResource());
+    auto resource = createValidKVCacheResource();
+    resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    auto layer_context = std::make_shared<MockLayerContext>(std::move(resource));
 
     EXPECT_EQ(connector_->asyncWriteByLayer(0, layer_context), nullptr);
 }

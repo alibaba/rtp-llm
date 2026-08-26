@@ -548,6 +548,39 @@ enum P2PConnectorBroadcastType {
     HANDLE_READ_NO_TRANSFER = 5;
 }
 
+// One transfer route as minted by KVCacheTransferPlanner, projected onto the side that
+// receives it. rank0 sends each worker only that worker's own routes, and only that
+// worker's own partition/slice — the peer's half never crosses this wire.
+//
+// A route is layer-independent: it expands at execution time into one transfer unit per
+// layer owned by cache_tag, keyed by <unique_key>_<layer_id>_<cache_tag>_r<route_id>.
+message TransferRoutePB {
+    // Orchestrator-minted id. This is the ONLY thing that names the transfer key, so both
+    // sides agree without any independent partition arithmetic.
+    int32 route_id = 1;
+    string cache_tag = 2;
+
+    // Prefill direction: index into peer_workers identifying the decode target.
+    // Decode direction: unused (this route's blocks are carried inline below).
+    int32 peer_index = 3;
+
+    // This side's head-dimension partition, fed to LayerBlockConverter.
+    int32 partition_count = 4;
+    int32 partition_id = 5;
+
+    // This side's CP byte slice, fed to CPSlotMapper::sliceBlockForPeer.
+    // slice_mode mirrors CpBlockSliceMode: 0=NONE, 1=EQUAL_BYTES, 2=PAYLOAD_BYTES.
+    int32 slice_mode = 6;
+    int32 slice_count = 7;
+    int32 slice_index = 8;
+
+    // Decode direction: the concrete (cache_key, block_id) pairs this route covers, per
+    // layer. rank0 resolves the key rule itself, so decode workers stay pure executors and
+    // never re-derive a key set. Empty in the prefill direction, where each worker's own
+    // local projection already equals its route's key set.
+    repeated LayerCacheBlockPB layer_blocks = 9;
+}
+
 message P2PConnectorBroadcastTpRequestPB {
     repeated LayerCacheBlockPB layer_blocks = 1;
     repeated TPWorkerInfoPB peer_workers = 2;
@@ -555,14 +588,26 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
-    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)
+    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill).
+    // Superseded by `routes` once the transfer plan drives execution; kept while both paths
+    // coexist (see the phased rollout in docs/backend/p2p_transfer_plan_orchestration.md).
     int32 remote_tp_size = 8;
     // Original user-request deadline. deadline_ms remains the physical
     // transfer deadline used by this broadcast and its worker operation.
     int64 request_deadline_ms = 9;
     // True only when rank0 intentionally projected an empty CP-local block set
     // for this worker. Ordinary empty READ requests remain malformed.
+    // Superseded by "routes is empty" once the transfer plan drives execution.
     bool allow_empty_projection = 10;
+
+    // This worker's slice of the transfer plan. Empty means no work for this worker.
+    // Additive for now: carried alongside the legacy fields so the plan can be shadow-
+    // compared (P1) before it drives execution (P2).
+    repeated TransferRoutePB routes = 11;
+    // Stable hash of the whole plan, appended to every transfer key so that two sides whose
+    // plans diverged (config drift) fail as "no matching recv task within deadline" rather
+    // than silently copying into the wrong byte range.
+    uint64 plan_digest = 12;
 }
 
 // GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration

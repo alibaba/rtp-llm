@@ -21,7 +21,7 @@ protected:
         for (int group_id : layer_to_group) {
             layer_group_ids.push_back({group_id});
         }
-        topology_ = makeTestCacheTopology(group_num, layer_num, layer_group_ids, 1, group_types);
+        topology_ = test::makeTestCacheTopology(group_num, layer_num, layer_group_ids, 1, group_types);
         resource.initGroups(topology_);
         auto& blocks = resource.mutableBlockIds(0);
         blocks.assign(block_ids_g0);
@@ -37,7 +37,7 @@ protected:
         // 2 layers: layer 0 -> group 0, layer 1 -> group 1
         std::vector<int>            layer_to_group = {0, 1};
         std::vector<CacheGroupType> group_types    = {CacheGroupType::FULL, CacheGroupType::LINEAR};
-        topology_ = makeTestCacheTopology(2, 2, {{0}, {1}}, 1, group_types);
+        topology_                                  = test::makeTestCacheTopology(2, 2, {{0}, {1}}, 1, group_types);
         resource.initGroups(topology_);
         resource.mutableBlockIds(0).assign(full_block_ids);
         resource.mutableBlockIds(1).assign(linear_block_ids);
