@@ -80,8 +80,15 @@ DEFAULT_MOCK_EVENT_LOOP_THREADS = 8
 DEFAULT_MOCK_COMPLETION_THREADS = 4
 DEFAULT_PREFILL_CACHE_BLOCKS = 6000
 DEFAULT_DECODE_CACHE_BLOCKS = 3000
-DEFAULT_MASTER_HTTP_PORT = 18080
-DEFAULT_MASTER_MANAGEMENT_PORT = 18081
+# Master ports are env-overridable so sibling framework instances can run
+# concurrently without squatting on each other's fixed 18080/18081 (plus the
+# gRPC port at http+2). Management defaults to http+1.
+DEFAULT_MASTER_HTTP_PORT = int(os.environ.get("FLEXLB_FT_MASTER_HTTP_PORT", "18080"))
+DEFAULT_MASTER_MANAGEMENT_PORT = int(
+    os.environ.get(
+        "FLEXLB_FT_MASTER_MANAGEMENT_PORT", str(DEFAULT_MASTER_HTTP_PORT + 1)
+    )
+)
 
 # Every env var read by JavaLoadClient.Config.fromEnv().  Exported explicitly
 # (unset ones become empty string — JavaLoadClient treats empty as unset) so
@@ -457,7 +464,11 @@ class EnvSpec:
     master_env: dict = field(default_factory=dict)  # extra/override env vars
     spring_profile: str = "default"
     master_debug_log: bool = False
-    discovery: str = "file"  # file (endpoints.json) | domain (DOMAIN_ADDRESS)
+    # file (static endpoints.json → env vars, NoOpServiceDiscovery)
+    # | domain (explicit DOMAIN_ADDRESS)
+    # | discovery_file (dynamic: mock --discovery-file, master FLEXLB_DISCOVERY_FILE
+    #   → FileServiceDiscovery; /add_engine + /remove_engine keep it in sync)
+    discovery: str = "file"
     domain_addrs: dict = field(default_factory=dict)  # {prefill: "a,b", decode: "a,b"}
     prefill_cache_blocks: int = DEFAULT_PREFILL_CACHE_BLOCKS
     decode_cache_blocks: int = DEFAULT_DECODE_CACHE_BLOCKS
@@ -538,6 +549,7 @@ class FlexEnv:
         self.master_http_port = DEFAULT_MASTER_HTTP_PORT
         self.master_management_port = DEFAULT_MASTER_MANAGEMENT_PORT
         self.endpoint_file = run_dir / "endpoints.json"
+        self.discovery_file = run_dir / "discovery.json"  # dynamic file discovery
         self.perf_file = run_dir / "perf.json"
         self.mock: Optional[ManagedProcess] = None
         self.master: Optional[ManagedProcess] = None
@@ -705,6 +717,12 @@ class EnvManager:
             "--env-file",
             str(env.run_dir / "flexlb_env.txt"),
         ]
+        if spec.discovery == "discovery_file":
+            # Dynamic file discovery: the mock maintains the domain→hosts
+            # mapping (kept in sync by /add_engine + /remove_engine) and the
+            # master re-reads it via FLEXLB_DISCOVERY_FILE → FileServiceDiscovery
+            # (mirrors run_online_eval.sh FLEXLB_DISCOVERY_FILE=auto wiring).
+            argv += ["--discovery-file", str(env.discovery_file)]
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
         if not wait_for_port("127.0.0.1", env.mock_http_port, 60):
@@ -720,6 +738,15 @@ class EnvManager:
             raise RuntimeError(
                 f"mock engine did not write endpoint file: {env.endpoint_file}"
             )
+        if spec.discovery == "discovery_file" and not wait_for(
+            lambda: env.discovery_file.exists()
+            and env.discovery_file.stat().st_size > 0,
+            10,
+            0.1,
+        ):
+            raise RuntimeError(
+                f"mock engine did not write discovery file: {env.discovery_file}"
+            )
         self._log(f"mock cluster up (pid={proc.pid}, http={env.mock_http_port})")
 
     # -- master ------------------------------------------------------------
@@ -734,6 +761,16 @@ class EnvManager:
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
             for key, value in payload.get("env", {}).items():
                 menv[key] = str(value)
+        elif spec.discovery == "discovery_file":
+            # Dynamic file discovery: MODEL_SERVICE_CONFIG (domain endpoints)
+            # comes from the mock's endpoint-file env section; host resolution
+            # itself goes through FileServiceDiscovery reading the discovery
+            # file the mock keeps in sync (DOMAIN_ADDRESS env vars unused).
+            payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
+            service_config = payload.get("env", {}).get("MODEL_SERVICE_CONFIG")
+            if service_config:
+                menv["MODEL_SERVICE_CONFIG"] = str(service_config)
+            menv["FLEXLB_DISCOVERY_FILE"] = str(env.discovery_file)
         elif spec.discovery == "domain":
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(
                 {
@@ -766,6 +803,15 @@ class EnvManager:
         menv.update(spec.master_env)  # spec overrides come last
         return menv
 
+    def _master_ports_in_use(self, env: FlexEnv) -> list[int]:
+        """Master's fixed ports: HTTP / management / gRPC (= http + 2)."""
+        ports = [
+            env.master_http_port,
+            env.master_management_port,
+            env.master_http_port + 2,
+        ]
+        return [p for p in ports if port_in_use(p)]
+
     def start_master(
         self, env: FlexEnv, log_name: Optional[str] = None
     ) -> ManagedProcess:
@@ -774,6 +820,23 @@ class EnvManager:
             raise RuntimeError(f"flexlb-api jar not found: {API_JAR} (build it first)")
         if env.master is not None:
             raise RuntimeError("master already running; stop it first")
+        # Pre-flight: a concurrently running master (sibling framework
+        # instance) holds the fixed 18080/18081/18082 ports — wait for release
+        # instead of dying on BindException while the readiness probe hits the
+        # *foreign* master (mis-detected as "up").
+        port_wait_s = float(os.environ.get("FLEXLB_FT_MASTER_PORT_WAIT_S", "120"))
+        port_deadline = time.monotonic() + port_wait_s
+        while True:
+            busy = self._master_ports_in_use(env)
+            if not busy:
+                break
+            if time.monotonic() >= port_deadline:
+                raise RuntimeError(
+                    f"master ports still busy after {port_wait_s:.0f}s (another "
+                    f"master running?): {busy}"
+                )
+            self._log(f"master ports {busy} busy; waiting for release ...")
+            time.sleep(5.0)
         java = resolve_java21()
         env.master_start_count += 1
         log_name = log_name or (
@@ -797,12 +860,21 @@ class EnvManager:
         env.master = proc
         if not wait_for_port("127.0.0.1", env.master_http_port, 90):
             raise RuntimeError(f"master failed to start:\n{proc.tail_log()}")
+        # Guard against a foreign master squatting on the HTTP port: if our own
+        # JVM died on BindException, the port probe above may still succeed
+        # against the foreign process. Re-check our own pid.
+        if not proc.alive():
+            raise RuntimeError(
+                f"master process exited during startup (port conflict?):\n"
+                f"{proc.tail_log()}"
+            )
 
         def _master_ready() -> bool:
             # /rtp_llm/master/info is a POST endpoint (GET returns 405);
             # http_post_json returns (status, payload) tuple.
             status, data = http_post_json(
-                f"http://127.0.0.1:{env.master_http_port}/rtp_llm/master/info", {}
+                f"http://127.0.0.1:{env.master_http_port}/rtp_llm/master/info",
+                {},
             )
             return status == 200 and bool(data and data.get("ready"))
 
