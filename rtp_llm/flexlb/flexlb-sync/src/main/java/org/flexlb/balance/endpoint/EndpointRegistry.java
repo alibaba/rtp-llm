@@ -261,22 +261,11 @@ public class EndpointRegistry {
                         ep.evictExpiredBatches(ttlMs), ttlMs));
     }
 
-    /**
-     * Log and report one endpoint-ledger TTL eviction pass
-     * (intent-ported from 51af09456f): endpoint-side evictions were
-     * previously log-only, invisible to the inflight.ttl.expired.qps
-     * series family. On this architecture the endpoint ledgers have a
-     * single stale-unobserved exit, so every evicted entry reports the
-     * {@code ttl} reason bucket; only non-zero counts are reported, keeping
-     * the series sparse.
-     */
-    private void logEndpointEviction(RoleType role,
-                                     String endpoint,
-                                     int evicted,
-                                     long ttlMs) {
+    private static void logEndpointEviction(RoleType role,
+                                            String endpoint,
+                                            int evicted,
+                                            long ttlMs) {
         if (evicted > 0) {
-            reporter.reportEndpointInflightTtlExpired(
-                    role.name(), endpoint, "ttl", evicted);
             Logger.info("event=endpoint_inflight_ttl_eviction role={} endpoint={} "
                             + "evicted={} ttl_ms={}",
                     role, endpoint, evicted, ttlMs);
