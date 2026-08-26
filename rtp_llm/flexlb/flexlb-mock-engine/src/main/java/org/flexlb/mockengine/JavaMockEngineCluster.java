@@ -793,7 +793,14 @@ public final class JavaMockEngineCluster {
                     .setLatestFinishedVersion(latestVersion)
                     .setDpSize(1)
                     .setTpSize(1)
-                    .setDpRank(0);
+                    .setDpRank(0)
+                    // Static engine limits. Production engines publish max_seq_len /
+                    // max_batch_tokens_size so the master can clamp decision-group
+                    // token capacity (BatcherContext); reporting them keeps the mock's
+                    // admission semantics aligned with production instead of the
+                    // implicit unlimited fallback.
+                    .setMaxSeqLen(1048576L)
+                    .setMaxBatchTokensSize(1048576L);
             status.addAllRunningTaskInfo(runningTasks.values().stream()
                     .map(FastRpcService::withLegacyTaskState)
                     .toList());
