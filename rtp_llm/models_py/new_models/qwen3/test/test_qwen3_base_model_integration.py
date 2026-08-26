@@ -8,7 +8,12 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
 
-from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
+from rtp_llm.config.quant_config import (
+    GPTQConfig,
+    ModelOptFp4Config,
+    QuantizationConfig as SourceQuantizationConfig,
+    WeightOnlyInt8PerChannelQuantConfig,
+)
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -40,6 +45,7 @@ def _model_config():
         eplb_config=types.SimpleNamespace(enable_eplb=lambda: False),
         quant_config=types.SimpleNamespace(get_runtime_method_key=lambda: "none"),
         use_new_loader=True,
+        require_weight_update=False,
     )
 
 
@@ -137,6 +143,43 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertFalse(model._use_new_loader())
         model.model_config.use_new_loader = True
         self.assertTrue(model._use_new_loader())
+
+    def test_registry_default_falls_back_for_unsupported_quantization(self):
+        config = _model_config()
+        config.use_new_loader = None
+        model = _base_model(config)
+        cases = {
+            "INT8": WeightOnlyInt8PerChannelQuantConfig(),
+            "GPTQ": GPTQConfig(bits=4, group_size=128, is_quanted=True),
+            "MODELOPT_FP4": ModelOptFp4Config(bits=4, group_size=16, is_quanted=True),
+        }
+
+        for name, quant_config in cases.items():
+            with self.subTest(quantization=name):
+                config.quant_config = quant_config
+                self.assertIn(
+                    "does not provide a supported NewLoader runtime method",
+                    model._new_loader_unsupported_reason(),
+                )
+                self.assertFalse(model._use_new_loader())
+
+                config.use_new_loader = True
+                self.assertTrue(model._use_new_loader())
+                with self.assertRaisesRegex(ValueError, "quantization config"):
+                    model._load_with_new_loader()
+                config.use_new_loader = None
+
+    def test_weight_update_requirement_falls_back_unless_newloader_is_explicit(self):
+        config = _model_config()
+        config.use_new_loader = None
+        config.require_weight_update = True
+        model = _base_model(config)
+
+        self.assertFalse(model._use_new_loader())
+        config.use_new_loader = True
+        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "online UpdateWeights is required"):
+            model._load_with_new_loader()
 
     def test_source_configs_preserve_ignore_and_exclude(self):
         ignored = ["model.layers.0.self_attn.o_proj"]
@@ -382,17 +425,18 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         config = _model_config()
         base_model = _base_model(config)
 
-        with tempfile.TemporaryDirectory() as model_path:
-            config.ckpt_path = model_path
-            save_file(_weights(), f"{model_path}/model.safetensors")
-            with patch.object(
-                BaseModel, "_get_device_str", return_value="cpu"
-            ), patch.object(
-                BaseModel, "_init_custom_module", return_value=None
-            ), patch.dict(
-                os.environ, {"USE_NEW_LOADER": "1"}, clear=False
-            ):
-                base_model.load()
+        with self.assertLogs(level="WARNING") as captured_logs:
+            with tempfile.TemporaryDirectory() as model_path:
+                config.ckpt_path = model_path
+                save_file(_weights(), f"{model_path}/model.safetensors")
+                with patch.object(
+                    BaseModel, "_get_device_str", return_value="cpu"
+                ), patch.object(
+                    BaseModel, "_init_custom_module", return_value=None
+                ), patch.dict(
+                    os.environ, {"USE_NEW_LOADER": "1"}, clear=False
+                ):
+                    base_model.load()
 
         self.assertIsInstance(base_model.py_model, Qwen3ForCausalLM)
         self.assertIsInstance(base_model.py_model, GptModelBase)
@@ -400,6 +444,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertFalse(base_model.py_model.training)
         self.assertIs(base_model.py_model.weight, base_model.weight)
         self.assertIs(base_model.weight_manager, None)
+        self.assertIn("UpdateWeights RPC", "\n".join(captured_logs.output))
         self.assertEqual(
             set(base_model.py_model.runtime_weight_view()),
             {"embedding", "final_layernorm.gamma", "lm_head"},
