@@ -146,6 +146,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 selected.ep().getIp(), selected.ep().getHttpPort(),
                 selected.ttft(), selected.hitCache());
 
+        reportSelectedEstimates(roleType, selected, config);
         reportCacheHitMetrics(roleType, selected.hitCache(), seqLen);
         reportRoutingCacheMatchMetrics(
                 roleType,
@@ -498,6 +499,24 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
         engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
+    }
+
+    private void reportSelectedEstimates(RoleType roleType,
+                                         ScoredEndpoint selected,
+                                         FlexlbConfig config) {
+        String deliveryMode = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
+        try {
+            engineHealthReporter.reportPrefillSelectedEstimates(
+                    roleType,
+                    selected.ep().getIp(),
+                    deliveryMode,
+                    selected.ttft(),
+                    selected.prefillMs());
+        } catch (RuntimeException telemetryFailure) {
+            Logger.warn(
+                    "Prefill selected-estimate metric failed: engine={}, delivery_mode={}",
+                    selected.ep().ipPort(), deliveryMode, telemetryFailure);
+        }
     }
 
     private void reportRoutingCacheMatchMetrics(RoleType roleType,

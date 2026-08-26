@@ -8,8 +8,10 @@ import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -107,6 +109,65 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void reportsSelectedEstimatesWithNonBatchDeliveryMode() {
+        setFormula(endpointConfig, "sum(computeTokens)");
+        endpointConfig.setDispatcher(new NonBatchDispatcherConfig());
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        PrefillEndpoint selectedEndpoint = Mockito.spy(
+                endpointRegistry.getPrefill("10.0.0.1:8080"));
+        Mockito.doReturn(250L).when(selectedEndpoint).realWaitTimeMs();
+        endpointRegistry.getPrefillEndpoints().put(
+                "10.0.0.1:8080", selectedEndpoint);
+
+        ServerStatus nonBatch = strategy.select(
+                buildContext(1_000, 10_001L, endpointConfig), RoleType.PREFILL, null);
+
+        assertTrue(nonBatch.isSuccess());
+        Mockito.verify(engineHealthReporter).reportPrefillSelectedEstimates(
+                RoleType.PREFILL, "10.0.0.1", "NON_BATCH", 1_250L, 1_000L);
+    }
+
+    @Test
+    void reportsSelectedEstimatesWithBatchDeliveryMode() {
+        setFormula(endpointConfig, "sum(computeTokens)");
+        endpointConfig.setDispatcher(new BatchDispatcherConfig());
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        PrefillEndpoint selectedEndpoint = Mockito.spy(
+                endpointRegistry.getPrefill("10.0.0.1:8080"));
+        Mockito.doReturn(250L).when(selectedEndpoint).realWaitTimeMs();
+        endpointRegistry.getPrefillEndpoints().put(
+                "10.0.0.1:8080", selectedEndpoint);
+
+        ServerStatus batch = strategy.select(
+                buildContext(1_000, 10_002L, endpointConfig), RoleType.PREFILL, null);
+
+        assertTrue(batch.isSuccess());
+        Mockito.verify(engineHealthReporter).reportPrefillSelectedEstimates(
+                RoleType.PREFILL, "10.0.0.1", "BATCH", 1_550L, 1_000L);
+    }
+
+    @Test
+    void selectedEstimateTelemetryFailureDoesNotFailRouting() {
+        setFormula(endpointConfig, "sum(computeTokens)");
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        Mockito.doThrow(new IllegalStateException("metrics unavailable"))
+                .when(engineHealthReporter).reportPrefillSelectedEstimates(
+                        any(), any(), any(), Mockito.anyLong(), Mockito.anyLong());
+
+        ServerStatus result = strategy.select(
+                buildContext(1_000, 10_003L, endpointConfig), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
     }
 
     @Test
