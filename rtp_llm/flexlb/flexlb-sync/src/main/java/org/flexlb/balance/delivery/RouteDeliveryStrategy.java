@@ -89,66 +89,45 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     private Prefix reservePrefix(
             List<DeliveryItem> candidates,
             PrefillTimePredictor.Evaluator evaluator) {
-        DeliveryItem head = candidates.get(0);
-        CapacityBoundary.Attempt<PrefillAdmissionPort.PreparedAdmission>
-                headAttempt = slotPort.prepareIfOwned(
-                        head,
-                        () -> admissionPort.prepare(
-                                head, predict(evaluator, head)))
-                        .orElseGet(() -> RouteDeliveryStrategy
-                                .<PrefillAdmissionPort.PreparedAdmission>
-                                ownershipLost());
-        if (headAttempt
-                instanceof CapacityBoundary.Attempt.Rejected<
-                        PrefillAdmissionPort.PreparedAdmission> rejected) {
-            return new Prefix(
-                    List.of(),
-                    null,
-                    new DeliveryContext.SelectionBoundary(
-                            head, rejected.boundary()));
-        }
-        PrefillAdmissionPort.PreparedAdmission prepared =
-                ((CapacityBoundary.Attempt.Accepted<
-                        PrefillAdmissionPort.PreparedAdmission>)
-                        headAttempt).value();
-        if (prepared.correlationId().isPresent()) {
-            IllegalStateException failure = new IllegalStateException(
-                    "route admission returned an external correlation id");
-            Throwable cleanup = close(prepared);
-            if (cleanup != null && cleanup != failure) {
-                failure.addSuppressed(cleanup);
-            }
-            throw failure;
-        }
         List<DeliveryItem> admitted = new ArrayList<>(candidates.size());
-        admitted.add(head);
+        PrefillAdmissionPort.PreparedAdmission prepared = null;
+        DeliveryContext.SelectionBoundary boundary = null;
         try {
-            for (int index = 1; index < candidates.size(); index++) {
-                DeliveryItem item = candidates.get(index);
-                CapacityBoundary.Attempt<DeliveryItem> attempt =
+            for (DeliveryItem item : candidates) {
+                PrefillAdmissionPort.PreparedAdmission current = prepared;
+                CapacityBoundary.Attempt<?> attempt =
                         slotPort.prepareIfOwned(
                                 item,
-                                () -> prepared.append(
-                                        item, predict(evaluator, item)))
-                                .orElseGet(() -> RouteDeliveryStrategy
-                                        .<DeliveryItem>ownershipLost());
+                                () -> current == null
+                                        ? admissionPort.prepare(
+                                                item,
+                                                predict(evaluator, item))
+                                        : current.append(
+                                                item,
+                                                predict(evaluator, item)))
+                        .orElseGet(RouteDeliveryStrategy::ownershipLost);
                 if (attempt
-                        instanceof CapacityBoundary.Attempt.Accepted<
-                                DeliveryItem>) {
-                    admitted.add(item);
-                    continue;
+                        instanceof CapacityBoundary.Attempt.Rejected<?>
+                                rejected) {
+                    boundary = new DeliveryContext.SelectionBoundary(
+                            item, rejected.boundary());
+                    break;
                 }
-                return new Prefix(
-                        admitted,
-                        prepared,
-                        new DeliveryContext.SelectionBoundary(
-                                item,
-                                ((CapacityBoundary.Attempt.Rejected<DeliveryItem>)
-                                        attempt).boundary()));
+                if (current == null) {
+                    prepared = (PrefillAdmissionPort.PreparedAdmission)
+                            ((CapacityBoundary.Attempt.Accepted<?>)
+                                    attempt).value();
+                    if (prepared.correlationId().isPresent()) {
+                        throw new IllegalStateException(
+                                "route admission returned an external "
+                                        + "correlation id");
+                    }
+                }
+                admitted.add(item);
             }
-            return new Prefix(admitted, prepared, null);
+            return new Prefix(admitted, prepared, boundary);
         } catch (Throwable failure) {
-            Throwable cleanup = close(prepared);
+            Throwable cleanup = prepared == null ? null : close(prepared);
             if (cleanup != null && cleanup != failure) {
                 failure.addSuppressed(cleanup);
             }
