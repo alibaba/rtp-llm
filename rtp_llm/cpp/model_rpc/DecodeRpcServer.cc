@@ -1184,8 +1184,8 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     DecodeRpcContext rpc_context{grpc_stream};
     // TODO(xinfei.sxf) request id is 0 here
     auto decode_context              = DecodeGenerateContext(rpc_context, 0, server_context, metrics_reporter_, meta_);
-    decode_context.onflight_requests = onflight_requests_;
-    decode_context.loading_cache_requests = loading_cache_requests_;
+    decode_context.onflight_requests      = &onflight_requests_;
+    decode_context.loading_cache_requests = &loading_cache_requests_;
 
     auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;

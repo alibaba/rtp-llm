@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -42,7 +44,7 @@ public:
     std::string                           request_key;
     int64_t                               retry_times           = 0;
     int64_t                               retry_cost_time_ms    = 0;
-    int64_t                               onflight_requests     = 0;
+    const std::atomic<size_t>*            onflight_requests     = nullptr;
     int64_t                               request_timeout_ms    = 0;
     bool                                  finished              = false;
     int64_t                               request_begin_time_us = 0;

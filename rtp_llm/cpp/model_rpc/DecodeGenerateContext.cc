@@ -71,7 +71,8 @@ void DecodeGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request          = loading_cache_requests;
+    collector.loading_cache_request =
+        loading_cache_requests ? static_cast<int64_t>(loading_cache_requests->load()) : 0;
     collector.prepare_generate_context_rt_us = stat_info.prepare_generate_context_rt_us;
     collector.allocate_resource_rt_us        = stat_info.allocate_resource_rt_us;
     collector.load_cache_from_prefill_rt_us  = stat_info.load_cache_from_prefill_rt_us;

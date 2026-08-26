@@ -627,8 +627,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   metrics_reporter_,
                                                   meta_,
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
-    prefill_context.onflight_requests      = onflight_requests_;
-    prefill_context.loading_cache_requests = loading_cache_requests_;
+    prefill_context.onflight_requests      = &onflight_requests_;
+    prefill_context.loading_cache_requests = &loading_cache_requests_;
 
     try {
         auto status = syncPrefix(prefill_context);
