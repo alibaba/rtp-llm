@@ -498,55 +498,11 @@ MODE_STRATEGY = {
     },
 }
 
-DEFAULT_FLEXLB_CONFIG = json.dumps(
-    {
-        "schemaVersion": 2,
-        "scheduler": {
-            "type": "QUEUE",
-            "ordering": {"type": "PRIORITY", "defaultPriority": 50},
-            "decision": {
-                "type": "FIXED_WINDOW",
-                "maxRequests": 32,
-                "maxCollectionWaitMs": 10,
-                "maxPredictedExecutionMs": 550,
-            },
-            "capacity": {
-                "maxOutstandingRequestsGlobal": 1000000,
-                "maxWaitingRequestsPerPrefillWorker": 1024,
-            },
-        },
-        "dispatcher": {"type": "BATCH", "enqueueRpcTimeoutMs": 5000},
-        "router": {
-            "availabilityHysteresisPercent": 30,
-            "roles": {
-                "prefill": {
-                    "availability": {"maxPendingRequests": 100000},
-                    "executionTimeEstimator": {"type": "FORMULA"},
-                    "selector": {
-                        "type": "ESTIMATED_TTFT",
-                        "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"},
-                    },
-                },
-                "decode": {
-                    "availability": {"maxKvUsagePercent": 90, "maxEngineRequests": 132},
-                    "kvReservation": {"maxOutputTokensForEstimate": 1000},
-                    "selector": {"type": "KV_USAGE_WEIGHTED_RANDOM"},
-                },
-                "vit": {"selector": {"type": "RANDOM"}},
-            },
-        },
-        "observability": {
-            "cacheHit": {
-                "recentKeyWindow": {
-                    "writeEnabled": True,
-                    "durationMs": 1800000,
-                    "maxKeyOccurrences": 10000000,
-                },
-                "metricsEnabled": True,
-                "requestTraceLogEnabled": False,
-            }
-        },
-    }
+_CONFIG_FILE = Path(__file__).resolve().parent / "na130_flexlb_config.json"
+DEFAULT_FLEXLB_CONFIG = (
+    _CONFIG_FILE.read_text(encoding="utf-8")
+    if _CONFIG_FILE.is_file()
+    else json.dumps({"schemaVersion": 2})
 )
 
 BASE_MASTER_ENV = {
@@ -728,6 +684,10 @@ class EnvManager:
             str(spec.n_decode),
             "--base-grpc-port",
             str(env.base_grpc_port),
+            # macOS lo0 only has 127.0.0.1 (no whole 127/8 routing like Linux),
+            # so the unique-IP advertisement (127.1.0.x) is unreachable there.
+            "--unique-engine-ips",
+            "false" if sys.platform == "darwin" else "true",
             "--event-loop-threads",
             str(spec.event_loop_threads),
             "--completion-threads",
@@ -837,6 +797,20 @@ class EnvManager:
         env.master = proc
         if not wait_for_port("127.0.0.1", env.master_http_port, 90):
             raise RuntimeError(f"master failed to start:\n{proc.tail_log()}")
+
+        def _master_ready() -> bool:
+            # /rtp_llm/master/info is a POST endpoint (GET returns 405);
+            # http_post_json returns (status, payload) tuple.
+            status, data = http_post_json(
+                f"http://127.0.0.1:{env.master_http_port}/rtp_llm/master/info", {}
+            )
+            return status == 200 and bool(data and data.get("ready"))
+
+        if not wait_for(_master_ready, timeout_s=30, interval_s=0.5):
+            raise RuntimeError(
+                "master HTTP up but engine sync not ready after 30s "
+                "(check ~/ai-whale/logs/flexlb.log)"
+            )
         self._log(
             f"master up (pid={proc.pid}, mode={spec.master_mode}, log={log_name})"
         )
