@@ -175,9 +175,22 @@ def t3_multi_request_isolation(ctx: CaseContext):
     base = rid_base(ctx, "cancel")
     rids = [ops.next_request_id(base) for _ in range(3)]
     cancel_rid = rids[1]  # B
+    # B runs a long decode so the cancel lands while it is still decoding.
+    # The default output_len=10 finishes decode in ~200ms and races the
+    # cancel: the engine finishes first, the master then (correctly) returns
+    # the terminal state idempotently without forwarding an engine cancel,
+    # and verify_engine_cancelled flaps.  200 tokens ≈ 4-5s of decode at the
+    # default perf step_ms, comfortably spanning the cancel window.
+    long_output_len = 200
     try:
+
+        def _schedule(rid: int):
+            if rid == cancel_rid:
+                return ops.schedule(rid, output_len=long_output_len)
+            return ops.schedule(rid)
+
         with ThreadPoolExecutor(max_workers=3) as pool:
-            responses = list(pool.map(ops.schedule, rids))
+            responses = list(pool.map(_schedule, rids))
         for i, resp in enumerate(responses):
             if resp.code != 200 or not resp.success:
                 return False, f"schedule failed for rid={rids[i]}: {resp.error_message}"
@@ -189,10 +202,18 @@ def t3_multi_request_isolation(ctx: CaseContext):
             )
             handles.append(ops.start_stream(resp, rid, input_pb=input_pb))
 
-        if not all(h.wait_first_output(15.0) for h in handles):
+        # Wait for the SHORT requests' (A, C) first output only.  In batch
+        # mode the mock engine's FetchResponse surfaces the first message
+        # only after decode completes, so waiting for B (output_len=200)
+        # would mean B is already terminal when the cancel fires — the
+        # master then (correctly) answers REQUEST_STATE_COMPLETED
+        # idempotently and never forwards an engine cancel.  A/C finish in
+        # ~1s while B still has ~3.5s of decode left, so cancelling right
+        # after A/C's first output lands the cancel mid-decode.
+        if not all(handles[i].wait_first_output(15.0) for i in (0, 2)):
             for h in handles:
                 h.cancel()
-            return False, "not all requests received first output"
+            return False, "short requests (A, C) did not receive first output"
 
         ops.cancel(cancel_rid, responses[1])
         b_ended = handles[1].wait_end(5.0)
@@ -220,6 +241,7 @@ def t3_multi_request_isolation(ctx: CaseContext):
             and c_complete
             and c_snap.completed
             and not b_snap.completed
+            and engine_cancelled
             and recovery_ok
         )
         return passed, (
