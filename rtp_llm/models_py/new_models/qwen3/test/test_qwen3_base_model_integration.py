@@ -119,7 +119,9 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
     def test_base_model_loader_route_uses_registry_default_and_explicit_override(self):
         model = object.__new__(BaseModel)
         model.model_config = types.SimpleNamespace(
-            model_type="qwen_3", use_new_loader=None
+            model_type="qwen_3",
+            use_new_loader=None,
+            require_weight_update=False,
         )
         model._new_loader_unsupported_reason = lambda **kwargs: None
 
@@ -171,11 +173,24 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                     model._load_with_new_loader()
                 config.use_new_loader = None
 
-    def test_weight_update_requirement_falls_back_unless_newloader_is_explicit(self):
+    def test_automatic_newloader_preserves_legacy_until_policy_is_declared(self):
         config = _model_config()
         config.use_new_loader = None
-        config.require_weight_update = True
+        config.require_weight_update = None
         model = _base_model(config)
+
+        self.assertFalse(model._use_new_loader())
+
+        config.require_weight_update = False
+        self.assertTrue(model._use_new_loader())
+
+        config.require_weight_update = True
+        with patch.object(
+            model,
+            "_legacy_loader_unsupported_reason",
+            return_value="this checkpoint has no legacy layout",
+        ), self.assertRaisesRegex(ValueError, "No compatible loader route"):
+            model._use_new_loader()
 
         self.assertFalse(model._use_new_loader())
         config.use_new_loader = True
@@ -427,7 +442,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         config = _model_config()
         base_model = _base_model(config)
 
-        with self.assertLogs(level="ERROR") as captured_logs, patch(
+        with self.assertLogs(level="WARNING") as captured_logs, patch(
             "rtp_llm.models.base_model.kmonitor.report"
         ) as report_metric:
             with tempfile.TemporaryDirectory() as model_path:
