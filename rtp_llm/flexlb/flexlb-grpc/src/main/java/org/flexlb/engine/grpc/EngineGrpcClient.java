@@ -17,6 +17,7 @@ import lombok.Getter;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -40,6 +41,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     private final EventLoopGroup eventLoopGroup;
     private final int connectTimeoutMillis;
 
+    @Autowired
     public EngineGrpcClient(CustomNameResolver nameResolver,
                             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
                             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
