@@ -13,6 +13,7 @@ import json
 import logging
 import struct
 import unittest
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -32,6 +33,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_UNSUPPORTED,
     DashScParameterError,
     LLMFinishReason,
+    MultimodalPart,
     OtherParams,
     SamplingParams,
 )
@@ -42,8 +44,14 @@ from rtp_llm.dash_sc.inference.servicer import (
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.multimodal.multimodal_mixins.kimi_k3 import kimi_k3_image_processor
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 
 def _add_input_tensor(
@@ -458,6 +466,133 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     access_agg.backend_error_code,
                     f"{int(exception_type)}_{exception_type.name}",
                 )
+
+    async def test_kimi_k3_rejects_non_image_parts_as_bad_request(self) -> None:
+        req = self._minimal_request()
+        tokenizer = _FakeTokenizer(
+            {
+                "<|kimi_image_placeholder|>": [22, 11],
+                "<|media_content|>": [163603],
+            }
+        )
+
+        for mm_type in (MMUrlType.VIDEO, MMUrlType.AUDIO):
+            with self.subTest(mm_type=mm_type):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                part = MultimodalPart(
+                    url="https://example.com/media",
+                    mm_type=mm_type,
+                )
+                with patch(
+                    "rtp_llm.dash_sc.inference.servicer."
+                    "parse_multimodal_parts_from_request",
+                    return_value=[part],
+                ), patch(
+                    "rtp_llm.dash_sc.inference.servicer."
+                    "preflight_kimi_k3_images_async",
+                    return_value=(
+                        [torch.tensor([1], dtype=torch.uint8)],
+                        [(1, 1)],
+                    ),
+                ):
+                    chunks = await _drain(
+                        iter_real_model_stream_infer(
+                            req,
+                            [163603],
+                            SamplingParams(),
+                            OtherParams(),
+                            visitor,
+                            rtp_llm_request_id=1,
+                            tokenizer=tokenizer,
+                            is_kimi_k3=True,
+                        )
+                    )
+
+                self.assertEqual(len(chunks), 1)
+                _assert_parameter_error_response(self, chunks[0], "only image")
+                self.assertEqual(visitor.enqueue_called, 0)
+
+    async def test_kimi_k3_invalid_image_is_bad_request(self) -> None:
+        req = self._minimal_request()
+        tokenizer = _FakeTokenizer(
+            {
+                "<|kimi_image_placeholder|>": [22, 11],
+                "<|media_content|>": [163603],
+            }
+        )
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        part = MultimodalPart(
+            url="https://example.com/bad-image",
+            mm_type=MMUrlType.IMAGE,
+        )
+
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer."
+            "parse_multimodal_parts_from_request",
+            return_value=[part],
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
+            return_value=BytesIO(b"not-an-image"),
+        ):
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [163603],
+                    SamplingParams(),
+                    OtherParams(),
+                    visitor,
+                    rtp_llm_request_id=1,
+                    tokenizer=tokenizer,
+                    is_kimi_k3=True,
+                )
+            )
+
+        self.assertEqual(len(chunks), 1)
+        _assert_parameter_error_response(self, chunks[0], "could not be decoded")
+        self.assertEqual(visitor.enqueue_called, 0)
+
+    async def test_kimi_k3_decompression_bomb_is_bad_request(self) -> None:
+        req = self._minimal_request()
+        tokenizer = _FakeTokenizer(
+            {
+                "<|kimi_image_placeholder|>": [22, 11],
+                "<|media_content|>": [163603],
+            }
+        )
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        part = MultimodalPart(
+            url="https://example.com/decompression-bomb",
+            mm_type=MMUrlType.IMAGE,
+        )
+
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer."
+            "parse_multimodal_parts_from_request",
+            return_value=[part],
+        ), patch(
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
+            return_value=BytesIO(b"image-header"),
+        ), patch.object(
+            kimi_k3_image_processor.Image,
+            "open",
+            side_effect=kimi_k3_image_processor.Image.DecompressionBombError("bomb"),
+        ):
+            chunks = await _drain(
+                iter_real_model_stream_infer(
+                    req,
+                    [163603],
+                    SamplingParams(),
+                    OtherParams(),
+                    visitor,
+                    rtp_llm_request_id=1,
+                    tokenizer=tokenizer,
+                    is_kimi_k3=True,
+                )
+            )
+
+        self.assertEqual(len(chunks), 1)
+        _assert_parameter_error_response(self, chunks[0], "could not be decoded")
+        self.assertEqual(visitor.enqueue_called, 0)
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -1831,6 +1966,104 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [9])
+
+    async def test_kimi_k3_splices_image_prompt_without_reencoding_other_tokens(
+        self,
+    ) -> None:
+        class _KimiTokenizer:
+            @staticmethod
+            def decode(*args, **kwargs) -> str:
+                raise AssertionError("K3 multimodal preparation must not decode input_ids")
+
+            @staticmethod
+            def encode(
+                text: str, allow_special_tokens: bool = True, **kwargs
+            ) -> list[int]:
+                if kwargs:
+                    raise AssertionError(
+                        f"K3 native encode must not receive HF kwargs: {kwargs}"
+                    )
+                if not allow_special_tokens:
+                    raise AssertionError("K3 structural prompts require special tokens")
+                mapping = {
+                    "<|kimi_image_placeholder|>": [22, 11],
+                    "<|media_content|>": [163603],
+                    (
+                        "<|media_begin|>image 640x480"
+                        "<|media_content|><|media_pad|><|media_end|>"
+                    ): [20, 640, 480, 163605, 21],
+                }
+                return mapping[text]
+
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=9, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=_KimiTokenizer(),
+            model_type="kimi_k3",
+            mm_download_headers='{"Authorization":"test"}',
+        )
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "kimi-k3-mm"
+        req.model_name = "default"
+        # 900/901 represent an ordinary-encoded user literal such as
+        # ``<|open|>response<|sep|>`` and must remain byte-for-byte unchanged.
+        input_ids = [7, 22, 11, 8, 900, 901]
+        _add_input_tensor(
+            req,
+            "input_ids",
+            "INT32",
+            [len(input_ids)],
+            struct.pack("<6i", *input_ids),
+        )
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "image": "https://example.com/image.jpg",
+                                    "min_pixels": 50176,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        )
+
+        with patch.object(
+            kimi_k3_image_processor,
+            "_preflight_kimi_k3_image",
+            return_value=(torch.tensor([1, 2, 3], dtype=torch.uint8), (640, 480)),
+        ) as preflight:
+            responses = await _drain(
+                servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+            )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_input = visitor.last_generate_input
+        self.assertEqual(
+            generate_input.token_ids.tolist(),
+            [7, 20, 640, 480, 163605, 21, 8, 900, 901],
+        )
+        self.assertEqual(len(generate_input.mm_inputs), 1)
+        mm_input = generate_input.mm_inputs[0]
+        self.assertEqual(mm_input.url, "https://example.com/image.jpg")
+        self.assertEqual(mm_input.tensor.tolist(), [1, 2, 3])
+        self.assertEqual(mm_input.mm_preprocess_config.min_pixels, 50176)
+        preflight.assert_called_once_with(
+            "https://example.com/image.jpg", '{"Authorization":"test"}'
+        )
 
     async def test_timeout_request_sets_dashscope_partial_response_metadata(
         self,

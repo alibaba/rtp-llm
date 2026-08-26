@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+import rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor as kimi_k3_image_processor
 import rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_vit as kimi_k3_vit
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     K3_MAX_IMAGE_FILE_SIZE_KB,
@@ -451,6 +452,89 @@ class KimiK3Eagle3MultimodalEmbeddingTest(TestCase):
         self.assertTrue(torch.equal(output[5], self.embedding_weight[21]))
 
 
+class KimiK3MediaPreflightTest(TestCase):
+    def test_preflight_rejects_image_when_full_decode_fails(self):
+        data = BytesIO()
+        Image.new("RGB", (64, 64), "red").save(
+            data, format="TIFF", compression="tiff_lzw"
+        )
+        raw = bytearray(data.getvalue())
+        # The header remains readable, but the LZW pixel stream is invalid.
+        raw[16] ^= 0xFF
+
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
+            return_value=BytesIO(raw),
+        ):
+            with self.assertRaisesRegex(ValueError, "could not be decoded"):
+                kimi_k3_image_processor.preflight_kimi_k3_images(["image"])
+
+    def test_preflight_rejects_oversized_pixel_count(self):
+        raw = _image_bytes()
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
+            return_value=BytesIO(raw),
+        ), patch.object(
+            kimi_k3_image_processor,
+            "K3_MAX_IMAGE_PIXELS",
+            1,
+        ):
+            with self.assertRaisesRegex(ValueError, "pixel count"):
+                kimi_k3_image_processor.preflight_kimi_k3_images(["image"])
+
+    def test_shared_preflight_reuses_downloaded_bytes_and_reports_sizes(self):
+        raw = _image_bytes(
+            width=31,
+            height=17,
+            mode="RGBA",
+            color=(255, 0, 0, 0),
+        )
+        url = "http://example.com/transparent.png"
+        download_headers = '{"Authorization": "Bearer test"}'
+
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
+            return_value=BytesIO(raw),
+        ) as download:
+            tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
+                [url], download_headers
+            )
+
+        self.assertEqual(sizes, [(31, 17)])
+        self.assertEqual(tensors[0].cpu().numpy().tobytes(), raw)
+        download.assert_called_once_with(
+            url,
+            download_headers,
+            max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
+        )
+
+    def test_preflight_does_not_read_or_seek_shared_cached_stream(self):
+        raw = _image_bytes(width=19, height=13)
+        url = "http://example.com/cached.png"
+
+        class SharedCachedBytesIO(BytesIO):
+            def read(self, *args, **kwargs):
+                raise AssertionError("shared cache stream must not be read")
+
+            def seek(self, *args, **kwargs):
+                raise AssertionError("shared cache stream must not be seeked")
+
+        shared = SharedCachedBytesIO(raw)
+        with patch(
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
+            return_value=shared,
+        ) as download:
+            tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
+                [url, url]
+            )
+
+        self.assertEqual(sizes, [(19, 13), (19, 13)])
+        self.assertEqual(
+            [tensor.cpu().numpy().tobytes() for tensor in tensors], [raw, raw]
+        )
+        self.assertEqual(download.call_count, 2)
+
+
 class KimiK3RendererTest(TestCase):
     def setUp(self):
         self.renderer = KimiK3Renderer.__new__(KimiK3Renderer)
@@ -529,7 +613,7 @@ class KimiK3RendererTest(TestCase):
         request = _media_request("image_url", "http://example.com/transparent.png")
 
         with patch(
-            "rtp_llm.openai.renderers.kimi_k3_renderer.get_bytes_io_from_url",
+            "rtp_llm.multimodal.multimodal_util.get_bytes_io_from_url",
             return_value=BytesIO(raw),
         ) as download:
             rendered = self.renderer.render_chat(request)
@@ -537,7 +621,7 @@ class KimiK3RendererTest(TestCase):
         download.assert_called_once_with(
             "http://example.com/transparent.png",
             self.renderer.vit_config.download_headers,
-            max_file_size_kb=self.renderer.MAX_IMAGE_BYTES // 1024,
+            max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
         )
         # This tokenizer stub encodes the template output byte-by-byte, so the token
         # ids carry the prompt the real image size was injected into.
@@ -555,7 +639,7 @@ class KimiK3RendererTest(TestCase):
         main_thread = threading.get_ident()
         worker_threads = []
 
-        def preflight(url):
+        def preflight(url, download_headers):
             worker_threads.append(threading.get_ident())
             barrier.wait(timeout=2)
             return torch.tensor([len(url)], dtype=torch.uint8), (8, 6)
@@ -571,7 +655,11 @@ class KimiK3RendererTest(TestCase):
             "http://example.com/1.png",
         )
 
-        with patch.object(self.renderer, "_preflight_one", side_effect=preflight):
+        with patch.object(
+            kimi_k3_image_processor,
+            "_preflight_kimi_k3_image",
+            side_effect=preflight,
+        ):
             rendered = asyncio.run(self.renderer.render_chat_async(request))
 
         self.assertEqual(len(rendered.multimodal_inputs), 2)
@@ -579,21 +667,27 @@ class KimiK3RendererTest(TestCase):
         self.assertTrue(all(thread != main_thread for thread in worker_threads))
 
     def test_preflight_rejects_image_count_before_download(self):
-        self.renderer.MAX_IMAGES_PER_REQUEST = 1
-        with patch.object(self.renderer, "_preflight_one") as preflight:
+        with patch.object(
+            kimi_k3_image_processor, "K3_MAX_IMAGES_PER_REQUEST", 1
+        ), patch.object(
+            kimi_k3_image_processor, "_preflight_kimi_k3_image"
+        ) as preflight:
             with self.assertRaisesRegex(ValueError, "image count"):
-                self.renderer._preflight_media(["first", "second"])
+                kimi_k3_image_processor.preflight_kimi_k3_images(
+                    ["first", "second"]
+                )
         preflight.assert_not_called()
 
     def test_preflight_rejects_total_image_bytes(self):
-        self.renderer.MAX_TOTAL_IMAGE_BYTES = 1
         with patch.object(
-            self.renderer,
-            "_preflight_one",
+            kimi_k3_image_processor, "K3_MAX_TOTAL_IMAGE_BYTES", 1
+        ), patch.object(
+            kimi_k3_image_processor,
+            "_preflight_kimi_k3_image",
             return_value=(torch.zeros(2, dtype=torch.uint8), (8, 6)),
         ):
             with self.assertRaisesRegex(ValueError, "image bytes"):
-                self.renderer._preflight_media(["image"])
+                kimi_k3_image_processor.preflight_kimi_k3_images(["image"])
 
     def test_render_rejects_expanded_visual_tokens_over_context(self):
         self.renderer.max_seq_len = 1

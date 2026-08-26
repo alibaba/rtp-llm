@@ -195,8 +195,8 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
                 max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
             )
         with Image.open(data) as image:
-            # image.copy() is the only full decode on any K3 path; PIL's own 89 MP
-            # default would let a tiny header claim 256 MB of pixels.
+            # Direct model RPC calls skip frontend preflight, so the backend
+            # must still enforce pixel limits and fully materialize the image.
             width, height = image.size
             if width * height > K3_MAX_IMAGE_PIXELS:
                 raise ValueError(

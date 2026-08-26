@@ -1,7 +1,11 @@
 """Kimi-K3 image processor."""
 
+import asyncio
 import math
-from typing import Any, Dict, List, Optional, Union
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
+from itertools import repeat
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -32,6 +36,14 @@ _TRANSPARENT_BG_FILL_STAGES = ("before_resize", "after_resize")
 # Per-image compressed byte limit, in KB.  Lives here so the renderer preflight
 # and the vit url fallback, K3's two byte entry points, cannot disagree.
 K3_MAX_IMAGE_FILE_SIZE_KB = 32 * 1024
+K3_MAX_IMAGES_PER_REQUEST = 16
+K3_MAX_TOTAL_IMAGE_BYTES = 128 * 1024 * 1024
+
+_K3_MEDIA_PREFLIGHT_CONCURRENCY = 4
+_K3_MEDIA_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_K3_MEDIA_PREFLIGHT_CONCURRENCY,
+    thread_name_prefix="kimi-k3-media",
+)
 
 # Largest square the tower's one-side patch limit can describe, 4x the patch
 # budget it will actually use.  PIL's own 89 MP default is 256 MB decoded.
@@ -39,6 +51,108 @@ K3_MAX_IMAGE_PIXELS = (
     _DEFAULT_MEDIA_PROC_CFG["patch_limit_on_one_side"]
     * _DEFAULT_MEDIA_PROC_CFG["patch_size"]
 ) ** 2
+
+
+def _preflight_kimi_k3_image(
+    url: str, download_headers: str = ""
+) -> tuple[torch.Tensor, tuple[int, int]]:
+    from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
+
+    data = get_bytes_io_from_url(
+        url,
+        download_headers,
+        max_file_size_kb=K3_MAX_IMAGE_FILE_SIZE_KB,
+    )
+    raw = data.getbuffer()
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            size = image.size
+            if size[0] * size[1] > K3_MAX_IMAGE_PIXELS:
+                raise ValueError(
+                    "Kimi K3 image pixel count exceeds the per-image limit: "
+                    f"{size[0]}x{size[1]} > {K3_MAX_IMAGE_PIXELS}"
+                )
+            image.load()
+    except (OSError, Image.DecompressionBombError) as error:
+        raise ValueError("Kimi K3 image could not be decoded") from error
+    return torch.frombuffer(raw, dtype=torch.uint8), size
+
+
+def _validate_kimi_k3_image_count(urls: Sequence[str]) -> None:
+    if len(urls) > K3_MAX_IMAGES_PER_REQUEST:
+        raise ValueError(
+            "Kimi K3 image count exceeds the per-request limit: "
+            f"{len(urls)} > {K3_MAX_IMAGES_PER_REQUEST}"
+        )
+
+
+def _append_kimi_k3_preflight_batch(
+    results: Sequence[tuple[torch.Tensor, tuple[int, int]]],
+    tensors: List[torch.Tensor],
+    sizes: List[tuple[int, int]],
+    total_bytes: int,
+) -> int:
+    for tensor, size in results:
+        total_bytes += tensor.numel()
+        if total_bytes > K3_MAX_TOTAL_IMAGE_BYTES:
+            raise ValueError(
+                "Kimi K3 image bytes exceed the per-request limit: "
+                f"{total_bytes} > {K3_MAX_TOTAL_IMAGE_BYTES}"
+            )
+        tensors.append(tensor)
+        sizes.append(size)
+    return total_bytes
+
+
+def preflight_kimi_k3_images(
+    urls: Sequence[str], download_headers: str = ""
+) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
+    """Download K3 images once, validate request limits, and report dimensions."""
+    _validate_kimi_k3_image_count(urls)
+    tensors: List[torch.Tensor] = []
+    sizes: List[tuple[int, int]] = []
+    total_bytes = 0
+    for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
+        batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
+        results = list(
+            _K3_MEDIA_EXECUTOR.map(
+                _preflight_kimi_k3_image,
+                batch,
+                repeat(download_headers),
+            )
+        )
+        total_bytes = _append_kimi_k3_preflight_batch(
+            results, tensors, sizes, total_bytes
+        )
+    return tensors, sizes
+
+
+async def preflight_kimi_k3_images_async(
+    urls: Sequence[str], download_headers: str = ""
+) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
+    """Async counterpart that keeps image I/O off the event loop."""
+    _validate_kimi_k3_image_count(urls)
+    loop = asyncio.get_running_loop()
+    tensors: List[torch.Tensor] = []
+    sizes: List[tuple[int, int]] = []
+    total_bytes = 0
+    for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
+        batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
+        results = await asyncio.gather(
+            *(
+                loop.run_in_executor(
+                    _K3_MEDIA_EXECUTOR,
+                    _preflight_kimi_k3_image,
+                    url,
+                    download_headers,
+                )
+                for url in batch
+            )
+        )
+        total_bytes = _append_kimi_k3_preflight_batch(
+            results, tensors, sizes, total_bytes
+        )
+    return tensors, sizes
 
 
 def _navit_resize_image(

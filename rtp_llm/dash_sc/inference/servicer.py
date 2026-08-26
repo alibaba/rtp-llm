@@ -60,12 +60,16 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
+from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
+    KimiK3VisionProcessor,
+    preflight_kimi_k3_images_async,
+)
 from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_request_headers,
     extract_trace_id,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
+from rtp_llm.utils.base_model_datatypes import GenerateInput, MMUrlType, RequestInfo
 from rtp_llm.utils.util import AtomicCounter
 
 # Phase-2 dash_sc_request_id (response infer.id) suffix; keeps client able to tell
@@ -81,14 +85,17 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+_KIMI_K3_IMAGE_PLACEHOLDER = "<|kimi_image_placeholder|>"
+_KIMI_K3_MEDIA_CONTENT = "<|media_content|>"
 
 
-def _build_mm_inputs_from_request(request: Any) -> list:
-    """Build ``MultimodalInput`` list from a dash_sc gRPC request.
+def _build_mm_inputs(
+    mm_parts: list, tensors: Optional[list[torch.Tensor]] = None
+) -> list:
+    """Build ``MultimodalInput`` list from parsed dash_sc multimodal parts.
 
-    Pulls :class:`~rtp_llm.dash_sc.codec.MultimodalPart` records via
-    :func:`parse_multimodal_parts_from_request` and wraps each in a
-    ``MultimodalInput`` whose ``MMPreprocessConfig`` carries the per-part
+    Wraps each parsed multimodal part in a ``MultimodalInput`` whose
+    ``MMPreprocessConfig`` carries the per-part
     overrides (``min_pixels`` / ``max_pixels`` / ``fps`` / ``max_frames`` /
     ``min_frames``). Fields unset by the upstream stay ``-1`` so the engine
     falls back to model defaults — same as the original "all -1" behavior.
@@ -101,18 +108,20 @@ def _build_mm_inputs_from_request(request: Any) -> list:
     ``MMPreprocessConfig`` import is lazy so this module stays importable in
     environments without the C++ binding (e.g. lightweight codec unit tests).
     """
-    mm_parts = parse_multimodal_parts_from_request(request)
     if not mm_parts:
         return []
-    import torch  # noqa: PLC0415  (lazy; only needed when mm parts present)
-
     from rtp_llm.ops import MMPreprocessConfig, MultimodalInput  # noqa: PLC0415
+
+    if tensors is None:
+        tensors = [torch.empty(0)] * len(mm_parts)
+    if len(tensors) != len(mm_parts):
+        raise ValueError("multimodal tensor count must match multimodal input count")
 
     return [
         MultimodalInput(
             part.url,
             part.mm_type,
-            torch.empty(0),
+            tensor,
             MMPreprocessConfig(
                 -1,  # width (no upstream control today)
                 -1,  # height
@@ -125,8 +134,108 @@ def _build_mm_inputs_from_request(request: Any) -> list:
                 -1,  # use VitConfig.mm_timeout_ms
             ),
         )
-        for part in mm_parts
+        for part, tensor in zip(mm_parts, tensors)
     ]
+
+
+def _find_token_sequence_offsets(
+    token_ids: list[int], target_ids: list[int]
+) -> list[int]:
+    if not target_ids:
+        return []
+
+    offsets: list[int] = []
+    target_len = len(target_ids)
+    offset = 0
+    while offset <= len(token_ids) - target_len:
+        if token_ids[offset : offset + target_len] == target_ids:
+            offsets.append(offset)
+            offset += target_len
+        else:
+            offset += 1
+    return offsets
+
+
+async def _prepare_multimodal_request(
+    request: Any,
+    input_ids_list: list[int],
+    *,
+    tokenizer: Any,
+    is_kimi_k3: bool = False,
+    download_headers: str = "",
+) -> tuple[list[int], list]:
+    """Expand K3 chat-template placeholders and build backend multimodal inputs."""
+    mm_parts = parse_multimodal_parts_from_request(request)
+    if not mm_parts:
+        return input_ids_list, []
+
+    if not is_kimi_k3:
+        return input_ids_list, _build_mm_inputs(mm_parts)
+
+    if any(part.mm_type != MMUrlType.IMAGE for part in mm_parts):
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            "Kimi K3 supports only image multimodal inputs",
+        )
+
+    urls = [part.url for part in mm_parts]
+    placeholder_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_IMAGE_PLACEHOLDER)
+    media_content_ids = _encode_kimi_k3_prompt(tokenizer, _KIMI_K3_MEDIA_CONTENT)
+    if not placeholder_ids or not media_content_ids:
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            "Kimi K3 image markers could not be tokenized",
+        )
+
+    placeholder_offsets = _find_token_sequence_offsets(
+        input_ids_list, placeholder_ids
+    )
+    expanded_count = len(
+        _find_token_sequence_offsets(input_ids_list, media_content_ids)
+    )
+    if placeholder_offsets:
+        if expanded_count or len(placeholder_offsets) != len(urls):
+            raise FtRuntimeException(
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                "Kimi K3 image placeholder count does not match multimodal input "
+                f"count: {len(placeholder_offsets)} != {len(urls)}",
+            )
+    elif expanded_count != len(urls):
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            "Kimi K3 media prompt count does not match multimodal input count: "
+            f"{expanded_count} != {len(urls)}",
+        )
+
+    try:
+        tensors, sizes = await preflight_kimi_k3_images_async(
+            urls, download_headers
+        )
+    except ValueError as error:
+        raise FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)
+        ) from error
+
+    expanded_ids = list(input_ids_list)
+    if placeholder_offsets:
+        expanded_ids = []
+        cursor = 0
+        for offset, (width, height) in zip(placeholder_offsets, sizes):
+            expanded_ids.extend(input_ids_list[cursor:offset])
+            image_prompt_ids = _encode_kimi_k3_prompt(
+                tokenizer,
+                KimiK3VisionProcessor.make_image_prompt(width, height),
+            )
+            if not image_prompt_ids:
+                raise FtRuntimeException(
+                    ExceptionType.MM_WRONG_FORMAT_ERROR,
+                    "Kimi K3 image prompt could not be tokenized",
+                )
+            expanded_ids.extend(image_prompt_ids)
+            cursor = offset + len(placeholder_ids)
+        expanded_ids.extend(input_ids_list[cursor:])
+
+    return expanded_ids, _build_mm_inputs(mm_parts, tensors)
 
 
 def _exception_metric_code(error_code: Any) -> str:
@@ -235,6 +344,13 @@ def _encode_tag(tokenizer: Any, text: str) -> list[int]:
     if hf_tok is None or not text:
         return []
     return list(hf_tok.encode(text, add_special_tokens=False))
+
+
+def _encode_kimi_k3_prompt(tokenizer: Any, text: str) -> list[int]:
+    hf_tok = _hf_tokenizer(tokenizer)
+    if hf_tok is None or not text:
+        return []
+    return list(hf_tok.encode(text))
 
 
 def _is_deepseek_v4(model_type: Optional[str]) -> bool:
@@ -549,6 +665,8 @@ async def iter_real_model_stream_infer(
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: Any = None,
     mm_inputs: Optional[list] = None,
+    is_kimi_k3: bool = False,
+    mm_download_headers: str = "",
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -593,6 +711,14 @@ async def iter_real_model_stream_infer(
     should_echo = bool(matched_echo_ids)
     echoed = False
     try:
+        if mm_inputs is None:
+            input_ids_list, mm_inputs = await _prepare_multimodal_request(
+                request,
+                input_ids_list,
+                tokenizer=tokenizer,
+                is_kimi_k3=is_kimi_k3,
+                download_headers=mm_download_headers,
+            )
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
@@ -1424,7 +1550,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         yield resp
                     return
                 else:
-                    mm_inputs = _build_mm_inputs_from_request(request)
                     async for resp, stats in iter_real_model_stream_infer(
                         request,
                         input_ids_list,
@@ -1440,7 +1565,8 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         think_runtime=self._think_runtime,
                         phase2_request_id_factory=self._next_rtp_llm_request_id,
                         access_agg=record,
-                        mm_inputs=mm_inputs,
+                        is_kimi_k3=self._is_kimi_k3,
+                        mm_download_headers=self._mm_download_headers,
                         yield_access_stats=True,
                     ):
                         (
