@@ -15,6 +15,7 @@ from rtp_llm.config.quant_config import (
     WeightOnlyInt8PerChannelQuantConfig,
 )
 from rtp_llm.model_loader.load_config import LoadMethod
+from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
@@ -81,6 +82,7 @@ def _parallelism_config():
         ep_size=1,
         ep_rank=0,
         local_rank=0,
+        world_rank=0,
         prefill_cp_config=types.SimpleNamespace(
             is_enabled=lambda: False,
             is_prefill_enabled=lambda: False,
@@ -425,7 +427,9 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         config = _model_config()
         base_model = _base_model(config)
 
-        with self.assertLogs(level="WARNING") as captured_logs:
+        with self.assertLogs(level="ERROR") as captured_logs, patch(
+            "rtp_llm.models.base_model.kmonitor.report"
+        ) as report_metric:
             with tempfile.TemporaryDirectory() as model_path:
                 config.ckpt_path = model_path
                 save_file(_weights(), f"{model_path}/model.safetensors")
@@ -444,7 +448,13 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         self.assertFalse(base_model.py_model.training)
         self.assertIs(base_model.py_model.weight, base_model.weight)
         self.assertIs(base_model.weight_manager, None)
-        self.assertIn("UpdateWeights RPC", "\n".join(captured_logs.output))
+        self.assertIn("CAPABILITY_DISABLED", "\n".join(captured_logs.output))
+        report_metric.assert_called_once_with(
+            GaugeMetrics.UPDATE_WEIGHTS_AVAILABLE_METRIC,
+            0,
+            {"loader": "newloader", "model_type": "qwen_3"},
+        )
+        self.assertTrue(base_model.uses_new_loader)
         self.assertEqual(
             set(base_model.py_model.runtime_weight_view()),
             {"embedding", "final_layernorm.gamma", "lm_head"},
@@ -457,6 +467,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.model_config = config
         base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
+        base_model.device_resource_config = None
 
         with self.assertRaisesRegex(ValueError, "p-tuning is not supported"):
             base_model._load_with_new_loader()
@@ -466,7 +477,9 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         config.eplb_config = types.SimpleNamespace(enable_eplb=lambda: True)
         base_model = object.__new__(BaseModel)
         base_model.model_config = config
+        base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
+        base_model.device_resource_config = None
 
         with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
             base_model._load_with_new_loader()
@@ -476,7 +489,9 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         config.enable_output_vocab_pruning = True
         base_model = object.__new__(BaseModel)
         base_model.model_config = config
+        base_model.parallelism_config = _parallelism_config()
         base_model.force_cpu_load_weights = False
+        base_model.device_resource_config = None
 
         with self.assertRaisesRegex(
             ValueError, "output vocabulary pruning is not supported"

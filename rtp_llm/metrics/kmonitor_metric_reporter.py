@@ -90,6 +90,7 @@ class GaugeMetrics(Enum):
     NUM_BEAMS_METRIC = "ft_num_beams"
 
     UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
+    UPDATE_WEIGHTS_AVAILABLE_METRIC = "py_rtp_update_weights_available"
 
     # worker_status
     WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"

@@ -205,3 +205,14 @@ The following legacy options and environment variables were removed and must no 
 | `--use_new_loader` | Select the loader explicitly. When unset, registered models use NewLoader only when the model, quantization, and requested loading capabilities are supported; unsupported configurations fall back to the legacy loader. Set true to require NewLoader or false to force rollback. NewLoader currently does not support online `UpdateWeights`; use `--require_weight_update true` for deployments that need it. (`USE_NEW_LOADER`) | Auto |
 | `--require_weight_update` | Require online weight updates through the `UpdateWeights` RPC. In automatic mode this routes registered models to the legacy loader; combining it with `--use_new_loader true` fails during startup. (`REQUIRE_WEIGHT_UPDATE`) | False |
 | `--keep_mla_checkpoint_weights` | Requires NewLoader. For DeepSeek and Kimi MLA models, retain checkpoint weights after conversion to the runtime layout. This increases device memory usage and reduces available KV-cache blocks; it has no effect on other models and is intended for debugging only. (`KEEP_MLA_CHECKPOINT_WEIGHTS`) | False |
+
+### NewLoader upgrade note
+
+Registered models now select NewLoader automatically when their runtime
+configuration is supported. NewLoader does not provide the online
+`UpdateWeights` RPC. Existing RL, training-serving, or other deployments that
+update weights without restarting must set `--require_weight_update true`; auto
+mode will then retain the legacy loader. Use `--use_new_loader false` for an
+explicit full rollback. At startup, the backend emits
+`py_rtp_update_weights_available` (`1` for legacy, `0` for NewLoader) and logs
+`CAPABILITY_DISABLED` at ERROR level when the selected route lacks this RPC.
