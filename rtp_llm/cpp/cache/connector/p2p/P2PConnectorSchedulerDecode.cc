@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -54,6 +55,57 @@ bool P2PConnectorSchedulerDecode::init(const std::string& process_id) {
     }
 
     return true;
+}
+
+ErrorInfo P2PConnectorSchedulerDecode::checkPeerCpLayout(int prefill_tp_size, int prefill_cp_size) const {
+    const auto& cp_cfg = config_.parallelism_config.prefill_cp_config;
+
+    // kv_cache_sharded 是部署级同配开关（OpaqueKVCacheSpec::fixedRegionCpSize 的 DECODE
+    // 分支已依赖此前提），因此本端可以推出对端应有的 CP 片数。
+    const int derived = cp_cfg.kv_cache_sharded ? prefill_tp_size : 1;
+    if (prefill_cp_size != derived) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "peer CP layout drift: reported prefill_cp_size=" + std::to_string(prefill_cp_size)
+                             + " but local config derives " + std::to_string(derived)
+                             + " (kv_cache_sharded=" + std::to_string(cp_cfg.kv_cache_sharded ? 1 : 0)
+                             + ", prefill_tp_size=" + std::to_string(prefill_tp_size) + ")");
+    }
+    // 配置里显式写了 prefill_cp_size 时，它也必须与上报值一致。
+    if (cp_cfg.prefill_cp_size > 0 && static_cast<int>(cp_cfg.prefill_cp_size) != prefill_cp_size) {
+        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                         "peer CP layout drift: reported prefill_cp_size=" + std::to_string(prefill_cp_size)
+                             + " but local prefill_cp_config.prefill_cp_size="
+                             + std::to_string(cp_cfg.prefill_cp_size));
+    }
+    return ErrorInfo::OkStatus();
+}
+
+std::shared_ptr<const PlanResult> P2PConnectorSchedulerDecode::planFor(int prefill_tp_size, int prefill_cp_size) {
+    const auto key = std::make_pair(prefill_tp_size, prefill_cp_size);
+    {
+        std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+        auto                        it = plan_cache_.find(key);
+        if (it != plan_cache_.end()) {
+            return it->second;
+        }
+    }
+
+    // 本端布局从真实 CacheTopology + ParallelismConfig 取；对端布局由本端推导
+    // （ShardLayoutFactory::peerOf），因此 GetPeerInfo / StartLoad 无需新增字段。
+    const auto dst_layout = ShardLayoutFactory::fromTopology(
+        *config_.topology, config_.parallelism_config, RoleType::DECODE);
+    const auto src_layout = ShardLayoutFactory::peerOf(dst_layout,
+                                                       prefill_tp_size,
+                                                       config_.parallelism_config.prefill_cp_config.kv_cache_sharded,
+                                                       RoleType::PREFILL);
+    const auto tags = ShardLayoutFactory::tagsOf(*config_.topology);
+
+    auto result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags));
+
+    std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+    auto [it, inserted] = plan_cache_.emplace(key, result);
+    (void)inserted;
+    return it->second;
 }
 
 void P2PConnectorSchedulerDecode::stopChecker() {
@@ -121,6 +173,34 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
         collector->success = false;
         return {nullptr,
                 ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "cache topology is null")};
+    }
+    if (!no_transfer) {
+        // 漂移断言（设计文档 §3.2.4）：这是「对端 layout 由本端推导」唯一的保护，
+        // 把配置漂移从传输期的疑难杂症变成入口处的确定性报错。
+        const auto drift = checkPeerCpLayout(prefill_tp_size, prefill_cp_size);
+        if (drift.hasError()) {
+            RTP_LLM_LOG_WARNING("asyncRead: %s", drift.ToString().c_str());
+            collector->success = false;
+            return {nullptr, drift};
+        }
+    }
+    // 编排层：计算传输计划。当前阶段**只影子运行**——plan 被算出、校验、随广播下发，
+    // 但执行路径仍是下面的 rank_layer_cache_buffers。等 worker 改成按 route 执行
+    // （slice 2 剩余部分）再切换，并同时删掉下面这条 CP 对称硬拒。
+    std::shared_ptr<const PlanResult> plan;
+    if (!no_transfer) {
+        plan = planFor(prefill_tp_size, prefill_cp_size);
+        if (!plan->ok()) {
+            // 影子阶段不因 plan 失败而拒绝请求，只上报——否则会把当前可用的对称场景
+            // 拖下水。切换执行路径时这里要改成硬失败。
+            RTP_LLM_LOG_WARNING("asyncRead: transfer plan unavailable (shadow mode, request continues): %s",
+                                plan->error.ToString().c_str());
+        } else {
+            RTP_LLM_LOG_DEBUG("asyncRead: transfer plan ready, routes=%zu, digest=%llu, unique_key=%s",
+                              plan->plan.routes.size(),
+                              static_cast<unsigned long long>(plan->plan.digest()),
+                              unique_key.c_str());
+        }
     }
     if (!no_transfer && prefill_cp_size != config_.cp_size) {
         RTP_LLM_LOG_WARNING("asyncRead: source/target CP layout mismatch, prefill_cp_size=%d, decode_cp_size=%d",

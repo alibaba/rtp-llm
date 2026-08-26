@@ -37,6 +37,30 @@ public:
                                                              int                    cp_rank = 0,
                                                              int                    cp_size = 1);
 
+    /// @brief Route 驱动的投影：只取 logical_positions 指定的逻辑位置。
+    ///
+    /// 与 convertLayerTag 的关键区别：**本函数不施加 group.policy.active_tail_blocks**。
+    /// 尾部裁剪必须由编排层统一算进 KeyShardSpec::tail_count —— convertLayerTag 里那段
+    /// `logical_end - tail_count` 用的是**本侧**的 logical_end，两侧 compact 程度不同时
+    /// （prefill compact cp_size→1、decode 不 compact）「最后 N 个」会指向不同的 key，
+    /// 破坏 executeCopy 的键集包含契约。logical_positions 由
+    /// KVCacheTransferPlanner::resolveKeys 解析，已经含了 tail_count。
+    static std::shared_ptr<LayerCacheBuffer> convertLayerTagForRoute(KVCacheResource&           resource,
+                                                                     const GroupBase&           group,
+                                                                     int                        layer_id,
+                                                                     const std::vector<size_t>& logical_positions,
+                                                                     int                        cp_rank,
+                                                                     int                        cp_size);
+
+    /// @brief 对某个 tag 覆盖的每一层各产出一个 buffer（route 与 layer 无关，故在此展开）。
+    static std::vector<std::shared_ptr<LayerCacheBuffer>>
+    convertTagForRoute(KVCacheResource&           resource,
+                       const CacheTopology&       topology,
+                       const std::string&         cache_tag,
+                       const std::vector<size_t>& logical_positions,
+                       int                        cp_rank,
+                       int                        cp_size);
+
     /// @brief 将 LayerCacheBuffer 转换为 transfer 层需要的 KeyBlockInfoMap
     static transfer::KeyBlockInfoMap buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,
                                                         const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,

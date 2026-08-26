@@ -74,6 +74,58 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayerTag(KVCacheR
     return buffer->blockIdMap().empty() ? nullptr : buffer;
 }
 
+std::shared_ptr<LayerCacheBuffer>
+LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resource,
+                                              const GroupBase&           group,
+                                              int                        layer_id,
+                                              const std::vector<size_t>& logical_positions,
+                                              int                        cp_rank,
+                                              int                        cp_size) {
+    const auto& cache_keys = resource.cacheKeys();
+    if (logical_positions.empty() || cache_keys.empty()) {
+        return nullptr;
+    }
+    const auto& block_ids = resource.blocksForLayer(layer_id, group.tag);
+    auto        buffer    = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
+
+    // 注意：这里**不**施加 group.policy.active_tail_blocks —— logical_positions 已由
+    // KVCacheTransferPlanner::resolveKeys 按编排层统一算出的 tail_count 裁剪过。
+    for (size_t logical_pos : logical_positions) {
+        if (logical_pos >= cache_keys.size()) {
+            continue;
+        }
+        const auto physical_pos =
+            CPSlotMapper::physicalBlockPosition(group.policy, logical_pos, cache_keys.size(), cp_rank, cp_size);
+        if (!physical_pos || *physical_pos >= block_ids.size() || isNullBlockIdx(block_ids[*physical_pos])) {
+            continue;
+        }
+        buffer->addBlockId(cache_keys[logical_pos], block_ids[*physical_pos]);
+    }
+    return buffer->blockIdMap().empty() ? nullptr : buffer;
+}
+
+std::vector<std::shared_ptr<LayerCacheBuffer>>
+LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
+                                         const CacheTopology&       topology,
+                                         const std::string&         cache_tag,
+                                         const std::vector<size_t>& logical_positions,
+                                         int                        cp_rank,
+                                         int                        cp_size) {
+    std::vector<std::shared_ptr<LayerCacheBuffer>> result;
+    if (logical_positions.empty()) {
+        return result;
+    }
+    const auto& group = topology.group(cache_tag);
+    for (int layer_id : group.layer_ids) {
+        auto buffer =
+            convertLayerTagForRoute(resource, group, layer_id, logical_positions, cp_rank, cp_size);
+        if (buffer) {
+            result.push_back(std::move(buffer));
+        }
+    }
+    return result;
+}
+
 transfer::KeyBlockInfoMap
 LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConverter>& converter,
                                          const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
