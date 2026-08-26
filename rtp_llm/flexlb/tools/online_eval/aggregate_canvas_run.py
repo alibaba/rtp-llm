@@ -11,6 +11,9 @@ Reads (legacy layout first, consolidated run-root files as fallback):
   flexlb_logs/flexlb.log* or master.log
 Legacy files win whenever they exist: a successful consolidation deletes
 them, so a legacy file that is present means fresher data (RUN_DIR reuse).
+Outputs meta/summary/batch/per_second/queue_timeseries plus engine_dist
+(per-engine routing distribution: requests/Gini/CV/Lorenz/window Gini,
+computed from per_request.jsonl ok rows).
 """
 import glob
 import gzip
@@ -32,6 +35,14 @@ def load_json(path):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+def is_ok(d):
+    """Success row predicate (same rule as per_second bucketing below)."""
+    err = d.get("error") or ""
+    return d.get("status") == "ok" or (
+        not err and d.get("status") not in ("schedule_error",)
+    )
 
 
 # ---- inputs: legacy layout first, consolidated run-root fallback ----
@@ -94,9 +105,7 @@ for d in rows:
     b = per_sec[t]
     b["arrivals"] += 1
     err = d.get("error") or ""
-    if d.get("status") == "ok" or (
-        not err and d.get("status") not in ("schedule_error",)
-    ):
+    if is_ok(d):
         b["success"] += 1
         b["sched"].append(d.get("schedule_ms", 0))
     else:
@@ -211,6 +220,119 @@ batch_distribution = {
     "by_reason": {r: {str(k): c[k] for k in sorted(c)} for r, c in reason_hist.items()},
 }
 
+# ---- engine_dist: per-engine routing distribution (from per_request rows) ----
+# Only ok rows count, matching JavaLoadClient's loadBalanceSummary. Mock
+# java_mock_stats is cluster-aggregate only, so per-engine utilization and KV
+# time series are not computable here (noted, not fabricated).
+
+
+def gini_coeff(values):
+    """Gini coefficient (ascending formula); None when empty/zero-sum."""
+    if not values:
+        return None
+    xs = sorted(values)
+    n = len(xs)
+    total = sum(xs)
+    if total <= 0:
+        return None
+    weighted = sum((i + 1) * x for i, x in enumerate(xs))
+    return round((2.0 * weighted) / (n * total) - (n + 1.0) / n, 4)
+
+
+def cv_coeff(values):
+    """Population coefficient of variation; None when empty/zero-mean."""
+    if not values:
+        return None
+    n = len(values)
+    mean = sum(values) / float(n)
+    if mean == 0:
+        return None
+    var = sum((x - mean) ** 2 for x in values) / float(n)
+    return round((var**0.5) / mean, 3)
+
+
+def lorenz_pct(values):
+    """21-point cumulative share (0..100 step 5), lightest engine first."""
+    if not values:
+        return []
+    xs = sorted(values)
+    total = sum(xs)
+    if total <= 0:
+        return []
+    pts = []
+    for k in range(21):
+        cut = int(round(k * 0.05 * len(xs)))
+        pts.append(round(100.0 * sum(xs[:cut]) / total, 2))
+    return pts
+
+
+ed_notes = [
+    "prefill_util_pct/decode_util_pct/decode_kv: mock java_mock_stats is "
+    "cluster-aggregate only -> omitted"
+]
+engine_dist = {"notes": ed_notes}
+if rows:
+    p_count = Counter()
+    d_count = Counter()
+    p_tokens = defaultdict(float)
+    win_p = defaultdict(Counter)
+    win_d = defaultdict(Counter)
+    for d in rows:
+        if not is_ok(d):
+            continue
+        p = d.get("prefill") or ""
+        de = d.get("decode") or ""
+        if p:
+            p_count[p] += 1
+            p_tokens[p] += d.get("input_len", 0) or 0
+        if de:
+            d_count[de] += 1
+        t_ms = d.get("send_start_epoch_ms")
+        if t_ms is not None:
+            w = int((t_ms - epoch0) // 3000)
+            if p:
+                win_p[w][p] += 1
+            if de:
+                win_d[w][de] += 1
+
+    p_vals = sorted(p_count.values(), reverse=True)
+    d_vals = sorted(d_count.values(), reverse=True)
+    engine_dist["prefill"] = {
+        "engine_count": len(p_count),
+        "requests_per_engine": p_vals,
+        "total": sum(p_vals),
+        "gini_cum": gini_coeff(p_vals),
+        "cv": cv_coeff(p_vals),
+    }
+    engine_dist["decode"] = {
+        "engine_count": len(d_count),
+        "requests_per_engine": d_vals,
+        "total": sum(d_vals),
+        "gini_cum": gini_coeff(d_vals),
+        "cv": cv_coeff(d_vals),
+    }
+    all_w = sorted(set(win_p) | set(win_d))
+    engine_dist["window_gini"] = {
+        "t": [str(w * 3) for w in all_w],
+        "prefill": [
+            gini_coeff(win_p[w].values()) if win_p.get(w) else None for w in all_w
+        ],
+        "decode": [
+            gini_coeff(win_d[w].values()) if win_d.get(w) else None for w in all_w
+        ],
+    }
+    engine_dist["lorenz"] = {
+        "x_pct": list(range(0, 101, 5)),
+        "prefill_y_pct": lorenz_pct(p_vals),
+        "decode_y_pct": lorenz_pct(d_vals),
+    }
+    if p_tokens:
+        engine_dist["prefill_tokens_per_engine"] = [
+            round(v, 1) for v in sorted(p_tokens.values(), reverse=True)
+        ]
+else:
+    ed_notes.append("per_request.jsonl not found/empty: engine_dist omitted")
+
 out = {
     "meta": {"run_dir": os.path.basename(run_dir)},
     "summary": {
@@ -241,5 +363,6 @@ out = {
     },
     "per_second": per_second,
     "queue_timeseries": queue_ts,
+    "engine_dist": engine_dist,
 }
 json.dump(out, sys.stdout)
