@@ -390,7 +390,12 @@ def main():
     inflight_age = agg.get("inflight_age_ts") or []
     kv_ts = agg.get("kv_ts") or []
     batcher_ts = agg.get("batcher_ts") or []
+    batcher_ts_by_role = agg.get("batcher_ts_by_role") or []
+    batcher_engine_quantile_ts = agg.get("batcher_engine_quantile_ts") or []
+    batcher_top_engines_ts = agg.get("batcher_top_engines_ts") or []
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
+    dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
+    batch_size_final = agg.get("batch_size_final") or {}
     schedule_only = (agg.get("meta") or {}).get("schedule_only")
     mock_last = (agg.get("batch") or {}).get("mock_last") or {}
     if not mock_last and slo:
@@ -1075,57 +1080,225 @@ def main():
             )
         )
         # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）。
-        # batcher 队列按 avg/engine 口径画（集群总量 ÷ prefill 引擎数）+
-        # maxWaitingRequestsPerPrefillWorker 容量线；routing 保持集群总量。
-        if batcher_ts:
-            BT = const("BT", str_arr(sparse_cats([r.get("t", 0) for r in batcher_ts])))
-            batcher_q_avg = const(
-                "batcherQueueAvg",
+        # 新口径（batcher_ts_by_role）：per-engine batcher 队列按 role 拆分
+        # （prefill ÷ prefill 引擎数 + 容量线 128；decode ÷ decode 引擎数）；
+        # prefill 另给跨引擎分位与 top-5 引擎序列（决策时点深度的
+        # 1s 采样近似）。旧口径（仅 batcher_ts，P+D 合计）退化画集群总量。
+        if batcher_ts_by_role:
+            BRT = const(
+                "BRT",
+                str_arr(sparse_cats([r.get("t", 0) for r in batcher_ts_by_role])),
+            )
+            p_bq_avg = const(
+                "batcherPrefillAvg",
                 num_arr(
                     [
-                        round((r.get("batcher_queue", 0) or 0) / p_engines, 2)
-                        for r in batcher_ts
+                        round((r.get("prefill", 0) or 0) / p_engines, 2)
+                        for r in batcher_ts_by_role
                     ]
                 ),
             )
-            routing_q = const(
-                "routingQueue",
-                num_arr([r.get("routing_queue", 0) or 0 for r in batcher_ts]),
+            d_bq_avg = const(
+                "batcherDecodeAvg",
+                num_arr(
+                    [
+                        round((r.get("decode", 0) or 0) / d_engines, 2)
+                        for r in batcher_ts_by_role
+                    ]
+                ),
             )
             queue_containers.append(
                 emit_container(
-                    "master 队列深度：batcher（avg/engine）",
-                    "x = 压测时间（s，1s 采样）；y = 队列深度 / 引擎（集群总量 ÷ "
+                    "master 队列深度：batcher by role（avg/engine）",
+                    "x = 压测时间（s，1s 采样）；y = 队列深度 / 引擎（prefill 集群总量 ÷ "
                     + num(p_engines)
-                    + "）；容量线 = maxWaitingRequestsPerPrefillWorker 128",
+                    + "、decode 集群总量 ÷ "
+                    + num(d_engines)
+                    + "）；容量线 = maxWaitingRequestsPerPrefillWorker 128（prefill 口径）",
                     emit_chart(
                         "LineChart",
-                        BT,
+                        BRT,
                         230,
                         [
-                            ("bq", "batcher 队列（avg/engine）", batcher_q_avg, "info"),
+                            ("pq", "prefill（avg/engine）", p_bq_avg, "info"),
+                            ("dq", "decode（avg/engine）", d_bq_avg, "warning"),
                             (
                                 "cap",
                                 "容量 128",
-                                const("batchCap", num_arr([128] * len(batcher_ts))),
+                                const(
+                                    "batchCap",
+                                    num_arr([128] * len(batcher_ts_by_role)),
+                                ),
                                 "danger",
                             ),
                         ],
                     ),
                 )
             )
-            queue_containers.append(
-                emit_container(
-                    "master 队列深度：routing（集群总量）",
-                    "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）",
-                    emit_chart(
-                        "LineChart",
-                        BT,
-                        230,
-                        [("rq", "routing 队列", routing_q, "warning")],
+            if batcher_engine_quantile_ts:
+                EQT = const(
+                    "EQT",
+                    str_arr(
+                        sparse_cats([r.get("t", 0) for r in batcher_engine_quantile_ts])
                     ),
                 )
+                queue_containers.append(
+                    emit_container(
+                        "prefill 引擎队列深度分布（跨引擎分位）",
+                        "x = 压测时间（s，1s 采样）；y = per-engine batcher 队列深度（跨引擎 p50/p90/p99/max）",
+                        emit_chart(
+                            "LineChart",
+                            EQT,
+                            230,
+                            [
+                                (
+                                    "q50",
+                                    "p50",
+                                    const(
+                                        "eqP50",
+                                        num_arr(
+                                            [
+                                                r.get("p50", 0) or 0
+                                                for r in batcher_engine_quantile_ts
+                                            ]
+                                        ),
+                                    ),
+                                    "success",
+                                ),
+                                (
+                                    "q90",
+                                    "p90",
+                                    const(
+                                        "eqP90",
+                                        num_arr(
+                                            [
+                                                r.get("p90", 0) or 0
+                                                for r in batcher_engine_quantile_ts
+                                            ]
+                                        ),
+                                    ),
+                                    "info",
+                                ),
+                                (
+                                    "q99",
+                                    "p99",
+                                    const(
+                                        "eqP99",
+                                        num_arr(
+                                            [
+                                                r.get("p99", 0) or 0
+                                                for r in batcher_engine_quantile_ts
+                                            ]
+                                        ),
+                                    ),
+                                    "warning",
+                                ),
+                                (
+                                    "qmx",
+                                    "max",
+                                    const(
+                                        "eqMax",
+                                        num_arr(
+                                            [
+                                                r.get("max", 0) or 0
+                                                for r in batcher_engine_quantile_ts
+                                            ]
+                                        ),
+                                    ),
+                                    "danger",
+                                ),
+                            ],
+                        ),
+                    )
+                )
+            if batcher_top_engines_ts:
+                # top-5 引擎序列：行键 = engineIp（动态），series 名用 e0..e4
+                top_engine_keys = []
+                for r in batcher_top_engines_ts:
+                    for k in r:
+                        if k != "t" and k not in top_engine_keys:
+                            top_engine_keys.append(k)
+                top_engine_keys = top_engine_keys[:5]
+                if top_engine_keys:
+                    TET = const(
+                        "TET",
+                        str_arr(
+                            sparse_cats([r.get("t", 0) for r in batcher_top_engines_ts])
+                        ),
+                    )
+                    te_colors = ["danger", "warning", "info", "success", "neutral"]
+                    top_lines = []
+                    for i, ekey in enumerate(top_engine_keys):
+                        top_lines.append(
+                            (
+                                "te%d" % i,
+                                ekey,
+                                const(
+                                    "teV%d" % i,
+                                    num_arr(
+                                        [
+                                            r.get(ekey, 0) or 0
+                                            for r in batcher_top_engines_ts
+                                        ]
+                                    ),
+                                ),
+                                te_colors[i % len(te_colors)],
+                            )
+                        )
+                    queue_containers.append(
+                        emit_container(
+                            "prefill 队列深度 top-5 引擎",
+                            "x = 压测时间（s，5s 采样）；y = per-engine batcher 队列深度（峰值 top-5 引擎）",
+                            emit_chart("LineChart", TET, 230, top_lines),
+                        )
+                    )
+        if batcher_ts:
+            BT = const("BT", str_arr(sparse_cats([r.get("t", 0) for r in batcher_ts])))
+            # routing.queue.length 唯一上报点是 type=batchQueue（同一 batcher
+            # 队列的按优先级分桶视角），保持集群总量口径。
+            routing_q = const(
+                "routingQueue",
+                num_arr([r.get("routing_queue", 0) or 0 for r in batcher_ts]),
             )
+            if not batcher_ts_by_role:
+                # 旧口径：batcher_queue 是 PREFILL+DECODE 引擎合计，不除
+                # 引擎数、不画容量线（分母口径不匹配会误导）。
+                batcher_q_total = const(
+                    "batcherQueueTotal",
+                    num_arr([r.get("batcher_queue", 0) or 0 for r in batcher_ts]),
+                )
+                queue_containers.append(
+                    emit_container(
+                        "master 队列深度：batcher（集群总量，P+D 合计）",
+                        "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，PREFILL+DECODE 集群合计）",
+                        emit_chart(
+                            "LineChart",
+                            BT,
+                            230,
+                            [
+                                (
+                                    "bq",
+                                    "batcher 队列（P+D 合计）",
+                                    batcher_q_total,
+                                    "info",
+                                )
+                            ],
+                        ),
+                    )
+                )
+            if any(r.get("routing_queue") for r in batcher_ts):
+                queue_containers.append(
+                    emit_container(
+                        "master 队列深度：routing（集群总量）",
+                        "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）",
+                        emit_chart(
+                            "LineChart",
+                            BT,
+                            230,
+                            [("rq", "routing 队列", routing_q, "warning")],
+                        ),
+                    )
+                )
         # dispatch 决策原因构成（G3 dispatch_reason_total counter 差分出的
         # 每秒 dispatch 速率；与 batcher 队列同 grid 便于对照）
         if dispatch_reason_ts:
@@ -1179,6 +1352,37 @@ def main():
                     emit_chart("LineChart", DRT, 230, dr_lines),
                 )
             )
+        if dispatch_batch_size_ts:
+            BST = const(
+                "BST",
+                str_arr(sparse_cats([r.get("t", 0) for r in dispatch_batch_size_ts])),
+            )
+            bs_known = (
+                ("fixed_window_timeout", "fixed_window_timeout", "warning"),
+                ("batch_full", "batch_full", "info"),
+                ("predicted_execution_cap", "predicted_execution_cap", "success"),
+            )
+            bs_lines = []
+            for key, label, color in bs_known:
+                vals = [r.get(key, 0) or 0 for r in dispatch_batch_size_ts]
+                if not any(vals):
+                    continue
+                bs_lines.append(
+                    (
+                        "bs_" + key,
+                        label,
+                        const("bs" + key, num_arr(vals)),
+                        color,
+                    )
+                )
+            if bs_lines:
+                queue_containers.append(
+                    emit_container(
+                        "dispatch 批大小（按 reason，引擎平均）",
+                        "x = 压测时间（s，1s 采样）；y = dispatch 批大小（请求/批，按 reason 的引擎平均）",
+                        emit_chart("LineChart", BST, 230, bs_lines),
+                    )
+                )
         lines.append("      <Divider />")
         lines.append("")
         lines.append("      <H2>2. 队列（集群总量）</H2>")
@@ -1686,7 +1890,26 @@ def main():
                 fmt_ms(max((r.get("used_pct", 0) or 0) for r in kv_ts)) + "%",
             ]
         )
-    if batcher_ts:
+    if batcher_ts_by_role:
+        b_parts = []
+        p_vals = [
+            r.get("prefill", 0) or 0 for r in batcher_ts_by_role if "prefill" in r
+        ]
+        d_vals = [r.get("decode", 0) or 0 for r in batcher_ts_by_role if "decode" in r]
+        if p_vals:
+            b_parts.append(
+                "prefill " + num(round(max(p_vals) / p_engines, 2)) + "/引擎"
+            )
+        if d_vals:
+            if d_engines:
+                b_parts.append(
+                    "decode " + num(round(max(d_vals) / d_engines, 2)) + "/引擎"
+                )
+            else:
+                b_parts.append("decode " + num(max(d_vals)) + "（集群）")
+        if b_parts:
+            rows.append(["master 队列深度峰值（by role）", " / ".join(b_parts)])
+    elif batcher_ts:
         bq_vals = [
             r.get("batcher_queue", 0) or 0 for r in batcher_ts if "batcher_queue" in r
         ]
@@ -1695,9 +1918,7 @@ def main():
         ]
         b_parts = []
         if bq_vals:
-            b_parts.append(
-                "batcher " + num(round(max(bq_vals) / p_engines, 2)) + "/引擎"
-            )
+            b_parts.append("batcher " + num(max(bq_vals)) + "（P+D 集群）")
         if rq_vals:
             b_parts.append("routing " + num(max(rq_vals)) + "（集群）")
         if b_parts:
@@ -1719,6 +1940,30 @@ def main():
         ]
         if dr_parts:
             rows.append(["dispatch reason 批次数", " / ".join(dr_parts)])
+    if batch_size_final:
+        bs_order = [
+            "fixed_window_timeout",
+            "batch_full",
+            "predicted_execution_cap",
+        ]
+        bs_order += sorted(k for k in batch_size_final if k not in bs_order)
+        bs_parts = []
+        for k in bs_order:
+            e = batch_size_final.get(k) or {}
+            if not e:
+                continue
+            bs_parts.append(
+                k
+                + " p50 "
+                + num(e.get("p50"))
+                + " / max "
+                + num(e.get("max"))
+                + "（"
+                + num(e.get("engines"))
+                + " 引擎终值）"
+            )
+        if bs_parts:
+            rows.append(["dispatch 批大小分布（终值）", " / ".join(bs_parts)])
     if mock_last:
         rows.append(
             [
@@ -1795,7 +2040,14 @@ def main():
         sections.append("latency")
     if queue_ts:
         sections.append("queue")
-    if batcher_ts or dispatch_reason_ts:
+    if (
+        batcher_ts
+        or batcher_ts_by_role
+        or batcher_engine_quantile_ts
+        or batcher_top_engines_ts
+        or dispatch_reason_ts
+        or dispatch_batch_size_ts
+    ):
         sections.append("batcher")
     if p_wg_pts or d_wg_pts:
         sections.append("balance")

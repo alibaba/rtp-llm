@@ -498,14 +498,16 @@ def prom_ts_extract(base_name, agg="sum"):
     return pts
 
 
-def prom_ts_extract_labeled(base_name, label_name):
+def prom_ts_extract_labeled(base_name, label_name, agg="sum"):
     """G3 prometheus timeline -> {label_value: [(epoch_ms, value)]}.
 
     Unlike prom_ts_extract (which folds label variants into one series),
     this splits them by one label — e.g. the dispatch reason counter's
     reason="..." tag. Same-(ts,label) variants (extra labels on the same
-    base name) are summed, so both single- and multi-extra-label shapes
-    yield the right per-label value.
+    base name, e.g. the per-engine series of a reason counter) are folded
+    per sample by agg: "sum" for counters (per-engine deltas add up),
+    "avg" for per-engine gauges (e.g. the per-dispatch batch size — the
+    engine average is the cluster-representative value).
     """
     label_re = re.compile(r"(?:^|,)" + re.escape(label_name) + r'="([^"]*)"(?:,|$)')
     series = {}
@@ -533,8 +535,59 @@ def prom_ts_extract_labeled(base_name, label_name):
             if not m:
                 continue
             bucket = series.setdefault(m.group(1), {})
-            bucket[ts] = bucket.get(ts, 0.0) + float(v)
-    return {label: sorted(points.items()) for label, points in series.items()}
+            acc = bucket.get(ts) or [0.0, 0]
+            acc[0] += float(v)
+            acc[1] += 1
+            bucket[ts] = acc
+    if agg == "avg":
+        return {
+            label: sorted((ts, s / c) for ts, (s, c) in points.items())
+            for label, points in series.items()
+        }
+    return {
+        label: sorted((ts, s) for ts, (s, c) in points.items())
+        for label, points in series.items()
+    }
+
+
+def prom_ts_extract_role_engine(base_name):
+    """G3 prometheus timeline -> {role: {engineIp: [(epoch_ms, value)]}}.
+
+    Splits a per-engine metric carrying both role and engineIp tags (e.g.
+    app.flexlb.batcher.queue.size) by the two labels at once. Series
+    missing either label are skipped.
+    """
+    role_re = re.compile(r'(?:^|,)role="([^"]*)"(?:,|$)')
+    engine_re = re.compile(r'(?:^|,)engineIp="([^"]*)"(?:,|$)')
+    series = {}
+    for grp in prom_ts:
+        if not isinstance(grp, dict):
+            continue
+        metrics = grp.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        try:
+            ts = float(grp.get("ts", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        for k, v in metrics.items():
+            if not isinstance(v, (int, float)):
+                continue
+            key = str(k)
+            name, brace, labels = key.partition("{")
+            if name != base_name or not brace:
+                continue
+            labels = labels.rstrip("}")
+            rm = role_re.search(labels)
+            em = engine_re.search(labels)
+            if not rm or not em:
+                continue
+            role_series = series.setdefault(rm.group(1), {})
+            role_series.setdefault(em.group(1), []).append((ts, float(v)))
+    for role_series in series.values():
+        for pts in role_series.values():
+            pts.sort(key=lambda p: p[0])
+    return series
 
 
 # master 10s ServerScheduleLatencyRecorder rows (SERVER_LAT). The row itself
@@ -775,7 +828,16 @@ if kv_used:
         )
     kv_ts = [{"t": t, **row} for t, row in rel_axis(kv_rows)]
 
-batcher_pts = prom_ts_extract("flexlb_app_flexlb_batcher_queue_size", agg="sum")
+# G3 per-engine batcher queue gauge. The metric carries role + engineIp
+# tags (BatchSchedulerReporter#reportBatcherQueueSize), so the plain
+# prom_ts_extract sum below folds PREFILL + DECODE workers into one
+# cluster total — kept for backward compatibility only; the per-role
+# totals and per-engine series below carry the real breakdown.
+BATCHER_Q_BASE = "flexlb_app_flexlb_batcher_queue_size"
+batcher_pts = prom_ts_extract(BATCHER_Q_BASE, agg="sum")
+# routing.queue.length's only reporter is reportBatcherQueueDepthByPriority
+# (type=batchQueue): the SAME per-engine batcher queue bucketed by priority,
+# not an independent routing-stage queue.
 routing_pts = prom_ts_extract("flexlb_app_routing_queue_length", agg="sum")
 batcher_ts = []
 if batcher_pts or routing_pts:
@@ -790,6 +852,126 @@ if batcher_pts or routing_pts:
             row["routing_queue"] = int(round(r_by_ts[ts]))
         b_rows.append((ts, row))
     batcher_ts = [{"t": t, **row} for t, row in rel_axis(b_rows)]
+
+# Per-role cluster totals + per-engine prefill depth distribution. The
+# master exposes no dispatch-time queue-depth counter, so the per-engine
+# 1s prometheus samples stand in as the decision-time depth estimate
+# (dispatch decisions happen asynchronously on each engine's batcher
+# thread; the sampling skew is bounded by the 1s poll interval).
+batcher_ts_by_role = []
+batcher_engine_quantile_ts = []
+batcher_top_engines_ts = []
+batcher_role_series = prom_ts_extract_role_engine(BATCHER_Q_BASE)
+if batcher_role_series:
+    role_rows_by_ts = defaultdict(dict)
+    for role, engines in batcher_role_series.items():
+        by_ts = defaultdict(float)
+        for pts in engines.values():
+            for ts, v in pts:
+                by_ts[ts] += v
+        for t, v in rel_axis(sorted(by_ts.items())):
+            role_rows_by_ts[t][role.lower()] = int(round(v))
+    batcher_ts_by_role = [
+        {"t": t, **vals} for t, vals in sorted(role_rows_by_ts.items())
+    ]
+
+    prefill_engines = batcher_role_series.get("PREFILL") or {}
+    vals_by_ts = defaultdict(list)
+    for pts in prefill_engines.values():
+        for ts, v in pts:
+            vals_by_ts[ts].append(v)
+
+    def _q(sorted_vals, frac):
+        idx = min(len(sorted_vals) - 1, int(round(frac * (len(sorted_vals) - 1))))
+        return round(sorted_vals[idx], 2)
+
+    q_rows = []
+    for ts, vals in sorted(vals_by_ts.items()):
+        s = sorted(vals)
+        q_rows.append(
+            (
+                ts,
+                {
+                    "p50": _q(s, 0.50),
+                    "p90": _q(s, 0.90),
+                    "p99": _q(s, 0.99),
+                    "max": round(s[-1], 2),
+                    "engines": len(s),
+                },
+            )
+        )
+    batcher_engine_quantile_ts = [{"t": t, **row} for t, row in rel_axis(q_rows)]
+
+    # Top-5 prefill engines by peak depth, downsampled to the last sample
+    # per 5s window to keep the aggregate compact.
+    engine_peak = {}
+    for ip, pts in prefill_engines.items():
+        if pts:
+            engine_peak[ip] = max(v for _, v in pts)
+    top_ips = sorted(engine_peak, key=engine_peak.get, reverse=True)[:5]
+    top_by_t = defaultdict(dict)
+    for ip in top_ips:
+        last_in_bucket = {}
+        order = []
+        for ts, v in prefill_engines[ip]:
+            bucket = int(ts // 5000)
+            if bucket not in last_in_bucket:
+                order.append(bucket)
+            last_in_bucket[bucket] = (ts, v)
+        for t, v in rel_axis([last_in_bucket[b] for b in order]):
+            top_by_t[t][ip] = round(v, 2)
+    batcher_top_engines_ts = [{"t": t, **vals} for t, vals in sorted(top_by_t.items())]
+
+# Per-dispatch batch size gauge (engine.balancing.master.batch.size, tags
+# role + engineIp + reason, reported once per dispatch). Per reason the
+# per-engine values are averaged: each engine's gauge holds the size of
+# its most recent dispatch with that reason, so the engine average is the
+# cluster-representative batch size for that reason at sample time.
+DISPATCH_BATCH_SIZE_BASE = "flexlb_app_engine_balancing_master_batch_size"
+batch_size_series = prom_ts_extract_labeled(
+    DISPATCH_BATCH_SIZE_BASE, "reason", agg="avg"
+)
+dispatch_batch_size_ts = []
+if batch_size_series:
+    bs_by_ts = defaultdict(dict)
+    for reason, pts in batch_size_series.items():
+        for ts, v in pts:
+            bs_by_ts[ts][reason] = round(v, 2)
+    dispatch_batch_size_ts = [
+        {"t": t, **vals} for t, vals in rel_axis(sorted(bs_by_ts.items()))
+    ]
+
+# Terminal batch size distribution from the end-of-run prometheus_after
+# snapshot: each engine's batch_size gauge holds the size of its most recent
+# dispatch with that reason, so the snapshot yields a per-reason distribution
+# across engines (the 1s timeline whitelist only picked this gauge up after
+# the poller fix — the final distribution is available on every run).
+master_prom_after = master_json.get("prometheus_after") or {}
+batch_size_final = {}
+if isinstance(master_prom_after, dict):
+    bs_reason_re = re.compile(r'reason="([^"]*)"')
+    bs_final_vals = defaultdict(list)
+    for k, v in master_prom_after.items():
+        if not isinstance(v, (int, float)):
+            continue
+        key = str(k)
+        if key.split("{", 1)[0] != DISPATCH_BATCH_SIZE_BASE:
+            continue
+        m = bs_reason_re.search(key)
+        if not m:
+            continue
+        bs_final_vals[m.group(1)].append(float(v))
+    for reason, vs in bs_final_vals.items():
+        vs.sort()
+        n = len(vs)
+        batch_size_final[reason] = {
+            "engines": n,
+            "min": vs[0],
+            "p50": vs[n // 2],
+            "p90": vs[min(n - 1, int(n * 0.9))],
+            "max": vs[-1],
+            "avg": round(sum(vs) / n, 2),
+        }
 
 # G3 dispatch reason counters -> per-second dispatch rate per reason.
 # dispatch_reason_total{reason=...} is a monotonically increasing counter
@@ -855,6 +1037,11 @@ out = {
     "inflight_age_ts": inflight_age_ts,
     "kv_ts": kv_ts,
     "batcher_ts": batcher_ts,
+    "batcher_ts_by_role": batcher_ts_by_role,
+    "batcher_engine_quantile_ts": batcher_engine_quantile_ts,
+    "batcher_top_engines_ts": batcher_top_engines_ts,
     "dispatch_reason_ts": dispatch_reason_ts,
+    "dispatch_batch_size_ts": dispatch_batch_size_ts,
+    "batch_size_final": batch_size_final,
 }
 json.dump(out, sys.stdout)
