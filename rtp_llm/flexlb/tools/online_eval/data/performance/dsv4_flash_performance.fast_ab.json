@@ -1,6 +1,6 @@
 {
   "block_size": 1024,
-  "sleep_scale": 0.1,
+  "sleep_scale": 1.0,
   "prefill": {
     "fixed_ms": 1.0,
     "scale": 1.0
