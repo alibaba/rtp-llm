@@ -4,10 +4,11 @@ The fusion concatenates the in_proj_qkvz and in_proj_ba weights along the
 output dim and runs a single GEMM, then slices the output to recover the
 two original projections. This must be:
   (1) numerically equivalent to running the two GEMMs separately, and
-  (2) bypassed when linear_attn_qkvz_s is present (FP8 path).
+  (2) bypassed for FP8 qkvz or a ROCm swizzle-incompatible fused layout.
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -22,6 +23,37 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         self.device = torch.device("cuda:0")
         torch.manual_seed(0)
         torch.cuda.manual_seed(0)
+
+    def test_rocm_ba_loader_rewrite_follows_local_shape(self) -> None:
+        from rtp_llm.device.device_impl import RocmImpl
+        from rtp_llm.utils.model_weight import W
+        from rtp_llm.utils.swizzle_utils import swizzle_tensor
+
+        fake_impl = SimpleNamespace(
+            _is_gfx950=lambda: False,
+            py_env_configs=SimpleNamespace(
+                py_hw_kernel_config=SimpleNamespace(use_swizzleA=True)
+            ),
+        )
+        aligned_ba = torch.randn(2048, 16, dtype=torch.bfloat16, device=self.device)
+        expected_aligned = swizzle_tensor(aligned_ba.t(), False).t()
+
+        rewritten_aligned = RocmImpl.maybe_rewrite_weight_by_key(
+            fake_impl,
+            W.linear_attn_ba_w,
+            aligned_ba,
+        )
+        self.assertTrue(torch.equal(rewritten_aligned, expected_aligned))
+
+        unaligned_ba = torch.randn(5120, 24, dtype=torch.bfloat16, device=self.device)
+        unaligned_before = unaligned_ba.clone()
+        rewritten_unaligned = RocmImpl.maybe_rewrite_weight_by_key(
+            fake_impl,
+            W.linear_attn_ba_w,
+            unaligned_ba,
+        )
+        self.assertIs(rewritten_unaligned, unaligned_ba)
+        self.assertTrue(torch.equal(rewritten_unaligned, unaligned_before))
 
     # ---- (1) low-level math equivalence ----
 
@@ -59,18 +91,22 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
 
     # ---- (2) Qwen3NextGatedDeltaNet end-to-end ----
 
-    def _build_module(self, weights_extra=None):
+    def _build_module(self, weights_extra=None, hw_kernel_config=None, num_v_heads=4):
         """Construct a small Qwen3NextGatedDeltaNet with random weights.
 
         Mirrors the setup pattern in
         rtp_llm/models_py/modules/factory/attention/cuda_cp_impl/test/test_cp_linear_attn.py
         but at the smallest legal sizes so the test runs fast.
+
+        num_v_heads controls the BA out-dim (= 2 * num_v_heads): 4 -> 8
+        (not 16-aligned), 8 -> 16 (aligned). hw_kernel_config is forwarded to
+        the module so the in_proj_ba swizzle/NoSwizzle decision can be observed.
         """
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
         from rtp_llm.ops import DataType, LinearAttentionConfig, ParallelismConfig
         from rtp_llm.utils.model_weight import W
 
-        num_k_heads, num_v_heads = 2, 4
+        num_k_heads = 2
         head_k_dim, head_v_dim = 32, 32
         hidden_size, conv_kernel_dim = 128, 4
 
@@ -116,7 +152,63 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         if weights_extra:
             weights.update(weights_extra)
 
-        return Qwen3NextGatedDeltaNet(cfg, par, weights, layernorm_eps=1e-6).to(dev)
+        return Qwen3NextGatedDeltaNet(
+            cfg, par, weights, layernorm_eps=1e-6, hw_kernel_config=hw_kernel_config
+        ).to(dev)
+
+    def _build_with_mocked_linears(
+        self,
+        *,
+        is_rocm: bool,
+        use_swizzle: bool,
+        num_v_heads: int,
+        quantized_qkvz: bool = False,
+    ):
+        """Construct a module while recording only its linear dispatch policy."""
+        from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
+        from rtp_llm.ops import HWKernelConfig
+        from rtp_llm.utils.model_weight import W
+
+        hw = HWKernelConfig()
+        hw.use_swizzleA = use_swizzle
+        weights_extra = None
+        if quantized_qkvz:
+            weights_extra = {
+                W.linear_attn_qkvz_s: torch.randn(
+                    8, dtype=torch.float32, device=self.device
+                )
+            }
+
+        hip_version = "test-rocm" if is_rocm else None
+        with patch.object(torch.version, "hip", hip_version, create=True), patch.object(
+            LinearFactory,
+            "create_linear",
+            side_effect=lambda *a, **kw: MagicMock(name="MockFusedLinear"),
+        ) as fused_factory, patch.object(
+            LinearFactory,
+            "create_linear_from_weights",
+            side_effect=lambda *a, **kw: MagicMock(name="MockLinear"),
+        ) as weights_factory:
+            module = self._build_module(
+                weights_extra=weights_extra,
+                hw_kernel_config=hw,
+                num_v_heads=num_v_heads,
+            )
+
+        return module, hw, fused_factory, weights_factory
+
+    @staticmethod
+    def _factory_call_for_weight(mock_factory, weight_key):
+        calls = [
+            call
+            for call in mock_factory.call_args_list
+            if len(call.args) >= 2 and call.args[1] == weight_key
+        ]
+        if len(calls) != 1:
+            raise AssertionError(
+                f"expected one factory call for {weight_key}, got {len(calls)}"
+            )
+        return calls[0]
 
     def test_bf16_path_takes_fusion(self) -> None:
         """When linear_attn_qkvz_s is None (BF16), fusion is enabled."""
@@ -125,6 +217,86 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         self.assertIsNotNone(module.in_proj_fused)
         self.assertIsNone(module.in_proj_qkvz)
         self.assertIsNone(module.in_proj_ba)
+
+    def test_rocm_swizzle_unaligned_bf16_uses_two_gemms(self) -> None:
+        """A swizzled qkvz plus raw BA must never become one WithSwizzle GEMM."""
+        from rtp_llm.utils.model_weight import W
+
+        module, hw, fused_factory, weights_factory = self._build_with_mocked_linears(
+            is_rocm=True,
+            use_swizzle=True,
+            num_v_heads=4,
+        )
+
+        self.assertFalse(module._qkvz_ba_fused)
+        fused_factory.assert_not_called()
+        qkvz_call = self._factory_call_for_weight(weights_factory, W.linear_attn_qkvz_w)
+        ba_call = self._factory_call_for_weight(weights_factory, W.linear_attn_ba_w)
+        self.assertIs(qkvz_call.kwargs["hw_kernel_config"], hw)
+        self.assertIsNone(ba_call.kwargs["hw_kernel_config"])
+
+    def test_rocm_swizzle_aligned_bf16_keeps_fusion(self) -> None:
+        from rtp_llm.utils.model_weight import W
+
+        module, hw, fused_factory, weights_factory = self._build_with_mocked_linears(
+            is_rocm=True,
+            use_swizzle=True,
+            num_v_heads=8,
+        )
+
+        self.assertTrue(module._qkvz_ba_fused)
+        fused_factory.assert_called_once()
+        self.assertIs(
+            fused_factory.call_args.kwargs["hw_kernel_config"],
+            hw,
+        )
+        self.assertFalse(
+            any(
+                len(call.args) >= 2
+                and call.args[1] in (W.linear_attn_qkvz_w, W.linear_attn_ba_w)
+                for call in weights_factory.call_args_list
+            )
+        )
+
+    def test_rocm_without_swizzle_keeps_unaligned_bf16_fusion(self) -> None:
+        module, hw, fused_factory, _ = self._build_with_mocked_linears(
+            is_rocm=True,
+            use_swizzle=False,
+            num_v_heads=4,
+        )
+
+        self.assertTrue(module._qkvz_ba_fused)
+        fused_factory.assert_called_once()
+        self.assertIs(fused_factory.call_args.kwargs["hw_kernel_config"], hw)
+
+    def test_cuda_keeps_unaligned_bf16_fusion(self) -> None:
+        module, hw, fused_factory, _ = self._build_with_mocked_linears(
+            is_rocm=False,
+            use_swizzle=True,
+            num_v_heads=4,
+        )
+
+        self.assertTrue(module._qkvz_ba_fused)
+        fused_factory.assert_called_once()
+        self.assertIs(fused_factory.call_args.kwargs["hw_kernel_config"], hw)
+
+    def test_fp8_qkvz_with_aligned_ba_keeps_ba_swizzle(self) -> None:
+        from rtp_llm.utils.model_weight import W
+
+        module, hw, fused_factory, weights_factory = self._build_with_mocked_linears(
+            is_rocm=True,
+            use_swizzle=True,
+            num_v_heads=8,
+            quantized_qkvz=True,
+        )
+
+        self.assertFalse(module._qkvz_ba_fused)
+        fused_factory.assert_not_called()
+        qkvz_call = self._factory_call_for_weight(weights_factory, W.linear_attn_qkvz_w)
+        ba_call = self._factory_call_for_weight(weights_factory, W.linear_attn_ba_w)
+        self.assertEqual(qkvz_call.args[2], W.linear_attn_qkvz_s)
+        self.assertIs(qkvz_call.kwargs["hw_kernel_config"], hw)
+        self.assertIs(ba_call.kwargs["hw_kernel_config"], hw)
 
     def test_quantized_path_falls_back_in_constructor(self) -> None:
         """When linear_attn_qkvz_s is set (FP8 path) the constructor must
@@ -181,6 +353,69 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
             qkvz_calls[0].args[2],
             W.linear_attn_qkvz_s,
             "fallback must pass linear_attn_qkvz_s as scale_key",
+        )
+
+    def _ba_hw_kernel_config_in_fallback(self, num_v_heads):
+        """Build the FP8 fallback (non-fused) branch with swizzle enabled and
+        return the hw_kernel_config the factory received for in_proj_ba.
+
+        Mocks the Linear factory so no real GEMM/strategy lookup runs; we only
+        inspect which hw_kernel_config was wired for the BA projection.
+        """
+        from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
+        from rtp_llm.ops import HWKernelConfig
+        from rtp_llm.utils.model_weight import W
+
+        hw = HWKernelConfig()
+        hw.use_swizzleA = True
+        # qkvz_s presence forces the 2-GEMM (non-fused) branch where in_proj_ba
+        # is created standalone.
+        scale = torch.randn(8, dtype=torch.float32, device=self.device)
+
+        with patch.object(
+            LinearFactory,
+            "create_linear_from_weights",
+            side_effect=lambda *a, **kw: MagicMock(name="MockLinear"),
+        ) as mock_factory:
+            self._build_module(
+                weights_extra={W.linear_attn_qkvz_s: scale},
+                hw_kernel_config=hw,
+                num_v_heads=num_v_heads,
+            )
+
+        ba_calls = [
+            c
+            for c in mock_factory.call_args_list
+            if len(c.args) >= 2 and c.args[1] == W.linear_attn_ba_w
+        ]
+        self.assertEqual(len(ba_calls), 1, "fallback must build in_proj_ba once")
+        return hw, ba_calls[0].kwargs.get("hw_kernel_config")
+
+    @unittest.skipUnless(
+        torch.version.hip is not None,
+        "ROCm-only BA swizzle dispatch",
+    )
+    def test_in_proj_ba_no_swizzle_when_unaligned(self) -> None:
+        """BA out-dim 8 (= 2*4, not 16-aligned, mirrors TP=4's 24): in_proj_ba
+        must receive hw_kernel_config=None so dispatch picks NoSwizzle,
+        consistent with device_impl skipping the swizzle. This is the crash fix."""
+        _hw, ba_cfg = self._ba_hw_kernel_config_in_fallback(num_v_heads=4)
+        self.assertIsNone(
+            ba_cfg,
+            "unaligned BA must pass hw_kernel_config=None (NoSwizzle dispatch)",
+        )
+
+    @unittest.skipUnless(
+        torch.version.hip is not None,
+        "ROCm-only BA swizzle dispatch",
+    )
+    def test_in_proj_ba_keeps_swizzle_when_aligned(self) -> None:
+        """Quantized qkvz does not disable swizzle for an aligned BF16 BA."""
+        hw, ba_cfg = self._ba_hw_kernel_config_in_fallback(num_v_heads=8)
+        self.assertIs(
+            ba_cfg,
+            hw,
+            "aligned BA must keep WithSwizzle dispatch",
         )
 
     def test_input_project_helper_shapes(self) -> None:

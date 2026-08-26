@@ -16,6 +16,16 @@ filegroup(
 )
 
 py_test(
+    name = "swizzle_utils_test",
+    srcs = [
+        "swizzle_utils_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "jit_cache_manager_test",
     size = "large",
     srcs = [

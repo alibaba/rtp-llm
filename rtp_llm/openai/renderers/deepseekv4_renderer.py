@@ -429,14 +429,30 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         # Override with custom configs if provided
         # Note: context parameter is not used since RTP-LLM always provides full message history
         if request.chat_template_kwargs:
-            encode_config.update(request.chat_template_kwargs)
+            # ChatCompletionRequest uses disabled/adaptive/enabled, while the
+            # DeepSeek encoding script uses chat/thinking. The request mode was
+            # already resolved above, so do not pass its public enum value into
+            # encode_messages as an encoding-level override.
+            encode_config.update(
+                {
+                    key: value
+                    for key, value in request.chat_template_kwargs.items()
+                    if key != "thinking_mode"
+                }
+            )
 
         if (
             request.extra_configs
             and request.extra_configs.chat_template_kwargs
             and isinstance(request.extra_configs.chat_template_kwargs, dict)
         ):
-            encode_config.update(request.extra_configs.chat_template_kwargs)
+            encode_config.update(
+                {
+                    key: value
+                    for key, value in request.extra_configs.chat_template_kwargs.items()
+                    if key != "thinking_mode"
+                }
+            )
         if request.disable_thinking():
             encode_config["thinking_mode"] = "chat"
 
