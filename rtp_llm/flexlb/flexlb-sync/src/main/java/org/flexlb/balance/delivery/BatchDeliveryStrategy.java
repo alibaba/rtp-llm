@@ -74,8 +74,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             List<DeliveryItem> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPrediction) {
-        List<DeliveryItem> ordered = List.copyOf(candidates);
-        DeliveryItem head = ordered.get(0);
+        DeliveryItem head = candidates.get(0);
 
         CapacityBoundary.Attempt<Prepared> groupAttempt =
                 slotPort.prepareIfOwned(head, () -> prepareAdmission(head))
@@ -91,12 +90,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         Prepared prepared = ((CapacityBoundary.Attempt.Accepted<Prepared>)
                 groupAttempt).value();
-        List<DeliveryItem> admitted = new ArrayList<>(ordered.size());
+        List<DeliveryItem> admitted = new ArrayList<>(candidates.size());
         admitted.add(head);
         DeliveryContext.SelectionBoundary boundary = null;
         try {
-            for (int index = 1; index < ordered.size(); index++) {
-                DeliveryItem item = ordered.get(index);
+            for (int index = 1; index < candidates.size(); index++) {
+                DeliveryItem item = candidates.get(index);
                 CapacityBoundary.Attempt<DeliveryItem> attempt =
                         slotPort.prepareIfOwned(
                                 item, () -> prepared.append(item))
@@ -115,7 +114,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 }
             }
             long predictedMs = plannedPrediction.isPresent()
-                    && sameIdentitySequence(admitted, ordered)
+                    && sameIdentitySequence(admitted, candidates)
                     ? plannedPrediction.getAsLong()
                     : PrefillPredictionBoundary.predictCommittedBatchMs(
                             evaluator,

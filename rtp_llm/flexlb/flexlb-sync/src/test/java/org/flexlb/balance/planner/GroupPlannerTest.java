@@ -174,7 +174,7 @@ class GroupPlannerTest {
 
         @Test
         void readyPlanRequiresAReason() {
-            assertThrows(NullPointerException.class,
+            assertThrows(IllegalArgumentException.class,
                     () -> new Plan<>(List.of(item(1L, 10L, 0L)),
                             Shape.empty().add(10L), 0L, 300L, false,
                             OptionalDouble.empty(),

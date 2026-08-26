@@ -269,18 +269,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public record AcceptedWorkerStatusFact(ReservationHandle reservation)
             implements WorkerStatusFact {
-        public AcceptedWorkerStatusFact {
-            java.util.Objects.requireNonNull(reservation, "reservation");
-        }
     }
 
     public record TerminalWorkerStatusFact(
             ReservationHandle reservation,
             long errorCode)
             implements WorkerStatusFact {
-        public TerminalWorkerStatusFact {
-            java.util.Objects.requireNonNull(reservation, "reservation");
-        }
     }
 
     /** Exact RequestSlot facts emitted after the Decode lock is released. */
@@ -289,7 +283,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             List<WorkerStatusFact> facts)
             implements EndpointStatusReduction {
         public StatusReduction {
-            java.util.Objects.requireNonNull(source, "source");
             facts = List.copyOf(facts);
         }
     }
@@ -1273,7 +1266,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority,
             AdmissionCapacity capacity) {
-        java.util.Objects.requireNonNull(capacity, "capacity");
         GenerationPin generationPin = tryPinGeneration();
         if (generationPin == null) {
             return LocalEvictionResult.ENDPOINT_RETIRED;
@@ -1552,7 +1544,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (attemptToken <= 0 || victims == null || victims.isEmpty()) {
             throw new IllegalArgumentException("attempt token and victims are required");
         }
-        java.util.Objects.requireNonNull(capacity, "capacity");
         GenerationPin generationPin = tryPinGeneration();
         if (generationPin == null) {
             return PreemptionBeginResult.ENDPOINT_RETIRED;
@@ -2355,7 +2346,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         this.confirmedRunningCount = actualConfirmed + syntheticallyHeldSlots
                 + engineFenceHeldSlotCount;
 
-        return List.copyOf(facts);
+        return facts;
     }
 
     /** Caller holds {@link #admissionLock}; request-id-only facts are forbidden. */

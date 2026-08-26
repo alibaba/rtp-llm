@@ -4,7 +4,6 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 
 import java.util.List;
-import java.util.Objects;
 
 /** Result of one worker decision cycle. */
 sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
@@ -25,7 +24,7 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
             if (items.isEmpty()) {
                 throw new IllegalArgumentException("admitted prefix cannot be empty");
             }
-            Objects.requireNonNull(metadata, "metadata");
+            assert metadata != null : "missing delivery metadata";
         }
     }
 
@@ -35,8 +34,8 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
             CapacityBoundary.Unavailable unavailable)
             implements BatcherCycleResult {
         public CapacityBlocked {
-            Objects.requireNonNull(item, "blocked item");
-            Objects.requireNonNull(unavailable, "capacity unavailability");
+            assert item != null : "missing blocked item";
+            assert unavailable != null : "missing capacity unavailability";
         }
     }
 
@@ -57,8 +56,8 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
             long wakeAtMs,
             SchedulingWaitReason reason) implements BatcherCycleResult {
         public AwaitingSchedulingChange {
-            Objects.requireNonNull(head, "waiting head");
-            Objects.requireNonNull(reason, "wait reason");
+            assert head != null : "missing waiting head";
+            assert reason != null : "missing wait reason";
         }
     }
 }

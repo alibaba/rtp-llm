@@ -323,9 +323,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private record StatusApplication(
             WorkerEndpoint endpoint,
             EndpointStatusReduction reduction) {
-        private StatusApplication {
-            Objects.requireNonNull(reduction, "reduction");
-        }
     }
 
     private void recordStatusCheckFailure(Throwable failure) {

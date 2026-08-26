@@ -4,7 +4,6 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalLong;
 
 /** Projects one incoming route against immutable, coherently captured inputs. */
@@ -73,14 +72,6 @@ public final class RouteProjection {
             String blockedDetail,
             AfterProbeAdmission afterProbe,
             String afterProbeDetail) {
-
-        public AdmissionBlockSemantics {
-            blockedDetail = Objects.requireNonNull(
-                    blockedDetail, "blockedDetail");
-            afterProbe = Objects.requireNonNull(afterProbe, "afterProbe");
-            afterProbeDetail = Objects.requireNonNull(
-                    afterProbeDetail, "afterProbeDetail");
-        }
     }
 
     /** Outputs requested by a routing policy from the frozen timeline. */
@@ -121,7 +112,6 @@ public final class RouteProjection {
                 throw new IllegalArgumentException(
                         "routingCacheMatchTokens must be non-negative");
             }
-            demand = Objects.requireNonNull(demand, "demand");
         }
 
         GroupPlanner.Item asItem() {
@@ -141,7 +131,6 @@ public final class RouteProjection {
             String detail) {
 
         public Result {
-            state = Objects.requireNonNull(state, "state");
             projectedTtftMs = requireNonNegative(
                     projectedTtftMs, "projectedTtftMs");
             projectedDrainMs = requireNonNegative(
@@ -158,8 +147,6 @@ public final class RouteProjection {
                 throw new IllegalArgumentException(
                         "incomingPrefillMs must be non-negative");
             }
-            initialHeadDisposition = Objects.requireNonNull(
-                    initialHeadDisposition, "initialHeadDisposition");
             detail = detail == null ? "" : detail;
         }
 
@@ -187,7 +174,6 @@ public final class RouteProjection {
 
         private static OptionalLong requireNonNegative(
                 OptionalLong value, String name) {
-            Objects.requireNonNull(value, name);
             if (value.isPresent() && value.getAsLong() < 0L) {
                 throw new IllegalArgumentException(name + " must be non-negative");
             }
@@ -203,12 +189,10 @@ public final class RouteProjection {
             OptionalLong pendingCount) {
 
         public Candidate {
-            projection = Objects.requireNonNull(projection, "projection");
             if (cacheHitTokens < 0L || routingCacheMatchTokens < 0L) {
                 throw new IllegalArgumentException(
                         "cache token counts must be non-negative");
             }
-            pendingCount = Objects.requireNonNull(pendingCount, "pendingCount");
             boolean carriesPendingCount = projection.selectable()
                     || projection.engineWorkUnmodeled();
             if (carriesPendingCount != pendingCount.isPresent()) {
@@ -252,8 +236,6 @@ public final class RouteProjection {
             long pendingRequestCount) {
 
         public Inputs {
-            queue = Objects.requireNonNull(queue, "queue");
-            work = Objects.requireNonNull(work, "work");
             if (queue.capturedAtMs() != work.capturedAtMs()) {
                 throw new IllegalArgumentException(
                         "queue and work snapshots must share capturedAtMs");

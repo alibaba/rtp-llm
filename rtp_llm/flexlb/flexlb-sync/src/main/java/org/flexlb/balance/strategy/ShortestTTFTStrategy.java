@@ -135,7 +135,7 @@ public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
         indexes.sort(Comparator
                 .comparingLong((Integer index) -> candidates.projectedTtftMs(index))
                 .thenComparingInt(Integer::intValue));
-        return List.copyOf(indexes.subList(0, count));
+        return indexes.subList(0, count);
     }
 
     /**

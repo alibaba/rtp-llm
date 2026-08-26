@@ -3,7 +3,6 @@ package org.flexlb.balance.planner;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalDouble;
 
 /**
@@ -148,9 +147,6 @@ public final class GroupPlanner {
 
         public Selection {
             items = items == null ? List.of() : List.copyOf(items);
-            Objects.requireNonNull(shape, "shape");
-            selectedPredictionMs = Objects.requireNonNull(
-                    selectedPredictionMs, "selectedPredictionMs");
             validateSelectedPrediction(items, selectedPredictionMs);
         }
     }
@@ -168,13 +164,12 @@ public final class GroupPlanner {
 
         public Plan {
             items = items == null ? List.of() : List.copyOf(items);
-            Objects.requireNonNull(shape, "shape");
-            selectedPredictionMs = Objects.requireNonNull(
-                    selectedPredictionMs, "selectedPredictionMs");
             validateSelectedPrediction(items, selectedPredictionMs);
-            Objects.requireNonNull(windowReadiness, "windowReadiness");
             if (windowReadiness == WindowReadiness.READY) {
-                Objects.requireNonNull(reason, "ready plan reason");
+                if (reason == null) {
+                    throw new IllegalArgumentException(
+                            "ready plan requires a reason");
+                }
             } else if (reason != null) {
                 throw new IllegalArgumentException("waiting plan must not have a reason");
             }

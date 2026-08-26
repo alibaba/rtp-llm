@@ -103,8 +103,7 @@ public final class EvictionPlanner {
         }
 
         candidates.sort(CANDIDATE_ORDER);
-        List<DeliveryItem> victims = List.copyOf(
-                candidates.subList(0, queueDeficit));
+        List<DeliveryItem> victims = candidates.subList(0, queueDeficit);
 
         // 9.3: retain the scalar cost for diagnostics; structured priority
         // harm is the absolute comparison dimension.
@@ -381,7 +380,7 @@ public final class EvictionPlanner {
             return DecodeVictimSet.fail("insufficient_lower_priority_candidates");
         }
         candidates.sort(DECODE_SLOT_ORDER);
-        List<DecodeRequestSnapshot> victims = List.copyOf(candidates.subList(0, (int) deficit));
+        List<DecodeRequestSnapshot> victims = candidates.subList(0, (int) deficit);
         long cost = 0;
         long freedKv = 0;
         PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
@@ -438,7 +437,7 @@ public final class EvictionPlanner {
         if (freedKv < kvDeficit) {
             return DecodeVictimSet.fail("insufficient_releasable_kv");
         }
-        return new DecodeVictimSet(List.copyOf(victims), harmProfile.build(),
+        return new DecodeVictimSet(victims, harmProfile.build(),
                 PriorityCostFunction.saturatedMultiply(
                         PriorityCostFunction.H_DECODE_KV_FULL, cost),
                 freedKv, null);
@@ -537,7 +536,7 @@ public final class EvictionPlanner {
         PlanCost cost = new PlanCost(harmProfile, minVictimPriority,
                 totalCost, victims.size(), tieBreak);
         return new DecodeEvictionProposal(ep.endpointId(),
-                List.copyOf(victims), evictionCase, totalCost, freedKvTokens, cost);
+                victims, evictionCase, totalCost, freedKvTokens, cost);
     }
 
     /**

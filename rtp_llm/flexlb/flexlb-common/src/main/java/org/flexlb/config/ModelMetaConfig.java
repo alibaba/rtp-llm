@@ -56,7 +56,7 @@ public class ModelMetaConfig {
         }
         this.serviceRoute = parsed;
         this.modelName = IdUtils.getModelNameByServiceId(parsed.getServiceId());
-        this.requiredRoles = List.copyOf(roles);
+        this.requiredRoles = roles;
     }
 
     /** Immutable request topology; live endpoint occupancy never changes it. */
@@ -76,6 +76,6 @@ public class ModelMetaConfig {
                 || !requiredRoles.contains(role)) {
             return List.of();
         }
-        return List.copyOf(serviceRoute.getAllEndpointsWithGroup(role));
+        return serviceRoute.getAllEndpointsWithGroup(role);
     }
 }

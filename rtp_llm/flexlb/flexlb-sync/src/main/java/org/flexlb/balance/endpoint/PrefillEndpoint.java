@@ -47,9 +47,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         private StatusReduction(
                 PrefillEndpoint source,
                 StatusSemantics semantics) {
-            this.source = java.util.Objects.requireNonNull(source, "source");
-            this.semantics = java.util.Objects.requireNonNull(
-                    semantics, "semantics");
+            this.source = source;
+            this.semantics = semantics;
         }
 
         private void bind(
@@ -92,17 +91,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // exact endpoint but cannot dereference it, start a thread, publish a
         // callback, or otherwise expose it before these final fields are set.
         PrefillGenerationRuntime.Generation generation =
-                java.util.Objects.requireNonNull(
-                        java.util.Objects.requireNonNull(
-                                runtimeFactory, "runtimeFactory")
-                                .create(
+                runtimeFactory.create(
                                 status.getIpPort(),
                                 this,
-                                java.util.Objects.requireNonNull(config, "config"),
-                                java.util.Objects.requireNonNull(
-                                        deliveryStrategy, "deliveryStrategy"),
-                                requestRuntime),
-                        "runtimeFactory generation");
+                                config,
+                                deliveryStrategy,
+                                requestRuntime);
         this.runtime = generation.runtime();
         this.workLedger = generation.ledger();
     }

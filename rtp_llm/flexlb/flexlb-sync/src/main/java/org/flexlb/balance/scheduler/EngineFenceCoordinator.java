@@ -41,10 +41,6 @@ final class EngineFenceCoordinator {
             RequestSlot.FenceHandle exactFence,
             CancelTarget target,
             long timeoutMs) {
-        Objects.requireNonNull(slot, "slot");
-        Objects.requireNonNull(exactFence, "exactFence");
-        Objects.requireNonNull(target, "target");
-
         synchronized (slot) {
             RequestSlot.FenceReduction reduction = slot.applyFenceFact(
                     new RequestSlot.FenceFact.CancelStarted(exactFence));
@@ -106,8 +102,6 @@ final class EngineFenceCoordinator {
     TerminalDisposition resumeTombstoned(
             RequestSlot slot,
             RequestSlot.FenceHandle exactFence) {
-        Objects.requireNonNull(slot, "slot");
-        Objects.requireNonNull(exactFence, "exactFence");
         RequestSlot.FenceReduction reduction;
         synchronized (slot) {
             reduction = slot.applyFenceFact(
@@ -128,9 +122,9 @@ final class EngineFenceCoordinator {
         // The authoritative proof is already persisted in the exact slot.
         // The sink owns a total reduction: leaf cleanup failures are isolated
         // there and cannot veto the RequestSlot terminal edge.
-        TerminalDisposition disposition = Objects.requireNonNull(
-                terminalSink.tombstoned(slot, ready.proof()),
-                "Engine fence terminal disposition");
+        TerminalDisposition disposition =
+                terminalSink.tombstoned(slot, ready.proof());
+        assert disposition != null : "missing Engine fence disposition";
         validateDisposition(slot, exactFence, disposition);
         return disposition;
     }

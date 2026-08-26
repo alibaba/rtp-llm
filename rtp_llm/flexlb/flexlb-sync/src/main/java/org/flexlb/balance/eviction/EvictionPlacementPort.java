@@ -9,7 +9,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 /** Canonical placement boundary for eviction-backed request admission. */
@@ -30,9 +29,6 @@ public interface EvictionPlacementPort {
         }
 
         record Failed(AdmissionFailure failure) implements DecodePlacement {
-            public Failed {
-                Objects.requireNonNull(failure, "failure");
-            }
         }
     }
 
@@ -57,7 +53,7 @@ public interface EvictionPlacementPort {
             PrefillEvictionStatus status,
             List<DeliveryItem> removed) {
         public PrefillEvictionCommit {
-            Objects.requireNonNull(status, "status");
+            assert status != null : "missing Prefill eviction status";
             removed = List.copyOf(removed);
             if (status != PrefillEvictionStatus.COMMITTED
                     && !removed.isEmpty()) {

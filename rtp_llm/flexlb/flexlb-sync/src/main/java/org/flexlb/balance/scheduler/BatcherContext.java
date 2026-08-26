@@ -826,10 +826,6 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
 
     private record ActiveQueueRejected(Throwable cause)
             implements ActiveQueueTermination {
-        private ActiveQueueRejected {
-            Objects.requireNonNull(cause, "rejection cause");
-        }
-
         @Override
         public String reason() {
             return "batch_token_capacity_exceeded";

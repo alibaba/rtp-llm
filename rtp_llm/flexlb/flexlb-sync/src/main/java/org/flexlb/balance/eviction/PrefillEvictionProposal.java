@@ -4,7 +4,6 @@ import org.flexlb.balance.delivery.DeliveryItem;
 
 import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Pure planning result for one prefill-queue eviction on one endpoint.
@@ -23,13 +22,11 @@ public record PrefillEvictionProposal(
         PlanCost cost) {
 
     public PrefillEvictionProposal {
-        endpointId = Objects.requireNonNull(endpointId, "endpointId");
         victims = List.copyOf(victims);
         if (victims.isEmpty()) {
             throw new IllegalArgumentException(
                     "Prefill eviction proposal requires exact victims");
         }
-        cost = Objects.requireNonNull(cost, "cost");
     }
 
     /**

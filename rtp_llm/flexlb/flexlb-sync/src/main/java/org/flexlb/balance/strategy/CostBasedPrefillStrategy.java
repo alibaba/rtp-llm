@@ -377,8 +377,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 String excludedIpPort,
                 int registeredCount,
                 Map<String, Integer> rejections) {
-            this.preferredEndpoints = java.util.Objects.requireNonNull(
-                    preferredEndpoints);
+            this.preferredEndpoints = preferredEndpoints;
             this.excludedPin = excludedPin;
             this.excludedIpPort = excludedIpPort;
             this.registeredCount = registeredCount;
@@ -499,8 +498,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 RouteProjection.Candidate projection) {
             entries.add(new Entry(
                     endpointAddress,
-                    java.util.Objects.requireNonNull(pin),
-                    java.util.Objects.requireNonNull(projection)));
+                    pin,
+                    projection));
         }
 
         protected RouteProjection.Candidate candidate(int index) {

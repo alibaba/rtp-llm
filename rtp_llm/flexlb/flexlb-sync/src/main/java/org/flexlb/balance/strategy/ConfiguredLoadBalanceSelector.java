@@ -7,7 +7,6 @@ import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Objects;
 
 /** Executes the unique leaf supporting the request's exact selector config. */
 @Component
@@ -28,14 +27,10 @@ public final class ConfiguredLoadBalanceSelector {
             BalanceContext context,
             RoleType role,
             String group) {
-        FlexlbConfig config = Objects.requireNonNull(
-                Objects.requireNonNull(context, "context").getConfig(),
-                "request config");
-        RoleType exactRole = Objects.requireNonNull(role, "role");
+        FlexlbConfig config = context.getConfig();
+        RoleType exactRole = role;
         RoutingConfig.EndpointSelectorConfig configured =
-                Objects.requireNonNull(
-                        config.getRouter().selectorFor(exactRole),
-                        "endpoint selector config");
+                config.getRouter().selectorFor(exactRole);
 
         LoadBalanceStrategy match = null;
         for (LoadBalanceStrategy candidate : strategies) {

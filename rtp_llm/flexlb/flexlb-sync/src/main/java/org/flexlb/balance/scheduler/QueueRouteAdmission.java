@@ -323,11 +323,6 @@ public final class QueueRouteAdmission implements AutoCloseable {
 
     /** Domain result of one admission-owned queue replacement publication. */
     public record ReplacementCommit(ReplacementStatus status) {
-
-        public ReplacementCommit {
-            Objects.requireNonNull(status, "status");
-        }
-
     }
 
     /**

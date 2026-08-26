@@ -1,7 +1,6 @@
 package org.flexlb.balance.delivery;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Narrow worker capability used by a delivery strategy. It deliberately does
@@ -48,11 +47,6 @@ public interface DeliveryContext<R> {
     record SelectionBoundary(
             DeliveryItem item,
             CapacityBoundary result) {
-
-        public SelectionBoundary {
-            Objects.requireNonNull(item, "item");
-            Objects.requireNonNull(result, "result");
-        }
     }
 
     /**
@@ -69,19 +63,10 @@ public interface DeliveryContext<R> {
                 CommittedDelivery owner,
                 R loopResult)
                 implements SelectionCommit<R> {
-
-            public Committed {
-                Objects.requireNonNull(owner, "owner");
-                Objects.requireNonNull(loopResult, "loopResult");
-            }
         }
 
         record NotCommitted<R>(R loopResult)
                 implements SelectionCommit<R> {
-
-            public NotCommitted {
-                Objects.requireNonNull(loopResult, "loopResult");
-            }
         }
     }
 }

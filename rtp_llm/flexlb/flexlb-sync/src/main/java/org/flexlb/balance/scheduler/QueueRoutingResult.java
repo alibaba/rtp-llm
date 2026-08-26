@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.loadbalance.Response;
 
-import java.util.Objects;
 
 /** Result of queue routing before the scheduler publishes ACTIVE ownership. */
 public sealed interface QueueRoutingResult {
@@ -10,13 +9,13 @@ public sealed interface QueueRoutingResult {
     record Admitted(QueueRouteAdmission admission)
             implements QueueRoutingResult {
         public Admitted {
-            Objects.requireNonNull(admission, "admission");
+            assert admission != null : "missing queue admission";
         }
     }
 
     record Rejected(Response response) implements QueueRoutingResult {
         public Rejected {
-            Objects.requireNonNull(response, "response");
+            assert response != null : "missing queue rejection";
             if (response.isSuccess()) {
                 throw new IllegalArgumentException(
                         "Rejected queue route requires a failure response");

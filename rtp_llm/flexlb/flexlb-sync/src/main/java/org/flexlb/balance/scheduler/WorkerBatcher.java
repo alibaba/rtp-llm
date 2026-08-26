@@ -18,7 +18,6 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -347,7 +346,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     private Throwable stopAndDrain(
             Throwable terminalFailure,
             boolean interruptWorker) {
-        Objects.requireNonNull(terminalFailure, "terminalFailure");
         boolean interrupted = false;
         synchronized (this) {
             stopped = true;
@@ -528,7 +526,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         BatchItem item = (BatchItem) exactItem;
         assert item.prefillEp() == prefillEndpoint
                 : "queued item belongs to another Prefill generation";
-        Objects.requireNonNull(reason, "reason");
         boolean removed;
         queueLock.lock();
         try {

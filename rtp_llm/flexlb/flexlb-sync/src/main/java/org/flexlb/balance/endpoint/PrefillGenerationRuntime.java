@@ -8,7 +8,6 @@ import org.flexlb.config.FlexlbConfig;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * Endpoint-owned runtime for one Prefill worker generation.
@@ -40,10 +39,6 @@ public interface PrefillGenerationRuntime {
     record Generation(
             PrefillGenerationRuntime runtime,
             PrefillWorkLedger ledger) {
-        public Generation {
-            runtime = Objects.requireNonNull(runtime, "runtime");
-            ledger = Objects.requireNonNull(ledger, "ledger");
-        }
     }
 
     /** Immutable queue state materialized under the runtime's queue lock. */
@@ -53,7 +48,6 @@ public interface PrefillGenerationRuntime {
             int queueCapacity,
             List<DeliveryItem> items) {
         public QueueSnapshot {
-            endpointId = Objects.requireNonNull(endpointId, "endpointId");
             if (queueVersion < 0L) {
                 throw new IllegalArgumentException(
                         "queueVersion must be non-negative");
@@ -74,9 +68,6 @@ public interface PrefillGenerationRuntime {
 
     /** Result of one atomic exact-victim replacement. */
     record QueueReplacement(QueueReplacementStatus status) {
-        public QueueReplacement {
-            status = Objects.requireNonNull(status, "status");
-        }
     }
 
     /** Start this exact generation once, after endpoint construction. */

@@ -1,7 +1,6 @@
 package org.flexlb.balance.delivery;
 
 import java.util.List;
-import java.util.Objects;
 
 /** Transport admission and submission required by batch delivery. */
 public interface BatchSubmissionPort {
@@ -45,7 +44,6 @@ public interface BatchSubmissionPort {
                 throw new IllegalArgumentException(
                         "predictedMs must be non-negative");
             }
-            Objects.requireNonNull(metadata, "metadata");
         }
     }
 

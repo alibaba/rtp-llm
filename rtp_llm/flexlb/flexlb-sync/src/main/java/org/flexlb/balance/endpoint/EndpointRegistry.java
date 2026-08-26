@@ -36,10 +36,6 @@ public class EndpointRegistry {
     public record EndpointPublication(
             WorkerEndpoint endpoint,
             EndpointStatusReduction statusReduction) {
-        public EndpointPublication {
-            java.util.Objects.requireNonNull(endpoint, "endpoint");
-            java.util.Objects.requireNonNull(statusReduction, "statusReduction");
-        }
     }
 
     /**
@@ -56,9 +52,6 @@ public class EndpointRegistry {
             WorkerStatus.TopologySnapshot topology,
             DecodeEndpoint.DecodeRoutingView routing) {
         public DecodeRoutingSnapshot {
-            java.util.Objects.requireNonNull(address, "address");
-            java.util.Objects.requireNonNull(topology, "topology");
-            java.util.Objects.requireNonNull(routing, "routing");
             if (generationId <= 0L) {
                 throw new IllegalArgumentException(
                         "Decode routing snapshot requires a positive generation");
@@ -179,10 +172,8 @@ public class EndpointRegistry {
         private DecodeDirectoryEntry(
                 String address,
                 DecodeEndpoint endpoint) {
-            this.address = java.util.Objects.requireNonNull(
-                    address, "address");
-            this.endpoint = java.util.Objects.requireNonNull(
-                    endpoint, "endpoint");
+            this.address = address;
+            this.endpoint = endpoint;
         }
 
         private DecodeRoutingSnapshot routingSnapshot() {
@@ -380,7 +371,6 @@ public class EndpointRegistry {
      */
     public WorkerEndpoint.GenerationPin captureCurrentDecode(
             DecodeRoutingSnapshot expected) {
-        java.util.Objects.requireNonNull(expected, "expected");
         WorkerEndpoint.GenerationPin pin =
                 capture(RoleType.DECODE, expected.address());
         if (pin == null) {
@@ -1128,9 +1118,7 @@ public class EndpointRegistry {
         }
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
-        DeliveryStrategy delivery = java.util.Objects.requireNonNull(
-                deliveryBinding.strategy(),
-                "Prefill delivery binding returned no strategy");
+        DeliveryStrategy delivery = deliveryBinding.strategy();
         return new PrefillEndpoint(
                 status,
                 config,
@@ -1143,7 +1131,6 @@ public class EndpointRegistry {
     private DecodeEndpoint createDecodeEndpoint(
             WorkerStatus status,
             WorkerStatus.EngineObservation engineStatus) {
-        java.util.Objects.requireNonNull(engineStatus, "engineStatus");
         prepareEndpointMetrics(RoleType.DECODE, status);
         return new DecodeEndpoint(status, requestRuntime);
     }
@@ -1152,7 +1139,6 @@ public class EndpointRegistry {
             WorkerStatus status,
             RoleType roleType,
             WorkerStatus.EngineObservation engineStatus) {
-        java.util.Objects.requireNonNull(engineStatus, "engineStatus");
         prepareEndpointMetrics(roleType, status);
         return new SimpleWorkerEndpoint(status);
     }
@@ -1280,7 +1266,7 @@ public class EndpointRegistry {
         failure = collectEndpointGenerations(
                 vitEndpoints, seen, endpoints, failure);
         return new EndpointGenerationSnapshot(
-                List.copyOf(endpoints), failure);
+                endpoints, failure);
     }
 
     private static Throwable collectEndpointGenerations(

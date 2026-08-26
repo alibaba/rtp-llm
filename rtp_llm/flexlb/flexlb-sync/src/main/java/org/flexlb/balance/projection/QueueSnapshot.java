@@ -4,7 +4,6 @@ import org.flexlb.balance.planner.GroupPlanner;
 
 import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Immutable scheduling inputs captured for a route-time what-if projection.
@@ -22,8 +21,6 @@ public record QueueSnapshot(
         AdmissionBlock admissionBlock) {
 
     public QueueSnapshot {
-        ordering = Objects.requireNonNull(ordering, "ordering");
-        constraints = Objects.requireNonNull(constraints, "constraints");
         activeItems = List.copyOf(activeItems);
         if (admissionBlock != null) {
             if (activeItems.isEmpty()) {
@@ -44,10 +41,6 @@ public record QueueSnapshot(
             long requestId,
             long enqueueSeq,
             RouteProjection.AdmissionBlockSemantics semantics) {
-
-        public AdmissionBlock {
-            semantics = Objects.requireNonNull(semantics, "semantics");
-        }
     }
 
 }

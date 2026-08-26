@@ -1,6 +1,5 @@
 package org.flexlb.balance.delivery;
 
-import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.Supplier;
@@ -45,9 +44,6 @@ public interface SlotDeliveryPort {
             OptionalLong correlationId) {
 
         public Identity {
-            boundary = Objects.requireNonNull(boundary, "boundary");
-            correlationId = Objects.requireNonNull(
-                    correlationId, "correlationId");
             if (correlationId.isPresent()
                     && correlationId.getAsLong() <= 0L) {
                 throw new IllegalArgumentException(
@@ -93,24 +89,12 @@ public interface SlotDeliveryPort {
         }
 
         record Failed(Throwable cause) implements Completion {
-
-            public Failed {
-                cause = Objects.requireNonNull(cause, "cause");
-            }
         }
 
         record TimedOut(Throwable cause) implements Completion {
-
-            public TimedOut {
-                cause = Objects.requireNonNull(cause, "cause");
-            }
         }
 
         record Uncertain(Throwable cause) implements Completion {
-
-            public Uncertain {
-                cause = Objects.requireNonNull(cause, "cause");
-            }
         }
     }
 

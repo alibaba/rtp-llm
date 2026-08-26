@@ -2073,10 +2073,6 @@ final class RequestSlot extends RequestLifecycle {
             AdmissionCleanup admissionCleanup,
             boolean armAcceptanceDeadline,
             long batchEnqueueStartedAtMs) {
-
-        DeliveryConfirmation {
-            Objects.requireNonNull(publication, "publication");
-        }
     }
 
     /**
@@ -2091,8 +2087,7 @@ final class RequestSlot extends RequestLifecycle {
         private AdmissionResources(
                 Runnable releaseAction,
                 long acceptanceTimeoutMs) {
-            this.releaseAction = Objects.requireNonNull(
-                    releaseAction, "releaseAction");
+            this.releaseAction = releaseAction;
             this.acceptanceTimeoutMs = acceptanceTimeoutMs;
         }
 
@@ -2126,8 +2121,7 @@ final class RequestSlot extends RequestLifecycle {
             Throwable failure = null;
             if (acceptanceDeadline != null) {
                 try {
-                    Objects.requireNonNull(timer, "timer")
-                            .cancel(acceptanceDeadline);
+                    timer.cancel(acceptanceDeadline);
                 } catch (Throwable timerFailure) {
                     failure = timerFailure;
                 }
@@ -2164,8 +2158,7 @@ final class RequestSlot extends RequestLifecycle {
             Throwable failure = null;
             if (requestDeadline != null) {
                 try {
-                    Objects.requireNonNull(timer, "timer")
-                            .cancel(requestDeadline);
+                    timer.cancel(requestDeadline);
                 } catch (Throwable timerFailure) {
                     failure = timerFailure;
                 }
@@ -2331,10 +2324,9 @@ final class RequestSlot extends RequestLifecycle {
                 String detail,
                 PreemptionRegistration transferredPreemption,
                 EngineFenceResources resources) {
-            Objects.requireNonNull(cause, "cause");
-            this.detail = Objects.requireNonNull(detail, "detail");
+            this.detail = detail;
             this.transferredPreemption = transferredPreemption;
-            this.resources = Objects.requireNonNull(resources, "resources");
+            this.resources = resources;
         }
 
         @Override
@@ -2422,10 +2414,10 @@ final class RequestSlot extends RequestLifecycle {
                 RequestSlot slot,
                 PublicationKind kind,
                 PublicationLease lease) {
-            this.slot = Objects.requireNonNull(slot, "slot");
+            this.slot = slot;
             this.future = slot.future;
-            this.kind = Objects.requireNonNull(kind, "kind");
-            this.lease = Objects.requireNonNull(lease, "lease");
+            this.kind = kind;
+            this.lease = lease;
             if (lease.exactSlot() != slot) {
                 throw new IllegalArgumentException(
                         "publication lease belongs to another slot");
@@ -2441,21 +2433,18 @@ final class RequestSlot extends RequestLifecycle {
         }
 
         Publication claimDeliveryResponse(Response response) {
-            Objects.requireNonNull(response, "response");
             requireDelivery("delivery response");
             claim();
             return () -> future.completeOwned(response);
         }
 
         Publication claimTerminalResponse(Response response) {
-            Objects.requireNonNull(response, "response");
             requireTerminal("external response");
             claim();
             return terminalPublication(() -> future.completeOwned(response));
         }
 
         Publication claimFailure(Throwable failure) {
-            Objects.requireNonNull(failure, "failure");
             requireTerminal("failure");
             claim();
             return terminalPublication(
@@ -2554,7 +2543,6 @@ final class RequestSlot extends RequestLifecycle {
         private static EngineFenceResources acquire(
                 BatchItem item,
                 PrefillWorkLedger.Protection prefillProtection) {
-            Objects.requireNonNull(item, "item");
             PrefillEndpoint prefill = item.prefillEp();
             DecodeEndpoint decode = item.decodeEp();
             DecodeEndpoint.EngineFenceLease decodeProtection = null;
@@ -2646,9 +2634,8 @@ final class RequestSlot extends RequestLifecycle {
         private ExactPrefillOnlyCleanup(
                 PrefillEndpoint prefill,
                 PrefillWorkLedger.Protection protection) {
-            this.prefill = Objects.requireNonNull(prefill, "Prefill endpoint");
-            this.protection = Objects.requireNonNull(
-                    protection, "Prefill protection");
+            this.prefill = prefill;
+            this.protection = protection;
         }
 
         @Override
@@ -2766,7 +2753,7 @@ record DeferredTerminal(
             boolean releasePrefillAccounting) {
         return new DeferredTerminal(
                 DeferredTerminalKind.FAILURE,
-                Objects.requireNonNull(errorType, "errorType"),
+                errorType,
                 detail,
                 releasePrefillAccounting,
                 null,
@@ -2800,7 +2787,7 @@ record DeferredTerminal(
                 null,
                 null,
                 false,
-                Objects.requireNonNull(observation, "observation"),
+                observation,
                 null);
     }
 
@@ -2878,8 +2865,8 @@ final class RequestFuture extends CompletableFuture<Response> {
     RequestFuture(
             ExternalCompletionSink sink,
             RequestSlot slot) {
-        this.sink = Objects.requireNonNull(sink, "sink");
-        this.slot = Objects.requireNonNull(slot, "slot");
+        this.sink = sink;
+        this.slot = slot;
     }
 
     @Override

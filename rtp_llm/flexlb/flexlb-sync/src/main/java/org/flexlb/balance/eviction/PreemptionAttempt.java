@@ -55,7 +55,7 @@ public final class PreemptionAttempt {
     }
 
     private final long token;
-    private final Map<Long, Victim> victims;
+    private final List<Victim> victims;
     private final Map<Long, VictimState> victimStates;
     private State state = State.PLANNED;
 
@@ -64,18 +64,18 @@ public final class PreemptionAttempt {
             throw new IllegalArgumentException("token and victims are required");
         }
         this.token = token;
-        this.victims = new LinkedHashMap<>();
+        this.victims = List.copyOf(victims);
         this.victimStates = new LinkedHashMap<>();
-        for (Victim victim : victims) {
-            if (this.victims.putIfAbsent(victim.requestId(), victim) != null) {
+        for (Victim victim : this.victims) {
+            if (this.victimStates.putIfAbsent(
+                    victim.requestId(), VictimState.PLANNED) != null) {
                 throw new IllegalArgumentException("duplicate victim " + victim.requestId());
             }
-            this.victimStates.put(victim.requestId(), VictimState.PLANNED);
         }
     }
 
     public long token() { return token; }
-    public List<Victim> victims() { return List.copyOf(victims.values()); }
+    public List<Victim> victims() { return victims; }
 
     public synchronized boolean claimAll() {
         if (state != State.PLANNED) {

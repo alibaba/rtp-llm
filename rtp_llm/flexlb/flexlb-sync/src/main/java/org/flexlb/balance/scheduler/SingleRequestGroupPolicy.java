@@ -6,7 +6,6 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.util.Logger;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalLong;
 
 /**
@@ -69,8 +68,7 @@ final class SingleRequestGroupPolicy implements GroupPolicy {
             DeliveryMetadata metadata = new DeliveryMetadata(
                     DECISION_REASON, Math.max(0, queueBefore - 1));
             PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
-            PrefillTimePredictor.Evaluator evaluator = Objects.requireNonNull(
-                    predictor, "prefill predictor").evaluator();
+            PrefillTimePredictor.Evaluator evaluator = predictor.evaluator();
             return ctx.admitAndDeliverCapacityFeasiblePrefix(
                     List.of(head), metadata, evaluator, OptionalLong.empty());
         });

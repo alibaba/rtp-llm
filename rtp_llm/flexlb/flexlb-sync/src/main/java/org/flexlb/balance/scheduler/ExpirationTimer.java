@@ -126,7 +126,7 @@ final class ExpirationTimer<S> implements AutoCloseable {
         private ScheduledFuture<?> scheduled;
 
         private DeadlineRegistration(ExpirationTimer<?> owner) {
-            this.owner = Objects.requireNonNull(owner, "owner");
+            this.owner = owner;
         }
 
         private synchronized void installScheduled(
@@ -135,7 +135,7 @@ final class ExpirationTimer<S> implements AutoCloseable {
                 throw new IllegalStateException(
                         "deadline already owns a scheduled task");
             }
-            scheduled = Objects.requireNonNull(exactScheduled, "exactScheduled");
+            scheduled = exactScheduled;
             if (state == DeadlineState.CANCELED) {
                 exactScheduled.cancel(false);
             }
@@ -293,7 +293,7 @@ final class ExpirationTimer<S> implements AutoCloseable {
         List<S> exactSlots = List.of();
         Throwable failure = null;
         try {
-            exactSlots = List.copyOf(slotDirectory.snapshot());
+            exactSlots = slotDirectory.snapshot();
         } catch (RuntimeException | Error snapshotFailure) {
             failure = snapshotFailure;
         }
@@ -499,7 +499,7 @@ final class ExpirationTimer<S> implements AutoCloseable {
     private Throwable detachAllDeadlines() {
         List<S> exactSlots;
         try {
-            exactSlots = List.copyOf(slotDirectory.snapshot());
+            exactSlots = slotDirectory.snapshot();
         } catch (RuntimeException | Error snapshotFailure) {
             return snapshotFailure;
         }
@@ -508,9 +508,7 @@ final class ExpirationTimer<S> implements AutoCloseable {
         for (S exactSlot : exactSlots) {
             DetachedDeadlines detached;
             try {
-                detached = Objects.requireNonNull(
-                        sink.detachDeadlinesForClose(exactSlot),
-                        "sink.detachDeadlinesForClose()");
+                detached = sink.detachDeadlinesForClose(exactSlot);
             } catch (RuntimeException | Error detachFailure) {
                 failure = append(failure, detachFailure);
                 continue;

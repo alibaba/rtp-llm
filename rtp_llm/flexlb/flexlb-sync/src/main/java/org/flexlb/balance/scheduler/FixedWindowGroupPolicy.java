@@ -8,7 +8,6 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.util.Logger;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalLong;
 
 /**
@@ -200,8 +199,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
             PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
             PrefillTimePredictor.Evaluator evaluator = predictor == null
                     ? null
-                    : Objects.requireNonNull(
-                            predictor.evaluator(), "predictor evaluator");
+                    : predictor.evaluator();
             PrefillTimePredictor.Evaluator planningEvaluator =
                     exactPredictThresholdMs > 0 ? evaluator : null;
 

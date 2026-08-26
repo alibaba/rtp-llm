@@ -120,8 +120,7 @@ public class WorkerStatus {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
-            runningTaskList = Map.copyOf(Objects.requireNonNull(
-                    runningTaskList, "runningTaskList"));
+            runningTaskList = Map.copyOf(runningTaskList);
         }
     }
 
@@ -139,11 +138,6 @@ public class WorkerStatus {
     public record CommittedWorkerStatus(
             EngineObservation fields,
             AppliedStatusCursor cursor) {
-
-        public CommittedWorkerStatus {
-            Objects.requireNonNull(fields, "fields");
-            Objects.requireNonNull(cursor, "cursor");
-        }
     }
 
     /**
@@ -182,13 +176,12 @@ public class WorkerStatus {
                 Long statusVersion,
                 Long latestFinishedVersion,
                 Map<String, TaskObservation> finishedTasks) {
-            this.owner = Objects.requireNonNull(owner, "owner");
-            this.engine = Objects.requireNonNull(engine, "engine");
+            this.owner = owner;
+            this.engine = engine;
             this.reportedAlive = reportedAlive;
             this.statusVersion = statusVersion;
             this.latestFinishedVersion = latestFinishedVersion;
-            this.finishedTasks = Objects.requireNonNull(
-                    finishedTasks, "finishedTasks");
+            this.finishedTasks = finishedTasks;
         }
 
         /** Exact service-discovery generation which issued this observation. */
@@ -246,12 +239,9 @@ public class WorkerStatus {
                 CommittedWorkerStatus baseCommitted,
                 StatusObservation observation,
                 CommittedWorkerStatus nextCommitted) {
-            this.baseCommitted = Objects.requireNonNull(
-                    baseCommitted, "baseCommitted");
-            this.observation = Objects.requireNonNull(
-                    observation, "observation");
-            this.nextCommitted = Objects.requireNonNull(
-                    nextCommitted, "nextCommitted");
+            this.baseCommitted = baseCommitted;
+            this.observation = observation;
+            this.nextCommitted = nextCommitted;
         }
 
         public StatusObservation observation() {
@@ -275,10 +265,9 @@ public class WorkerStatus {
     private WorkerStatus(
             TopologySnapshot initialTopology,
             EngineObservation initialStatus) {
-        topology = new AtomicReference<>(Objects.requireNonNull(
-                initialTopology, "initialTopology"));
+        topology = new AtomicReference<>(initialTopology);
         committedStatus = new AtomicReference<>(new CommittedWorkerStatus(
-                Objects.requireNonNull(initialStatus, "initialStatus"),
+                initialStatus,
                 new AppliedStatusCursor(-1L, -1L)));
         long discoveredAtUs = System.nanoTime() / 1000;
         pollHealth = new AtomicReference<>(new PollHealth(
@@ -378,7 +367,6 @@ public class WorkerStatus {
     public PreparedStatus prepareNewStatus(StatusObservation observation) {
         requireGenerationLock();
         requireActiveGeneration();
-        Objects.requireNonNull(observation, "observation");
         if (observation.owner != this) {
             throw new IllegalArgumentException(
                     "status observation belongs to another worker generation");
@@ -407,7 +395,6 @@ public class WorkerStatus {
      * response reducer has succeeded.
      */
     public void publishPreparedStatus(PreparedStatus prepared) {
-        Objects.requireNonNull(prepared, "prepared");
         requireGenerationLock();
         requireActiveGeneration();
         if (prepared.observation.owner != this) {

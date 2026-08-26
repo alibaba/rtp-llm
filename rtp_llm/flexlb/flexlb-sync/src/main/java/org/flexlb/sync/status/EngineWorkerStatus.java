@@ -127,7 +127,7 @@ public class EngineWorkerStatus {
             for (WorkerEndpoint.GenerationPin pin : captured) {
                 addresses.add(pin.endpoint().ipPort());
             }
-            return List.copyOf(addresses);
+            return addresses;
         } finally {
             for (WorkerEndpoint.GenerationPin pin : captured) {
                 pin.close();

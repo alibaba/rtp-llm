@@ -30,6 +30,7 @@ public record DecodeEvictionProposal(
         PlanCost cost) {
 
     public DecodeEvictionProposal {
+        victims = List.copyOf(victims);
         boolean hasLocal = victims.stream().anyMatch(victim -> victim.phase().isMasterQueued());
         boolean hasCancel = victims.stream().anyMatch(victim -> victim.phase().requiresEngineCancel());
         if (hasLocal && hasCancel) {

@@ -354,7 +354,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             BatchItem item,
             boolean priorityAdmission,
             BooleanSupplier commitAction) {
-        Objects.requireNonNull(commitAction, "commitAction");
         if (shuttingDown.get() || item == null || item.future().isDone()) {
             return false;
         }
@@ -432,7 +431,7 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         private final AdmissionMutation exact;
 
         private AdmissionScope(AdmissionMutation exact) {
-            this.exact = Objects.requireNonNull(exact, "exact");
+            this.exact = exact;
         }
 
         @Override
@@ -523,7 +522,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             AdmissionMutation exact,
             Response failure) {
         try {
-            Objects.requireNonNull(failure, "failure");
             if (failure.isSuccess()) {
                 throw new IllegalArgumentException(
                         "admission termination requires a failure response");
@@ -639,7 +637,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             CompletableFuture<?> future,
             Runnable releasePermit,
             long acceptanceTimeoutMs) {
-        Objects.requireNonNull(releasePermit, "releasePermit");
         if (acceptanceTimeoutMs < 0) {
             throw new IllegalArgumentException("acceptanceTimeoutMs must be non-negative");
         }
@@ -1510,8 +1507,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
     public void onDeliveryCommitted(
             CommittedDelivery delivery,
             DeliveryMetadata metadata) {
-        Objects.requireNonNull(delivery, "delivery");
-        Objects.requireNonNull(metadata, "metadata");
         delivery.deliver(metadata);
     }
 
@@ -1559,7 +1554,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             DeliveryItem exactItem,
             Supplier<T> preparation) {
         BatchItem item = (BatchItem) exactItem;
-        Objects.requireNonNull(preparation, "preparation");
         RequestSlot entry = entryFor(item);
         if (entry == null) {
             return Optional.empty();
@@ -1568,8 +1562,7 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             if (!ownsPreparedDelivery(entry, item)) {
                 return Optional.empty();
             }
-            return Optional.of(Objects.requireNonNull(
-                    preparation.get(), "delivery preparation result"));
+            return Optional.of(preparation.get());
         }
     }
 
@@ -1579,8 +1572,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             SlotDeliveryPort.Identity identity,
             SlotDeliveryPort.EndpointTransfer endpointTransfer) {
         BatchItem item = (BatchItem) exactItem;
-        Objects.requireNonNull(identity, "identity");
-        Objects.requireNonNull(endpointTransfer, "endpointTransfer");
         RequestSlot entry = entryFor(item);
         if (entry == null) {
             return null;
@@ -1710,14 +1701,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             RequestSlot.DeliveryConfirmation confirmation,
             DeliveryClaimKind deliveryKind,
             long batchId) {
-
-        private DeliveryPublication {
-            Objects.requireNonNull(slot, "slot");
-            Objects.requireNonNull(item, "item");
-            Objects.requireNonNull(response, "response");
-            Objects.requireNonNull(confirmation, "confirmation");
-            Objects.requireNonNull(deliveryKind, "deliveryKind");
-        }
     }
 
     /** Called with {@code entry} locked. */
@@ -1743,7 +1726,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             throw new IllegalArgumentException(
                     "delivery claim was not created by this scheduler");
         }
-        Objects.requireNonNull(completion, "completion");
         PreemptionWork work = null;
         RequestSlot.FenceReduction fenceReduction = null;
         synchronized (exact.slot) {

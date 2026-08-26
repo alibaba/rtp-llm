@@ -86,7 +86,6 @@ public final class DecodePreemptionCoordinator {
     }
 
     public CompletableFuture<ExecutionResult> execute(Request request) {
-        Objects.requireNonNull(request, "request");
         long token = nextToken();
         List<PreemptionAttempt.Victim> victims = new ArrayList<>(request.victims().size());
         List<DecodeEndpoint.ReservationHandle> victimReservations =
@@ -487,7 +486,7 @@ public final class DecodePreemptionCoordinator {
         }
 
         private List<ClaimedVictim> claims() {
-            return List.copyOf(claims);
+            return claims;
         }
 
         private void endpointBegun() {

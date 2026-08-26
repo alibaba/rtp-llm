@@ -71,8 +71,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
 
         private CommittedGenerationHandoff(
                 GenerationHandoff generationHandoff) {
-            this.generationHandoff = Objects.requireNonNull(
-                    generationHandoff, "generationHandoff");
+            this.generationHandoff = generationHandoff;
         }
 
         @Override
@@ -107,8 +106,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
         private RequestEntry rollbackEntry;
 
         private DirectRegistrationImpl(RequestEntry rollbackEntry) {
-            this.rollbackEntry = Objects.requireNonNull(
-                    rollbackEntry, "rollbackEntry");
+            this.rollbackEntry = rollbackEntry;
         }
 
         /** Leave the registered entry under canonical registry ownership. */
@@ -180,15 +178,14 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
         public List<CommittedHandoff> commitGroupUnderLock(
                 List<DeliveryItem> items,
                 List<RouteReservation> exactReservations) {
-            List<RouteReservation> reservations = List.copyOf(exactReservations);
-            if (reservations.isEmpty() || reservations.get(0) != this) {
+            if (exactReservations.isEmpty() || exactReservations.get(0) != this) {
                 throw new IllegalArgumentException(
                         "route commit must be invoked on its first exact reservation");
             }
             List<RouteLease> exactLeases = new ArrayList<>(
-                    reservations.size());
+                    exactReservations.size());
             for (RouteReservation reservation
-                    : reservations) {
+                    : exactReservations) {
                 if (!(reservation instanceof PrefillWorkRegistry.RouteLease)) {
                     throw new IllegalArgumentException(
                             "route reservation belongs to another Prefill ledger");
@@ -260,10 +257,9 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                 throw new IllegalArgumentException(
                         "predicted batch work must be non-negative");
             }
-            this.lease = Objects.requireNonNull(lease, "lease");
+            this.lease = lease;
             this.originalPredictionMs = predictedWorkMs;
-            this.originalFeatures = Objects.requireNonNull(
-                    originalFeatures, "originalFeatures");
+            this.originalFeatures = originalFeatures;
             this.predictedWorkMs = OptionalLong.of(predictedWorkMs);
             this.remainingWorkMs = OptionalLong.of(predictedWorkMs);
             this.phaseBaseMs = nowMs;
@@ -518,8 +514,8 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                 List<IndividualPhaseUpdate> individuals,
                 List<BatchPhaseUpdate> batches,
                 long unknownEngineRequestCount) {
-            this.individuals = List.copyOf(individuals);
-            this.batches = List.copyOf(batches);
+            this.individuals = individuals;
+            this.batches = batches;
             this.unknownEngineRequestCount = unknownEngineRequestCount;
         }
 
@@ -587,7 +583,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                 throw new IllegalStateException(
                         "request is not an ACTIVE route request_id=" + requestId);
             }
-            Objects.requireNonNull(lease, "lease");
             remainingWorkMs = lease.predictedWorkMs;
             phaseBaseMs = nowMs;
             lastObservedAtMs = nowMs;
@@ -601,7 +596,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                 throw new IllegalStateException(
                         "request is not an ACTIVE batch member request_id=" + requestId);
             }
-            batchWork = Objects.requireNonNull(work, "batchWork");
+            batchWork = work;
             committedItem = activeItem;
             reservation = null;
             activeItem = null;
@@ -632,7 +627,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                            long pendingRequestCount) {
         public Snapshot {
             activeItems = List.copyOf(activeItems);
-            Objects.requireNonNull(committedWork, "committedWork");
+            assert committedWork != null : "missing committed work snapshot";
         }
     }
 
@@ -712,7 +707,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
 
     public boolean enqueueActiveUnderLock(BatchItem item) {
         requireLock();
-        Objects.requireNonNull(item, "item");
         if (requests.containsKey(item.requestId())) {
             return false;
         }
@@ -902,7 +896,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             int maximum,
             GenerationHandoff generationHandoff) {
         BatchItem item = (BatchItem) exactItem;
-        Objects.requireNonNull(generationHandoff, "generationHandoff");
         lock.lock();
         try {
             RequestEntry entry = requests.get(item.requestId());
@@ -935,7 +928,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             int maximum,
             GenerationHandoff generationHandoff) {
         BatchItem head = (BatchItem) exactHead;
-        Objects.requireNonNull(generationHandoff, "generationHandoff");
         lock.lock();
         try {
             RequestEntry entry = requests.get(head.requestId());
@@ -1014,7 +1006,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
 
         @Override
         public synchronized void addListener(Runnable listener) {
-            Objects.requireNonNull(listener, "listener");
             if (listener != capacityAvailable) {
                 throw new IllegalArgumentException(
                         "Prefill availability requires its exact worker wake callback");
@@ -1039,8 +1030,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             List<RouteLease> leases) {
         requireLock();
         List<BatchItem> members = validateActiveGroup(items);
-        List<RouteLease> exactLeases = List.copyOf(leases);
-        if (members.size() != exactLeases.size()) {
+        if (members.size() != leases.size()) {
             throw new IllegalArgumentException(
                     "route commit requires one exact lease per member");
         }
@@ -1050,8 +1040,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                 new ArrayList<>(members.size());
         for (int index = 0; index < members.size(); index++) {
             RequestEntry entry = requests.get(members.get(index).requestId());
-            RouteLease lease = Objects.requireNonNull(
-                    exactLeases.get(index), "route lease");
+            RouteLease lease = leases.get(index);
             if (!unique.add(lease) || entry.reservation != lease
                     || lease.requestId != entry.requestId
                     || lease.state != LeaseState.OPEN
@@ -1069,7 +1058,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             removeValidatedActiveIndex(item);
         }
         for (int index = 0; index < members.size(); index++) {
-            RouteLease lease = exactLeases.get(index);
+            RouteLease lease = leases.get(index);
             moveGenerationHandoffToOwnedUnderLock(
                     lease, committedHandoffs.get(index));
             RequestEntry entry = requests.get(members.get(index).requestId());
@@ -1083,7 +1072,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             List<BatchItem> items,
             long predictedMs) {
         requireLock();
-        Objects.requireNonNull(lease, "lease");
         List<BatchItem> members = validateActiveGroup(items);
         RequestEntry head = requests.get(lease.headRequestId);
         BatchItem headItem = head == null ? null : head.activeItem;
@@ -1130,9 +1118,8 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
     }
 
     private List<BatchItem> validateActiveGroup(List<BatchItem> items) {
-        List<BatchItem> members = List.copyOf(items);
-        assert !members.isEmpty() : "committed group requires members";
-        for (BatchItem item : members) {
+        assert !items.isEmpty() : "committed group requires members";
+        for (BatchItem item : items) {
             RequestEntry entry = requests.get(item.requestId());
             assert entry != null && entry.activeIdentity(item)
                     : "group member is not canonical ACTIVE request_id="
@@ -1141,7 +1128,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                     : "canonical ACTIVE request has no queue index request_id="
                     + item.requestId();
         }
-        return members;
+        return items;
     }
 
     private void removeValidatedActiveIndex(BatchItem item) {
@@ -1268,8 +1255,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
     public List<BatchCompletion> releaseProtection(
             Protection exactProtection,
             Function<List<DeliveryItem>, OptionalLong> repredictor) {
-        if (!(Objects.requireNonNull(
-                exactProtection, "exactProtection")
+        if (!(exactProtection
                 instanceof PrefillWorkRegistry.ProtectionLease)) {
             throw new IllegalArgumentException(
                     "protection belongs to another Prefill ledger");
@@ -1279,7 +1265,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             throw new IllegalArgumentException(
                     "protection belongs to another Prefill ledger");
         }
-        Objects.requireNonNull(repredictor, "repredictor");
         List<BatchCompletion> completions = new ArrayList<>(1);
         boolean capacityReleased = false;
         lock.lock();
@@ -1318,7 +1303,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             Function<List<DeliveryItem>, OptionalLong> repredictor,
             Runnable committedPublication,
             Runnable failedReduction) {
-        Objects.requireNonNull(observation, "observation");
         return reconcileEngineStatus(
                 observation.engine(),
                 observation.finishedTasks(),
@@ -1416,9 +1400,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             OptionalLong oldRemaining = batch.remainingAt(nowMs);
             OptionalLong prediction;
             try {
-                prediction = Objects.requireNonNull(
-                        repredictor.apply(deliveryItems(survivors)),
-                        "batch repredictor result");
+                prediction = repredictor.apply(deliveryItems(survivors));
                 if (prediction.isPresent() && prediction.getAsLong() < 0L) {
                     throw new IllegalArgumentException(
                             "batch reprediction must be non-negative");
@@ -1449,7 +1431,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             updates.add(new BatchPredictionUpdate(
                     batch, prediction, newRemaining, nowMs));
         }
-        return List.copyOf(updates);
+        return updates;
     }
 
     private PreparedActiveObservations prepareActiveObservationsUnderLock(
@@ -1507,12 +1489,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             Function<List<DeliveryItem>, OptionalLong> repredictor,
             Runnable committedPublication,
             Runnable failedReduction) {
-        Objects.requireNonNull(engine, "engine");
-        Objects.requireNonNull(finishedTasks, "finishedTasks");
-        Objects.requireNonNull(repredictor, "repredictor");
-        Objects.requireNonNull(
-                committedPublication, "committedPublication");
-        Objects.requireNonNull(failedReduction, "failedReduction");
         boolean capacityReleased = false;
         boolean canonicalMutationStarted = false;
         PreparedStatusReconciliation outcome = null;
@@ -1814,7 +1790,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
     @Override
     public int evictExpiredIndividuals(
             long ttlMs, java.util.function.LongPredicate schedulerOwnsRequest) {
-        Objects.requireNonNull(schedulerOwnsRequest, "schedulerOwnsRequest");
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
@@ -1848,7 +1823,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
     @Override
     public int evictExpiredBatches(
             long ttlMs, java.util.function.LongPredicate schedulerOwnsRequest) {
-        Objects.requireNonNull(schedulerOwnsRequest, "schedulerOwnsRequest");
         int evicted = 0;
         boolean capacityReleased = false;
         lock.lock();
@@ -2077,9 +2051,7 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
         OptionalLong oldRemaining = batch.remainingAt(nowMs);
         OptionalLong prediction;
         try {
-            prediction = Objects.requireNonNull(
-                    repredictor.apply(deliveryItems(survivors)),
-                    "batch repredictor result");
+            prediction = repredictor.apply(deliveryItems(survivors));
             if (prediction.isPresent() && prediction.getAsLong() < 0L) {
                 throw new IllegalArgumentException(
                         "batch reprediction must be non-negative");
@@ -2305,8 +2277,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             CapacityLease lease,
             CommittedGenerationHandoff committedHandoff) {
         requireLock();
-        Objects.requireNonNull(lease, "lease");
-        Objects.requireNonNull(committedHandoff, "committedHandoff");
         if (lease.state != LeaseState.OPEN
                 || lease.generationHandoff == null
                 || committedHandoff.generationHandoff

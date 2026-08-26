@@ -149,7 +149,7 @@ final class RequestExpirationController implements AutoCloseable {
             implements ExpirationTimer.SlotDirectory<RequestSlot> {
         @Override
         public List<RequestSlot> snapshot() {
-            return List.copyOf(lifecycle.snapshotSlots());
+            return lifecycle.snapshotSlots();
         }
 
         @Override

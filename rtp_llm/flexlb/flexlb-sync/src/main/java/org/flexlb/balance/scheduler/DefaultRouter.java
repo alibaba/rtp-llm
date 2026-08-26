@@ -242,7 +242,7 @@ public class DefaultRouter implements Router {
         for (SelectedRole selection : selections) {
             statuses.add(selection.serverStatus());
         }
-        return List.copyOf(statuses);
+        return statuses;
     }
 
     private static Throwable closeSelections(

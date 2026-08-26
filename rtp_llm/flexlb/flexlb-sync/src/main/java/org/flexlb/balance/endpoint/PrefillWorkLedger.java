@@ -7,7 +7,6 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.function.Function;
 import java.util.function.LongPredicate;
@@ -80,7 +79,7 @@ public interface PrefillWorkLedger {
             CapacityStatus status,
             RouteReservation reservation) {
         public RouteReservationResult {
-            Objects.requireNonNull(status, "status");
+            assert status != null : "missing route capacity status";
             if ((status == CapacityStatus.ACQUIRED)
                     != (reservation != null)) {
                 throw new IllegalArgumentException(
@@ -93,7 +92,7 @@ public interface PrefillWorkLedger {
             CapacityStatus status,
             BatchReservation reservation) {
         public BatchReservationResult {
-            Objects.requireNonNull(status, "status");
+            assert status != null : "missing batch capacity status";
             if ((status == CapacityStatus.ACQUIRED)
                     != (reservation != null)) {
                 throw new IllegalArgumentException(
@@ -110,7 +109,7 @@ public interface PrefillWorkLedger {
     record ActiveWorkerStatusFact(DeliveryItem item)
             implements WorkerStatusFact {
         public ActiveWorkerStatusFact {
-            Objects.requireNonNull(item, "item");
+            assert item != null : "missing active worker item";
         }
     }
 
@@ -125,8 +124,8 @@ public interface PrefillWorkLedger {
             TerminalFactKind kind,
             long errorCode) implements WorkerStatusFact {
         public TerminalWorkerStatusFact {
-            Objects.requireNonNull(item, "item");
-            Objects.requireNonNull(kind, "kind");
+            assert item != null : "missing terminal worker item";
+            assert kind != null : "missing terminal fact kind";
         }
     }
 
@@ -148,7 +147,7 @@ public interface PrefillWorkLedger {
             boolean successfulCompletion,
             boolean learningEligible) {
         public BatchCompletion {
-            Objects.requireNonNull(originalFeatures, "originalFeatures");
+            assert originalFeatures != null : "missing original batch features";
         }
     }
 

@@ -55,8 +55,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
     public SelectedRole select(BalanceContext balanceContext, RoleType roleType, String group) {
         logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
 
-        FlexlbConfig config = java.util.Objects.requireNonNull(
-                balanceContext.getConfig(), "request config");
+        FlexlbConfig config = balanceContext.getConfig();
 
         List<String> candidateAddresses =
                 engineWorkerStatus.modelWorkerAddressSnapshot(roleType);

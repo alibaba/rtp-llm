@@ -89,8 +89,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     private Prefix reservePrefix(
             List<DeliveryItem> candidates,
             PrefillTimePredictor.Evaluator evaluator) {
-        List<DeliveryItem> ordered = List.copyOf(candidates);
-        DeliveryItem head = ordered.get(0);
+        DeliveryItem head = candidates.get(0);
         CapacityBoundary.Attempt<PrefillAdmissionPort.PreparedAdmission>
                 headAttempt = slotPort.prepareIfOwned(
                         head,
@@ -121,11 +120,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
             throw failure;
         }
-        List<DeliveryItem> admitted = new ArrayList<>(ordered.size());
+        List<DeliveryItem> admitted = new ArrayList<>(candidates.size());
         admitted.add(head);
         try {
-            for (int index = 1; index < ordered.size(); index++) {
-                DeliveryItem item = ordered.get(index);
+            for (int index = 1; index < candidates.size(); index++) {
+                DeliveryItem item = candidates.get(index);
                 CapacityBoundary.Attempt<DeliveryItem> attempt =
                         slotPort.prepareIfOwned(
                                 item,
@@ -200,7 +199,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                     deliveryFailure, close(admission));
         }
         if (!delivered.isEmpty()) {
-            telemetry.routesDelivered(metadata, List.copyOf(delivered));
+            telemetry.routesDelivered(metadata, delivered);
         }
         if (deliveryFailure != null) {
             throw propagate(deliveryFailure);

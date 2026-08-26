@@ -1,7 +1,6 @@
 package org.flexlb.balance.projection;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.OptionalLong;
 
 /**
@@ -41,7 +40,6 @@ public record WorkSnapshot(
                               long remainingWorkMs) {
 
         public RequestWork {
-            phase = Objects.requireNonNull(phase, "phase");
             if (remainingWorkMs < 0L) {
                 throw new IllegalArgumentException(
                         "remaining request work must be non-negative");
@@ -57,9 +55,6 @@ public record WorkSnapshot(
 
         public BatchWork {
             requestIds = List.copyOf(requestIds);
-            phase = Objects.requireNonNull(phase, "phase");
-            remainingWorkMs = Objects.requireNonNull(
-                    remainingWorkMs, "remainingWorkMs");
             if (remainingWorkMs.isPresent()
                     && remainingWorkMs.getAsLong() < 0L) {
                 throw new IllegalArgumentException(

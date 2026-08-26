@@ -166,8 +166,6 @@ public class EvictionManager implements AdmissionFallback {
     @Override
     public boolean tryAdmit(BalanceContext ctx,
                             CompletableFuture<Response> future) {
-        Objects.requireNonNull(ctx, "ctx");
-        Objects.requireNonNull(future, "future");
         if (shutdown || future.isDone()
                 || ctx.requestExpired(System.currentTimeMillis())
                 || !PriorityNormalizer.hasPriority(ctx.getPriority())) {

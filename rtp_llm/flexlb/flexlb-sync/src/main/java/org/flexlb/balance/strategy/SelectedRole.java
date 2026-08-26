@@ -30,10 +30,8 @@ public final class SelectedRole implements AutoCloseable {
             ServerStatus serverStatus,
             long prefillWorkMs,
             long decodeTotalKv) {
-        this.generationPin = Objects.requireNonNull(
-                generationPin, "generationPin");
-        this.serverStatus = Objects.requireNonNull(
-                serverStatus, "serverStatus");
+        this.generationPin = generationPin;
+        this.serverStatus = serverStatus;
         if (!serverStatus.isSuccess()) {
             throw new IllegalArgumentException(
                     "SelectedRole requires successful response metadata");

@@ -209,9 +209,9 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 WorkerEndpoint.GenerationPin pin,
                 DecodeEndpoint endpoint,
                 DecodeEndpoint.DecodeRoutingView view) {
-            this.pin = java.util.Objects.requireNonNull(pin);
-            this.endpoint = java.util.Objects.requireNonNull(endpoint);
-            this.view = java.util.Objects.requireNonNull(view);
+            this.pin = pin;
+            this.endpoint = endpoint;
+            this.view = view;
         }
 
         private DecodeEndpoint endpoint() {
