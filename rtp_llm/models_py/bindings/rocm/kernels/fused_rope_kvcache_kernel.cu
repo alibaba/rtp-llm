@@ -1216,11 +1216,8 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
     }
 
     // refer to the implementation of hipify decode attention
-    // input_lengths is indexed by sequence, so use batch_idx (derived from blockIdx.x)
-    // rather than blockIdx.y: blockIdx.y is the head index in this launch geometry, so
-    // head-indexing this buffer both picks the wrong sequence and reads past the buffer
-    // whenever the decode batch is smaller than head_num.
-    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
+    const int  position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;
@@ -1379,11 +1376,8 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
     }
 
     // refer to the implementation of hipify decode attention
-    // input_lengths is indexed by sequence, so use batch_idx (derived from blockIdx.x)
-    // rather than blockIdx.y: blockIdx.y is the head index in this launch geometry, so
-    // head-indexing this buffer both picks the wrong sequence and reads past the buffer
-    // whenever the decode batch is smaller than head_num.
-    const int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
+    const int  position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;

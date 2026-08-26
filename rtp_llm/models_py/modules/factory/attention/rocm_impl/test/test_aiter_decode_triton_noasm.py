@@ -45,28 +45,29 @@ CONTEXT_LENGTH = 6359
 NUM_BLOCKS = math.ceil(CONTEXT_LENGTH / BLOCK_SIZE)
 
 
-def make_config() -> AttentionConfigs:
+def make_config(block_size: int = BLOCK_SIZE) -> AttentionConfigs:
     config = AttentionConfigs()
     config.head_num = HEAD_NUM
     config.kv_head_num = KV_HEAD_NUM
     config.size_per_head = HEAD_DIM
-    config.tokens_per_block = BLOCK_SIZE
-    config.kernel_tokens_per_block = BLOCK_SIZE
+    config.tokens_per_block = block_size
+    config.kernel_tokens_per_block = block_size
     config.max_seq_len = 40960
     config.kv_cache_dtype = KvCacheDataType.BASE
     config.dtype = torch.bfloat16
-    config.need_rope_kv_cache = False
+    config.need_rope_kv_cache = True
     return config
 
 
-def make_inputs(device: torch.device) -> PyAttentionInputs:
+def make_inputs(device: torch.device, block_size: int = BLOCK_SIZE):
     inputs = PyAttentionInputs()
     inputs.is_prefill = False
     inputs.is_cuda_graph = False
     # Decode sees full context after current token is inserted into KV cache.
     inputs.sequence_lengths = torch.tensor([CONTEXT_LENGTH - 1], dtype=torch.int32)
     inputs.input_lengths = torch.tensor([1], dtype=torch.int32)
-    block_table = torch.arange(NUM_BLOCKS, dtype=torch.int32, device=device).view(1, -1)
+    num_blocks = math.ceil(CONTEXT_LENGTH / block_size)
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(1, -1)
     inputs.kv_cache_kernel_block_id_device = block_table
     inputs.kv_cache_kernel_block_id = block_table.cpu()
     inputs.kv_cache_block_id_device = block_table
@@ -201,25 +202,27 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
         self.assertGreater(mismatched_l2, 0.1, f"{mismatched_l2=:.6f}")
 
     def test_factory_pairs_reader_and_writer(self):
-        inputs = make_inputs(torch.device("cuda"))
-        for kv_dtype, use_asm_pa, expected_linear_v, expected_writer in (
-            (KvCacheDataType.BASE, False, True, FusedRopeKVCacheDecodeOpNonAsm),
-            (KvCacheDataType.BASE, True, False, FusedRopeKVCacheDecodeOpAsm),
-            (KvCacheDataType.FP8, False, False, FusedRopeKVCacheDecodeOpAsm),
-        ):
-            with self.subTest(kv_dtype=kv_dtype, use_asm_pa=use_asm_pa):
-                config = make_config()
+        cases = (
+            (KvCacheDataType.BASE, False, 16, True, FusedRopeKVCacheDecodeOpNonAsm),
+            (KvCacheDataType.BASE, True, 32, False, FusedRopeKVCacheDecodeOpAsm),
+            (KvCacheDataType.FP8, False, 16, False, FusedRopeKVCacheDecodeOpAsm),
+            (KvCacheDataType.FP8, False, 32, False, FusedRopeKVCacheDecodeOpAsm),
+        )
+        for kv_dtype, use_asm_pa, page, linear_v, writer in cases:
+            with self.subTest(kv_dtype=kv_dtype, page=page):
+                config = make_config(page)
                 config.kv_cache_dtype = kv_dtype
                 fmha_config = FMHAConfig()
                 fmha_config.use_aiter_pa = True
                 fmha_config.use_asm_pa = use_asm_pa
                 fmha_config.use_triton_pa = True
+                inputs = make_inputs(torch.device("cuda"), page)
                 impl = attn_factory.get_fmha_impl(
                     config, None, inputs, fmha_config=fmha_config
                 )
                 self.assertIsInstance(impl, AiterDecodeImplTriton)
-                self.assertEqual(impl.fmha_impl.linear_v, expected_linear_v)
-                self.assertIs(type(impl.rope_kvcache_impl), expected_writer)
+                self.assertIs(impl.fmha_impl.linear_v, linear_v)
+                self.assertIs(type(impl.rope_kvcache_impl), writer)
 
 
 if __name__ == "__main__":

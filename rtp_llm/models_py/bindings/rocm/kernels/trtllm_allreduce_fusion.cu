@@ -772,6 +772,9 @@ void allreduce_kernel_launcher_hd(AllReduceFusionParams<T> const& params,
         case 4096:
             allreduce_kernel_launcher_<T, NRanks, 4096, QUANT_TYPE>(params, meta, cptrs, stream);
             return;
+        case 3072:
+            allreduce_kernel_launcher_<T, NRanks, 3072, QUANT_TYPE>(params, meta, cptrs, stream);
+            return;
         case 2560:
             allreduce_kernel_launcher_<T, NRanks, 2560, QUANT_TYPE>(params, meta, cptrs, stream);
             return;
@@ -949,21 +952,28 @@ Tensor get_handle(void* ptr) {
 void open_handles(int rank, std::vector<Tensor>& handles, void* ptr, std::vector<void*>& ipc_ptrs) {
     std::vector<gpuIpcMemHandle_t> ipc_handles;
     int                            world_size = handles.size();
+    std::vector<void*>             opened(world_size, nullptr);
     ipc_handles.reserve(world_size);
-    ipc_ptrs.resize(world_size);
     for (auto& handle : handles) {
         gpuIpcMemHandle_t ipc_handle;
         std::memcpy(&ipc_handle, handle.data_ptr(), sizeof(gpuIpcMemHandle_t));
         ipc_handles.push_back(ipc_handle);
     }
     for (int i = 0; i < world_size; ++i) {
-        if (i != rank) {
-            TORCH_CHECK(gpuIpcOpenMemHandle((void**)&ipc_ptrs[i], ipc_handles[i], gpuIpcMemLazyEnablePeerAccess)
-                        == gpuSuccess);
-        } else {
-            ipc_ptrs[i] = ptr;
+        if (i == rank) {
+            opened[i] = ptr;
+            continue;
+        }
+        auto err = gpuIpcOpenMemHandle(&opened[i], ipc_handles[i], gpuIpcMemLazyEnablePeerAccess);
+        if (err != gpuSuccess) {
+            for (int j = 0; j < i; ++j) {
+                if (j != rank && opened[j] != nullptr)
+                    hipIpcCloseMemHandle(opened[j]);
+            }
+            TORCH_CHECK(false, "hipIpcOpenMemHandle failed: ", hipGetErrorString(err));
         }
     }
+    ipc_ptrs.swap(opened);
 }
 
 void create_base_ptr(void** base_ptr, void* ptr) {
@@ -1086,24 +1096,25 @@ public:
         meta.rank       = rank_;
         meta.nranks     = world_size_;
 
+        int64_t token_num = input.numel() / input.size(-1);
+        bool    direct_input =
+            token_num <= (NBLOCKS_PER_GPU / 4)
+            && (world_size_ <= 2 || (world_size_ <= 4 && size < 160 * 1024) || (world_size_ <= 8 && size < 80 * 1024));
         CommPtrs* cptrs;
         bool      cache_hit = false;
-        auto      it = ptr_to_comm_ptrs_.find(ptr);
+        auto      it        = direct_input ? ptr_to_comm_ptrs_.find(ptr) : ptr_to_comm_ptrs_.end();
         if (it != ptr_to_comm_ptrs_.end()) {
             // Validate that the allocation backing this data_ptr hasn't
             // changed (freed + reused by the caching allocator).  If the
             // range no longer matches, the cached IPC slot is stale.
-            auto& slot = it->second;
+            auto&  slot      = it->second;
             void*  cur_start = nullptr;
             size_t cur_size  = 0;
             hipPointerGetAttribute(
-                &cur_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-                reinterpret_cast<hipDeviceptr_t>(ptr));
-            hipPointerGetAttribute(
-                &cur_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-                reinterpret_cast<hipDeviceptr_t>(ptr));
+                &cur_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(ptr));
+            hipPointerGetAttribute(&cur_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(ptr));
             if (cur_start == slot.range_start && cur_size == slot.range_size) {
-                cptrs = slot.comm_ptrs;
+                cptrs     = slot.comm_ptrs;
                 cache_hit = true;
             } else {
                 // Stale entry — allocation was recycled.  Erase so we fall
@@ -1112,26 +1123,19 @@ public:
             }
         }
         if (!cache_hit) {
-            // Restore fast-path: during graph capture, assign each allreduce
-            // invocation its own comm_ptrs slot and record the input tensor's
-            // data_ptr for later IPC handle exchange (consume_capture).
-            // Verified: ROCm hipGraph capture retains caching-allocator block
-            // references, so IPC handles stay valid across replay.
-            // (ROCm 6.x, PyTorch 2.6, 8×MI300X, 50+ round identical-prompt
-            //  decode + 24h whole-cluster soak with trtallreduce enabled.)
+            // One-stage graph replay reads peer inputs directly; other paths use the workspace.
             gpuStreamCaptureStatus status = gpuStreamCaptureStatusNone;
             if (gpuStreamIsCapturing(stream, &status) != gpuSuccess)
                 status = gpuStreamCaptureStatusNone;
-            // size_in_bytes_ is the workspace buffer size; tensors beyond it
-            // fall back to the copy path because they cannot fit in a single
-            // comm_ptrs slot's IPC-registered region.
             int remaining = comm_ptrs_buf_len_ - used_comm_ptrs_ - static_cast<int>(unregistered_ptrs_.size());
-            if (status == gpuStreamCaptureStatusActive && size < size_in_bytes_ && remaining > 0) {
+            if (direct_input && status == gpuStreamCaptureStatusActive && size < size_in_bytes_ && remaining > 0) {
                 unregistered_ptrs_.push_back(ptr);
                 cptrs = comm_ptrs_ + used_comm_ptrs_ + static_cast<int>(unregistered_ptrs_.size()) - 1;
             } else {
                 cptrs = comm_ptrs_ + 0;
-                gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream);
+                TORCH_CHECK(size <= size_in_bytes_, "allreduce input exceeds comm workspace capacity");
+                TORCH_CHECK(gpuMemcpyAsync(data_, ptr, size, gpuMemcpyDeviceToDevice, stream) == gpuSuccess,
+                            "failed to stage allreduce input into the comm workspace");
             }
         }
 
@@ -1173,8 +1177,8 @@ public:
     }
 
     void open_captured_handles(std::vector<Tensor>& handles, std::vector<int64_t>& offsets, int64_t ptr_idx) {
-        void*              ptr      = unregistered_ptrs_[ptr_idx];
-        void*              base_ptr = unregistered_base_ptrs_[ptr_idx];
+        void* ptr      = unregistered_ptrs_[ptr_idx];
+        void* base_ptr = unregistered_base_ptrs_[ptr_idx];
 
         // Defensive check: verify the cached pointer still belongs to a valid
         // device allocation.  The caching allocator may have freed and re-used
@@ -1190,39 +1194,57 @@ public:
         // HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR / HIP_POINTER_ATTRIBUTE_RANGE_SIZE
         // to query the allocation range on ROCm.
         hipPointerAttribute_t ptr_attrs = {};
-        hipError_t attr_err = hipPointerGetAttributes(&ptr_attrs, base_ptr);
+        hipError_t            attr_err  = hipPointerGetAttributes(&ptr_attrs, base_ptr);
         TORCH_CHECK(attr_err == hipSuccess,
-                    "[TrtllmAllreduce] cached base_ptr ", base_ptr,
-                    " (ptr_idx=", ptr_idx, ") failed hipPointerGetAttributes (err=",
-                    static_cast<int>(attr_err), "). The pointer is no longer valid — "
+                    "[TrtllmAllreduce] cached base_ptr ",
+                    base_ptr,
+                    " (ptr_idx=",
+                    ptr_idx,
+                    ") failed hipPointerGetAttributes (err=",
+                    static_cast<int>(attr_err),
+                    "). The pointer is no longer valid — "
                     "discard the captured graph and re-capture.");
         TORCH_CHECK(ptr_attrs.type == hipMemoryTypeDevice || ptr_attrs.type == hipMemoryTypeUnified,
-                    "[TrtllmAllreduce] cached base_ptr ", base_ptr,
-                    " (ptr_idx=", ptr_idx, ") is not device memory (type=",
-                    static_cast<int>(ptr_attrs.type), "). The underlying allocation "
+                    "[TrtllmAllreduce] cached base_ptr ",
+                    base_ptr,
+                    " (ptr_idx=",
+                    ptr_idx,
+                    ") is not device memory (type=",
+                    static_cast<int>(ptr_attrs.type),
+                    "). The underlying allocation "
                     "may have been freed. Discard the captured graph and re-capture.");
 
         // Query allocation base address and size via hipPointerGetAttribute.
-        void*  range_start = nullptr;
-        size_t range_size  = 0;
-        hipError_t start_err = hipPointerGetAttribute(
-            &range_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-            reinterpret_cast<hipDeviceptr_t>(base_ptr));
+        void*      range_start = nullptr;
+        size_t     range_size  = 0;
+        hipError_t start_err   = hipPointerGetAttribute(
+            &range_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(base_ptr));
         hipError_t size_err = hipPointerGetAttribute(
-            &range_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-            reinterpret_cast<hipDeviceptr_t>(base_ptr));
-        TORCH_CHECK(start_err == hipSuccess && size_err == hipSuccess
-                    && range_start != nullptr && range_size > 0,
+            &range_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(base_ptr));
+        TORCH_CHECK(start_err == hipSuccess && size_err == hipSuccess && range_start != nullptr && range_size > 0,
                     "[TrtllmAllreduce] failed to query allocation range for base_ptr ",
-                    base_ptr, " (ptr_idx=", ptr_idx, ", start_err=",
-                    static_cast<int>(start_err), ", size_err=",
-                    static_cast<int>(size_err), "). Discard the captured graph "
+                    base_ptr,
+                    " (ptr_idx=",
+                    ptr_idx,
+                    ", start_err=",
+                    static_cast<int>(start_err),
+                    ", size_err=",
+                    static_cast<int>(size_err),
+                    "). Discard the captured graph "
                     "and re-capture.");
         TORCH_CHECK(reinterpret_cast<char*>(base_ptr) >= reinterpret_cast<char*>(range_start)
-                    && reinterpret_cast<char*>(ptr) < reinterpret_cast<char*>(range_start) + range_size,
-                    "[TrtllmAllreduce] cached ptr ", ptr, " (base_ptr=", base_ptr,
-                    ", ptr_idx=", ptr_idx, ") falls outside the current allocation "
-                    "[", range_start, ", +", range_size,
+                        && reinterpret_cast<char*>(ptr) < reinterpret_cast<char*>(range_start) + range_size,
+                    "[TrtllmAllreduce] cached ptr ",
+                    ptr,
+                    " (base_ptr=",
+                    base_ptr,
+                    ", ptr_idx=",
+                    ptr_idx,
+                    ") falls outside the current allocation "
+                    "[",
+                    range_start,
+                    ", +",
+                    range_size,
                     "). The allocation was likely freed and re-used. "
                     "Discard the captured graph and re-capture.");
 
@@ -1246,13 +1268,9 @@ public:
         void*  reg_start = nullptr;
         size_t reg_size  = 0;
         hipPointerGetAttribute(
-            &reg_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-            reinterpret_cast<hipDeviceptr_t>(ptr));
-        hipPointerGetAttribute(
-            &reg_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-            reinterpret_cast<hipDeviceptr_t>(ptr));
-        ptr_to_comm_ptrs_[ptr] = CachedSlot{
-            comm_ptrs_ + used_comm_ptrs_, reg_start, reg_size};
+            &reg_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(ptr));
+        hipPointerGetAttribute(&reg_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(ptr));
+        ptr_to_comm_ptrs_[ptr] = CachedSlot{comm_ptrs_ + used_comm_ptrs_, reg_start, reg_size};
 
         // Track every ptr registered in this session (vector, NOT set) so
         // that duplicate data_ptrs are counted correctly for rollback.
@@ -1266,8 +1284,8 @@ public:
     void commit_capture() {
         pending_capture_ptrs_.clear();
         // Reset snapshot — nothing to roll back.
-        capture_snapshot_used_       = used_comm_ptrs_;
-        capture_snapshot_ipc_count_  = static_cast<int>(captured_ipc_handles_.size());
+        capture_snapshot_used_      = used_comm_ptrs_;
+        capture_snapshot_ipc_count_ = static_cast<int>(captured_ipc_handles_.size());
     }
 
     // Begin a new capture session: snapshot the current high-water marks so
@@ -1299,9 +1317,9 @@ public:
         // 3. Close and remove IPC handles opened during this session.
         while (static_cast<int>(captured_ipc_handles_.size()) > capture_snapshot_ipc_count_) {
             auto& last = captured_ipc_handles_.back();
-            for (void* ipc_ptr : last) {
-                if (ipc_ptr) {
-                    hipIpcCloseMemHandle(ipc_ptr);
+            for (int i = 0; i < world_size_; ++i) {
+                if (i != rank_ && last[i] != nullptr) {
+                    hipIpcCloseMemHandle(last[i]);
                 }
             }
             captured_ipc_handles_.pop_back();
@@ -1309,27 +1327,27 @@ public:
     }
 
 private:
-    int                                  device_id_;
-    int                                  rank_;
-    int                                  world_size_;
-    int64_t                              size_in_bytes_;
-    int                                  comm_ptrs_buf_len_;
-    int                                  max_thread_blocks_;
-    bool                                 round_robin_;
-    void*                                sync_clock_;
-    void*                                barrier_flags_;
-    void*                                data_;
-    std::vector<void*>                   ipc_barrier_flags_;
-    std::vector<void*>                   ipc_data_;
-    std::vector<void*>                   unregistered_ptrs_;
-    std::vector<void*>                   unregistered_base_ptrs_;
-    std::vector<std::vector<void*>>      captured_ipc_handles_;
-    CommPtrs*                            comm_ptrs_;
-    int                                  used_comm_ptrs_;
+    int                                   device_id_;
+    int                                   rank_;
+    int                                   world_size_;
+    int64_t                               size_in_bytes_;
+    int                                   comm_ptrs_buf_len_;
+    int                                   max_thread_blocks_;
+    bool                                  round_robin_;
+    void*                                 sync_clock_;
+    void*                                 barrier_flags_;
+    void*                                 data_;
+    std::vector<void*>                    ipc_barrier_flags_;
+    std::vector<void*>                    ipc_data_;
+    std::vector<void*>                    unregistered_ptrs_;
+    std::vector<void*>                    unregistered_base_ptrs_;
+    std::vector<std::vector<void*>>       captured_ipc_handles_;
+    CommPtrs*                             comm_ptrs_;
+    int                                   used_comm_ptrs_;
     std::unordered_map<void*, CachedSlot> ptr_to_comm_ptrs_;
-    std::vector<void*>                   pending_capture_ptrs_;      // ptrs registered in current session (allows duplicates)
-    int                                  capture_snapshot_used_ = 0;       // used_comm_ptrs_ at session start
-    int                                  capture_snapshot_ipc_count_ = 0;  // captured_ipc_handles_.size() at session start
+    std::vector<void*> pending_capture_ptrs_;            // ptrs registered in current session (allows duplicates)
+    int                capture_snapshot_used_      = 0;  // used_comm_ptrs_ at session start
+    int                capture_snapshot_ipc_count_ = 0;  // captured_ipc_handles_.size() at session start
 };
 
 // ============================================================================

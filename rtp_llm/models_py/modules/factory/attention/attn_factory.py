@@ -128,17 +128,16 @@ def _is_fmha_impl_disabled(
     # FlashInfer native implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flashinfer_native
-    # Aiter vectorized prefill writer.  Paged prefill and Triton decode consume
-    # vectorized V cache, so Aiter alone enables this writer as well as ASM.
-    elif "AiterPrefillImplAsm" in impl_class_name:
-        return not (
-            fmha_config.use_asm_pa
-            or fmha_config.use_aiter_pa
-            or fmha_config.use_triton_pa
-        )
-    elif "AiterPrefillImplPaged" in impl_class_name:
-        return not (fmha_config.use_asm_pa or fmha_config.use_aiter_pa)
+    # Aiter ASM / Paged prefill
+    elif (
+        "AiterPrefillImplAsm" in impl_class_name
+        or "AiterPrefillImplPaged" in impl_class_name
+    ):
+        return not fmha_config.use_asm_pa
+    # Aiter ASM decode — disabled when triton PA is enabled (triton PA takes priority)
     elif "AiterDecodeImplAsm" in impl_class_name:
+        if fmha_config.use_triton_pa:
+            return True
         return not fmha_config.use_asm_pa
     # Aiter Non-ASM implementations
     elif (
@@ -148,10 +147,7 @@ def _is_fmha_impl_disabled(
         return not fmha_config.use_aiter_pa
     # Aiter Triton implementations
     elif "AiterDecodeImplTriton" in impl_class_name:
-        return not (
-            fmha_config.use_triton_pa
-            or (fmha_config.use_aiter_pa and not fmha_config.use_asm_pa)
-        )
+        return not fmha_config.use_triton_pa
     # Default: not disabled
     return False
 
@@ -170,47 +166,44 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
-    # ROCm pins one V layout across prefill and decode; other backends do not.
-    layout_ok = None
+    strict_impl_selection = False
     if get_device_type() == DeviceType.ROCm:
         from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
-            v_layout_filter,
+            validate_v_layout,
         )
 
-        layout_ok = v_layout_filter(attn_configs, attn_inputs, fmha_config)
+        strict_impl_selection = validate_v_layout(
+            attn_configs, attn_inputs, fmha_config
+        )
 
-    skipped: List[str] = []
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
 
         # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
-            skipped.append(f"{impl_class_name}: disabled by config")
             continue
 
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
-            skipped.append(f"{impl_class_name}: support() rejected")
-            continue
-
-        if layout_ok is not None and not layout_ok(impl):
-            skipped.append(f"{impl_class_name}: V layout mismatch")
             continue
 
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
-            skipped.append(f"{impl_class_name}: parallelism config unsupported")
             continue
+        kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
-            instance = impl(attn_configs, attn_inputs, parallelism_config)
-            if not is_cuda_graph or instance.support_cuda_graph():
-                return instance
-            skipped.append(f"{impl_class_name}: no cuda graph support")
+            instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
         except Exception as e:
+            if strict_impl_selection or (
+                isinstance(e, RuntimeError)
+                and "illegal memory access" in str(e).lower()
+            ):
+                raise
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
-            skipped.append(f"{impl_class_name}: instantiation failed ({e})")
             continue
+        if not is_cuda_graph or instance.support_cuda_graph():
+            return instance
     if (
         attn_configs.rope_config.style == RopeStyle.Mrope
         and not attn_configs.rope_config.mrope_interleaved
@@ -221,7 +214,7 @@ def get_fmha_impl(
             "non-interleaved layout by default; do not flip mrope_interleaved because "
             "that changes RoPE semantics. Use a CUDA backend for these checkpoints."
         )
-    raise Exception(f"can not find mha type; candidates skipped: {'; '.join(skipped)}")
+    raise Exception("can not find mha type")
 
 
 class AttnImplFactory(object):

@@ -24,7 +24,6 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     PREFILL_MHA_IMPS,
     PREFILL_MLA_IMPS,
 )
-
 from rtp_llm.utils.backend_registry import run_backend_registrations
 
 device_type = get_device_type()
@@ -33,8 +32,7 @@ if device_type == DeviceType.ROCm:
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplAsm,
         AiterDecodeImplNonAsm,
-        AiterDecodeImplTritonLinear,
-        AiterDecodeImplTritonVectorized,
+        AiterDecodeImplTriton,
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
@@ -43,10 +41,7 @@ if device_type == DeviceType.ROCm:
     PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
     PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
     PREFILL_MHA_IMPS.append(AiterPrefillImplNonAsm)
-    # Vectorized first: where the layout preflight does not apply, this keeps the
-    # default decode writer matching the ASM prefill writer.
-    DECODE_MHA_IMPS.append(AiterDecodeImplTritonVectorized)
-    DECODE_MHA_IMPS.append(AiterDecodeImplTritonLinear)
+    DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
 elif device_type == DeviceType.Cuda:
