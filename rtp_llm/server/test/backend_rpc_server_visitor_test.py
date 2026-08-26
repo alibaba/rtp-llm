@@ -38,8 +38,17 @@ class _FakeGenerateConfig:
     def validate(self):
         return None
 
+    def is_prefill_only(self):
+        return self.max_new_tokens == 0
+
     def model_copy(self, update=None):
-        copied = _FakeGenerateConfig(self.is_streaming)
+        copied = _FakeGenerateConfig(
+            is_streaming=self.is_streaming,
+            calculate_loss=self.calculate_loss,
+            return_hidden_states=self.return_hidden_states,
+            return_all_hidden_states=self.return_all_hidden_states,
+        )
+        copied.max_new_tokens = self.max_new_tokens
         copied.role_addrs = list(self.role_addrs)
         for key, value in (update or {}).items():
             setattr(copied, key, value)
@@ -391,7 +400,13 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     async def test_non_streaming_discards_partial_attempt_before_retry(self):
         client = _RetryingModelRpcClient()
         visitor = self._visitor(client)
-        input = _FakeInput(_FakeGenerateConfig(is_streaming=False))
+        generate_config = _FakeGenerateConfig(
+            is_streaming=False,
+            calculate_loss=1,
+            return_hidden_states=True,
+            return_all_hidden_states=True,
+        )
+        input = _FakeInput(generate_config)
         visitor.set_request_id_factory(lambda: 456)
 
         stream = await visitor.enqueue(input)
@@ -405,6 +420,31 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(client.inputs[1].generate_config, input.generate_config)
         self.assertIs(client.inputs[1].token_ids, input.token_ids)
         self.assertEqual(input.request_id, 123)
+        self.assertFalse(client.inputs[1].generate_config.is_prefill_only())
+        self.assertEqual(client.inputs[1].generate_config.calculate_loss, 1)
+        self.assertTrue(client.inputs[1].generate_config.return_hidden_states)
+        self.assertTrue(client.inputs[1].generate_config.return_all_hidden_states)
+        self.assertEqual(client.inputs[1].generate_config.role_addrs, [])
+
+    async def test_prefill_only_retry_preserves_legal_config(self):
+        client = _RetryingModelRpcClient()
+        visitor = self._visitor(client)
+        generate_config = _FakeGenerateConfig(is_streaming=False)
+        generate_config.max_new_tokens = 0
+        input = _FakeInput(generate_config)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(input)
+        outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+        self.assertEqual(client.attempts, 2)
+        retried_config = client.inputs[1].generate_config
+        self.assertTrue(retried_config.is_prefill_only())
+        self.assertEqual(retried_config.calculate_loss, 0)
+        self.assertFalse(retried_config.return_hidden_states)
+        self.assertFalse(retried_config.return_all_hidden_states)
+        self.assertEqual(retried_config.role_addrs, [])
 
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])

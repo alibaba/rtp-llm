@@ -1,10 +1,9 @@
 """DeepEPStrategy: ACCL-EP normal-mode dispatch + per-expert local compute + combine.
 
-EP > 1 DeepEP implementation. DSV4 automatic strategy selection no longer
-falls back here when Mega is unavailable; EP>1 requires Mega and fails fast.
-This class is kept as an explicit implementation for targeted tests or
-experiments. Composes ``LocalLoopStrategy`` for the local per-expert compute
-on the dispatched recv tokens.
+EP > 1 DeepEP implementation. DSV4 automatic strategy selection never falls
+back here when Mega is unavailable; this path requires the explicit
+``DSV4_MOE_STRATEGY=deepep`` opt-in. Composes ``LocalLoopStrategy`` for the
+local per-expert compute on the dispatched recv tokens.
 
 Direct port of the pre-refactor ``_routed_experts_deepep`` +
 ``_pad_topk_for_deepep`` + the ``_DEEPEP_SUPPORTED_TOPK`` constant.
@@ -18,7 +17,6 @@ import torch
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .local_loop import LocalLoopStrategy
-
 
 # ACCL-EP's intranode dispatch kernel has a compile-time switch over
 # ``num_topk`` that only covers {2, 4, 8, 16} (asserts false on others —
@@ -34,8 +32,45 @@ _DEEPEP_SUPPORTED_TOPK = (2, 4, 8, 16)
 class DeepEPStrategy(RoutedExpertsStrategy):
     name = "deepep"
 
+    @staticmethod
+    def _require_normal_wrapper(cfg: MoeCfg):
+        if cfg.ep_size <= 1:
+            raise RuntimeError(
+                "DeepEPStrategy requires ep_size > 1; "
+                f"got ep_size={cfg.ep_size} (layer_id={cfg.layer_id})."
+            )
+
+        from rtp_llm.models_py.distributed.deepep_wrapper import (
+            DeepEPMode,
+            DeepEPWrapper,
+        )
+
+        if not DeepEPWrapper.is_initialized():
+            raise RuntimeError(
+                "DeepEPStrategy requires an initialized DeepEPWrapper, but the "
+                "wrapper is not initialized. Call init_deepep_wrapper() at engine "
+                f"startup (layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
+            )
+        if DeepEPWrapper._instance is None:
+            raise RuntimeError(
+                "DeepEPStrategy requires an initialized DeepEPWrapper, but the "
+                "wrapper instance is missing despite initialized state "
+                f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
+            )
+
+        wrapper = DeepEPWrapper._instance
+        if wrapper.mode != DeepEPMode.NORMAL:
+            mode_name = getattr(wrapper.mode, "name", str(wrapper.mode))
+            raise RuntimeError(
+                "DeepEPStrategy requires DeepEPMode.NORMAL, but the initialized "
+                f"wrapper uses {mode_name} (layer_id={cfg.layer_id}, "
+                f"ep_size={cfg.ep_size})."
+            )
+        return wrapper
+
     def __init__(self, cfg: MoeCfg):
         super().__init__(cfg)
+        self._require_normal_wrapper(cfg)
         # Composition: hold a LocalLoopStrategy instance for the per-expert
         # local compute on dispatched recv tokens. Registered as a child
         # nn.Module so its ``experts`` ModuleList propagates through
@@ -84,7 +119,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
 
     def forward(
         self,
-        x: torch.Tensor,        # [N, D] local rank's tokens (BF16)
+        x: torch.Tensor,  # [N, D] local rank's tokens (BF16)
         weights: torch.Tensor,  # [N, k] fp32
         indices: torch.Tensor,  # [N, k] int64 global expert IDs
     ) -> torch.Tensor:
@@ -92,21 +127,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         → DeepEP combine. Requires ``init_deepep_wrapper`` to have been
         called by the engine (``backend_manager.py``).
         """
-        from rtp_llm.models_py.distributed.deepep_wrapper import (
-            DeepEPMode,
-            DeepEPWrapper,
-        )
-
-        if DeepEPWrapper._instance is None:
-            raise RuntimeError(
-                "DeepEPWrapper not initialised; ep_size>1 requires "
-                "init_deepep_wrapper() at engine startup (enable via "
-                "--use_deepep_moe 1)."
-            )
-        wrapper = DeepEPWrapper._instance
-        assert (
-            wrapper.mode == DeepEPMode.NORMAL
-        ), f"expected NORMAL DeepEP mode, got {wrapper.mode}"
+        wrapper = self._require_normal_wrapper(self.cfg)
         buf = wrapper.buffer
         cfg = self.cfg
 

@@ -72,6 +72,11 @@ message GenerateConfigPB {
         THINKING_MODE_ADAPTIVE = 2;
         THINKING_MODE_ENABLED = 3;
     }
+
+    // Keep this as a plain proto3 scalar for wire compatibility. Because omitted and explicitly assigned 0
+    // are indistinguishable on the wire, a bare zero retains the legacy target-prefill/internal-zero behavior.
+    // An unflagged zero with return_prompt_logits retains legacy prompt-scoring normalization. Positive values
+    // mean normal generation; negative values are invalid.
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
     int32 num_return_sequences = 3;
@@ -153,6 +158,9 @@ message GenerateConfigPB {
     google.protobuf.StringValue structural_tag = 72;
     ThinkingModePB thinking_mode = 73;
     reserved 74;
+    // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
+    // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
+    bool prefill_only = 75;
 }
 
 message MMPreprocessConfigPB {
@@ -305,6 +313,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    INVALID_PARAMS = 26;
+    EXECUTION_EXCEPTION = 27;
 }
 
 // transfer between prefill and decode

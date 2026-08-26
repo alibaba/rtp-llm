@@ -23,6 +23,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMWallClockTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMHiddenStateCaptureMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
@@ -303,10 +304,8 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(pending_decode_stream_size_metric, "rtp_llm_pending_decode_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_since_prefill_metric, "rtp_llm_decode_since_prefill");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_batch_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_token_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric, "rtp_llm_scheduler_admitted_context_batch_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric, "rtp_llm_scheduler_admitted_context_token_size");
     REGISTER_GAUGE_MUTABLE_METRIC(waiting_oldest_age_us_metric, "rtp_llm_scheduler_waiting_oldest_age_us");
     REGISTER_MUTABLE_METRIC_BASE(
         group_fallback_acc_metric, "rtp_llm_scheduler_group_fallback_acc", kmonitor::COUNTER, kmonitor::NORMAL);
@@ -335,6 +334,95 @@ bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
     REPORT_GAUGE(step_latency_us);
+}
+
+bool RtpLLMHiddenStateCaptureMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(batch_qps_metric, "rtp_llm_hidden_state_capture_batch_qps");
+    REGISTER_QPS_MUTABLE_METRIC(publish_success_qps_metric, "rtp_llm_hidden_state_capture_publish_success_qps");
+    REGISTER_QPS_MUTABLE_METRIC(failure_qps_metric, "rtp_llm_hidden_state_capture_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(initialization_failure_qps_metric,
+                                "rtp_llm_hidden_state_capture_initialization_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(layout_failure_qps_metric, "rtp_llm_hidden_state_capture_layout_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(prepare_failure_qps_metric, "rtp_llm_hidden_state_capture_prepare_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(quantize_failure_qps_metric, "rtp_llm_hidden_state_capture_quantize_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(store_failure_qps_metric, "rtp_llm_hidden_state_capture_store_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(shutdown_failure_qps_metric, "rtp_llm_hidden_state_capture_shutdown_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(hard_contract_failure_qps_metric,
+                                "rtp_llm_hidden_state_capture_hard_contract_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(request_error_failure_qps_metric,
+                                "rtp_llm_hidden_state_capture_request_error_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(operational_failure_qps_metric, "rtp_llm_hidden_state_capture_operational_failure_qps");
+    REGISTER_QPS_MUTABLE_METRIC(duplicate_request_id_qps_metric,
+                                "rtp_llm_hidden_state_capture_duplicate_request_id_qps");
+    REGISTER_QPS_MUTABLE_METRIC(fail_open_disable_qps_metric, "rtp_llm_hidden_state_capture_fail_open_disable_qps");
+    REGISTER_QPS_MUTABLE_METRIC(disabled_skip_qps_metric, "rtp_llm_hidden_state_capture_disabled_skip_qps");
+    REGISTER_QPS_MUTABLE_METRIC(broken_rejection_qps_metric, "rtp_llm_hidden_state_capture_broken_rejection_qps");
+    REGISTER_QPS_MUTABLE_METRIC(bf16_publish_qps_metric, "rtp_llm_hidden_state_capture_bf16_publish_qps");
+    REGISTER_QPS_MUTABLE_METRIC(fp8_publish_qps_metric, "rtp_llm_hidden_state_capture_fp8_publish_qps");
+
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_latency_us_metric, "rtp_llm_hidden_state_capture_publish_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(quantize_latency_us_metric, "rtp_llm_hidden_state_capture_quantize_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(store_put_latency_us_metric, "rtp_llm_hidden_state_capture_store_put_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_request_count_metric, "rtp_llm_hidden_state_capture_publish_request_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_token_count_metric, "rtp_llm_hidden_state_capture_publish_token_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_payload_bytes_metric, "rtp_llm_hidden_state_capture_publish_payload_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_input_ids_bytes_metric,
+                                  "rtp_llm_hidden_state_capture_publish_input_ids_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_aux_hidden_bytes_metric,
+                                  "rtp_llm_hidden_state_capture_publish_aux_hidden_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_last_hidden_bytes_metric,
+                                  "rtp_llm_hidden_state_capture_publish_last_hidden_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(publish_scale_bytes_metric, "rtp_llm_hidden_state_capture_publish_scale_bytes");
+    REGISTER_STATUS_MUTABLE_METRIC(capture_enabled_metric, "rtp_llm_hidden_state_capture_enabled");
+    REGISTER_STATUS_MUTABLE_METRIC(capture_broken_metric, "rtp_llm_hidden_state_capture_broken");
+    REGISTER_STATUS_MUTABLE_METRIC(fail_open_enabled_metric, "rtp_llm_hidden_state_capture_fail_open_enabled");
+    return true;
+}
+
+void RtpLLMHiddenStateCaptureMetrics::report(const kmonitor::MetricsTags*              tags,
+                                             RtpLLMHiddenStateCaptureMetricsCollector* collector) {
+    REPORT_QPS(batch_qps);
+    REPORT_QPS(publish_success_qps);
+    REPORT_QPS(failure_qps);
+    REPORT_QPS(initialization_failure_qps);
+    REPORT_QPS(layout_failure_qps);
+    REPORT_QPS(prepare_failure_qps);
+    REPORT_QPS(quantize_failure_qps);
+    REPORT_QPS(store_failure_qps);
+    REPORT_QPS(shutdown_failure_qps);
+    REPORT_QPS(hard_contract_failure_qps);
+    REPORT_QPS(request_error_failure_qps);
+    REPORT_QPS(operational_failure_qps);
+    REPORT_QPS(duplicate_request_id_qps);
+    REPORT_QPS(fail_open_disable_qps);
+    REPORT_QPS(disabled_skip_qps);
+    REPORT_QPS(broken_rejection_qps);
+    REPORT_QPS(bf16_publish_qps);
+    REPORT_QPS(fp8_publish_qps);
+
+    if (collector->has_publish_latency) {
+        REPORT_MUTABLE_METRIC(publish_latency_us_metric, collector->publish_latency_us);
+    }
+    if (collector->has_quantize_latency) {
+        REPORT_MUTABLE_METRIC(quantize_latency_us_metric, collector->quantize_latency_us);
+    }
+    if (collector->has_store_put_latency) {
+        REPORT_MUTABLE_METRIC(store_put_latency_us_metric, collector->store_put_latency_us);
+    }
+    if (collector->has_publish_payload) {
+        REPORT_MUTABLE_METRIC(publish_request_count_metric, collector->publish_request_count);
+        REPORT_MUTABLE_METRIC(publish_token_count_metric, collector->publish_token_count);
+        REPORT_MUTABLE_METRIC(publish_payload_bytes_metric, collector->publish_payload_bytes);
+        REPORT_MUTABLE_METRIC(publish_input_ids_bytes_metric, collector->publish_input_ids_bytes);
+        REPORT_MUTABLE_METRIC(publish_aux_hidden_bytes_metric, collector->publish_aux_hidden_bytes);
+        REPORT_MUTABLE_METRIC(publish_last_hidden_bytes_metric, collector->publish_last_hidden_bytes);
+        REPORT_MUTABLE_METRIC(publish_scale_bytes_metric, collector->publish_scale_bytes);
+    }
+    if (collector->has_capture_status) {
+        REPORT_MUTABLE_METRIC(capture_enabled_metric, collector->capture_enabled);
+        REPORT_MUTABLE_METRIC(capture_broken_metric, collector->capture_broken);
+        REPORT_MUTABLE_METRIC(fail_open_enabled_metric, collector->fail_open_enabled);
+    }
 }
 
 bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {

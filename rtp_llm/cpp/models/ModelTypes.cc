@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
-    shape_hints[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
+    shape_hints[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints[GptModelInputIndex::inputLengths] = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::sequenceLengths] =
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
@@ -61,6 +61,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
             0;
     shape_hints[GptModelInputIndex::needAllLogits]       = inputs.need_all_logits;
     shape_hints[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
+    shape_hints[GptModelInputIndex::skipLmHead]          = inputs.skip_lm_head;
+    shape_hints[GptModelInputIndex::captureHiddenStates] = inputs.capture_hidden_states;
     shape_hints[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
     shape_hints[GptModelInputIndex::mtpHiddenStatesDtype] =
@@ -155,6 +157,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     int64_t*      mm_extra_input_shape_ptr = nullptr;
     inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
+    inputs.skip_lm_head                    = shape_hints_ptr[GptModelInputIndex::skipLmHead];
+    inputs.capture_hidden_states           = shape_hints_ptr[GptModelInputIndex::captureHiddenStates];
     inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
@@ -195,11 +199,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         cudaSyncAndCheck();
     }
 
-    const auto max_kernel_blocks = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
-    const auto max_blocks        = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
-    const auto cache_keys_width  = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
-    const auto kv_cache_group_num      = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
-    const auto group_types_len         = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
+    const auto max_kernel_blocks  = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
+    const auto max_blocks         = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
+    const auto cache_keys_width   = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
+    const auto kv_cache_group_num = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
+    const auto group_types_len    = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
     const auto combo_position_ids_size = checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
     const auto text_tokens_mask_size   = checkedHint(GptModelInputIndex::textTokensMask, "textTokensMask");
     const auto mm_features_locs_size   = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
@@ -265,12 +269,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             // RTP_LLM_DEVICE_INPUT publishes it to CUDA. Follow the root bitmap so the packed-buffer
             // classification below stays identical across ranks (otherwise pack/unpack drifts
             // off-by-tensor and non-root unpacks garbage).
-            inputs.kv_cache_kernel_block_id =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num,
-                          checkedHint(GptModelInputIndex::inputLengths, "inputLengths"),
-                          max_kernel_blocks},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
+            inputs.kv_cache_kernel_block_id = allocBuf(
+                rtp_llm::DataType::TYPE_INT32,
+                {kv_cache_group_num, checkedHint(GptModelInputIndex::inputLengths, "inputLengths"), max_kernel_blocks},
+                pickAlloc(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
             inputs.kv_cache_update_mapping =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3});

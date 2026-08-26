@@ -110,6 +110,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
+        self._disable_capture_context()
 
         noise_token_id = getattr(model_config, "dspark_noise_token_id", None)
         target_layer_ids = getattr(model_config, "dspark_target_layer_ids", None)

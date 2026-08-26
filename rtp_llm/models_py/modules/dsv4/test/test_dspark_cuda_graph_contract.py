@@ -15,6 +15,7 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model._gen_num_per_cycle = gamma
     model._dspark_commit_cp_enabled = False
     model._dspark_kv_cache_sharded = False
+    model.kv_cache = None
     model.tp_size = 2
     model.tp_rank = 0
     model._v4_args = type(
@@ -24,6 +25,68 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_aux_hidden_capture_and_cuda_graph_width_contract(self) -> None:
+        target_layer_ids = [2, 6, 9]
+        dim = 8
+
+        def _fake_base_init(model, *_args, **_kwargs) -> None:
+            model._gen_num_per_cycle = 5
+            model._v4_args = SimpleNamespace(
+                n_layers=3,
+                compress_ratios=(0, 0, 0),
+                window_size=128,
+                dim=dim,
+                vocab_size=17,
+            )
+
+        model_config = SimpleNamespace(
+            dspark_noise_token_id=1,
+            dspark_target_layer_ids=target_layer_ids,
+            dspark_markov_rank=4,
+        )
+        parallelism_config = SimpleNamespace(
+            tp_size=1,
+            tp_rank=0,
+            prefill_cp_config=None,
+        )
+        with patch.object(
+            dspark_model_module.DeepSeekV4Model, "__init__", _fake_base_init
+        ):
+            model = DeepSeekV4DSparkModel(
+                model_config,
+                parallelism_config,
+                weights=None,
+                moe_config=None,
+                max_generate_batch_size=1,
+            )
+
+        self.assertFalse(model.supports_hidden_state_capture)
+        self.assertIs(DeepSeekV4DSparkModel._captures_aux_hidden, False)
+        self.assertEqual(
+            model.cuda_graph_input_hidden_size(), len(target_layer_ids) * dim
+        )
+
+    def test_commit_rejects_wrong_aux_hidden_width(self) -> None:
+        model = _dspark_harness(gamma=3)
+        target_layer_ids = (2, 6, 9)
+        aux_width = len(target_layer_ids) * model._v4_args.dim
+        model.init_dspark_proposer(
+            width=3,
+            noise_token_id=1,
+            aux_feature_dim=aux_width,
+            hidden_dim=model._v4_args.dim,
+        )
+        inputs = SimpleNamespace(
+            input_hiddens=torch.zeros((1, aux_width - 1)),
+            attention_inputs=SimpleNamespace(
+                input_lengths=torch.tensor([1], dtype=torch.int32),
+                prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, f"configured width {aux_width}"):
+            model.run_commit_step(inputs, torch.device("cpu"))
+
     def test_forward_uses_fixed_role_entrypoints(self) -> None:
         model = _dspark_harness(gamma=3)
         model.v4 = SimpleNamespace(

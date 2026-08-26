@@ -44,6 +44,7 @@ private:
 struct CustomConfig {
     bool                                    reuse_cache        = false;
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
+    RoleType                                role_type          = RoleType::PDFUSION;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
     bool                                    prefill_cp_enabled  = false;
@@ -155,6 +156,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::GrpcConfig            grpc_config;
     rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig             vit_config;
+    pd_sep_config.role_type = config.role_type;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,

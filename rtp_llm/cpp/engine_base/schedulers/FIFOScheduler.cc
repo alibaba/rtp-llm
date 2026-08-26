@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -29,8 +30,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                       metrics_reporter),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
-    max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    max_batch_tokens_without_cache_(
+        static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1) {
@@ -79,6 +80,15 @@ void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector)
 std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
 FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (hasMixedExecutionModes(streams)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
+    }
+
     std::vector<bool> enqueue_successes;
     enqueue_successes.reserve(streams.size());
     std::vector<GenerateStreamPtr> valid_streams;
@@ -188,8 +198,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
         admitted_count, admitted_tokens, admitted_max_seq_len, admitted_sequence_count, new_stream);
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) {
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     // FIFOScheduler's own scheduling loop uses the counter-based evaluateRunningBatch();
     // this list-based FIFOSchedulerBase entry point delegates to the list overload so
     // both paths agree.
@@ -310,13 +319,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
@@ -325,6 +331,20 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // Explicit groups are scheduled through enqueueGroup() and the dedicated group
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
+
+    bool       has_execution_mode      = false;
+    bool       scheduling_prefill_only = false;
+    const auto capture_execution_mode  = [&](const list<GenerateStreamPtr>& streams) {
+        const auto it = std::find_if(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream && stream->getStatus() == StreamState::RUNNING;
+        });
+        if (!has_execution_mode && it != streams.end()) {
+            has_execution_mode      = true;
+            scheduling_prefill_only = isPrefillOnly(*it);
+        }
+    };
+    capture_execution_mode(running_streams_);
+    capture_execution_mode(already_admitted_streams);
 
     ScheduleRuntime schedule_runtime;
     for (const auto& stream : already_admitted_streams) {
@@ -357,6 +377,11 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
+        const bool prefill_only = isPrefillOnly(stream);
+        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
+            continue;
+        }
+
         // Stop admitting new work once this scheduling round reaches the uncached
         // token quota. Keep scanning so errored streams behind it can still be
         // finalized.
@@ -379,6 +404,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
 
         if (!evaluateRunningBatch(schedule_runtime, stream)) {
             continue;
+        }
+        if (!has_execution_mode) {
+            has_execution_mode      = true;
+            scheduling_prefill_only = prefill_only;
         }
 
         const auto state                 = stream->getStatus();

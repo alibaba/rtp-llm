@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
@@ -193,8 +194,7 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
                 sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
-                gathered_mm_extra_input.emplace_back(
-                    current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
+                gathered_mm_extra_input.emplace_back(current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
             } else {
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }
@@ -256,17 +256,16 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
     const auto total_context_batch_size = total_batch_size - total_decode_batch_size;
-    auto       indexes =
-        torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto* dst = indexes.data_ptr<int32_t>();
+    auto       indexes = torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto*      dst     = indexes.data_ptr<int32_t>();
     for (int64_t i = 0; i < total_decode_batch_size; ++i) {
         dst[i] = static_cast<int32_t>(i);
     }
     if (total_context_batch_size > 0) {
-        auto input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
-                                                                  model_input.input_lengths.contiguous();
-        const auto* lengths = input_lengths.data_ptr<int32_t>();
-        int32_t     offset  = static_cast<int32_t>(total_decode_batch_size);
+        auto        input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
+                                                                          model_input.input_lengths.contiguous();
+        const auto* lengths       = input_lengths.data_ptr<int32_t>();
+        int32_t     offset        = static_cast<int32_t>(total_decode_batch_size);
         for (int64_t i = 0; i < total_context_batch_size; ++i) {
             offset += lengths[total_decode_batch_size + i];
             dst[total_decode_batch_size + i] = offset - 1;
@@ -385,8 +384,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
+    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
+    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
                                    && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
@@ -472,10 +471,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
-    const auto context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
-    auto prefix_lengths_host =
+    const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
+    auto                       prefix_lengths_host =
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
+    auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -616,7 +615,23 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
-    auto model_input = allocateModelInputBuffers(stream_groups);
+    const auto all_streams = stream_groups.allStreams();
+    if (hasMixedExecutionModes(all_streams)) {
+        // Do not return before the executor's TP sync: non-root ranks can own an empty
+        // stream list, so a rank-local early return would fork the collective sequence.
+        // Mark every affected request instead; the gathered batch remains shape-valid
+        // and any model output is ignored by the errored streams.
+        for (const auto& stream : all_streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS, kMixedExecutionModeBatchError);
+            }
+        }
+    }
+    const bool prefill_only = !all_streams.empty() && isPrefillOnly(all_streams.front());
+
+    auto model_input                  = allocateModelInputBuffers(stream_groups);
+    model_input.skip_lm_head          = prefill_only;
+    model_input.capture_hidden_states = prefill_only;
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));

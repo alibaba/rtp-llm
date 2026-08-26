@@ -56,8 +56,8 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -331,6 +331,7 @@ class DeepSeekV4Model(GptModelBase):
                 getattr(model_config, "capture_aux_hidden_layer_ids", None) or ()
             )
         )
+
         if self._capture_aux_hidden_layer_ids:
             # DSpARK: the captured aux features ride the shared MTP hidden
             # buffer instead of a dedicated output channel. The factory sets
@@ -470,6 +471,22 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_trigger,
                 self._profile_path,
             )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states.mean(dim=-2)
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        if self.v4 is None:
+            raise RuntimeError("DeepSeekV4Model is not initialized")
+        return self.v4.norm(hidden_states)
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
@@ -1291,6 +1308,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
+                capture_context=self.capture_context(inputs.capture_hidden_states),
             )
         else:
             return forward_decode(

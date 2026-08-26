@@ -24,6 +24,7 @@ import unittest
 
 from pydantic import ValidationError
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import (
     _DIVERGE_START_COMBO_WARN_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
 )
@@ -36,6 +37,212 @@ from rtp_llm.config.generate_config import (
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.structure.request_extractor import RequestExtractor
+
+
+class TestPrefillOnlyGenerateConfig(unittest.TestCase):
+    def test_prefill_only_preserves_cache_setting(self):
+        config = GenerateConfig(max_new_tokens=0, reuse_cache=True)
+
+        self.assertTrue(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+        config.validate()
+
+    def test_update_preserves_cache_setting_across_prefill_only(self):
+        config = GenerateConfig(max_new_tokens=1, reuse_cache=True)
+
+        config.update({"max_new_tokens": 0})
+        self.assertTrue(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+        config.update({"max_new_tokens": 1})
+        self.assertFalse(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+    def test_update_and_pop_preserves_cache_setting_across_prefill_only(self):
+        config = GenerateConfig(max_new_tokens=1, reuse_cache=True)
+
+        remain = config.update_and_pop({"max_new_tokens": 0, "unknown": "keep"})
+        self.assertEqual(remain, {"unknown": "keep"})
+        self.assertTrue(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+        remain = config.update_and_pop({"max_new_tokens": 1, "unknown": "keep"})
+        self.assertEqual(remain, {"unknown": "keep"})
+        self.assertFalse(config.is_prefill_only())
+        self.assertTrue(config.reuse_cache)
+
+    def test_negative_max_new_tokens_is_rejected(self):
+        with self.assertRaisesRegex(FtRuntimeException, "greater than or equal to 0"):
+            GenerateConfig(max_new_tokens=-1)
+
+    def test_is_prefill_only_is_a_pure_boolean_query(self):
+        config = GenerateConfig(max_new_tokens=1)
+        config.max_new_tokens = -1
+
+        self.assertIs(config.is_prefill_only(), False)
+        with self.assertRaisesRegex(FtRuntimeException, "max_new_tokens"):
+            config.validate()
+
+    def test_failed_update_is_atomic(self):
+        config = GenerateConfig(max_new_tokens=1, return_logits=True, reuse_cache=True)
+
+        with self.assertRaisesRegex(FtRuntimeException, "return_logits"):
+            config.update({"reuse_cache": False, "max_new_tokens": 0})
+
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertTrue(config.return_logits)
+        self.assertTrue(config.reuse_cache)
+
+    def test_failed_update_and_pop_is_atomic(self):
+        config = GenerateConfig(max_new_tokens=1, return_logits=True, reuse_cache=True)
+
+        with self.assertRaisesRegex(FtRuntimeException, "return_logits"):
+            config.update_and_pop(
+                {"reuse_cache": False, "max_new_tokens": 0, "unknown": "keep"}
+            )
+
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertTrue(config.return_logits)
+        self.assertTrue(config.reuse_cache)
+
+    def test_negative_update_is_validated_atomically(self):
+        for update_method in ("update", "update_and_pop"):
+            with self.subTest(update_method=update_method):
+                config = GenerateConfig(max_new_tokens=3, reuse_cache=True)
+
+                with self.assertRaisesRegex(FtRuntimeException, "max_new_tokens"):
+                    getattr(config, update_method)(
+                        {"reuse_cache": False, "max_new_tokens": -1}
+                    )
+
+                self.assertEqual(config.max_new_tokens, 3)
+                self.assertTrue(config.reuse_cache)
+
+    def test_prompt_scoring_normalizes_zero_max_new_tokens(self):
+        config = GenerateConfig(max_new_tokens=0, return_prompt_logits=True)
+
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertFalse(config.is_prefill_only())
+        self.assertFalse(config.is_streaming)
+        self.assertFalse(config.reuse_cache)
+        self.assertFalse(config.can_use_pd_separation)
+        config.validate()
+
+    def test_prompt_scoring_normalizes_zero_max_new_tokens_on_update(self):
+        config = GenerateConfig(max_new_tokens=1, return_prompt_logits=True)
+
+        config.update({"max_new_tokens": 0})
+
+        self.assertEqual(config.max_new_tokens, 1)
+        self.assertFalse(config.is_prefill_only())
+
+    def test_positive_min_new_tokens_is_rejected_for_prefill_only(self):
+        for min_new_tokens in (1, [0, 1]):
+            with self.subTest(min_new_tokens=min_new_tokens):
+                with self.assertRaisesRegex(FtRuntimeException, "min_new_tokens"):
+                    GenerateConfig(max_new_tokens=0, min_new_tokens=min_new_tokens)
+
+    def test_unsupported_config_is_rejected_without_mutating_cache_setting(self):
+        bad_configs = {
+            "num_beams": {"num_beams": 2},
+            "variable_num_beams": {"variable_num_beams": [1]},
+            "num_return_sequences": {"num_return_sequences": 2},
+            "return_logits": {"return_logits": True},
+            "calculate_loss": {"calculate_loss": 1},
+            "return_softmax_probs": {"return_softmax_probs": True},
+            "return_all_probs": {"return_all_probs": 1},
+            "return_cum_log_probs": {"return_cum_log_probs": True},
+            "return_hidden_states": {"return_hidden_states": True},
+            "return_all_hidden_states": {"return_all_hidden_states": True},
+        }
+        for field, overrides in bad_configs.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(FtRuntimeException, field):
+                    GenerateConfig(max_new_tokens=0, **overrides)
+
+        config = GenerateConfig(max_new_tokens=1, return_logits=True)
+        with self.assertRaisesRegex(FtRuntimeException, "return_logits"):
+            config.update({"max_new_tokens": 0})
+        self.assertTrue(config.reuse_cache)
+
+    def test_positive_generation_is_unchanged(self):
+        config = GenerateConfig(
+            max_new_tokens=1,
+            min_new_tokens=1,
+            num_beams=2,
+            variable_num_beams=[1],
+            num_return_sequences=2,
+            return_logits=True,
+            calculate_loss=1,
+            return_softmax_probs=True,
+            return_all_probs=1,
+            return_cum_log_probs=True,
+            return_hidden_states=True,
+            return_all_hidden_states=True,
+        )
+
+        config.validate()
+        self.assertTrue(config.reuse_cache)
+        self.assertTrue(
+            GenerateConfig(
+                max_new_tokens=1, return_prompt_logits=True
+            ).return_prompt_logits
+        )
+
+
+class TestGenerateConfigUpdates(unittest.TestCase):
+    def test_updates_only_declared_fields(self):
+        values = {"validate": "shadowed", "unknown": "keep"}
+
+        for update_method in ("update", "update_and_pop"):
+            with self.subTest(update_method=update_method):
+                config = GenerateConfig()
+
+                remaining = getattr(config, update_method)(values)
+
+                self.assertTrue(callable(config.validate))
+                if update_method == "update":
+                    self.assertIsNone(remaining)
+                else:
+                    self.assertEqual(remaining, values)
+
+    def test_updates_preserve_constructor_coercion(self):
+        startup_values = {
+            "max_new_tokens": "4",
+            "reuse_cache": "false",
+            "top_p": "0.75",
+        }
+        expected = GenerateConfig(**startup_values)
+
+        for update_method in ("update", "update_and_pop"):
+            with self.subTest(update_method=update_method):
+                config = GenerateConfig()
+
+                remaining = getattr(config, update_method)(startup_values)
+
+                self.assertEqual(config.max_new_tokens, expected.max_new_tokens)
+                self.assertEqual(config.reuse_cache, expected.reuse_cache)
+                self.assertEqual(config.top_p, expected.top_p)
+                if update_method == "update_and_pop":
+                    self.assertEqual(remaining, {})
+
+    def test_type_validation_failure_is_wrapped_and_atomic(self):
+        values = {"reuse_cache": False, "aux_info": object()}
+
+        for update_method in ("update", "update_and_pop"):
+            with self.subTest(update_method=update_method):
+                config = GenerateConfig(reuse_cache=True, aux_info=True)
+
+                with self.assertRaises(FtRuntimeException) as context:
+                    getattr(config, update_method)(values)
+
+                self.assertEqual(
+                    context.exception.exception_type,
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                )
+                self.assertIsInstance(context.exception.__cause__, ValidationError)
+                self.assertTrue(config.reuse_cache)
+                self.assertTrue(config.aux_info)
 
 
 class TestRawGenerateConfigParsing(unittest.TestCase):
