@@ -119,8 +119,44 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
+        # Reduction strategy, decided by router capability. "partial" means the
+        # value still needs summing over Group.TP. Two partials can be added
+        # locally and then share one collective; an already-complete branch
+        # cannot join, since the reduction would sum it tp_size times.
+        #
+        #   one collective
+        #     use_unified_tp_allreduce   routed partial              \
+        #                                shared partial              /  add -> all_reduce
+        #
+        #     use_ep_unified_allreduce   routed partial, scattered   \
+        #                                shared partial              /  add -> all_reduce
+        #
+        #     these two differ only in how routed becomes a full-width partial:
+        #     pure TP leaves it that way, EP scatter-adds this rank's token slice
+        #
+        #   two collectives
+        #     use_ep_shared_allreduce    routed complete via all_gather  \
+        #                                shared partial -> all_reduce    /  add
+        #
+        #     no flag, ffn_tp_size > 1   routed complete                 \
+        #                                shared complete                 /  add
+        #
+        #   no collective
+        #     no flag, ffn_tp_size == 1  routed and shared already complete -> add
+        #
+        #   counts are Group.TP only; the EP all_to_all is not included
+        self.use_ep_unified_allreduce = (
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size > 1
+            and self.ffn_tp_size == router_tp_size
+            and router.supports_row_scatter_finalize
+        )
         self.use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size > 1
+            and not self.use_ep_unified_allreduce
         )
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
@@ -131,9 +167,10 @@ class GenericMoeLayer(nn.Module):
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "GenericMoE unified TP all-reduce %s "
+                "GenericMoE unified TP all-reduce %s, EP unified all-reduce %s "
                 "(router=%s, ffn_tp_size=%d, router_tp_size=%d, ep_size=%d)",
                 "enabled" if self.use_unified_tp_allreduce else "disabled",
+                "enabled" if self.use_ep_unified_allreduce else "disabled",
                 type(router).__name__,
                 self.ffn_tp_size,
                 router_tp_size,
@@ -211,6 +248,21 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        if self.use_ep_unified_allreduce:
+            assert self.shared_expert is not None
+            row_scatter_target = self._gate_shared_expert_output(
+                hidden_states,
+                self.shared_expert(hidden_states, skip_allreduce=True),
+            )
+            experts_output = self.fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation="SiGLU",
+                row_scatter_target=row_scatter_target,
+            )
+            return all_reduce(experts_output, group=Group.TP, inplace=True)
+
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
         # path separately.  This is especially important for decode, where the
@@ -240,9 +292,9 @@ class GenericMoeLayer(nn.Module):
                 )
                 experts_output = all_reduce(experts_output, group=Group.TP)
             elif self.use_ep_shared_allreduce:
-                # EP mode: routed expert output is already complete
-                # (EP combine via all_to_all / all_gather aggregated across ranks).
-                # Only the shared expert output is TP-partial and needs all_reduce.
+                # Skipping DenseMLP's reduce to redo it here saves no collective;
+                # it just puts the gate ahead of the reduction, which is
+                # equivalent for a rank-consistent gate.
                 shared_expert_output = self._gate_shared_expert_output(
                     hidden_states, shared_expert_output
                 )

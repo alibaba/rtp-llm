@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import torch
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ROW_SCATTER_TARGET_ARG,
     SKIP_TP_ALLREDUCE_ARG,
     CombineForwardPayload,
     ExpertForwardPayload,
@@ -24,36 +25,38 @@ def _extract_extra_finalize_args(router_finalize_mock):
     return args[4]
 
 
+def _make_fused_moe(*, supports_skip=False, supports_row_scatter=False):
+    hidden_states = torch.randn(4, 8)
+    topk_ids = torch.zeros(4, 2, dtype=torch.int32)
+    topk_weights = torch.ones(4, 2, dtype=torch.float32)
+
+    router = Mock(spec=FusedMoeDataRouter)
+    router.supports_skip_tp_allreduce = supports_skip
+    router.supports_row_scatter_finalize = supports_row_scatter
+    router.prepare.return_value = ExpertForwardPayload(
+        expert_x=hidden_states,
+        expert_topk_ids=topk_ids,
+        expert_topk_weights=topk_weights,
+    )
+    experts = Mock(spec=FusedMoeExpertExecutor)
+    experts.execute.return_value = CombineForwardPayload(
+        fused_expert_output=hidden_states.clone()
+    )
+    router.finalize.return_value = hidden_states.clone()
+    return (
+        FusedMoe(router, experts, expert_num=8),
+        router,
+        experts,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+    )
+
+
 class FusedMoeSkipAllreduceTest(TestCase):
-    def _make_fused_moe(self, supports_skip):
-        hidden_states = torch.randn(4, 8)
-        topk_ids = torch.zeros(4, 2, dtype=torch.int32)
-        topk_weights = torch.ones(4, 2, dtype=torch.float32)
-
-        router = Mock(spec=FusedMoeDataRouter)
-        router.supports_skip_tp_allreduce = supports_skip
-        router.prepare.return_value = ExpertForwardPayload(
-            expert_x=hidden_states,
-            expert_topk_ids=topk_ids,
-            expert_topk_weights=topk_weights,
-        )
-        experts = Mock(spec=FusedMoeExpertExecutor)
-        experts.execute.return_value = CombineForwardPayload(
-            fused_expert_output=hidden_states.clone()
-        )
-        router.finalize.return_value = hidden_states.clone()
-        return (
-            FusedMoe(router, experts, expert_num=8),
-            router,
-            experts,
-            hidden_states,
-            topk_weights,
-            topk_ids,
-        )
-
     def test_forward_passes_skip_tp_allreduce_to_supported_router(self):
-        fused_moe, router, _, hidden_states, topk_weights, topk_ids = (
-            self._make_fused_moe(True)
+        fused_moe, router, _, hidden_states, topk_weights, topk_ids = _make_fused_moe(
+            supports_skip=True
         )
         fused_moe(
             hidden_states=hidden_states,
@@ -69,7 +72,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
         for supports_skip in (True, False):
             with self.subTest(supports_skip=supports_skip):
                 fused_moe, router, _, hidden_states, topk_weights, topk_ids = (
-                    self._make_fused_moe(supports_skip)
+                    _make_fused_moe(supports_skip=supports_skip)
                 )
                 fused_moe(
                     hidden_states=hidden_states,
@@ -81,8 +84,8 @@ class FusedMoeSkipAllreduceTest(TestCase):
                 self.assertFalse(extra_finalize_args[SKIP_TP_ALLREDUCE_ARG])
 
     def test_forward_overrides_conflicting_finalize_skip_key(self):
-        fused_moe, router, _, hidden_states, topk_weights, topk_ids = (
-            self._make_fused_moe(True)
+        fused_moe, router, _, hidden_states, topk_weights, topk_ids = _make_fused_moe(
+            supports_skip=True
         )
         extra_finalize_args = {SKIP_TP_ALLREDUCE_ARG: True}
         fused_moe(
@@ -100,7 +103,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
 
     def test_unsupported_router_cannot_be_bypassed_by_finalize_key(self):
         fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
-            self._make_fused_moe(False)
+            _make_fused_moe(supports_skip=False)
         )
         extra_finalize_args = {SKIP_TP_ALLREDUCE_ARG: True}
         fused_moe(
@@ -119,8 +122,8 @@ class FusedMoeSkipAllreduceTest(TestCase):
         )
 
     def test_forward_passes_router_context_to_finalize(self):
-        fused_moe, router, _, hidden_states, topk_weights, topk_ids = (
-            self._make_fused_moe(False)
+        fused_moe, router, _, hidden_states, topk_weights, topk_ids = _make_fused_moe(
+            supports_skip=False
         )
         router_context = object()
         router.prepare.return_value.router_context = router_context
@@ -135,7 +138,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
 
     def test_forward_rejects_skip_tp_allreduce_for_unsupported_router(self):
         fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
-            self._make_fused_moe(False)
+            _make_fused_moe(supports_skip=False)
         )
         with self.assertRaisesRegex(ValueError, "supports_skip_tp_allreduce"):
             fused_moe(
@@ -143,6 +146,48 @@ class FusedMoeSkipAllreduceTest(TestCase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 skip_tp_allreduce=True,
+            )
+
+        router.prepare.assert_not_called()
+        experts.execute.assert_not_called()
+
+
+class FusedMoeRowScatterTargetTest(TestCase):
+    def test_forward_passes_row_scatter_target_only_when_supplied(self):
+        fused_moe, router, _, hidden_states, topk_weights, topk_ids = _make_fused_moe(
+            supports_row_scatter=True
+        )
+        fused_moe(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+        self.assertNotIn(
+            ROW_SCATTER_TARGET_ARG, _extract_extra_finalize_args(router.finalize)
+        )
+
+        target = torch.zeros_like(hidden_states)
+        fused_moe(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_scatter_target=target,
+        )
+        self.assertIs(
+            _extract_extra_finalize_args(router.finalize)[ROW_SCATTER_TARGET_ARG],
+            target,
+        )
+
+    def test_forward_rejects_row_scatter_target_for_unsupported_router(self):
+        fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
+            _make_fused_moe(supports_row_scatter=False)
+        )
+        with self.assertRaisesRegex(ValueError, "supports_row_scatter_finalize"):
+            fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                row_scatter_target=torch.zeros_like(hidden_states),
             )
 
         router.prepare.assert_not_called()

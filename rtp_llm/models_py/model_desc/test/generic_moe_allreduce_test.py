@@ -16,6 +16,7 @@ from rtp_llm.utils.model_weight import W
 def _make_layer(
     *,
     supports_skip_tp_allreduce=True,
+    supports_row_scatter_finalize=False,
     ffn_tp_size=2,
     attn_tp_size=2,
     ep_size=1,
@@ -50,6 +51,7 @@ def _make_layer(
         topk_ids_dtype=torch.int32,
         router=SimpleNamespace(
             supports_skip_tp_allreduce=supports_skip_tp_allreduce,
+            supports_row_scatter_finalize=supports_row_scatter_finalize,
             tp_collective_size=attn_tp_size,
         ),
     )
@@ -229,6 +231,63 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         torch.testing.assert_close(result, routed_output + shared_output)
         self.assertFalse(fused_moe.call_args.kwargs["skip_tp_allreduce"])
         self.assertFalse(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+
+
+class GenericMoeEpUnifiedAllreduceTest(TestCase):
+    def test_ep_unified_decision_covers_all_predicate_terms(self):
+        cases = (
+            ("ep_router_supports_row_scatter", True, 2, 2, 2, 2, True),
+            ("router_lacks_support", False, 2, 2, 2, 2, False),
+            ("pure_tp_is_not_ep", True, 2, 1, 2, 2, False),
+            ("ffn_tp_one", True, 1, 2, 1, 2, False),
+            ("no_shared_expert", True, 2, 2, 2, 1, False),
+            ("router_tp_size_mismatch", True, 4, 2, 2, 2, False),
+        )
+        for name, supports, ffn_tp, ep_size, attn_tp, moe_style, expected in cases:
+            with self.subTest(name=name):
+                layer = _make_layer(
+                    supports_row_scatter_finalize=supports,
+                    ffn_tp_size=ffn_tp,
+                    attn_tp_size=attn_tp,
+                    ep_size=ep_size,
+                    moe_style=moe_style,
+                )
+                self.assertEqual(layer.use_ep_unified_allreduce, expected)
+
+    def test_ep_unified_displaces_the_separate_shared_reduce(self):
+        fused = _make_layer(ep_size=2, supports_row_scatter_finalize=True)
+        self.assertTrue(fused.use_ep_unified_allreduce)
+        self.assertFalse(fused.use_ep_shared_allreduce)
+
+        legacy = _make_layer(ep_size=2, supports_row_scatter_finalize=False)
+        self.assertFalse(legacy.use_ep_unified_allreduce)
+        self.assertTrue(legacy.use_ep_shared_allreduce)
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_row_scatter_reduces_both_branches_once(self, mock_all_reduce):
+        layer = _make_layer(ep_size=2, supports_row_scatter_finalize=True)
+        hidden_states, routed_output, shared_output, gate_output, fused_moe = (
+            _configure_forward(layer, gate_enabled=True)
+        )
+        # Stand in for the router: scatter-add the routed slice into the buffer
+        # the layer supplied, then hand that same buffer back.
+        fused_moe.side_effect = lambda **kwargs: kwargs["row_scatter_target"].add_(
+            routed_output
+        )
+        expected_input = torch.sigmoid(gate_output) * shared_output + routed_output
+        mock_all_reduce.side_effect = lambda tensor, group, inplace: tensor * 2
+
+        result = layer(hidden_states)
+
+        mock_all_reduce.assert_called_once()
+        self.assertIs(mock_all_reduce.call_args.kwargs["group"], Group.TP)
+        self.assertTrue(mock_all_reduce.call_args.kwargs["inplace"])
+        reduce_input = mock_all_reduce.call_args.args[0]
+        self.assertIs(reduce_input, fused_moe.call_args.kwargs["row_scatter_target"])
+        torch.testing.assert_close(reduce_input, expected_input)
+        torch.testing.assert_close(result, expected_input * 2)
+        self.assertTrue(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+        self.assertNotIn("skip_tp_allreduce", fused_moe.call_args.kwargs)
 
 
 if __name__ == "__main__":

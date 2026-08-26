@@ -1,6 +1,7 @@
 # type: ignore
 import logging
 import os
+from unittest.mock import patch
 
 import torch
 import torch.distributed
@@ -9,7 +10,9 @@ import torch.multiprocessing as mp
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
     destroy_distributed_environment,
     init_distributed_environment,
 )
@@ -21,10 +24,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ROW_SCATTER_TARGET_ARG,
     CombineForwardPayload,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers import (
+    deepep_low_latency_router as router_module,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
     DeepEpLowLatencyRouter,
@@ -141,6 +148,92 @@ def _destroy_router(router: DeepEpLowLatencyRouter):
     destroy_distributed_environment()
 
 
+def _combine_input(payload, use_fp8: bool, num_local_experts: int):
+    """The dispatch result in bfloat16, which is what combine consumes."""
+    if not (use_fp8 and payload.expert_x_scale is not None):
+        return payload.expert_x
+    recv_x = torch.zeros(payload.expert_x.size(), dtype=torch.bfloat16).cuda()
+    for local_expert_id in range(num_local_experts):
+        recv_x[local_expert_id] = per_token_cast_back(
+            payload.expert_x[local_expert_id],
+            payload.expert_x_scale[local_expert_id],
+        )
+    return recv_x
+
+
+def _check_row_scatter_matches_gather(
+    router: DeepEpLowLatencyRouter,
+    config: MoEConfigAdapter,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    use_fp8: bool,
+    rank: int,
+):
+    """Compare both finalize paths on identical inputs.
+
+    Gathering the combined slices and reducing a second tensor separately takes
+    two Group.TP collectives; accumulating the slice into that tensor and
+    reducing once takes one. Both must produce the same rows.
+    """
+    assert router.supports_row_scatter_finalize
+    num_tokens = topk_ids.size(0)
+    num_local_experts = config.expert_num // config.ep_size
+    # Replicated over the TP group, which is how the dispatch input arrives.
+    torch.manual_seed(4242)
+    dispatch_input = torch.randn((num_tokens, config.hidden_size), dtype=torch.bfloat16)
+    # Rank-specific, so a slice landing on the wrong rows shows up in the sum
+    # instead of cancelling out.
+    torch.manual_seed(7000 + rank)
+    partial_sum = torch.randn_like(dispatch_input)
+    counts = {"all_gather": 0, "all_reduce": 0}
+
+    def dispatch_and_combine(extra_finalize_args):
+        payload = router.prepare(dispatch_input, None, None, topk_weights, topk_ids)
+        return router.finalize(
+            CombineForwardPayload(
+                fused_expert_output=_combine_input(payload, use_fp8, num_local_experts)
+            ),
+            payload.expert_topk_weights,
+            payload.expert_topk_ids,
+            False,
+            extra_finalize_args,
+        )
+
+    def counted_all_gather(tensor, group):
+        assert group is Group.TP, f"unexpected collective group: {group}"
+        counts["all_gather"] += 1
+        return collective_torch.all_gather(tensor, group)
+
+    def counted_all_reduce(tensor, inplace=False):
+        counts["all_reduce"] += 1
+        return collective_torch.all_reduce(tensor, Group.TP, inplace=inplace)
+
+    with patch.object(router_module, "all_gather", side_effect=counted_all_gather):
+        gathered = dispatch_and_combine({"original_num_tokens": num_tokens})
+        gather_output = gathered + counted_all_reduce(partial_sum.clone())
+        gather_counts = dict(counts)
+
+        counts["all_gather"] = 0
+        counts["all_reduce"] = 0
+        target = partial_sum.clone()
+        scattered = dispatch_and_combine(
+            {
+                "original_num_tokens": num_tokens,
+                ROW_SCATTER_TARGET_ARG: target,
+            }
+        )
+        assert scattered is target
+        row_scatter_output = counted_all_reduce(scattered, inplace=True)
+        row_scatter_counts = dict(counts)
+
+    assert gather_counts == {"all_gather": 1, "all_reduce": 1}, gather_counts
+    assert row_scatter_counts == {"all_gather": 0, "all_reduce": 1}, row_scatter_counts
+    # The paths add the combined slices and the two partials in a different
+    # order, so bfloat16 rounds a few times at the scale of those terms. A slice
+    # written to the wrong rows moves a whole token, which is far larger.
+    torch.testing.assert_close(row_scatter_output, gather_output, rtol=2e-2, atol=1e-1)
+
+
 def _run_deepep_low_latency_router_test(
     rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
 ):
@@ -206,15 +299,7 @@ def _run_deepep_low_latency_router_test(
     )
     # quant back to bfloat16 if use_fp8
     num_expert_recv_tokens = payload.expert_tokens_meta.expert_num_tokens
-    if use_fp8 and payload.expert_x_scale is not None:
-        recv_x = torch.zeros(payload.expert_x.size(), dtype=torch.bfloat16).cuda()
-        for local_expert_id in range(num_local_experts):
-            recv_x[local_expert_id] = per_token_cast_back(
-                payload.expert_x[local_expert_id],
-                payload.expert_x_scale[local_expert_id],
-            )
-    else:
-        recv_x = payload.expert_x
+    recv_x = _combine_input(payload, use_fp8, num_local_experts)
     # print handle
     # for local_expert_id in range(min(5, num_local_experts)):
     #     recv_count, recv_src_info, recv_layout_range = (
@@ -274,6 +359,10 @@ def _run_deepep_low_latency_router_test(
     torch.testing.assert_close(
         hidden_states[dp_rank, :, :128], combined_x[:, :128], atol=1e-2, rtol=1e-1
     )
+    if config.tp_size > 1:
+        _check_row_scatter_matches_gather(
+            router, config, topk_ids[dp_rank], topk_weights[dp_rank], use_fp8, rank
+        )
     _destroy_router(router)
 
 
