@@ -483,7 +483,12 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         auto& worker         = resource_.grpc_workers[i];
         auto  connect_status = resource_.rpc_pool.getConnection(worker);
         if (!connect_status.ok()) {
-            string error_msg = "get grpc connection for rank:" + std::to_string(i) + ", addr:" + worker + " failed";
+            const auto peer_addr = static_cast<size_t>(i) < decode_context.peer_addrs.size() ?
+                                       decode_context.peer_addrs[i] :
+                                       "<missing>";
+            string error_msg = "request [" + decode_context.request_key + "] get grpc connection failed: rank="
+                               + std::to_string(i) + ", worker=" + worker + ", peer=" + peer_addr;
+            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
             return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, error_msg);
         }
         auto& rpc_context = all_context[i];
@@ -514,11 +519,16 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             error_msg = "load cache timeout : cost time is " + std::to_string(cost_time_ms)
                         + "ms, "
                           "total timeout for load cache is "
-                        + std::to_string(total_timeout_ms) + "ms";
+                        + std::to_string(total_timeout_ms) + "ms, finished=" + std::to_string(finished_count) + "/"
+                        + std::to_string(worker_size) + ", request=" + decode_context.request_key;
+            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
             return ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, error_msg);
         }
         if (load_context.server_context->IsCancelled()) {
-            string error_msg = "request is cancelled";
+            string error_msg = "load cache cancelled: request=" + decode_context.request_key + ", finished="
+                               + std::to_string(finished_count) + "/" + std::to_string(worker_size) + ", cost_ms="
+                               + std::to_string(cost_time_ms);
+            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
             return ErrorInfo(ErrorCode::CANCELLED, error_msg);
         }
         auto once_deadline =
@@ -540,7 +550,11 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             }
             each_finished_count[i]++;
             if (!ok) {
-                string error_msg = "async get next event from grpc completion queue failed";
+                string error_msg = "grpc completion queue event failed: request=" + decode_context.request_key
+                                   + ", cq=" + std::to_string(i) + ", finished="
+                                   + std::to_string(finished_count) + "/" + std::to_string(worker_size) + ", cost_ms="
+                                   + std::to_string(cost_time_ms);
+                RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
                 return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
             }
             auto        rank             = reinterpret_cast<uintptr_t>(got_tag);
@@ -554,11 +568,24 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             if (!status.ok()) {
                 all_success = false;
                 error_code  = ErrorCode::LOAD_KV_CACHE_FAILED;
-                error_msg += std::to_string(rank) + ": " + status.error_message() + ", ";
+                const auto& worker_addr = resource_.grpc_workers.at(rank);
+                const auto  peer_addr   = rank < decode_context.peer_addrs.size() ?
+                                              decode_context.peer_addrs[rank] :
+                                              "<missing>";
+                error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
+                             + ", cq=" + std::to_string(i) + ", grpc_code="
+                             + std::to_string(static_cast<int>(status.error_code())) + ", grpc_message="
+                             + status.error_message() + ", grpc_details=" + status.error_details() + "; ";
             } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
                 all_success = false;
                 error_code  = transRPCErrorCode(pb_error_code);
-                error_msg += std::to_string(rank) + ": " + pb_error_message + ", ";
+                const auto& worker_addr = resource_.grpc_workers.at(rank);
+                const auto  peer_addr   = rank < decode_context.peer_addrs.size() ?
+                                              decode_context.peer_addrs[rank] :
+                                              "<missing>";
+                error_msg += "rank=" + std::to_string(rank) + ", worker=" + worker_addr + ", peer=" + peer_addr
+                             + ", cq=" + std::to_string(i) + ", remote_code=" + std::to_string(pb_error_code)
+                             + ", remote_message=" + pb_error_message + "; ";
             }
             finished_count++;
             if (finished_count == worker_size) {
@@ -578,6 +605,12 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         all_success = false;
     }
     if (!all_success) {
+        RTP_LLM_LOG_WARNING("request [%s] async TP load cache failed: finished=%zu/%u, cost_ms=%ld, error=%s",
+                            decode_context.request_key.c_str(),
+                            finished_count,
+                            worker_size,
+                            (currentTimeUs() - load_cache_begin_time_us) / 1000,
+                            error_msg.c_str());
         return ErrorInfo(error_code, error_msg);
     }
 
