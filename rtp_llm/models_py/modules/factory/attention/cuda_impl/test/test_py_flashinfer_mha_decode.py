@@ -7,7 +7,7 @@ from unittest import mock
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
-from base_attention_test import BaseAttentionTest
+from base_attention_test import BaseAttentionTest, TestConfig
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import py_flashinfer_mha
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -29,6 +29,16 @@ class PageMetadata(NamedTuple):
     page_indptr: List[int]
     page_indices: List[int]
     last_page_lens: List[int]
+
+
+class _CudaGraphTestDecodeAttnOp(PyFlashinferDecodeAttnOp):
+    """Keep actual-graph test workspaces out of the process-global pool."""
+
+    def __del__(self):
+        # A failed assertion can keep the captured graph alive through its
+        # traceback. Releasing that workspace to the global pool would let a
+        # later test reuse storage that the graph still references.
+        pass
 
 
 class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
@@ -384,6 +394,9 @@ class TestDecodeHostFillValidation(BaseAttentionTest):
             inputs,
             config.seq_size_per_block,
         )
+        self.assertFalse(fill_inputs.sequence_lengths.is_cuda)
+        self.assertFalse(fill_inputs.input_lengths.is_cuda)
+        self.assertFalse(fill_inputs.kv_cache_block_id_host.is_cuda)
         self.assertEqual(
             fill_inputs.sequence_lengths.tolist(),
             [sequence_length - 1 for sequence_length in sequence_lengths],
@@ -405,70 +418,72 @@ class TestDecodeHostFillValidation(BaseAttentionTest):
     def test_validates_required_lengths(self):
         """Compatibility fallback rejects missing or mismatched lengths."""
         config = self._create_config()
-        inputs = self._create_attention_inputs_base(
-            batch_size=2,
-            sequence_lengths=[64, 128],
-            seq_size_per_block=config.seq_size_per_block,
-        )
-        inputs.is_prefill = False
-        inputs.is_cuda_graph = True
-        invalid_inputs = PyAttentionInputs()
-        invalid_inputs.input_lengths = inputs.input_lengths
-        invalid_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
-        invalid_inputs.prefix_lengths = inputs.prefix_lengths
-        invalid_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id
-        invalid_inputs.kv_cache_kernel_block_id_device = (
-            inputs.kv_cache_kernel_block_id_device
-        )
-        invalid_inputs.is_cuda_graph = True
-        with self.assertRaisesRegex(ValueError, "requires non-empty sequence_lengths"):
-            py_flashinfer_mha._decode_graph_host_fill_inputs(
-                invalid_inputs,
+
+        def make_inputs() -> PyAttentionInputs:
+            inputs = self._create_attention_inputs_base(
+                batch_size=2,
+                sequence_lengths=[64, 128],
+                seq_size_per_block=config.seq_size_per_block,
+            )
+            inputs.is_prefill = False
+            inputs.is_cuda_graph = True
+            return inputs
+
+        def make_partial_inputs(
+            include_input_lengths: bool = True,
+            include_prefix_lengths: bool = True,
+        ) -> PyAttentionInputs:
+            source = make_inputs()
+            inputs = PyAttentionInputs()
+            if include_input_lengths:
+                inputs.input_lengths = source.input_lengths
+            if include_prefix_lengths:
+                inputs.prefix_lengths = source.prefix_lengths
+            inputs.sequence_lengths = source.sequence_lengths
+            inputs.kv_cache_kernel_block_id = source.kv_cache_kernel_block_id
+            inputs.kv_cache_kernel_block_id_device = (
+                source.kv_cache_kernel_block_id_device
+            )
+            inputs.is_cuda_graph = True
+            return inputs
+
+        with self.subTest(case="missing sequence lengths"):
+            inputs = make_inputs()
+            inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
+            with self.assertRaisesRegex(
+                ValueError, "requires non-empty sequence_lengths"
+            ):
+                py_flashinfer_mha._decode_graph_host_fill_inputs(
+                    inputs,
+                    config.seq_size_per_block,
+                )
+
+        with self.subTest(case="missing input lengths"):
+            inputs = make_partial_inputs(include_input_lengths=False)
+            with self.assertRaisesRegex(ValueError, "requires input lengths"):
+                py_flashinfer_mha._decode_graph_host_fill_inputs(
+                    inputs,
+                    config.seq_size_per_block,
+                )
+
+        with self.subTest(case="missing prefix lengths"):
+            inputs = make_partial_inputs(include_prefix_lengths=False)
+            fill_inputs = py_flashinfer_mha._decode_graph_host_fill_inputs(
+                inputs,
                 config.seq_size_per_block,
             )
+            self.assertEqual(fill_inputs.prefix_lengths.numel(), 0)
 
-        invalid_inputs.sequence_lengths = torch.tensor([63, 127], dtype=torch.int32)
-        missing_input_lengths = PyAttentionInputs()
-        missing_input_lengths.sequence_lengths = invalid_inputs.sequence_lengths
-        missing_input_lengths.prefix_lengths = invalid_inputs.prefix_lengths
-        missing_input_lengths.kv_cache_kernel_block_id = (
-            invalid_inputs.kv_cache_kernel_block_id
-        )
-        missing_input_lengths.kv_cache_kernel_block_id_device = (
-            invalid_inputs.kv_cache_kernel_block_id_device
-        )
-        with self.assertRaisesRegex(ValueError, "requires input lengths"):
-            py_flashinfer_mha._decode_graph_host_fill_inputs(
-                missing_input_lengths,
-                config.seq_size_per_block,
-            )
+        with self.subTest(case="mismatched sequence batch"):
+            inputs = make_inputs()
+            inputs.input_lengths = torch.ones(1, dtype=torch.int32)
+            with self.assertRaisesRegex(ValueError, "batch size mismatch"):
+                py_flashinfer_mha._decode_graph_host_fill_inputs(
+                    inputs,
+                    config.seq_size_per_block,
+                )
 
-        missing_prefix_lengths = PyAttentionInputs()
-        missing_prefix_lengths.input_lengths = inputs.input_lengths
-        missing_prefix_lengths.sequence_lengths = torch.tensor(
-            [63, 127], dtype=torch.int32
-        )
-        missing_prefix_lengths.kv_cache_kernel_block_id = (
-            inputs.kv_cache_kernel_block_id
-        )
-        missing_prefix_lengths.kv_cache_kernel_block_id_device = (
-            inputs.kv_cache_kernel_block_id_device
-        )
-        fill_inputs = py_flashinfer_mha._decode_graph_host_fill_inputs(
-            missing_prefix_lengths,
-            config.seq_size_per_block,
-        )
-        self.assertEqual(fill_inputs.prefix_lengths.numel(), 0)
-
-        invalid_inputs.input_lengths = torch.ones(1, dtype=torch.int32)
-        with self.assertRaisesRegex(ValueError, "batch size mismatch"):
-            py_flashinfer_mha._decode_graph_host_fill_inputs(
-                invalid_inputs,
-                config.seq_size_per_block,
-            )
-
-    def test_accepts_prefix_lengths_and_rejects_input_mismatch(self):
-        """Prefix metadata is preserved and must align with input lengths."""
+    def _create_prefix_graph_inputs(self) -> tuple[PyAttentionInputs, TestConfig]:
         config = self._create_config(head_num=32, head_num_kv=32)
         inputs = self._create_attention_inputs_base(
             batch_size=2,
@@ -478,9 +493,12 @@ class TestDecodeHostFillValidation(BaseAttentionTest):
         inputs.is_prefill = False
         inputs.is_cuda_graph = True
         inputs.prefix_lengths = torch.tensor([63, 127], dtype=torch.int32)
-        # Keep the fallback source deliberately different so this test fails if
-        # prefix_lengths + input_lengths is accidentally ignored.
         inputs.sequence_lengths = torch.tensor([7, 7], dtype=torch.int32)
+        return inputs, config
+
+    def test_accepts_prefix_lengths(self):
+        """Prefix metadata is preserved and takes the C++ prefix path."""
+        inputs, config = self._create_prefix_graph_inputs()
         fill_inputs = py_flashinfer_mha._decode_graph_host_fill_inputs(
             inputs,
             config.seq_size_per_block,
@@ -497,6 +515,9 @@ class TestDecodeHostFillValidation(BaseAttentionTest):
         self.assertEqual(fmha_params.decode_page_indptr_h.tolist(), [0, 1, 3])
         self.assertEqual(fmha_params.paged_kv_last_page_len_h.tolist(), [64, 64])
 
+    def test_accepts_prefix_lengths_without_sequence_lengths(self):
+        """The existing C++ prefix contract does not require sequence lengths."""
+        inputs, config = self._create_prefix_graph_inputs()
         # C++ fillParams ignores sequence_lengths when prefix lengths exist;
         # preserve that pre-existing prefix-only input contract.
         inputs.sequence_lengths = torch.empty(0, dtype=torch.int32)
@@ -512,6 +533,9 @@ class TestDecodeHostFillValidation(BaseAttentionTest):
         self.assertEqual(prefix_only_params.decode_page_indptr_h.tolist(), [0, 1, 3])
         self.assertEqual(prefix_only_params.paged_kv_last_page_len_h.tolist(), [64, 64])
 
+    def test_rejects_prefix_input_batch_mismatch(self):
+        """Prefix and input metadata must describe the same graph batch."""
+        inputs, config = self._create_prefix_graph_inputs()
         inputs.prefix_lengths = torch.tensor([63], dtype=torch.int32)
         with self.assertRaisesRegex(ValueError, "prefix_lengths=1"):
             py_flashinfer_mha._decode_graph_host_fill_inputs(
@@ -524,8 +548,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     """Test CUDA graph buffer management for PyFlashinferDecodeAttnOp.
 
     These tests exercise the Python prepare/replay boundary for both decode
-    backends and actual CUDA-core graph capture/replay. Tensor-core graph
-    coverage remains at the Python boundary in this target.
+    backends and actual CUDA-core and tensor-core graph capture/replay.
     """
 
     def _assert_cuda_core_graph_mode(self, attn_op) -> None:
@@ -761,6 +784,52 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
         logging.info("_fixed_batch_size correctly set after prepare()")
 
+    def test_disable_split_kv_capability_probe_is_cached(self):
+        """Repeated decode-op construction probes a wrapper type only once."""
+        config = self._create_config()
+        inputs = self._create_cuda_graph_inputs(
+            2,
+            [64, 128],
+            config.seq_size_per_block,
+        )
+        capability_probe = py_flashinfer_mha._decode_plan_supports_disable_split_kv
+        capability_probe.cache_clear()
+        try:
+            first_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+            second_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+            cache_info = capability_probe.cache_info()
+            self.assertEqual(cache_info.misses, 1)
+            self.assertEqual(cache_info.hits, 1)
+            self.assertEqual(
+                first_op._decode_plan_supports_disable_split_kv,
+                second_op._decode_plan_supports_disable_split_kv,
+            )
+        finally:
+            capability_probe.cache_clear()
+
+    def test_tensor_core_graph_omits_unsupported_disable_split_kv(self):
+        """Legacy FlashInfer plans keep their native CUDA graph signature."""
+        config = self._create_config()
+        inputs = self._create_cuda_graph_inputs(
+            2,
+            [64, 128],
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+        self.assertTrue(attn_op.use_tensor_core)
+        attn_op._decode_plan_supports_disable_split_kv = False
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+
+        with mock.patch.object(
+            attn_op.decode_wrapper,
+            "plan",
+            wraps=attn_op.decode_wrapper.plan,
+        ) as plan_mock:
+            attn_op.prepare(inputs)
+
+        self.assertNotIn("disable_split_kv", plan_mock.call_args.kwargs)
+        self.assertIsNotNone(attn_op._cuda_graph_plan_info)
+
     def test_set_params_rejects_rebind_after_cuda_graph_prepare(self):
         """Graph wrapper buffers cannot be rebound after prepare()."""
         config = self._create_config(head_num=32, head_num_kv=32)
@@ -800,8 +869,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             attn_op.prepare(inputs)
         self._assert_graph_buffer_pointers(attn_op, fmha_params, graph_buffer_pointers)
 
-    def test_replay_rejects_empty_sequence_lengths(self):
-        """Graph replay rejects empty sequence metadata."""
+    def test_replay_rejects_device_only_sequence_length_mirror(self):
+        """Replay requires the host mirror supplied by CudaGraphRunner."""
         config = self._create_config(head_num=32, head_num_kv=32)
         capture_bs = 4
         capture_inputs = self._create_cuda_graph_inputs(
@@ -883,6 +952,22 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 original_plan_topology,
             )
         )
+
+    def test_replay_reports_missing_graph_wrapper_buffer(self):
+        """A dependency contract mismatch reports a graph-specific error."""
+        config = self._create_config(head_num=32, head_num_kv=32)
+        inputs = self._create_cuda_graph_inputs(
+            2,
+            [64, 128],
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, inputs)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+        attn_op.prepare(inputs)
+        del attn_op.decode_wrapper._paged_kv_indices_buf
+
+        with self.assertRaisesRegex(RuntimeError, "_paged_kv_indices_buf"):
+            attn_op.prepare_for_cuda_graph_replay(inputs)
 
     def test_replay_rejects_batch_size_change_before_refresh(self):
         """A wrong replay batch cannot resize graph-bound metadata buffers."""
@@ -1030,6 +1115,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             self.assertFalse(capture_call.args[1].is_cuda)
             self.assertFalse(capture_call.args[2].is_cuda)
             self.assertTrue(capture_call.kwargs["non_blocking"])
+            self.assertEqual(
+                "disable_split_kv" in capture_call.kwargs,
+                attn_op._decode_plan_supports_disable_split_kv,
+            )
+            if attn_op._decode_plan_supports_disable_split_kv:
+                self.assertTrue(capture_call.kwargs["disable_split_kv"])
             self.assertTrue(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
             self.assertEqual(
                 attn_op.decode_wrapper._qo_indptr_buf.numel(), capture_bs + 1
@@ -1104,6 +1195,17 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         with self.assertRaisesRegex(RuntimeError, "use prepare_for_cuda_graph_replay"):
             attn_op.prepare(inputs)
         self.assertIs(attn_op.fmha_params, original_params)
+
+        attn_op.decode_wrapper._qo_indptr_buf = (
+            attn_op.decode_wrapper._qo_indptr_buf.clone()
+        )
+        replay_inputs = self._create_cuda_graph_inputs(
+            2,
+            [129, 193],
+            config.seq_size_per_block,
+        )
+        with self.assertRaisesRegex(RuntimeError, "query indptr buffer no longer"):
+            attn_op.prepare_for_cuda_graph_replay(replay_inputs)
 
     def test_cuda_core_replay_replans_only_on_page_topology_change(self):
         """CUDA-core replay caches only topology and refreshes graph buffers."""
@@ -1278,25 +1380,121 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertEqual(plan_mock.call_count, 1)
         self.assertIsNotNone(attn_op._cuda_core_plan_page_indptr_h)
 
-    def _run_cuda_core_actual_graph_replay_matches_reference(
+    def test_replay_rejects_changed_flashinfer_launch_plan(self):
+        """Replay fails if replanning selects a launch incompatible with capture."""
+        config = self._create_config(head_num=32, head_num_kv=32)
+        capture_inputs = self._create_cuda_graph_inputs(
+            2,
+            [64, 128],
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+        attn_op.prepare(capture_inputs)
+        captured_plan_info = attn_op._cuda_graph_plan_info
+        original_plan = attn_op.decode_wrapper.plan
+
+        def incompatible_plan(*args, **kwargs):
+            original_plan(*args, **kwargs)
+            raw_plan_info = attn_op.decode_wrapper._plan_info
+            plan_info = list(raw_plan_info)
+            self.assertGreater(len(plan_info), 0)
+            plan_info[0] += 1
+            attn_op.decode_wrapper._plan_info = plan_info
+
+        replay_inputs = self._create_cuda_graph_inputs(
+            2,
+            [129, 193],
+            config.seq_size_per_block,
+        )
+        with mock.patch.object(
+            attn_op.decode_wrapper,
+            "plan",
+            side_effect=incompatible_plan,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "launch plan changed"):
+                attn_op.prepare_for_cuda_graph_replay(replay_inputs)
+        self.assertEqual(attn_op._cuda_graph_plan_info, captured_plan_info)
+        self.assertIsNone(attn_op._cuda_core_plan_page_indptr_h)
+
+    def test_prefix_replay_rejects_more_reuse_pages_than_capture(self):
+        """Prefix graph replay cannot grow its capture-time reuse workspace."""
+        config = self._create_config(head_num=32, head_num_kv=32)
+        capture_inputs = self._create_cuda_graph_inputs(
+            2,
+            [64, 128],
+            config.seq_size_per_block,
+            use_prefix_lengths=True,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        attn_op.set_params(rtp_llm_ops.FlashInferMlaAttnParams())
+        attn_op.prepare(capture_inputs)
+
+        replay_inputs = self._create_cuda_graph_inputs(
+            2,
+            [193, 193],
+            config.seq_size_per_block,
+            use_prefix_lengths=True,
+        )
+        with self.assertRaisesRegex(RuntimeError, "Buffer reallocation required"):
+            attn_op.prepare_for_cuda_graph_replay(replay_inputs)
+
+    def _run_actual_graph_replay_matches_reference(
         self,
         use_prefix_lengths: bool,
+        expect_tensor_core: bool,
+        head_num_kv: int = 32,
         active_batch_size: Optional[int] = None,
         padding_block_id: int = 0,
     ) -> None:
-        config = self._create_config(head_num=32, head_num_kv=32)
+        if not is_sm90():
+            self.skipTest(
+                "FlashInfer 0.6.9 real decode CUDA graph capture is not "
+                "supported by the sm8x or sm12x test targets; metadata and "
+                "replanning tests remain enabled on those platforms"
+            )
+        config = self._create_config(head_num=32, head_num_kv=head_num_kv)
         capture_bs = 2
-        # Prefix metadata also sizes FlashInfer's reuse-page workspace. Give
-        # capture enough aggregate reuse pages for both replay shapes while
-        # changing their per-request page topology.
-        capture_sequence_lengths = [64, 384] if use_prefix_lengths else [64, 128]
+        if use_prefix_lengths:
+            # Prefix metadata also sizes FlashInfer's reuse-page workspace.
+            capture_sequence_lengths = [64, 384]
+        else:
+            # CudaGraphRunner captures with near-max lengths, then replays the
+            # graph with shorter live sequences.
+            capture_sequence_lengths = [512, 512]
         capture_inputs = self._create_cuda_graph_inputs(
             capture_bs,
             capture_sequence_lengths,
             config.seq_size_per_block,
             use_prefix_lengths=use_prefix_lengths,
         )
-        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        # Actual capture fixtures must not recycle a workspace still referenced
+        # by another graph created earlier in this process.
+        graph_workspace = torch.zeros(
+            py_flashinfer_mha.DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+            dtype=torch.uint8,
+            device="cuda",
+        )
+        graph = None
+        graph_output = None
+        attn_op = None
+
+        def cleanup_graph_resources():
+            nonlocal graph, graph_output, attn_op, graph_workspace
+            graph_output = None
+            graph = None
+            attn_op = None
+            graph_workspace = None
+            torch.cuda.synchronize()
+
+        self.addCleanup(cleanup_graph_resources)
+        with mock.patch.object(
+            py_flashinfer_mha,
+            "get_py_flashinfer_workspace_buffer",
+            return_value=graph_workspace,
+        ):
+            attn_op = _CudaGraphTestDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertEqual(attn_op.use_tensor_core, expect_tensor_core)
         fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         attn_op.set_params(fmha_params)
         attn_op.prepare(capture_inputs)
@@ -1312,6 +1510,19 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             padding_block_id=padding_block_id,
             use_prefix_lengths=use_prefix_lengths,
         )
+        same_topology_sequence_lengths = [130, 194]
+        if active_batch_size is not None:
+            same_topology_sequence_lengths = same_topology_sequence_lengths[
+                :active_batch_size
+            ]
+        same_topology_inputs = self._create_cuda_graph_inputs(
+            capture_bs,
+            same_topology_sequence_lengths,
+            config.seq_size_per_block,
+            active_batch_size=active_batch_size,
+            padding_block_id=padding_block_id,
+            use_prefix_lengths=use_prefix_lengths,
+        )
         local_head_num = config.head_num // config.tp_size
         local_kv_head_num = config.head_num_kv // config.tp_size
         static_q = self._create_query_tensor(
@@ -1320,11 +1531,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             config.size_per_head,
         )
         total_blocks = max(
-            self._calculate_total_blocks(
-                replay_sequence_lengths,
-                config.seq_size_per_block,
-            ),
-            padding_block_id + 1,
+            int(inputs.kv_cache_kernel_block_id.max().item()) + 1
+            for inputs in (capture_inputs, replay_inputs, same_topology_inputs)
         )
         kv_cache, k_cache, v_cache = self._create_kv_cache(
             total_blocks,
@@ -1359,26 +1567,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             config.seq_size_per_block,
         )
 
-        same_topology_sequence_lengths = [130, 194]
-        if active_batch_size is not None:
-            same_topology_sequence_lengths = same_topology_sequence_lengths[
-                :active_batch_size
-            ]
-        same_topology_inputs = self._create_cuda_graph_inputs(
-            capture_bs,
-            same_topology_sequence_lengths,
-            config.seq_size_per_block,
-            active_batch_size=active_batch_size,
-            padding_block_id=padding_block_id,
-            use_prefix_lengths=use_prefix_lengths,
-        )
         with mock.patch.object(
             attn_op.decode_wrapper,
             "plan",
             wraps=attn_op.decode_wrapper.plan,
         ) as plan_mock:
             attn_op.prepare_for_cuda_graph_replay(same_topology_inputs)
-        self.assertEqual(plan_mock.call_count, 0)
+        self.assertEqual(plan_mock.call_count, 1 if expect_tensor_core else 0)
         graph.replay()
         torch.cuda.synchronize()
         self._assert_active_output_matches_reference(
@@ -1394,13 +1589,19 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
 
     def test_cuda_core_actual_graph_replay_matches_reference(self):
         """Capture and replay CUDA-core decode after crossing a page boundary."""
-        if self.kv_cache_dtype == KvCacheDataType.FP8 and not is_sm90():
-            self.skipTest(
-                "Real FP8 KV CUDA graph capture is limited to the SM90 target; "
-                "non-SM90 targets retain focused replay coverage"
-            )
-        self._run_cuda_core_actual_graph_replay_matches_reference(
+        self._run_actual_graph_replay_matches_reference(
             use_prefix_lengths=False,
+            expect_tensor_core=False,
+            active_batch_size=1,
+            padding_block_id=7,
+        )
+
+    def test_actual_tensor_core_graph_replay_matches_reference(self):
+        """Capture and replay GQA tensor-core decode across a page boundary."""
+        self._run_actual_graph_replay_matches_reference(
+            use_prefix_lengths=False,
+            expect_tensor_core=True,
+            head_num_kv=8,
             active_batch_size=1,
             padding_block_id=7,
         )
@@ -1409,8 +1610,11 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         """Capture and replay the compatible prefix-length metadata contract."""
         if self.kv_cache_dtype == KvCacheDataType.FP8:
             self.skipTest("Prefix metadata is dtype-independent and covered by FP16")
-        self._run_cuda_core_actual_graph_replay_matches_reference(
-            use_prefix_lengths=True
+        self._run_actual_graph_replay_matches_reference(
+            use_prefix_lengths=True,
+            expect_tensor_core=False,
+            active_batch_size=1,
+            padding_block_id=7,
         )
 
     def test_cuda_core_replay_matches_reference_with_stale_padding_ids(self):
