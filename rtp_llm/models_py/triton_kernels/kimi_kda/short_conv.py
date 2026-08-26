@@ -17,7 +17,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 _PREFILL_BLOCK_T = 64
 
 
@@ -166,15 +165,13 @@ def _kimi_kda_short_conv_paged_prefill_kernel(
         for i_w in tl.static_range(-W + 1, 1):
             source_t = o_t + i_w
             source_t_i64 = source_t.to(tl.int64)
-            m_x = (
-                (source_t >= 0) & (source_t < sequence_length)
-            )[:, None] & m_d[None, :]
+            m_x = ((source_t >= 0) & (source_t < sequence_length))[:, None] & m_d[
+                None, :
+            ]
             history_idx = source_t + W - 1
-            m_h = (
-                has_initial
-                & (source_t >= -W + 1)
-                & (source_t < 0)
-            )[:, None] & m_d[None, :]
+            m_h = (has_initial & (source_t >= -W + 1) & (source_t < 0))[:, None] & m_d[
+                None, :
+            ]
             b_yi = tl.load(
                 x
                 + (sequence_start + source_t_i64)[:, None] * stride_x_t
@@ -225,9 +222,7 @@ def _kimi_kda_short_conv_paged_prefill_kernel(
     # chunk also publishes a request-owned tail state for immediate Decode.
     local_end = tl.minimum(token_offset + BT, sequence_length)
     absolute_end = prefix + local_end
-    should_write = (absolute_end % PAGE_SIZE == 0) | (
-        local_end == sequence_length
-    )
+    should_write = (absolute_end % PAGE_SIZE == 0) | (local_end == sequence_length)
     write_page = (absolute_end - 1) // PAGE_SIZE
     write_page_valid = (write_page >= 0) & (write_page < max_block_count)
     write_page_address = tl.where(write_page_valid, write_page, 0)
@@ -307,6 +302,7 @@ def _kimi_kda_short_conv_paged_prefill_kernel(
             & m_d[:, None]
             & (state_w[None, :] < history_size),
         )
+
 
 @triton.jit
 def _kimi_kda_short_conv_decode_kernel(
@@ -447,9 +443,7 @@ def _kimi_kda_short_conv_paged_decode_kernel(
         other=0,
     ).to(tl.int64)
     read_valid = (
-        read_page_valid
-        & (read_block_id > 0)
-        & (read_block_id < physical_block_count)
+        read_page_valid & (read_block_id > 0) & (read_block_id < physical_block_count)
     )
     write_valid = (
         write_page_valid
@@ -568,9 +562,10 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
     """Replay a target-verify sequence inside one Triton program.
 
     This is numerically equivalent to invoking the paged one-token decode
-    kernel T times, but keeps the W-1 convolution history in registers and
-    removes Python dispatch, block-map clones and inter-step cache copies.
-    Each speculative position still publishes its physical checkpoint.
+    kernel T times. It resolves the patched read/write mapping and replays the
+    checkpoint-copy semantics in one program, removing Python dispatch and
+    block-map clones. Each speculative position still publishes its physical
+    checkpoint.
     """
 
     i_b = tl.program_id(0)
@@ -583,72 +578,99 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
     packed_d = i_p * D + o_d
 
     sequence_length_plus_one = tl.load(sequence_lengths_plus_one + i_b).to(tl.int64)
-    reserve_page_raw = (sequence_length_plus_one - 2) // seq_size_per_block
-    reserve_page_valid = (
-        (sequence_length_plus_one > 1)
-        & (reserve_page_raw >= 0)
-        & (reserve_page_raw < max_block_count)
-    )
-    reserve_page = tl.where(reserve_page_valid, reserve_page_raw, 0)
-    read_block_id = tl.load(
-        block_map + i_b * stride_bm_b + reserve_page * stride_bm_page,
-        mask=reserve_page_valid,
-        other=0,
-    ).to(tl.int64)
-    read_valid = (
-        reserve_page_valid
-        & (read_block_id > 0)
-        & (read_block_id < physical_block_count)
-    )
+    write_page_base_raw = (sequence_length_plus_one - 1) // seq_size_per_block
     b_weight = tl.load(
         weight + packed_d[:, None] * stride_w_d + o_w[None, :] * stride_w_w,
         mask=m_d[:, None] & m_w[None, :],
         other=0,
     )
+    previous_checkpoint = tl.zeros((BD, BW), dtype=tl.float32)
 
-    for i_t in tl.range(0, T):
-        # Build this token's W-wide convolution window directly from the
-        # original checkpoint and the preceding verify inputs.  This avoids
-        # cross-program synchronization while preserving the one-token
-        # kernel's reduction order exactly.
-        source_t = i_t + o_w - (W - 1)
-        history_w = source_t + (W - 1)
+    for i_t in tl.static_range(0, T):
+        read_page_raw = (sequence_length_plus_one + i_t - 2) // seq_size_per_block
+        logical_write_page_raw = (
+            sequence_length_plus_one + i_t - 1
+        ) // seq_size_per_block
+        checkpoint_page_raw = write_page_base_raw + i_t
+        read_page_valid = (
+            (sequence_length_plus_one + i_t > 1)
+            & (read_page_raw >= 0)
+            & (read_page_raw < max_block_count)
+        )
+        checkpoint_page_valid = (checkpoint_page_raw >= 0) & (
+            checkpoint_page_raw < max_block_count
+        )
+        read_page = tl.where(read_page_valid, read_page_raw, 0)
+        checkpoint_page = tl.where(checkpoint_page_valid, checkpoint_page_raw, 0)
+        original_read_block_id = tl.load(
+            block_map + i_b * stride_bm_b + read_page * stride_bm_page,
+            mask=read_page_valid,
+            other=0,
+        ).to(tl.int64)
+        checkpoint_block_id = tl.load(
+            block_map + i_b * stride_bm_b + checkpoint_page * stride_bm_page,
+            mask=checkpoint_page_valid,
+            other=0,
+        ).to(tl.int64)
+        # The old loop patched only the logical write column to the reserved
+        # checkpoint block. In-page steps read that copied checkpoint; page
+        # transitions read the original block-table entry instead.
+        read_from_checkpoint = read_page_raw == logical_write_page_raw
+        read_block_id = tl.where(
+            read_from_checkpoint, checkpoint_block_id, original_read_block_id
+        )
+        read_valid = (
+            read_page_valid
+            & (read_block_id > 0)
+            & (read_block_id < physical_block_count)
+        )
+        checkpoint_valid = (
+            checkpoint_page_valid
+            & (checkpoint_block_id > 0)
+            & (checkpoint_block_id < physical_block_count)
+        )
+
+        # Publish the old loop's destination copy before any shifted-history
+        # reload. This is the only inter-warp read-after-write dependency in a
+        # non-initial step, so one barrier here is sufficient; the final
+        # checkpoint store is ordered by the next iteration's barrier.
+        if i_t > 0:
+            tl.store(
+                conv_state
+                + checkpoint_block_id * stride_s_block
+                + o_w[None, :] * stride_s_w
+                + packed_d[:, None] * stride_s_d,
+                previous_checkpoint,
+                mask=checkpoint_valid & m_d[:, None] & (o_w[None, :] < W - 1),
+            )
+            tl.debug_barrier()
+
         b_history = tl.load(
             conv_state
             + read_block_id * stride_s_block
-            + history_w[None, :] * stride_s_w
+            + o_w[None, :] * stride_s_w
             + packed_d[:, None] * stride_s_d,
-            mask=read_valid
-            & m_d[:, None]
-            & (source_t[None, :] < 0)
-            & (history_w[None, :] < W - 1),
+            mask=read_valid & m_d[:, None] & (o_w[None, :] < W - 1),
             other=0,
         ).to(tl.float32)
         b_q = tl.load(
-            q
-            + i_b * stride_q_b
-            + source_t[None, :] * stride_q_t
-            + o_d[:, None] * stride_q_d,
-            mask=m_d[:, None] & (source_t[None, :] >= 0) & (i_p == 0),
+            q + i_b * stride_q_b + i_t * stride_q_t + o_d * stride_q_d,
+            mask=m_d & (i_p == 0),
             other=0,
         ).to(tl.float32)
         b_k = tl.load(
-            k
-            + i_b * stride_k_b
-            + source_t[None, :] * stride_k_t
-            + o_d[:, None] * stride_k_d,
-            mask=m_d[:, None] & (source_t[None, :] >= 0) & (i_p == 1),
+            k + i_b * stride_k_b + i_t * stride_k_t + o_d * stride_k_d,
+            mask=m_d & (i_p == 1),
             other=0,
         ).to(tl.float32)
         b_v = tl.load(
-            v
-            + i_b * stride_v_b
-            + source_t[None, :] * stride_v_t
-            + o_d[:, None] * stride_v_d,
-            mask=m_d[:, None] & (source_t[None, :] >= 0) & (i_p == 2),
+            v + i_b * stride_v_b + i_t * stride_v_t + o_d * stride_v_d,
+            mask=m_d & (i_p == 2),
             other=0,
         ).to(tl.float32)
-        b_cache = tl.where(source_t[None, :] < 0, b_history, b_q + b_k + b_v)
+        b_x = b_q + b_k + b_v
+        b_cache = tl.where((o_w < W - 1)[None, :], b_history, 0.0)
+        b_cache = tl.where((o_w == W - 1)[None, :], b_x[:, None], b_cache)
         b_y = tl.sum(b_cache * b_weight, 1)
         b_y = b_y * tl.sigmoid(b_y)
         tl.store(
@@ -661,87 +683,24 @@ def _kimi_kda_short_conv_paged_target_verify_kernel(
             mask=m_d,
         )
 
-    # Publish checkpoints newest-to-oldest so the final write to the source
-    # page cannot change the original history used by earlier checkpoints.
-    for reverse_offset in tl.range(0, T):
-        i_t = T - 1 - reverse_offset
-        state_source_t = i_t + o_w - (W - 2)
-        state_history_w = state_source_t + (W - 1)
-        state_history = tl.load(
+        b_shifted_history = tl.load(
             conv_state
             + read_block_id * stride_s_block
-            + state_history_w[None, :] * stride_s_w
+            + (o_w[None, :] + 1) * stride_s_w
             + packed_d[:, None] * stride_s_d,
-            mask=read_valid
-            & m_d[:, None]
-            & (o_w[None, :] < W - 1)
-            & (state_source_t[None, :] < 0)
-            & (state_history_w[None, :] < W - 1),
+            mask=read_valid & m_d[:, None] & (o_w[None, :] < W - 2),
             other=0,
-        ).to(tl.float32)
-        state_q = tl.load(
-            q
-            + i_b * stride_q_b
-            + state_source_t[None, :] * stride_q_t
-            + o_d[:, None] * stride_q_d,
-            mask=m_d[:, None]
-            & (o_w[None, :] < W - 1)
-            & (state_source_t[None, :] >= 0)
-            & (i_p == 0),
-            other=0,
-        ).to(tl.float32)
-        state_k = tl.load(
-            k
-            + i_b * stride_k_b
-            + state_source_t[None, :] * stride_k_t
-            + o_d[:, None] * stride_k_d,
-            mask=m_d[:, None]
-            & (o_w[None, :] < W - 1)
-            & (state_source_t[None, :] >= 0)
-            & (i_p == 1),
-            other=0,
-        ).to(tl.float32)
-        state_v = tl.load(
-            v
-            + i_b * stride_v_b
-            + state_source_t[None, :] * stride_v_t
-            + o_d[:, None] * stride_v_d,
-            mask=m_d[:, None]
-            & (o_w[None, :] < W - 1)
-            & (state_source_t[None, :] >= 0)
-            & (i_p == 2),
-            other=0,
-        ).to(tl.float32)
-        history = tl.where(
-            state_source_t[None, :] < 0,
-            state_history,
-            state_q + state_k + state_v,
         )
-
-        write_page_raw = reserve_page_raw + i_t
-        write_page_valid = (
-            (write_page_raw >= 0) & (write_page_raw < max_block_count)
-        )
-        write_page = tl.where(write_page_valid, write_page_raw, 0)
-        write_block_id = tl.load(
-            block_map + i_b * stride_bm_b + write_page * stride_bm_page,
-            mask=write_page_valid,
-            other=0,
-        ).to(tl.int64)
-        write_valid = (
-            write_page_valid
-            & (write_block_id > 0)
-            & (write_block_id < physical_block_count)
+        previous_checkpoint = tl.where(
+            (o_w == W - 2)[None, :], b_x[:, None], b_shifted_history
         )
         tl.store(
             conv_state
-            + write_block_id * stride_s_block
+            + checkpoint_block_id * stride_s_block
             + o_w[None, :] * stride_s_w
             + packed_d[:, None] * stride_s_d,
-            history,
-            mask=write_valid
-            & m_d[:, None]
-            & (o_w[None, :] < W - 1),
+            previous_checkpoint,
+            mask=checkpoint_valid & m_d[:, None] & (o_w[None, :] < W - 1),
         )
 
 
