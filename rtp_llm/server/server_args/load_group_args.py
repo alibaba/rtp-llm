@@ -51,13 +51,25 @@ def init_load_group_args(parser, load_config, model_args):
         ),
     )
     load_group.add_argument(
+        "--require_weight_update",
+        env_name="REQUIRE_WEIGHT_UPDATE",
+        bind_to=(model_args, "require_weight_update"),
+        type=str2bool,
+        default=False,
+        help=(
+            "声明部署需要在线 UpdateWeights RPC；自动选路时会使用支持权重热更的 "
+            "legacy loader。与 --use_new_loader true 同时设置会在启动期报错"
+        ),
+    )
+    load_group.add_argument(
         "--keep_mla_checkpoint_weights",
         env_name="KEEP_MLA_CHECKPOINT_WEIGHTS",
         bind_to=(load_config, "keep_mla_checkpoint_weights"),
         type=str2bool,
         default=False,
         help=(
-            "需先启用 newloader；仅对 DeepSeek MLA 生效：保留已转换为运行时布局的 "
-            "checkpoint 权重。会增加显存占用并减少 KV cache 可用块，仅用于调试"
+            "需先启用 newloader；对 DeepSeek/Kimi MLA 生效：保留已转换为运行时 "
+            "布局的 checkpoint 权重。会增加显存占用并减少 KV cache 可用块，"
+            "仅用于调试"
         ),
     )
