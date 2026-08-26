@@ -475,6 +475,11 @@ class EnvSpec:
     master_extra_args: list = field(default_factory=list)
     event_loop_threads: int = DEFAULT_MOCK_EVENT_LOOP_THREADS
     completion_threads: int = DEFAULT_MOCK_COMPLETION_THREADS
+    # Seconds the freshly started master must hold "alive == discovered" for
+    # every role before start_master() returns (0 disables). Skips the
+    # cold-start first-connect storm during which healthy engines can be
+    # 3-strike-marked dead (CONNECT_TIMEOUT 20ms intake defect).
+    master_stable_window_s: float = 3.0
 
     def fingerprint(self) -> str:
         return json.dumps(
@@ -489,6 +494,7 @@ class EnvSpec:
                 "prefill_cache_blocks": self.prefill_cache_blocks,
                 "decode_cache_blocks": self.decode_cache_blocks,
                 "spring_profile": self.spring_profile,
+                "master_stable_window_s": self.master_stable_window_s,
             },
             sort_keys=True,
         )
@@ -869,20 +875,71 @@ class EnvManager:
                 f"{proc.tail_log()}"
             )
 
-        def _master_ready() -> bool:
+        def _master_info() -> Optional[dict]:
             # /rtp_llm/master/info is a POST endpoint (GET returns 405);
             # http_post_json returns (status, payload) tuple.
             status, data = http_post_json(
                 f"http://127.0.0.1:{env.master_http_port}/rtp_llm/master/info",
                 {},
             )
-            return status == 200 and bool(data and data.get("ready"))
+            return data if status == 200 else None
 
-        if not wait_for(_master_ready, timeout_s=30, interval_s=0.5):
+        if not wait_for(
+            lambda: (lambda d: bool(d and d.get("ready")))(_master_info()),
+            timeout_s=30,
+            interval_s=0.5,
+        ):
             raise RuntimeError(
                 "master HTTP up but engine sync not ready after 30s "
                 "(check ~/ai-whale/logs/flexlb.log)"
             )
+
+        # Stability window: hold "alive == discovered == spec topology" for
+        # master_stable_window_s (default 3s) before returning. Skips the
+        # cold-start first-connect storm; 0 disables (cold-start probe).
+        window_s = spec.master_stable_window_s
+        if window_s > 0:
+
+            def _engines_stable() -> bool:
+                data = _master_info()
+                if not data or not data.get("ready"):
+                    return False
+                summary = data.get("worker_summary", {}) or {}
+                for role, expected in (
+                    ("PREFILL", spec.n_prefill),
+                    ("DECODE", spec.n_decode),
+                ):
+                    if expected <= 0:
+                        continue
+                    entry = summary.get(role) or {}
+                    try:
+                        discovered = int(entry.get("discovered", -1))
+                        alive = int(entry.get("alive", -1))
+                    except (TypeError, ValueError):
+                        return False
+                    if discovered != expected or alive != discovered:
+                        return False
+                return True
+
+            needed = max(1, int(round(window_s / 0.5)))
+            stable_ticks = 0
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                if _engines_stable():
+                    stable_ticks += 1
+                    if stable_ticks >= needed:
+                        break
+                else:
+                    stable_ticks = 0
+                time.sleep(0.5)
+            if stable_ticks < needed:
+                if not proc.alive():
+                    raise RuntimeError(f"master exited:\n{proc.tail_log()}")
+                raise RuntimeError(
+                    f"master engines not stable (alive == discovered for "
+                    f"{window_s:.0f}s) within 90s — check "
+                    f"~/ai-whale/logs/flexlb.log"
+                )
         self._log(
             f"master up (pid={proc.pid}, mode={spec.master_mode}, log={log_name})"
         )
