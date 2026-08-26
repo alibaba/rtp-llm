@@ -571,6 +571,8 @@ message MemoryOperationRequestPB {
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
+    // Coordinator-generated id used to correlate one copy plan across all TP ranks.
+    uint64 copy_plan_id = 3;
 }
 
 message MemoryOperationResponsePB {

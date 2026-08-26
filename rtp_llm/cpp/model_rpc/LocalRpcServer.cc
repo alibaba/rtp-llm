@@ -1,5 +1,5 @@
-#include <memory>
 #include <chrono>
+#include <memory>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -530,7 +530,30 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "cache manager is null");
     }
-    if (!cache_manager->executeFunction(*request, *response)) {
+    const bool    is_memory_copy = request->has_mem_request();
+    const int64_t copy_begin_us  = currentTimeUs();
+    if (is_memory_copy) {
+        const auto& mem_request = request->mem_request();
+        RTP_LLM_LOG_INFO("memory cache worker copy begin, plan_id=%lu direction=%s items=%d peer=%s",
+                         mem_request.copy_plan_id(),
+                         mem_request.copy_direction() == MemoryOperationRequestPB::H2D ? "H2D" : "D2H",
+                         mem_request.copy_items_size(),
+                         context->peer().c_str());
+    }
+    const bool execute_success = cache_manager->executeFunction(*request, *response);
+    if (is_memory_copy) {
+        const auto& mem_request = request->mem_request();
+        RTP_LLM_LOG_INFO("memory cache worker copy end, plan_id=%lu direction=%s items=%d elapsed_us=%ld success=%d "
+                         "cancelled=%d peer=%s",
+                         mem_request.copy_plan_id(),
+                         mem_request.copy_direction() == MemoryOperationRequestPB::H2D ? "H2D" : "D2H",
+                         mem_request.copy_items_size(),
+                         currentTimeUs() - copy_begin_us,
+                         execute_success,
+                         context->IsCancelled(),
+                         context->peer().c_str());
+    }
+    if (!execute_success) {
         RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
         const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);

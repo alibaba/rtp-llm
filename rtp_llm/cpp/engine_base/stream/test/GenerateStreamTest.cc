@@ -127,6 +127,48 @@ TEST(CompleteTokenIdsTest, ClampsExhaustedAndPartialBudget) {
     EXPECT_EQ(token_ids.completeTokenIds().data_ptr<int32_t>()[5], 7);
 }
 
+TEST_F(GenerateStreamTest, testMinNewTokensIgnoresEarlyEosUntilLaterEos) {
+    auto builder       = GenerateStreamBuilder();
+    auto stream        = builder.createContextStream({1, 2, 3});
+    auto normal_stream = std::dynamic_pointer_cast<NormalGenerateStream>(stream);
+    ASSERT_TRUE(normal_stream);
+
+    stream->special_tokens_.eos_token_id                     = 99;
+    stream->vocab_size_                                      = 100;
+    stream->generate_input_->generate_config->ignore_eos     = false;
+    stream->generate_input_->generate_config->min_new_tokens = 3;
+    stream->generate_input_->generate_config->max_new_tokens = 8;
+
+    auto update_one_token = [&](int token_id) {
+        stream->update({torch::tensor({{token_id}}, torch::kInt32),
+                        1,
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor(),
+                        torch::Tensor()});
+    };
+
+    update_one_token(99);
+    EXPECT_EQ(stream->seqLength(), stream->inputLength() + 1);
+    EXPECT_FALSE(normal_stream->finished_);
+
+    update_one_token(7);
+    EXPECT_EQ(stream->seqLength(), stream->inputLength() + 2);
+    EXPECT_FALSE(normal_stream->finished_);
+
+    update_one_token(8);
+    EXPECT_EQ(stream->seqLength(), stream->inputLength() + 3);
+    EXPECT_FALSE(normal_stream->finished_);
+
+    update_one_token(99);
+    EXPECT_EQ(stream->seqLength(), stream->inputLength() + 4);
+    EXPECT_TRUE(normal_stream->finished_);
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
