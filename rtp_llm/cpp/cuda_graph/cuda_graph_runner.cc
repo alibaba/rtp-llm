@@ -660,16 +660,55 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto& py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
 
+    // The focused MTP refresh can publish a smaller live batch/table than the
+    // one copied by prepareAttentionInputs(). This is especially visible for
+    // DSV4 INDEXER_KV: one 1024-token owner expands to four 256-token kernel
+    // rows, so every stale owner column leaves four apparently valid block ids.
+    // Clear the complete captured destinations before copying the live
+    // rectangle. The fill and copies use the graph stream and are therefore
+    // ordered before replay without a device-wide synchronization.
+#if USING_CUDA
+    CudaGraphPrepareFillParams fill_params;
+    auto clear_block_table = [&fill_params](torch::Tensor& dst) {
+        addCudaGraphPrepareFillRegion(fill_params, dst, 0, dst.numel(), 0);
+    };
+#else
+    auto clear_block_table = [](torch::Tensor& dst) {
+        if (dst.defined() && dst.numel() > 0) {
+            dst.fill_(0);
+        }
+    };
+#endif
+
     FusedD2DCopyParams     d2d_copies;
     FusedStridedCopyParams strided_d2d_copies;
     auto add_block_table = [&d2d_copies, &strided_d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() == 0) {
             return;
         }
+        RTP_LLM_CHECK_WITH_INFO(dst.defined() && src.dim() == dst.dim(),
+                                "CUDA graph focused block-table copy rank mismatch: src_dim=%ld dst_dim=%ld",
+                                src.dim(),
+                                dst.defined() ? dst.dim() : -1);
+        RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(),
+                                "CUDA graph focused block-table copy dtype mismatch");
+        RTP_LLM_CHECK_WITH_INFO(src.is_cuda() && dst.is_cuda(),
+                                "CUDA graph focused block-table copy requires CUDA tensors");
         if (src.dim() < 2) {
+            RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(),
+                                    "CUDA graph focused block-table source numel=%ld exceeds destination numel=%ld",
+                                    src.numel(),
+                                    dst.numel());
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
+        RTP_LLM_CHECK_WITH_INFO(
+            src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1),
+            "CUDA graph focused block-table source shape=(%ld,%ld) exceeds destination shape=(%ld,%ld)",
+            src.size(0),
+            src.size(1),
+            dst.size(0),
+            dst.size(1));
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),
@@ -679,6 +718,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     };
 
     if (inputs.attention_inputs_by_tag.empty()) {
+        clear_block_table(py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
         add_block_table(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                         py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
     } else {
@@ -689,10 +729,14 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             RTP_LLM_CHECK_WITH_INFO(dst_it != py_model_inputs.attention_inputs_by_tag.end(),
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
+            clear_block_table(dst_it->second.kv_cache_kernel_block_id_device);
             add_block_table(src_inputs.kv_cache_kernel_block_id_device,
                             dst_it->second.kv_cache_kernel_block_id_device);
         }
     }
+#if USING_CUDA
+    invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
+#endif
     fusedCopy(d2d_copies);
     fusedStridedCopy(strided_d2d_copies);
 }
