@@ -94,8 +94,8 @@ public abstract class FlexLBMockTestBase {
     private NioEventLoopGroup eventLoopGroup;
     private ThreadPoolExecutor grpcExecutor;
 
-    /** Addressable logical decode endpoints: one subnet per 254 endpoints. */
-    private static final int LOGICAL_DECODE_INDEX_LIMIT = 254 * 254;
+    /** Addressable logical endpoints: one subnet per 254 endpoints. */
+    private static final int LOGICAL_WORKER_INDEX_LIMIT = 254 * 254;
 
     // Additional prefill workers started by tests (for multi-worker scenarios)
     private final List<MockPrefillWorker> additionalPrefillWorkers = new ArrayList<>();
@@ -430,13 +430,45 @@ public abstract class FlexLBMockTestBase {
     }
 
     /**
+     * Add a Prefill endpoint without starting a server. Frontend-delivery tests only
+     * return its route metadata; the Master does not contact Prefill before replying.
+     */
+    protected PrefillEndpoint addLogicalPrefillEndpoint(int workerIndex) {
+        if (workerIndex <= 0 || workerIndex > LOGICAL_WORKER_INDEX_LIMIT) {
+            throw new IllegalArgumentException("logical prefill worker index must be in [1, "
+                    + LOGICAL_WORKER_INDEX_LIMIT + "]");
+        }
+        String ip = "198.19." + (workerIndex - 1) / 254 + "."
+                + ((workerIndex - 1) % 254 + 1);
+        int httpPort = 60_000;
+        int grpcPort = httpPort + 1;
+        String ipPort = ip + ":" + httpPort;
+
+        WorkerStatus ws = discoveredWorkerStatus(
+                RoleType.PREFILL,
+                ip,
+                httpPort,
+                grpcPort,
+                workerIndex,
+                1_000_000_000L,
+                2_000_000_000L);
+
+        PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry
+                .registerPreinitializedEndpoint(RoleType.PREFILL, ipPort, ws);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
+                .getPrefillStatusMap().put(ipPort, ws);
+        additionalPrefillIpPorts.add(ipPort);
+        return endpoint;
+    }
+
+    /**
      * Add a decode endpoint without starting a server. The Master schedule path only
      * selects decode metadata; it does not contact decode before returning the ACK.
      */
     protected DecodeEndpoint addLogicalDecodeEndpoint(int workerIndex) {
-        if (workerIndex <= 0 || workerIndex > LOGICAL_DECODE_INDEX_LIMIT) {
+        if (workerIndex <= 0 || workerIndex > LOGICAL_WORKER_INDEX_LIMIT) {
             throw new IllegalArgumentException("logical decode worker index must be in [1, "
-                    + LOGICAL_DECODE_INDEX_LIMIT + "]");
+                    + LOGICAL_WORKER_INDEX_LIMIT + "]");
         }
         // RFC 2544 benchmarking block, spread over subnets so a production-sized
         // decode fleet still gets one distinct address per endpoint.

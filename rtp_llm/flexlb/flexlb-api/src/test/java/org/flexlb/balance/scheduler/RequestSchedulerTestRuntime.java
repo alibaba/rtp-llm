@@ -2,15 +2,20 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.admission.AdmissionFallback;
 import org.flexlb.balance.composition.BatchDeliveryBinding;
+import org.flexlb.balance.composition.RouteDeliveryBinding;
 import org.flexlb.balance.delivery.BatchSubmissionPort;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointEvent;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointStatusReduction;
+import org.flexlb.balance.endpoint.PrefillDeliveryStrategyBinding;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -47,19 +52,32 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             BatchSchedulerReporter batchReporter,
             RequestSchedulerReporter requestReporter,
             EngineCancelChannel cancelChannel) {
-        Objects.requireNonNull(batchSubmission, "batchSubmission");
         this.lifecycle = new RequestLifecycleCoordinator(
                 configService, batchReporter, requestReporter, cancelChannel);
-        AtomicLong batchIds = new AtomicLong();
+        DispatcherConfig dispatcher = Objects.requireNonNull(
+                configService.loadBalanceConfig().getDispatcher(),
+                "dispatcher");
+        PrefillDeliveryStrategyBinding deliveryBinding = switch (dispatcher) {
+            case BatchDispatcherConfig ignored -> {
+                AtomicLong batchIds = new AtomicLong();
+                yield new BatchDeliveryBinding(
+                        Objects.requireNonNull(
+                                batchSubmission, "batchSubmission"),
+                        new BatchPrefillAdmission(batchIds::incrementAndGet),
+                        lifecycle,
+                        new DeliveryTelemetryAdapter(batchReporter));
+            }
+            case NonBatchDispatcherConfig ignored ->
+                    new RouteDeliveryBinding(
+                            new RoutePrefillAdmission(),
+                            lifecycle,
+                            new DeliveryTelemetryAdapter(batchReporter));
+        };
         this.registry = new EndpointRegistry(
                 configService,
                 lifecycle,
                 batchReporter,
-                new BatchDeliveryBinding(
-                        batchSubmission,
-                        new BatchPrefillAdmission(batchIds::incrementAndGet),
-                        lifecycle,
-                        new DeliveryTelemetryAdapter(batchReporter)),
+                deliveryBinding,
                 new WorkerBatcherFactory());
         AdmissionFallback noPriorityTakeover = (context, future) -> false;
         this.scheduler = new RequestScheduler(

@@ -31,16 +31,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.RejectedExecutionHandler;
-import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -65,7 +64,12 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
-    private final CapacitySignalingExecutor dispatchExecutor;
+    private final ThreadPoolExecutor dispatchExecutor;
+    private final int admissionCapacity;
+    private final Semaphore admissionPermits;
+    // Admission ends at RPC handoff; this separate count keeps the callback
+    // executor alive while accepted RPCs are still awaiting completion.
+    private final AtomicInteger pendingCompletions = new AtomicInteger();
     private final MeterRegistry meterRegistry;
     private final ReentrantReadWriteLock admissionLifecycle =
             new ReentrantReadWriteLock(true);
@@ -80,7 +84,8 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
                     // "Available" means the rejecting condition changed and
                     // the active head must retry admission. Shutdown is such
                     // a change: the retry returns a typed terminal failure.
-                    return !acceptingSubmissions || executorHasCapacity();
+                    return !acceptingSubmissions
+                            || admissionPermits.availablePermits() > 0;
                 }
 
                 @Override
@@ -111,15 +116,19 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
         this.grpcClient = grpcClient;
         this.configService = configService;
         this.meterRegistry = meterRegistry;
-        Logger.info("FlexLB dispatch executor config: poolSize={}, queueSize={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
-                poolSize, queueSize);
-        this.dispatchExecutor = new CapacitySignalingExecutor(
+        this.admissionCapacity = Math.addExact(poolSize, queueSize);
+        this.admissionPermits = new Semaphore(admissionCapacity);
+        Logger.info("FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
+                poolSize, admissionCapacity);
+        // Permits bound accepted reservations through their RPC handoff. The
+        // physical queue stays unbounded so an accepted batch cannot be
+        // rejected after commit.
+        this.dispatchExecutor = new ThreadPoolExecutor(
                 poolSize, poolSize,
                 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(queueSize),
+                new LinkedBlockingQueue<>(),
                 new NamedThreadFactory("flexlb-dispatch-executor"),
-                new ThreadPoolExecutor.AbortPolicy(),
-                this::signalCapacityAvailable);
+                new ThreadPoolExecutor.AbortPolicy());
         registerMetrics();
     }
 
@@ -167,7 +176,6 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
     @Override
     public CapacityBoundary.Attempt<PreparedSubmission> prepare() {
-        ReservedDispatch reservedDispatch = new ReservedDispatch();
         admissionReadLock.lock();
         try {
             if (!acceptingSubmissions) {
@@ -175,27 +183,17 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
                         new IllegalStateException(
                                 "batch dispatcher is shut down"));
             }
-            try {
-                // The accepted task itself is the permit. No later execute()
-                // call exists on the admitted path, so executor saturation
-                // cannot appear after a request leaves ACTIVE.
-                dispatchExecutor.execute(reservedDispatch);
-            } catch (RejectedExecutionException capacityFull) {
-                if (!acceptingSubmissions || dispatchExecutor.isShutdown()) {
-                    return rejectedFailure(
-                            new IllegalStateException(
-                                    "batch dispatcher stopped during admission",
-                                    capacityFull));
-                }
+            if (!admissionPermits.tryAcquire()) {
                 return new CapacityBoundary.Attempt.Rejected<>(
                         new CapacityBoundary.Unavailable(
                                 capacityAvailability,
                                 CAPACITY_BLOCK_SEMANTICS));
             }
+            return new CapacityBoundary.Attempt.Accepted<>(
+                    new PermitReservation());
         } finally {
             admissionReadLock.unlock();
         }
-        return new CapacityBoundary.Attempt.Accepted<>(reservedDispatch);
     }
 
     private static CapacityBoundary.Attempt<PreparedSubmission> rejectedFailure(
@@ -212,20 +210,31 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
                 return;
             }
             acceptingSubmissions = false;
-            // Every previously returned permit already owns a task in this
-            // executor. Graceful shutdown preserves those tasks; submit() only
-            // fills their payload and never calls execute() again.
-            dispatchExecutor.shutdown();
+            tryShutdownExecutor();
         } finally {
             admissionWriteLock.unlock();
         }
         signalCapacityAvailable();
     }
 
-    private boolean executorHasCapacity() {
-        return !dispatchExecutor.isShutdown()
-                && (dispatchExecutor.getPoolSize() < dispatchExecutor.getMaximumPoolSize()
-                || dispatchExecutor.getQueue().remainingCapacity() > 0);
+    private void releasePermit() {
+        admissionPermits.release();
+        signalCapacityAvailable();
+        tryShutdownExecutor();
+    }
+
+    private void finishCompletion() {
+        pendingCompletions.decrementAndGet();
+        tryShutdownExecutor();
+    }
+
+    private void tryShutdownExecutor() {
+        if (!acceptingSubmissions
+                && admissionPermits.availablePermits()
+                == admissionCapacity
+                && pendingCompletions.get() == 0) {
+            dispatchExecutor.shutdown();
+        }
     }
 
     private void signalCapacityAvailable() {
@@ -238,85 +247,53 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
         }
     }
 
-    /** Accepted executor task whose delivery payload is supplied after admission. */
-    private final class ReservedDispatch
-            implements BatchSubmissionPort.PreparedSubmission, Runnable {
+    /** One dispatch-task permit, acquired before the canonical commit. */
+    private final class PermitReservation
+            implements BatchSubmissionPort.PreparedSubmission {
 
         private enum State {
             PREPARED,
-            MOVED,
-            CLOSED
+            SUBMITTED,
+            RELEASED
         }
 
-        private State state = State.PREPARED;
-        private DispatchTask task;
+        private final AtomicReference<State> state =
+                new AtomicReference<>(State.PREPARED);
 
         @Override
         public void submit(
                 BatchSubmissionPort.Command command,
                 BatchSubmissionPort.Observer observer) {
             DispatchTask submittedTask = dispatchTask(command, observer);
-            synchronized (this) {
-                if (state != State.PREPARED) {
-                    throw new IllegalStateException(
-                            "prepared batch submission cannot move from " + state);
-                }
-                task = submittedTask;
-                state = State.MOVED;
-                notifyAll();
+            if (!state.compareAndSet(State.PREPARED, State.SUBMITTED)) {
+                throw new IllegalStateException(
+                        "prepared batch submission cannot submit from "
+                                + state.get());
+            }
+            try {
+                dispatchExecutor.execute(() -> {
+                    try {
+                        doDispatch(submittedTask);
+                    } finally {
+                        finishSubmitted();
+                    }
+                });
+            } catch (RuntimeException | Error submissionFailure) {
+                finishSubmitted();
+                throw submissionFailure;
             }
         }
 
         @Override
         public void close() {
-            synchronized (this) {
-                if (state == State.MOVED || state == State.CLOSED) {
-                    return;
-                }
-                state = State.CLOSED;
-                notifyAll();
-            }
-            try {
-                if (dispatchExecutor.remove(this)) {
-                    signalCapacityAvailable();
-                }
-            } catch (Throwable cleanupFailure) {
-                // The task is still CLOSED, so even an executor bookkeeping
-                // failure cannot start an RPC or alter the business outcome.
-                Logger.error(
-                        "Prepared batch submission cleanup failed",
-                        cleanupFailure);
+            if (state.compareAndSet(State.PREPARED, State.RELEASED)) {
+                releasePermit();
             }
         }
 
-        @Override
-        public void run() {
-            DispatchTask submittedTask;
-            boolean interrupted = false;
-            synchronized (this) {
-                while (state == State.PREPARED) {
-                    try {
-                        wait();
-                    } catch (InterruptedException interruption) {
-                        interrupted = true;
-                    }
-                }
-                submittedTask = state == State.MOVED ? task : null;
-            }
-            try {
-                if (submittedTask != null) {
-                    doDispatch(
-                            submittedTask.items(),
-                            submittedTask.prefillEndpoint(),
-                            submittedTask.batchId(),
-                            submittedTask.predictedMs(),
-                            submittedTask.reason(),
-                            submittedTask.observer());
-                }
-            } finally {
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
+        private void finishSubmitted() {
+            if (state.compareAndSet(State.SUBMITTED, State.RELEASED)) {
+                releasePermit();
             }
         }
     }
@@ -344,68 +321,34 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
                                 BatchSubmissionPort.Observer observer) {
     }
 
-    /** Signals both task completion and the earlier queue-slot release on dequeue. */
-    private static final class CapacitySignalingExecutor extends ThreadPoolExecutor {
-
-        private final Runnable capacityAvailableSignal;
-
-        private CapacitySignalingExecutor(
-                int corePoolSize,
-                int maximumPoolSize,
-                long keepAliveTime,
-                TimeUnit unit,
-                BlockingQueue<Runnable> workQueue,
-                ThreadFactory threadFactory,
-                RejectedExecutionHandler handler,
-                Runnable capacityAvailableSignal) {
-            super(corePoolSize, maximumPoolSize, keepAliveTime, unit,
-                    workQueue, threadFactory, handler);
-            this.capacityAvailableSignal = capacityAvailableSignal;
-        }
-
-        @Override
-        protected void beforeExecute(Thread thread, Runnable task) {
-            super.beforeExecute(thread, task);
-            capacityAvailableSignal.run();
-        }
-
-        @Override
-        protected void afterExecute(Runnable task, Throwable failure) {
-            try {
-                super.afterExecute(task, failure);
-            } finally {
-                capacityAvailableSignal.run();
-            }
-        }
-    }
-
     // ==================== Internal: dispatch pipeline (runs on executor thread) ====================
 
-    private void doDispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
-                            long batchId, long predMs, String reason,
-                            BatchSubmissionPort.Observer observer) {
+    private void doDispatch(DispatchTask task) {
         DispatchAttempt attempt = new DispatchAttempt();
         try {
-            doDispatchInternal(
-                    items, prefillEp, batchId, predMs, reason,
-                    observer, attempt);
+            doDispatchInternal(task, attempt);
         } catch (Throwable unexpectedFailure) {
             Logger.error("Unexpected dispatch failure batch_id={} rpc_invocation_started={}",
-                    batchId, attempt.rpcInvocationStarted, unexpectedFailure);
+                    task.batchId(), attempt.rpcInvocationStarted, unexpectedFailure);
             if (attempt.rpcInvocationStarted) {
                 // Once invocation starts, cleanup is unsafe even if the
                 // exception escaped an otherwise defensive post-send path.
-                markUncertain(items, batchId, unexpectedFailure, observer);
+                markUncertain(task.items(), task.batchId(),
+                        unexpectedFailure, task.observer());
             } else {
-                failItems(items, batchId, unexpectedFailure, observer);
+                failItems(task.items(), task.batchId(),
+                        unexpectedFailure, task.observer());
             }
         }
     }
 
-    private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
-                                    long batchId, long predMs, String reason,
-                                    BatchSubmissionPort.Observer observer,
+    private void doDispatchInternal(DispatchTask task,
                                     DispatchAttempt attempt) {
+        List<BatchItem> items = task.items();
+        PrefillEndpoint prefillEp = task.prefillEndpoint();
+        long batchId = task.batchId();
+        BatchSubmissionPort.Observer observer = task.observer();
+
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
@@ -419,7 +362,8 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
         // 2. Log dispatch
         try {
-            logDispatch(batchId, items, prefillEp, predMs, reason);
+            logDispatch(batchId, items, prefillEp,
+                    task.predictedMs(), task.reason());
         } catch (Throwable loggingFailure) {
             // Reporting is not part of transport ownership. A logger failure
             // cannot turn an otherwise valid committed batch into a delivery
@@ -456,43 +400,49 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
             markUncertain(items, batchId, missingFuture, observer);
             return;
         }
+        // Increment while this dispatch still owns its admission permit. That
+        // prevents shutdown from observing both zero pending completions and
+        // all permits returned before the completion observer is registered.
+        pendingCompletions.incrementAndGet();
         try {
-            CompletableFuture<Void> completionObserver = rpcFuture.handleAsync((response, ex) -> {
+            CompletableFuture<Void> completionObserver = rpcFuture.handleAsync(
+                    (response, ex) -> {
+                        try {
+                            if (ex != null) {
+                                Throwable cause = unwrapCompletionFailure(ex);
+                                Logger.debug("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                                        batchId, prefillIp, prefillGrpcPort, cause.getMessage());
+                                // Once the asynchronous RPC is invoked, no
+                                // transport status proves the server did not
+                                // accept the request. Reconcile every transport
+                                // failure through the Engine-side request-id fence.
+                                markUncertain(items, batchId, cause, observer);
+                            } else if (response == null) {
+                                markUncertain(items, batchId, new RuntimeException(
+                                        "EnqueueBatch returned null response"), observer);
+                            } else {
+                                handleResponse(batchId, items, response, observer);
+                            }
+                        } catch (Throwable completionFailure) {
+                            // This callback is unconditionally post-invocation. Never
+                            // let an unexpected response-processing failure fall back
+                            // to definite failure/cleanup.
+                            markUncertain(items, batchId, completionFailure, observer);
+                        }
+                        return null;
+                    }, dispatchExecutor);
+            completionObserver.whenComplete((ignored, observerFailure) -> {
                 try {
-                    if (ex != null) {
-                        Throwable cause = unwrapCompletionFailure(ex);
-                        Logger.debug("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
-                                batchId, prefillIp, prefillGrpcPort, cause.getMessage());
-                        // Once the asynchronous RPC is invoked, no
-                        // transport status proves the server did not
-                        // accept the request. Reconcile every transport
-                        // failure through the Engine-side request-id fence.
-                        markUncertain(items, batchId, cause, observer);
-                    } else if (response == null) {
-                        markUncertain(items, batchId, new RuntimeException(
-                                "EnqueueBatch returned null response"), observer);
-                    } else {
-                        handleResponse(batchId, items, response, observer);
+                    if (observerFailure != null) {
+                        markUncertain(items, batchId,
+                                unwrapCompletionFailure(observerFailure), observer);
                     }
-                } catch (Throwable completionFailure) {
-                    // This callback is unconditionally post-invocation. Never
-                    // let an unexpected response-processing failure fall back
-                    // to definite failure/cleanup.
-                    markUncertain(items, batchId, completionFailure, observer);
+                } finally {
+                    finishCompletion();
                 }
-                return null;
-            }, dispatchExecutor);
-
-            // handleAsync consumes an RPC failure in the lambda above. Its
-            // returned future can still fail if the executor rejects callback
-            // execution, which is also post-invocation and therefore
-            // ambiguous.
-            completionObserver.exceptionally(observerFailure -> {
-                markUncertain(items, batchId,
-                        unwrapCompletionFailure(observerFailure), observer);
-                return null;
             });
         } catch (Throwable registrationFailure) {
+            finishCompletion();
             // Callback registration is post-invocation. The RPC may already
             // be in flight even though no completion observer was installed.
             markUncertain(items, batchId, registrationFailure, observer);

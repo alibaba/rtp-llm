@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -259,7 +260,9 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void completionExecutorRejectionAfterRpcInvocationIsUncertain() throws Exception {
+    void acceptedRpcCompletesNormallyAfterShutdown() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture = new CompletableFuture<>();
@@ -270,16 +273,28 @@ class DefaultBatchDispatcherTest {
                     return rpcFuture;
                 });
 
-        submit(List.of(item),
-                4L, 100, "completion_rejected", callback);
+        BatchSubmissionPort.PreparedSubmission reservation = reservePermit();
+        CapacityBoundary.Unavailable unavailable = unavailableBoundary();
+        CountDownLatch capacityChanged = new CountDownLatch(1);
+        unavailable.availability().addListener(() -> {
+            if (unavailable.availability().isAvailable()) {
+                capacityChanged.countDown();
+            }
+        });
+        reservation.submit(
+                command(List.of(item), 4L, 100, "shutdown_drain"), callback);
         assertTrue(invoked.await(5, TimeUnit.SECONDS));
+        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS),
+                "dispatch capacity must be released after the RPC handoff");
+        assertFalse(rpcFuture.isDone());
+
         dispatcher.shutdown();
         rpcFuture.complete(ackResponse(4L, List.of(1L)));
 
-        assertTrue(callback.uncertainLatch.await(5, TimeUnit.SECONDS));
-        assertEquals(0, callback.successCount.get());
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, callback.successCount.get());
         assertEquals(0, callback.failureCount.get());
-        assertEquals(1, callback.uncertainCount.get());
+        assertEquals(0, callback.uncertainCount.get());
     }
 
     @Test
@@ -403,6 +418,8 @@ class DefaultBatchDispatcherTest {
 
         assertTrue(rpcInvoked.await(5, TimeUnit.SECONDS),
                 "the task accepted before shutdown must still invoke the RPC");
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS),
+                "shutdown must drain the accepted task and its completion callback");
         assertEquals(0, callback.failureCount.get());
         CapacityBoundary.Attempt.Rejected<?> rejected = assertInstanceOf(
                 CapacityBoundary.Attempt.Rejected.class, dispatcher.prepare());
@@ -410,7 +427,7 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void boundedExecutorReportsUnavailableAndQueuedPermitReleaseRestoresCapacity()
+    void logicalCapacityRejectsAndUnusedReservationRestoresCapacity()
             throws Exception {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
@@ -435,7 +452,7 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void runningReservedPermitReleaseSignalsAndRestoresCapacity() throws Exception {
+    void closingAnyUnusedReservationSignalsAndRestoresCapacity() throws Exception {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
         BatchSubmissionPort.PreparedSubmission running = reservePermit();
@@ -459,7 +476,7 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
-    void submittingAcceptedPermitsDoesNotPerformAnotherExecutorAdmission() {
+    void acceptedReservationsSubmitWithoutSecondCapacityCheck() {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
         PrefillEndpoint endpoint = createPrefillEndpoint();
@@ -477,6 +494,58 @@ class DefaultBatchDispatcherTest {
         assertDoesNotThrow(() -> queued.submit(
                 command(List.of(secondItem), 2L, 100, "already_accepted"),
                 callback));
+    }
+
+    @Test
+    void submittedReservationReleasesCapacityAfterRpcHandoff() throws Exception {
+        dispatcher.shutdown();
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        PrefillEndpoint endpoint = createPrefillEndpoint();
+        BatchItem item = createBatchItem(1L, 500, 200, endpoint);
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
+                new CompletableFuture<>();
+        CountDownLatch rpcInvoked = new CountDownLatch(1);
+        CountDownLatch allowHandoff = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(invocation -> {
+                    rpcInvoked.countDown();
+                    assertTrue(allowHandoff.await(5, TimeUnit.SECONDS));
+                    return rpcFuture;
+                });
+
+        BatchSubmissionPort.PreparedSubmission reservation = reservePermit();
+        CapacityBoundary.Unavailable unavailable = unavailableBoundary();
+        CountDownLatch capacityChanged = new CountDownLatch(1);
+        unavailable.availability().addListener(() -> {
+            if (unavailable.availability().isAvailable()) {
+                capacityChanged.countDown();
+            }
+        });
+        BatchSubmissionPort.Command command =
+                command(List.of(item), 1L, 100, "dispatch_handoff_capacity");
+        reservation.submit(command, callback);
+        assertTrue(rpcInvoked.await(5, TimeUnit.SECONDS));
+
+        reservation.close();
+        reservation.close();
+        assertFalse(unavailable.availability().isAvailable(),
+                "close after submit must not release a dispatch still handing off");
+        assertThrows(IllegalStateException.class,
+                () -> reservation.submit(command, callback));
+
+        allowHandoff.countDown();
+        assertTrue(capacityChanged.await(5, TimeUnit.SECONDS));
+        assertTrue(unavailable.availability().isAvailable());
+        assertFalse(rpcFuture.isDone());
+        assertEquals(0, callback.successCount.get());
+        BatchSubmissionPort.PreparedSubmission replacement = reservePermit();
+
+        replacement.close();
+
+        rpcFuture.complete(ackResponse(1L, List.of(1L)));
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, callback.successCount.get());
     }
 
     // ---- task40: priority passthrough to GenerateInputPB ----
