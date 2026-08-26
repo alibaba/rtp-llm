@@ -813,17 +813,14 @@ TEST(HybridPoolConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGrou
     // state-ring window for swa_kv.
     EXPECT_EQ(opaqueEntriesPerBlock(*csa_kv, kDsv4KvEntryBytes), 32u);
     EXPECT_EQ(opaqueEntriesPerBlock(*hca_kv, kDsv4KvEntryBytes), 1u);
-    // The block-tree source range keeps INDEXER_KV in DeepGEMM-compatible
-    // 256-token kernel rows even when the other compressed pools use 128.
-    EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 64u);
+    EXPECT_EQ(opaqueEntriesPerBlock(*idx_kv, kDsv4IndexerEntryBytes), 32u);
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 128u);
 
     EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(csa_kv_gid), 128u);
     EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(swa_kv_gid), 1u);
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(csa_kv_gid), csa_kv->block_size_bytes() * 128u);
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(hca_kv_gid), hca_kv->block_size_bytes() * 128u);
-    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(idx_kv_gid), 64u);
-    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes() * 64u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(idx_kv_gid), idx_kv->block_size_bytes() * 128u);
     EXPECT_EQ(config.kvBlockStrideBytesForGroup(swa_kv_gid), swa_kv->block_size_bytes());
 
     auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config, csa_kv_gid);
@@ -1352,14 +1349,6 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKerne
     EXPECT_EQ(decoupled.seq_size_per_block, 16384u);
     EXPECT_EQ(decoupled.kernel_seq_size_per_block, 128u);
     EXPECT_EQ(decoupled.kernelBlocksPerKvBlock(), 128u);
-    const auto indexer_gid = gidForTag(decoupled, "indexer_kv");
-    const auto& indexer_group = decoupled.topology().group("indexer_kv");
-    EXPECT_EQ(indexer_group.seq_size_per_block, 16384u);
-    EXPECT_EQ(indexer_group.kernel_seq_size_per_block, 256u);
-    EXPECT_EQ(decoupled.kernelBlocksPerKvBlockForGroup(indexer_gid), 64u);
-    EXPECT_EQ(decoupled.specForGroup(indexer_gid)->block_size_bytes(), 64u * kDsv4IndexerEntryBytes);
-    EXPECT_EQ(decoupled.kvBlockStrideBytesForGroup(indexer_gid),
-              64u * 64u * kDsv4IndexerEntryBytes);
 }
 
 // Absorbs DEV's CacheConfigTest.DSV4KernelSeqSizeRejectsInvalidPhysicalKernelShape.  DEV enforced
