@@ -1348,6 +1348,17 @@ TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKerne
     EXPECT_EQ(old_valid.kernelBlocksPerKvBlock(), 1u);
     EXPECT_EQ(old_valid.topology().group("indexer_kv").kernel_seq_size_per_block, 128u);
 
+    auto online_geometry = create_config(1024, 1024);
+    const auto online_indexer_gid = gidForTag(online_geometry, "indexer_kv");
+    const auto& online_indexer_group = online_geometry.topology().group("indexer_kv");
+    EXPECT_EQ(online_indexer_group.seq_size_per_block, 1024u);
+    EXPECT_EQ(online_indexer_group.kernel_seq_size_per_block, 256u);
+    EXPECT_EQ(online_geometry.kernelBlocksPerKvBlockForGroup(online_indexer_gid), 4u);
+    EXPECT_EQ(online_geometry.specForGroup(online_indexer_gid)->block_size_bytes(),
+              64u * kDsv4IndexerEntryBytes);
+    EXPECT_EQ(online_geometry.kvBlockStrideBytesForGroup(online_indexer_gid),
+              4u * 64u * kDsv4IndexerEntryBytes);
+
     auto decoupled = create_config(16384, 128);
     EXPECT_EQ(decoupled.seq_size_per_block, 16384u);
     EXPECT_EQ(decoupled.kernel_seq_size_per_block, 128u);

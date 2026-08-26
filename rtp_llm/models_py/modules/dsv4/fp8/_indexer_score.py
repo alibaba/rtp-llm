@@ -127,6 +127,19 @@ def validate_indexer_paged_layout(
             f"DSV4 indexer owner entries {owner_eb} are not divisible by "
             f"kernel entries {kernel_eb}"
         )
+    blocks_per_owner = owner_eb // kernel_eb
+    if kernel_block_table.dim() != 2 or kernel_block_table.dtype != torch.int32:
+        raise RuntimeError(
+            "DSV4 indexer kernel block table must be 2D int32, got "
+            f"shape={tuple(kernel_block_table.shape)}, "
+            f"dtype={kernel_block_table.dtype}"
+        )
+    if int(kernel_block_table.shape[1]) % blocks_per_owner != 0:
+        raise RuntimeError(
+            "DSV4 indexer kernel block-table width must contain complete "
+            f"physical owners: width={int(kernel_block_table.shape[1])}, "
+            f"kernel_blocks_per_owner={blocks_per_owner}"
+        )
     supported_block_kv = _supported_paged_block_kv(kv_pool.device)
     if kernel_eb not in supported_block_kv:
         raise RuntimeError(
@@ -145,6 +158,12 @@ def validate_indexer_paged_layout(
                 "DSV4 indexer pool shape does not match kernel geometry: "
                 f"shape={tuple(kv_pool.shape)}, kernel_entries={kernel_eb}"
             )
+        if int(kv_pool.shape[0]) % blocks_per_owner != 0:
+            raise RuntimeError(
+                "DSV4 indexer kernel pool rows must contain complete physical "
+                f"owners: rows={int(kv_pool.shape[0])}, "
+                f"kernel_blocks_per_owner={blocks_per_owner}"
+            )
         # Preserve the block-row stride: framework opaque pools may append
         # shared-pool padding after the useful entries in every kernel row.
         pool_for_kernel = kv_pool
@@ -154,6 +173,13 @@ def validate_indexer_paged_layout(
             raise RuntimeError(
                 f"DSV4 indexer pool entries {total_entries} are not divisible "
                 f"by DeepGEMM block_kv={deepgemm_eb}"
+            )
+        kernel_rows = total_entries // deepgemm_eb
+        if kernel_rows % blocks_per_owner != 0:
+            raise RuntimeError(
+                "DSV4 indexer flattened pool rows must contain complete "
+                f"physical owners: rows={kernel_rows}, "
+                f"kernel_blocks_per_owner={blocks_per_owner}"
             )
         pool_for_kernel = kv_pool
     else:

@@ -98,10 +98,22 @@ public:
         // Production PyWrappedModel creates these device mirrors. Python tests
         // cannot assign them because the bindings intentionally expose them as
         // read-only, so reproduce that input-building step in the test wrapper.
-        inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
-        inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
-        refreshTaggedAttentionInputs(inputs);
+        prepareDeviceInputMirrors(inputs);
         return runner_->forward(inputs, state_);
+    }
+
+    void prepareAttentionInputs(torch_ext::PyModelInputs& inputs) {
+        prepareDeviceInputMirrors(inputs);
+        RTP_LLM_CHECK_WITH_INFO(runner_ != nullptr && runner_->canRun(inputs, state_),
+                                "test input cannot run on the selected CUDA graph");
+        runner_->prepareAttentionInputs(inputs, state_);
+    }
+
+    void updateKVCacheKernelBlockId(torch_ext::PyModelInputs& inputs) {
+        prepareDeviceInputMirrors(inputs);
+        RTP_LLM_CHECK_WITH_INFO(runner_ != nullptr && runner_->canRun(inputs, state_),
+                                "test input cannot run on the selected CUDA graph");
+        runner_->updateKVCacheKernelBlockId(inputs, state_);
     }
 
     int getCurrentRealGraphSize() {
@@ -113,6 +125,12 @@ public:
     }
 
 private:
+    static void prepareDeviceInputMirrors(torch_ext::PyModelInputs& inputs) {
+        inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
+        inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
+        refreshTaggedAttentionInputs(inputs);
+    }
+
     void reset_runner() {
         if (runner_ != nullptr) {
             delete runner_;
@@ -157,5 +175,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_kernel_tokens_per_block") = std::vector<int>{})
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
+        .def("updateKVCacheKernelBlockId", &CudaGraphTestRunner::updateKVCacheKernelBlockId)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }
