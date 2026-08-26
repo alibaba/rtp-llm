@@ -166,13 +166,27 @@ py_library(
 )
 
 py_library(
-    name = "new_weight_loader",
+    name = "model_desc_base",
     srcs = [
         "model_desc/block_map.py",
         "model_desc/module_base.py",
-    ] + glob([
+    ],
+    deps = [
+        ":modules",
+        ":new_loader_core",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "new_weight_loader",
+    srcs = glob([
         "layers/*.py",
         "new_models/*.py",
+        "new_models/bert/*.py",
         "new_models/deepseek_v3/*.py",
         "new_models/deepseek_v3_mtp/*.py",
         "new_models/deepseek_vl2/*.py",
@@ -195,6 +209,7 @@ py_library(
         "new_models/deepseek_vl2/vision.py",
     ]),
     deps = [
+        ":model_desc_base",
         ":new_loader_core",
         ":kernels",
         ":modules",
@@ -285,8 +300,12 @@ py_library(
         "model_desc/*.py",
         "model_desc/cuda_graph/*.py",
         "speculative/*.py",
+    ], exclude = [
+        "model_desc/block_map.py",
+        "model_desc/module_base.py",
     ]),
     deps = [
+        ":model_desc_base",
         ":utils",
         ":modules",
         ":kernels",

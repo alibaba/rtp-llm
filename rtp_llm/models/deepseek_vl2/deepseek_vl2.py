@@ -35,8 +35,8 @@ class DeepSeekVLV2(BaseModel):
         if self.model_config.attn_config.use_mla:
             raise RuntimeError(
                 "DeepSeek-VL2 small/full checkpoints use MLA, which is not "
-                "supported by the legacy DeepSeekVLV2Weight layout; enable "
-                "USE_NEW_LOADER=1"
+                "supported by the legacy DeepSeekVLV2Weight layout; do not "
+                "force the legacy loader with USE_NEW_LOADER=0"
             )
         self.py_model = GenericMoeModel(
             self.model_config,

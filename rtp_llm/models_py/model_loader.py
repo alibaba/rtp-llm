@@ -15,6 +15,7 @@ from rtp_llm.models_py.module_base import RtpModule, collect_loaded_tensor_ids
 from rtp_llm.models_py.registry import get_model_class, list_models
 
 logger = logging.getLogger(__name__)
+_CUSTOM_WEIGHT_PREFIX = "__custom__."
 
 _EXPERT_ID_RE = re.compile(r"(?:^|\.)experts\.(\d+)(?:\.|$)")
 _STACKED_EXPERT_RE = re.compile(
@@ -138,6 +139,7 @@ class NewLoaderConfig:
     lm_head_tp_size: Optional[int] = None
     lm_head_tp_rank: Optional[int] = None
     keep_mla_checkpoint_weights: bool = False
+    custom_weight_mappings: Tuple[Tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.load_method, str):
@@ -209,6 +211,36 @@ class NewLoaderConfig:
             raise TypeError("compute_dtype must be a torch.dtype")
         if not isinstance(self.keep_mla_checkpoint_weights, bool):
             raise TypeError("keep_mla_checkpoint_weights must be a bool")
+        if not isinstance(self.custom_weight_mappings, tuple):
+            raise TypeError("custom_weight_mappings must be a tuple")
+        runtime_names = set()
+        checkpoint_names = set()
+        for mapping in self.custom_weight_mappings:
+            if not isinstance(mapping, tuple) or len(mapping) != 2:
+                raise TypeError(
+                    "custom_weight_mappings entries must be "
+                    "(runtime_name, checkpoint_name) tuples"
+                )
+            runtime_name, checkpoint_name = mapping
+            if not isinstance(runtime_name, str) or not runtime_name:
+                raise TypeError("custom runtime weight names must be non-empty strings")
+            if not runtime_name.startswith(_CUSTOM_WEIGHT_PREFIX):
+                raise ValueError(
+                    f"custom runtime weight {runtime_name!r} must start with "
+                    f"{_CUSTOM_WEIGHT_PREFIX!r}"
+                )
+            if not isinstance(checkpoint_name, str) or not checkpoint_name:
+                raise TypeError(
+                    "custom checkpoint weight names must be non-empty strings"
+                )
+            if runtime_name in runtime_names:
+                raise ValueError(f"Duplicate custom runtime weight {runtime_name!r}")
+            if checkpoint_name in checkpoint_names:
+                raise ValueError(
+                    f"Duplicate custom checkpoint weight {checkpoint_name!r}"
+                )
+            runtime_names.add(runtime_name)
+            checkpoint_names.add(checkpoint_name)
         _validate_runtime_device(self.device, "device")
         if self.parallelism_config is not None:
             for prefix in ("tp", "ep"):
@@ -469,6 +501,12 @@ class NewModelLoader:
             raise TypeError(
                 f"Registered model {model_cls.__name__} must inherit RtpModule to "
                 "provide newloader completeness validation"
+            )
+        if self.load_config.custom_weight_mappings and not bool(
+            getattr(model, "supports_custom_weight_mappings", False)
+        ):
+            raise NotImplementedError(
+                f"{type(model).__name__} does not support downstream custom weights"
             )
         try:
             source = inspect.getfile(model_cls)
