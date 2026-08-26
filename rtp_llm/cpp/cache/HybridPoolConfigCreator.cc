@@ -209,13 +209,6 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
         group.policy            = state.policy;
         group.layer_ids         = state.layer_ids;
         group.local_kv_head_num = state.local_kv_head_num;
-        // INDEXER_KV stores one physical owner block using multiple
-        // DeepGEMM-compatible 256-token rows. Keep owner geometry on the
-        // group while the spec describes one kernel row.
-        if (tag == "indexer_kv" && config.seq_size_per_block >= 256) {
-            group.seq_size_per_block        = config.seq_size_per_block;
-            group.kernel_seq_size_per_block = 256;
-        }
         groups.push_back(group);
         for (int layer_id : state.layer_ids) {
             auto& layer = layers[static_cast<size_t>(layer_id)];

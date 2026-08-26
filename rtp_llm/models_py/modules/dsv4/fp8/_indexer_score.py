@@ -70,20 +70,6 @@ def has_fp8_mqa_logits() -> bool:
 _sched_cache: Optional[torch.Tensor] = None
 _num_sms_cache: int = 0
 
-# ``get_paged_mqa_logits_metadata`` accepts 32/64/128, but the execution
-# kernel is stricter across architectures: 64 is the portable block size
-# (32 is SM100-only and 128 is rejected by the attention kernel).
-_PORTABLE_PAGED_BLOCK_KV = (64,)
-
-
-def _supported_paged_block_kv(device: torch.device) -> tuple[int, ...]:
-    # DeepGEMM's 32-entry execution path is specific to SM100. Keep the
-    # existing 128-token owner (32 compressed entries) working there, while
-    # selecting the portable 64-entry row for all other architectures.
-    if device.type == "cuda" and torch.cuda.get_device_capability(device)[0] == 10:
-        return (32, 64)
-    return _PORTABLE_PAGED_BLOCK_KV
-
 
 def _get_num_sms(device: torch.device) -> int:
     global _num_sms_cache
@@ -92,109 +78,10 @@ def _get_num_sms(device: torch.device) -> int:
     return _num_sms_cache
 
 
-def validate_indexer_paged_layout(
-    kv_pool: torch.Tensor,
-    kernel_block_table: torch.Tensor,
-    kernel_entries_per_block: int,
-    owner_tokens_per_block: int,
-    compress_ratio: int,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Validate and expose the framework's INDEXER_KV kernel-row layout.
-
-    The framework may subdivide one physical cache block into several kernel
-    blocks. DeepGEMM requires each exposed kernel row itself to use a supported
-    ``block_kv``; this function does not merge or remap rows. Kernel ids are
-    already expanded by the framework as
-    ``physical_id * blocks_per_owner + subblock`` and are passed through.
-    """
-    kernel_eb = int(kernel_entries_per_block)
-    owner_tpb = int(owner_tokens_per_block)
-    ratio = int(compress_ratio)
-    if kernel_eb <= 0 or owner_tpb <= 0 or ratio <= 0:
-        raise RuntimeError(
-            "DSV4 indexer paged layout requires positive kernel entries, "
-            f"owner tokens and compression ratio; got {kernel_eb}, "
-            f"{owner_tpb}, {ratio}"
-        )
-    if owner_tpb % ratio != 0:
-        raise RuntimeError(
-            f"DSV4 indexer owner block size {owner_tpb} is not divisible by "
-            f"compression ratio {ratio}"
-        )
-    owner_eb = owner_tpb // ratio
-    if owner_eb % kernel_eb != 0:
-        raise RuntimeError(
-            f"DSV4 indexer owner entries {owner_eb} are not divisible by "
-            f"kernel entries {kernel_eb}"
-        )
-    blocks_per_owner = owner_eb // kernel_eb
-    if kernel_block_table.dim() != 2 or kernel_block_table.dtype != torch.int32:
-        raise RuntimeError(
-            "DSV4 indexer kernel block table must be 2D int32, got "
-            f"shape={tuple(kernel_block_table.shape)}, "
-            f"dtype={kernel_block_table.dtype}"
-        )
-    if int(kernel_block_table.shape[1]) % blocks_per_owner != 0:
-        raise RuntimeError(
-            "DSV4 indexer kernel block-table width must contain complete "
-            f"physical owners: width={int(kernel_block_table.shape[1])}, "
-            f"kernel_blocks_per_owner={blocks_per_owner}"
-        )
-    supported_block_kv = _supported_paged_block_kv(kv_pool.device)
-    if kernel_eb not in supported_block_kv:
-        raise RuntimeError(
-            "DSV4 indexer kernel row is not supported by DeepGEMM: "
-            f"kernel_block_kv={kernel_eb}, "
-            f"physical_block_kv={owner_eb}, supported="
-            f"{supported_block_kv}"
-        )
-    deepgemm_eb = kernel_eb
-    if kv_pool.dim() == 3:
-        if (
-            int(kv_pool.shape[1]) != kernel_eb
-            or int(kv_pool.shape[2]) != INDEXER_ENTRY_BYTES
-        ):
-            raise RuntimeError(
-                "DSV4 indexer pool shape does not match kernel geometry: "
-                f"shape={tuple(kv_pool.shape)}, kernel_entries={kernel_eb}"
-            )
-        if int(kv_pool.shape[0]) % blocks_per_owner != 0:
-            raise RuntimeError(
-                "DSV4 indexer kernel pool rows must contain complete physical "
-                f"owners: rows={int(kv_pool.shape[0])}, "
-                f"kernel_blocks_per_owner={blocks_per_owner}"
-            )
-        # Preserve the block-row stride: framework opaque pools may append
-        # shared-pool padding after the useful entries in every kernel row.
-        pool_for_kernel = kv_pool
-    elif kv_pool.dim() == 2 and int(kv_pool.shape[1]) == INDEXER_ENTRY_BYTES:
-        total_entries = int(kv_pool.shape[0])
-        if total_entries % deepgemm_eb != 0:
-            raise RuntimeError(
-                f"DSV4 indexer pool entries {total_entries} are not divisible "
-                f"by DeepGEMM block_kv={deepgemm_eb}"
-            )
-        kernel_rows = total_entries // deepgemm_eb
-        if kernel_rows % blocks_per_owner != 0:
-            raise RuntimeError(
-                "DSV4 indexer flattened pool rows must contain complete "
-                f"physical owners: rows={kernel_rows}, "
-                f"kernel_blocks_per_owner={blocks_per_owner}"
-            )
-        pool_for_kernel = kv_pool
-    else:
-        raise RuntimeError(
-            "DSV4 indexer pool must be [blocks, entries, 132] or "
-            f"[slots, 132], got {tuple(kv_pool.shape)}"
-        )
-
-    return pool_for_kernel, kernel_block_table, deepgemm_eb
-
-
 def fp8_paged_indexer_score(
     q_fp8: torch.Tensor,  # [B, next_n, H, D] float8_e4m3fn
     w_fold: torch.Tensor,  # [B*next_n, H]    fp32
-    kv_pool_uint8: torch.Tensor,  # [blocks, block, 132] (may have row padding)
+    kv_pool_uint8: torch.Tensor,  # [total_slots, 132] uint8 — flat pool view
     block_table: torch.Tensor,  # [B, max_blocks] int32 — logical→physical
     context_lens: torch.Tensor,  # [B, next_n] int32 — live K length per row
     block_size: int,  # tokens per cache block
@@ -217,21 +104,14 @@ def fp8_paged_indexer_score(
     assert block_table.dtype == torch.int32 and block_table.dim() == 2
     assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
     # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
-    if kv_pool_uint8.dim() == 3:
-        assert kv_pool_uint8.shape[1:] == (block_size, INDEXER_ENTRY_BYTES)
-        # ``unsqueeze`` retains a possibly padded dim-0 stride while exposing
-        # DeepGEMM's [block, token, head=1, bytes] contract without a copy.
-        kv_4d = kv_pool_uint8.unsqueeze(2)
-    else:
-        # Legacy tightly-packed flat pool.
-        total_slots = kv_pool_uint8.shape[0]
-        assert (
-            total_slots % block_size == 0
-        ), f"total_slots={total_slots} not divisible by block_size={block_size}"
-        num_blocks = total_slots // block_size
-        kv_4d = kv_pool_uint8.view(
-            num_blocks, block_size, 1, INDEXER_ENTRY_BYTES
-        )
+    # Our pool is a flat [total_slots, 132] view; reshape into the 4D
+    # layout (no copy — just a metadata change).
+    total_slots = kv_pool_uint8.shape[0]
+    assert (
+        total_slots % block_size == 0
+    ), f"total_slots={total_slots} not divisible by block_size={block_size}"
+    num_blocks = total_slots // block_size
+    kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
 
     num_sms = _get_num_sms(q_fp8.device)
     schedule = _deep_gemm.get_paged_mqa_logits_metadata(

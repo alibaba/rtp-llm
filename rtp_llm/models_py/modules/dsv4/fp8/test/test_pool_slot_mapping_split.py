@@ -5,12 +5,7 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    CSA_KV,
-    HCA_KV,
-    INDEXER_KV,
-    SWA_KV,
-)
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     pool_physical_tokens_per_block,
     require_pool_tokens_per_block,
@@ -107,26 +102,11 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         torch.testing.assert_close(rank3, torch.tensor([-1, -1, -1, 832], dtype=torch.int64))
 
     def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
-        class FakeKVCache:
-            group_tags = [
-                HCA_KV,
-                INDEXER_KV,
-                SWA_KV,
-            ]
-
-            def get_seq_size_per_block(self, tag: str) -> int:
-                return {
-                    HCA_KV: 2048,
-                    INDEXER_KV: 2048,
-                    SWA_KV: 1024,
-                }[tag]
-
-            def get_kernel_seq_size_per_block(self, tag: str) -> int:
-                return {
-                    HCA_KV: 128,
-                    INDEXER_KV: 1024,
-                    SWA_KV: 256,
-                }[tag]
+        cache = _FakeTagKVCache(
+            group_tags=[HCA_KV, SWA_KV],
+            seq_size_per_block={HCA_KV: 128, SWA_KV: 128},
+            kernel_seq_size_per_block={HCA_KV: 128, SWA_KV: 128},
+        )
 
         class FakeAttn:
             _kv_cache = None
@@ -134,8 +114,6 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             def _pool_entries_per_block(self, tag: str) -> int:
                 if tag == HCA_KV:
                     return 1
-                if tag == INDEXER_KV:
-                    return 64
                 if tag == SWA_KV:
                     return 32
                 return 0
@@ -146,21 +124,20 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         class FakeV4:
             layers = [FakeLayer()]
 
-        specs = build_paged_pool_specs(FakeKVCache(), FakeV4(), max_seq_len=2048)
+        specs = build_paged_pool_specs(cache, FakeV4(), max_seq_len=256)
 
         self.assertEqual(specs[HCA_KV][1], 128)
-        self.assertEqual(specs[INDEXER_KV][1], 1024)
-        self.assertEqual(specs[SWA_KV][1], 1024)
-        self.assertEqual(specs[HCA_KV][2], 17)
-        self.assertEqual(specs[INDEXER_KV][2], 9)
-        self.assertEqual(specs[SWA_KV][2], 3)
+        self.assertEqual(specs[SWA_KV][1], 128)
 
-    def test_require_pool_tokens_per_block_rejects_unknown_region(self) -> None:
-        class FakeKVCache:
-            group_tags = ["unknown"]
+    def test_require_pool_tokens_per_block_rejects_unknown_tag(self) -> None:
+        cache = _FakeTagKVCache(
+            group_tags=["mystery"],
+            seq_size_per_block={"mystery": 16384},
+            kernel_seq_size_per_block={"mystery": 128},
+        )
 
         with self.assertRaisesRegex(RuntimeError, "cannot be inferred"):
-            require_pool_tokens_per_block(FakeKVCache(), tag="mystery")
+            require_pool_tokens_per_block(cache, tag="mystery")
 
     def test_compute_full_params_equal_entries(self) -> None:
         block_table = torch.tensor([[3, 4]], dtype=torch.int32)

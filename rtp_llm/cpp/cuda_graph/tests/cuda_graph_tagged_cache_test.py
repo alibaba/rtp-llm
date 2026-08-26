@@ -49,21 +49,6 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedBlockTableTailModel:
-    """Expose the captured INDEXER table tail after a focused refresh."""
-
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
-        return None
-
-    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
-        indexer_tail = inputs.attention_inputs["full"].kv_cache_kernel_block_id_device[
-            0, -1
-        ]
-        return PyModelOutputs(
-            inputs.input_hiddens + indexer_tail.to(inputs.input_hiddens.dtype)
-        )
-
-
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -119,12 +104,10 @@ def _build_decode_inputs(
     tags: list[str],
     values: dict[str, int],
     batch_size: int = 2,
-    is_target_verify: bool = False,
-    table_width: int = 1,
 ) -> PyModelInputs:
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
-    attention_inputs.is_target_verify = is_target_verify
+    attention_inputs.is_target_verify = False
     attention_inputs.prefix_lengths = torch.empty(
         0, dtype=torch.int32
     ).pin_memory()
@@ -154,7 +137,7 @@ def _build_decode_inputs(
         values,
         batch_size=batch_size,
         token_count=batch_size,
-        block_count=table_width,
+        block_count=1,
     )
 
 
@@ -316,100 +299,6 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             runner,
             _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
             52,
-        )
-
-    def test_decode_tagged_table_uses_owner_rounding_before_kernel_expansion(
-        self,
-    ) -> None:
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            TaggedBlockTableModel(),
-            HIDDEN_SIZE,
-            1025,
-            1024,
-            256,
-            [2],
-            GROUP_TAGS,
-            False,
-            1,
-            [1024, 1024],
-            [256, 256],
-        )
-
-        # ceil(1025 / 1024) owner rows * (1024 / 256) kernel rows = 8.
-        # Rounding directly at kernel granularity would allocate only 5 rows.
-        self._assert_replay_signature(
-            runner,
-            _build_decode_inputs(
-                GROUP_TAGS,
-                {"full": 2, "aux": 1},
-                table_width=8,
-            ),
-            18,
-        )
-
-    def test_focused_refresh_clears_split_geometry_table_tail(self) -> None:
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            TaggedBlockTableTailModel(),
-            HIDDEN_SIZE,
-            1025,
-            1024,
-            256,
-            [2],
-            GROUP_TAGS,
-            False,
-            1,
-            [1024, 1024],
-            [256, 256],
-        )
-
-        # The captured INDEXER table has two owner columns expanded to eight
-        # kernel rows. First seed all eight rows, then emulate the MTP focused
-        # refresh with only one live owner (four rows). Rows [4:8] must not
-        # retain the previous request's expanded ids.
-        wide = _build_decode_inputs(
-            GROUP_TAGS, {"full": 7, "aux": 7}, table_width=8
-        )
-        runner.prepareAttentionInputs(wide)
-
-        narrow = _build_decode_inputs(
-            GROUP_TAGS, {"full": 2, "aux": 2}, table_width=4
-        )
-        runner.updateKVCacheKernelBlockId(narrow)
-        output = runner.forward(narrow)
-        torch.cuda.synchronize()
-        torch.testing.assert_close(
-            output.hidden_states, torch.zeros_like(output.hidden_states)
-        )
-
-    def test_decode_tagged_table_uses_shared_rectangular_owner_width(self) -> None:
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            TaggedBlockTableModel(),
-            HIDDEN_SIZE,
-            9,
-            4,
-            4,
-            [2],
-            GROUP_TAGS,
-            False,
-            1,
-            [8, 4],
-            [8, 4],
-        )
-
-        # Runtime hybrid inputs are rectangular: the 4-token group needs three
-        # owner rows, so the 8-token group also exposes a three-column tagged
-        # view even though its own sequence coverage would need only two rows.
-        self._assert_replay_signature(
-            runner,
-            _build_decode_inputs(
-                GROUP_TAGS,
-                {"full": 2, "aux": 1},
-                table_width=3,
-            ),
-            18,
         )
 
     def test_duplicate_capture_tag_is_rejected(self) -> None:
