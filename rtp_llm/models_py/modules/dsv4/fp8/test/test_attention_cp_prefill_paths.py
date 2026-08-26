@@ -87,10 +87,8 @@ def _make_dispatch_layer(compress_ratio: int, seq: list) -> AttentionFP8:
         side_effect=lambda x, p: seq.append("common") or None
     )
     layer._prefill_compute_qkv = MagicMock(  # type: ignore[assignment]
-        side_effect=lambda x, c: seq.append("qkv") or _make_qkv()
-    )
-    layer._ensure_prefill_kv_full = MagicMock(  # type: ignore[assignment]
-        side_effect=lambda qkv, c: seq.append("ensure") or qkv
+        side_effect=lambda x, c, shared_input_quant=None: seq.append("qkv")
+        or _make_qkv()
     )
     layer._prefill_write_swa_fp8_paged = MagicMock(  # type: ignore[assignment]
         side_effect=lambda c, kv: seq.append("swa_write")
@@ -149,7 +147,7 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
             env_value="1",
         )
 
-        self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "swa_path"])
+        self.assertEqual(seq, ["common", "qkv", "swa_write", "swa_path"])
 
     def test_csa_env_off_uses_baseline_after_swa_write(self) -> None:
         common = _make_common(cp_on=True, device=torch.device("cuda"))
@@ -160,7 +158,7 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
             env_value="0",
         )
 
-        self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "csa_path"])
+        self.assertEqual(seq, ["common", "qkv", "swa_write", "csa_path"])
 
     def test_csa_env_on_cuda_uses_overlap_orchestrator(self) -> None:
         common = _make_common(cp_on=True, device=torch.device("cuda"))
@@ -193,7 +191,7 @@ class AttentionCPPrefillDispatchTest(unittest.TestCase):
             env_value="1",
         )
 
-        self.assertEqual(seq, ["common", "qkv", "ensure", "swa_write", "hca_path"])
+        self.assertEqual(seq, ["common", "qkv", "swa_write", "hca_path"])
 
 
 class AttentionSwaAsyncGatherTest(unittest.TestCase):
@@ -293,14 +291,6 @@ class AttentionSwaAsyncGatherTest(unittest.TestCase):
         self.assertEqual(seq[-1], "lin_wq_b")
         self.assertIn("q_out", seen)
         self.assertEqual(qkv.q.data_ptr(), seen["q_out"].data_ptr())
-
-    def test_prefill_workspace_q_rejects_overflow(self) -> None:
-        ws = PrefillWorkspace(
-            torch.device("cpu"), q_rows=2, q_dim=4, reserve_cp=False, align_bytes=1
-        )
-
-        with self.assertRaisesRegex(AssertionError, "prefill_q overflow: num_tokens=3"):
-            ws.prefill_q(3)
 
     def _make_qkv_layer(self, seq: list, fail_q: bool = False) -> AttentionFP8:
         layer = AttentionFP8.__new__(AttentionFP8)

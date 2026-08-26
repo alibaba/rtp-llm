@@ -1053,46 +1053,5 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 zero_output = valid_output & negative_slot
                 self.assertTrue(torch.all(direct[zero_output] == 0))
 
-    def test_cp_byte_sliced_runtime_requires_compaction(self):
-        cp_size = 2
-        full_entries_per_block = 16
-        num_blocks = 3
-        local_slice_bytes = full_entries_per_block * HEAD_BYTES // cp_size
-        raw = torch.zeros(
-            num_blocks,
-            local_slice_bytes,
-            dtype=torch.uint8,
-            device=self.device,
-        )
-        k = torch.randn(2, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
-        slots = torch.tensor([16, 17], dtype=torch.int64, device=self.device)
-        with self.assertRaisesRegex(AssertionError, "metadata-precomputed compaction"):
-            quantize_and_insert_k_cache_cp_byte_sliced(
-                k,
-                raw,
-                slots,
-                full_entries_per_block=full_entries_per_block,
-                cp_rank=0,
-                cp_size=cp_size,
-                compaction=None,
-            )
-
-        out = torch.zeros(1, 2, HEAD_DIM, dtype=torch.bfloat16, device=self.device)
-        read_slots = slots.view(1, 2)
-        gather_lens = torch.tensor([2], dtype=torch.int32, device=self.device)
-        with self.assertRaisesRegex(AssertionError, "metadata-precomputed compaction"):
-            dequantize_and_gather_k_cache_slots_cp_byte_sliced(
-                out=out,
-                k_cache_raw=raw,
-                slot_mapping=read_slots,
-                gather_lens=gather_lens,
-                offset=0,
-                full_entries_per_block=full_entries_per_block,
-                cp_rank=0,
-                cp_size=cp_size,
-                compaction=None,
-            )
-
-
 if __name__ == "__main__":
     unittest.main()

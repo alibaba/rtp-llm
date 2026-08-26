@@ -41,9 +41,6 @@ class _MetadataAttention:
     """Minimal owner for the production common/SWA metadata methods."""
 
     _build_shared_prefill_meta = AttentionFP8._build_shared_prefill_meta
-    _validate_reusable_prefill_common = (
-        AttentionFP8._validate_reusable_prefill_common
-    )
     _build_swa_prefill_meta_varlen = AttentionFP8._build_swa_prefill_meta_varlen
 
     def __init__(

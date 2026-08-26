@@ -98,11 +98,6 @@ def compute_prefill_gather_lens(
       num_decodes:   count of decode requests preceding the prefills.
       window_size:   SWA window (≥1).
     """
-    assert seq_lens.dtype == torch.int32 and query_start_loc.dtype == torch.int32, (
-        f"seq_lens and query_start_loc must be int32, got {seq_lens.dtype} / "
-        f"{query_start_loc.dtype}"
-    )
-    assert num_prefills >= 0 and num_decodes >= 0 and window_size >= 1
     out = torch.empty(num_prefills, dtype=torch.int32, device=seq_lens.device)
     if num_prefills == 0:
         return out
@@ -201,9 +196,6 @@ def compute_window_topk_and_length_varlen(
     position_ids = position_ids.reshape(-1)
     prefix_lengths = prefix_lengths.reshape(-1)
     req_id_per_token = req_id_per_token.reshape(-1)
-    assert window_size >= 1
-    assert position_ids.numel() == req_id_per_token.numel()
-
     device = position_ids.device
     num_tokens = int(position_ids.numel())
     topk_idxs = torch.empty((num_tokens, window_size), dtype=torch.int32, device=device)
@@ -370,18 +362,9 @@ def compute_swa_slot_mapping(
     are written. This matches state-ring writes and avoids ring collisions when
     physical blocks are much larger than the SWA ring.
     """
-    assert (
-        block_table.dtype == torch.int32
-    ), f"block_table must be int32, got {block_table.dtype}"
-    assert (
-        query_start_loc.dtype == torch.int32 and seq_lens.dtype == torch.int32
-    ), "query_start_loc and seq_lens must be int32"
     pool_entries_per_block = int(pool_entries_per_block)
     tokens_per_block_for_block_table = int(tokens_per_block_for_block_table)
     ring_entries = int(ring_entries)
-    assert pool_entries_per_block >= 1
-    assert tokens_per_block_for_block_table >= 1
-    assert ring_entries >= 1
     device = block_table.device
     slot_mapping = torch.empty(num_tokens, dtype=torch.long, device=device)
     if num_tokens == 0:
@@ -476,21 +459,6 @@ def compute_swa_slot_mapping_from_positions(
     committed end. Invalid request ids, invalid positions, unallocated blocks,
     and older generations of the same ring slot map to ``-1``.
     """
-    assert block_table.ndim == 2
-    assert seq_lens.ndim == 1
-    assert block_table.dtype == torch.int32
-    assert req_id_per_token.dtype == torch.int32
-    assert positions.dtype == torch.int32
-    assert seq_lens.dtype == torch.int32
-    assert block_table.shape[0] == seq_lens.numel()
-    assert 0 <= num_tokens <= min(req_id_per_token.numel(), positions.numel())
-    assert (
-        block_table.device
-        == req_id_per_token.device
-        == positions.device
-        == seq_lens.device
-    )
-
     block_table = block_table.contiguous()
     req_id_per_token = req_id_per_token.reshape(-1).contiguous()
     positions = positions.reshape(-1).contiguous()
@@ -499,10 +467,6 @@ def compute_swa_slot_mapping_from_positions(
     pool_entries_per_block = int(pool_entries_per_block)
     tokens_per_block_for_block_table = int(tokens_per_block_for_block_table)
     ring_entries = int(ring_entries)
-    assert pool_entries_per_block >= 1
-    assert tokens_per_block_for_block_table >= 1
-    assert ring_entries >= 1
-    assert ring_entries <= pool_entries_per_block
 
     slot_mapping = torch.empty(num_tokens, dtype=torch.long, device=block_table.device)
     if num_tokens == 0:
@@ -605,18 +569,10 @@ def compute_swa_cp_sliced_slot_mapping(
     intentionally separate: logical block rows and SWA ring entries need not
     match or divide each other.
     """
-    assert (
-        block_table.dtype == torch.int32
-    ), f"block_table must be int32, got {block_table.dtype}"
-    assert (
-        query_start_loc.dtype == torch.int32 and seq_lens.dtype == torch.int32
-    ), "query_start_loc and seq_lens must be int32"
     tokens_per_block_for_block_table = int(tokens_per_block_for_block_table)
     local_entries_per_block = int(local_entries_per_block)
     cp_rank = int(cp_rank)
     cp_size = int(cp_size)
-    assert cp_size > 1 and 0 <= cp_rank < cp_size
-    assert tokens_per_block_for_block_table >= 1 and local_entries_per_block >= 1
     full_entries_per_block = local_entries_per_block * cp_size
 
     device = block_table.device
@@ -690,7 +646,6 @@ def compute_swa_slot_in_flat(
     position_ids = position_ids.reshape(-1)
     req_id_per_token = req_id_per_token.reshape(-1)
     prefix_lengths = prefix_lengths.reshape(-1)
-    assert position_ids.numel() == req_id_per_token.numel()
     num_tokens = int(position_ids.numel())
     device = position_ids.device
     out = torch.empty(num_tokens, dtype=torch.long, device=device)
@@ -783,7 +738,6 @@ def compute_swa_slot_in_flat_from_cu(
     """Build ``slot_in_flat`` for a full-view CP workspace from cu-seqlens."""
     cu_seqlens = cu_seqlens.reshape(-1)
     prefix_lengths = prefix_lengths.reshape(-1)
-    assert cu_seqlens.numel() == prefix_lengths.numel() + 1
     num_tokens = int(num_tokens)
     device = cu_seqlens.device
     out = torch.empty(num_tokens, dtype=torch.long, device=device)
@@ -972,18 +926,6 @@ def combine_topk_swa_indices(
     compressed-region size (``ceil(max_model_len / compress_ratio)``); pass
     ``N=0`` and ``topk=0`` for SWA-only layers.
     """
-    assert (
-        topk_indices.dtype == torch.int32
-    ), f"topk_indices must be int32, got {topk_indices.dtype}"
-    assert (
-        query_start_loc.dtype == torch.int32 and seq_lens.dtype == torch.int32
-    ), "query_start_loc and seq_lens must be int32"
-    assert gather_lens.dtype == torch.int32, "gather_lens must be int32"
-    assert window_size >= 1 and compress_ratio >= 1
-    assert int(topk_indices.shape[-1]) >= int(
-        topk
-    ), f"topk_indices width {topk_indices.shape[-1]} < topk {topk}"
-
     num_tokens = int(topk_indices.shape[0])
     num_reqs = int(seq_lens.shape[0])
     combined_topk = (
@@ -1170,10 +1112,6 @@ def combine_topk_swa_indices_cp(
     where contiguous query-row math is invalid.
     """
     global_positions = global_positions.reshape(-1).contiguous()
-    assert (req_id_per_token is None) == (prefix_lengths is None), (
-        "req_id_per_token and prefix_lengths must be passed together for "
-        "CP varlen combine"
-    )
     if req_id_per_token is not None:
         req_id_per_token = req_id_per_token.reshape(-1).contiguous()
         prefix_lengths = prefix_lengths.reshape(-1).contiguous()
@@ -1214,13 +1152,6 @@ def combine_topk_swa_indices_cp_prepared(
     one-dimensional contiguous position/request tensors. The public wrapper
     above retains the permissive normalization contract.
     """
-    assert (
-        topk_indices.dtype == torch.int32
-    ), f"topk_indices must be int32, got {topk_indices.dtype}"
-    assert topk_indices.dim() == 2, f"topk_indices must be 2D, got {topk_indices.shape}"
-    assert window_size >= 1 and compress_ratio >= 1
-    assert global_positions.dim() == 1 and global_positions.is_contiguous()
-
     num_tokens = int(global_positions.numel())
     combined_topk = (
         (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
@@ -1243,29 +1174,14 @@ def combine_topk_swa_indices_cp_prepared(
     if num_tokens == 0:
         return combined_indices, combined_lens
 
-    assert (
-        topk_indices.shape[0] == num_tokens
-    ), f"topk rows {topk_indices.shape[0]} != positions {num_tokens}"
-    assert int(topk_indices.shape[1]) >= int(
-        topk
-    ), f"topk_indices width {topk_indices.shape[1]} < topk {topk}"
     # Note: do NOT force ``topk_indices.contiguous()`` here. HCA passes a
     # [T_total, N] broadcast view (stride 0 on dim 0) of arange(N) as a
     # ~9-32 GiB peak-memory optimization at 1M ctx; the kernel reads via
     # ``ptr + row*stride + col`` and a 0-stride broadcast is bit-equal to
     # the materialized version. A force-contiguous here defeats the
     # optimization and reintroduces the alloc.
-    assert (req_id_per_token is None) == (prefix_lengths is None), (
-        "req_id_per_token and prefix_lengths must be passed together for "
-        "CP varlen combine"
-    )
     is_varlen = req_id_per_token is not None
     if is_varlen:
-        assert req_id_per_token.dim() == 1 and req_id_per_token.is_contiguous()
-        assert prefix_lengths.dim() == 1 and prefix_lengths.is_contiguous()
-        assert (
-            req_id_per_token.numel() == num_tokens
-        ), f"req_id_per_token rows {req_id_per_token.numel()} != positions {num_tokens}"
         req_ptr = req_id_per_token
         prefix_ptr = prefix_lengths
     else:

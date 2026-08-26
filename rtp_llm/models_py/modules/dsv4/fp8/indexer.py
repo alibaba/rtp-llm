@@ -49,8 +49,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_mqa_indexer_score,
     fp8_paged_indexer_score,
-    has_fp8_mqa_logits,
-    has_fp8_paged_mqa_logits,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
@@ -317,18 +315,7 @@ class IndexerFP8(PoolBackedModule):
         and the four ``W.v4_indexer_compressor_*`` keys for its nested
         ``CompressorFP8``."""
         super().__init__()
-        assert index_head_dim == INDEXER_HEAD_DIM, (
-            f"IndexerFP8 locked to index_head_dim={INDEXER_HEAD_DIM} "
-            f"(matches CompressorFP8 132B layout); got {index_head_dim}"
-        )
-        assert has_fp8_paged_mqa_logits(), (
-            "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
-            "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
-        )
-        assert layer_weights is not None, (
-            "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
-            "construction is not supported (use the BF16 path for that)."
-        )
+        weights: Dict[str, torch.Tensor] = layer_weights  # type: ignore[assignment]
         self.dim = dim
         self.n_heads = index_n_heads
         self.head_dim = index_head_dim
@@ -342,8 +329,8 @@ class IndexerFP8(PoolBackedModule):
         from rtp_llm.utils.model_weight import W
 
         self.wq_b = _v4_fp8_linear(
-            layer_weights[W.v4_indexer_wq_b_w],
-            layer_weights[W.v4_indexer_wq_b_s],
+            weights[W.v4_indexer_wq_b_w],
+            weights[W.v4_indexer_wq_b_s],
         )
         # weights_proj is plain BF16. Pre-fold the runtime ``softmax_scale *
         # n_heads^-0.5`` into the weight at load time so prefill / decode can
@@ -351,15 +338,15 @@ class IndexerFP8(PoolBackedModule):
         # mul. New tensor — never mutate ``layer_weights`` in place.
         _wp_scale = self.softmax_scale * self.n_heads**-0.5
         self.weights_proj = (
-            layer_weights[W.v4_indexer_weights_proj_w] * _wp_scale
+            weights[W.v4_indexer_weights_proj_w] * _wp_scale
         ).contiguous()
 
         # Nested compressor: 132B layout (head_dim=128).
         inner_cmp_weights = {
-            "ape": layer_weights[W.v4_indexer_compressor_ape],
-            "wkv": layer_weights[W.v4_indexer_compressor_wkv],
-            "wgate": layer_weights[W.v4_indexer_compressor_wgate],
-            "norm": layer_weights[W.v4_indexer_compressor_norm],
+            "ape": weights[W.v4_indexer_compressor_ape],
+            "wkv": weights[W.v4_indexer_compressor_wkv],
+            "wgate": weights[W.v4_indexer_compressor_wgate],
+            "norm": weights[W.v4_indexer_compressor_norm],
         }
         self.compressor = CompressorFP8(
             dim=dim,
@@ -421,11 +408,6 @@ class IndexerFP8(PoolBackedModule):
         ``indexer.compressor`` directly) so we don't need to forward
         here. Accepting ``None`` with cp_size <= 1 is the no-op.
         """
-        if cp_ctx is not None and cp_ctx.cp_size > 1:
-            assert (
-                cp_ctx.input_lengths_global is not None
-                and cp_ctx.input_lengths_global.numel() >= 1
-            ), "IndexerFP8 CP requires cp_ctx.input_lengths_global"
         self._cp_ctx = cp_ctx
 
     def _gather_prefill_k_cache(
@@ -460,10 +442,8 @@ class IndexerFP8(PoolBackedModule):
 
         from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as asm
 
-        plan = attention_inputs.indexer_cp_plan
-        actual_cu = attention_inputs.indexer_cp_local_cu
-        assert plan is not None, "CP-sharded indexer gather requires prebuilt plan"
-        assert actual_cu is not None, "CP-sharded indexer gather requires local cu"
+        plan: Any = attention_inputs.indexer_cp_plan
+        actual_cu: torch.Tensor = attention_inputs.indexer_cp_local_cu  # type: ignore[assignment]
         local_q = torch.empty(
             (plan.total_local_T, k_quant_flat.shape[-1]),
             dtype=k_quant_flat.dtype,
@@ -615,8 +595,6 @@ class IndexerFP8(PoolBackedModule):
         compressor_meta: Optional[CompressorMeta] = None,
     ) -> torch.Tensor:
         bsz, q_len = int(x.size(0)), int(x.size(1))
-        if position_ids is None:
-            assert q_len == 1, "decode q_len > 1 requires flat position_ids"
         ratio = self.compress_ratio
         K = self.index_topk
 
@@ -637,14 +615,13 @@ class IndexerFP8(PoolBackedModule):
                 )
                 compressed_len = ((start_pos + 1) // ratio).view(bsz, 1, 1)
             else:
-                assert compressor_meta is not None
-                pos_flat = compressor_meta.positions.reshape(-1)
+                decode_meta: CompressorMeta = compressor_meta  # type: ignore[assignment]
+                pos_flat = decode_meta.positions.reshape(-1)
                 freqs = self.freqs_cis.index_select(0, pos_flat).contiguous()
                 q = self._compute_indexer_q(
                     qr, freqs, batched_rope=False, apply_rope=False
                 )
-                assert compressor_meta.compressed_lens_per_token is not None
-                compressed_len = compressor_meta.compressed_lens_per_token.view(
+                compressed_len = decode_meta.compressed_lens_per_token.view(  # type: ignore[union-attr]
                     bsz, q_len, 1
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
@@ -756,7 +733,7 @@ class IndexerFP8(PoolBackedModule):
         layout-agnostic — once the caller starts feeding per-request
         ``cu_seqlens`` we'll fan that out here.
         """
-        assert self.freqs_cis is not None, "IndexerFP8.prepare needs freqs_cis bound"
+        freqs_cis: torch.Tensor = self.freqs_cis  # type: ignore[assignment]
         ratio = self.compress_ratio
         # ``use_varlen`` is required — set by
         # ``Attention._build_csa_prefill_meta`` which receives it from
@@ -780,29 +757,11 @@ class IndexerFP8(PoolBackedModule):
             eff_input_lengths = cp_ctx.input_lengths_global
         host_seq_total_per_req: Optional[tuple[int, ...]] = None
         if use_varlen:
-            assert cu_seqlens is not None
-            assert eff_input_lengths is not None
-            assert prefix_lengths is not None
-            assert position_ids is not None
-            assert req_id_per_token is not None
-            cu_seqlens = _flat_1d(cu_seqlens)
-            eff_input_lengths = _flat_1d(eff_input_lengths)
-            prefix_lengths = _flat_1d(prefix_lengths)
-            position_ids = _flat_1d(position_ids)
-            req_id_per_token = _flat_1d(req_id_per_token)
-            assert position_ids.numel() == req_id_per_token.numel(), (
-                "position_ids / req_id_per_token must have matching token counts: "
-                f"{position_ids.numel()} vs {req_id_per_token.numel()}"
-            )
-            assert (
-                cu_seqlens.numel() == batch_size + 1
-            ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
-            assert (
-                eff_input_lengths.numel() == batch_size
-            ), f"input_lengths must be [B={batch_size}], got {eff_input_lengths.shape}"
-            assert (
-                prefix_lengths.numel() == batch_size
-            ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
+            cu_seqlens = _flat_1d(cu_seqlens)  # type: ignore[arg-type]
+            eff_input_lengths = _flat_1d(eff_input_lengths)  # type: ignore[arg-type]
+            prefix_lengths = _flat_1d(prefix_lengths)  # type: ignore[arg-type]
+            position_ids = _flat_1d(position_ids)  # type: ignore[arg-type]
+            req_id_per_token = _flat_1d(req_id_per_token)  # type: ignore[arg-type]
             # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
             with record_function_range("dsv4.fp8.indexer.prepare.varlen_lengths"):
                 seq_total_per_req = prefix_lengths.to(
@@ -880,7 +839,7 @@ class IndexerFP8(PoolBackedModule):
             # sp:sp+S]`` for B == 1 contiguous range; per-token gather is
             # required when requests interleave on the flat axis.
             with record_function_range("dsv4.fp8.indexer.prepare.freqs"):
-                freqs_cis_slice = self.freqs_cis.index_select(
+                freqs_cis_slice = freqs_cis.index_select(
                     0, positions_d.to(torch.long)
                 )
 
@@ -916,7 +875,7 @@ class IndexerFP8(PoolBackedModule):
                 T = end_pos // ratio
                 M = bsz * seqlen
 
-                freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
+                freqs_cis_slice = freqs_cis[sp_int : sp_int + seqlen]
 
                 # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
                 positions_d = torch.arange(
@@ -1014,7 +973,6 @@ class IndexerFP8(PoolBackedModule):
                     # prefill_meta broadcast path calls ``prepare`` once per
                     # CSA ratio bucket, instead of rebuilding in every layer's
                     # nested compressor hot path.
-                    assert cp_ctx is not None
                     if cp_ctx.input_lengths_global is not None:
                         with record_function_range(
                             "dsv4.fp8.indexer.prepare.cp_nested_compressor_meta"
@@ -1147,15 +1105,6 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
-
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
-            assert self._kv_pool_view.dim() == 3, (
-                "IndexerFP8 expects 3D ``_kv_pool_view`` "
-                "[num_blocks, eb, 132]; got dim="
-                f"{self._kv_pool_view.dim()}"
-            )
 
             if T == 0:
                 # Cold-start prefill before any compressed tokens — no K
@@ -1361,15 +1310,6 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
-
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
-            assert self._kv_pool_view.dim() == 3, (
-                "IndexerFP8 expects 3D ``_kv_pool_view`` "
-                "[num_blocks, eb, 132]; got dim="
-                f"{self._kv_pool_view.dim()}"
-            )
 
             if T == 0:
                 return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)

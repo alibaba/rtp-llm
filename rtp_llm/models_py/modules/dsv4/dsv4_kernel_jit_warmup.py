@@ -763,8 +763,7 @@ def _run_deepgemm_warmup_launch_with_retry(
             _release_cuda_cache(device)
             time.sleep(0.2 * attempt)
 
-    assert last_error is not None
-    raise last_error
+    raise last_error  # type: ignore[misc]
 
 
 def _run_tilelang_warmup_launch_with_retry(
@@ -799,8 +798,7 @@ def _run_tilelang_warmup_launch_with_retry(
             _release_cuda_cache(device)
             time.sleep(0.2 * attempt)
 
-    assert last_error is not None
-    raise last_error
+    raise last_error  # type: ignore[misc]
 
 
 def _run_triton_warmup_launch_with_retry(
@@ -840,8 +838,7 @@ def _run_triton_warmup_launch_with_retry(
     finally:
         _restore_tmpdir(previous_tmpdir)
 
-    assert last_error is not None
-    raise last_error
+    raise last_error  # type: ignore[misc]
 
 
 def _is_cuda_device(device: torch.device) -> bool:
@@ -1091,9 +1088,6 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     kv_slot_mapping = torch.zeros((num_tokens,), dtype=torch.int64, device=device)
     # state_block_size is the kernel block size for state-pool block_table
     state_block_size = DSV4_KERNEL_TOKENS_PER_BLOCK
-    assert (
-        gen_num_per_cycle >= 0
-    ), f"gen_num_per_cycle must be >= 0, got {gen_num_per_cycle}"
     state_ring_entries_values = _state_ring_entries_warmup_values(
         compress_ratio=compress_ratio,
         overlap=overlap,

@@ -228,9 +228,6 @@ def _build_suffix_pool_slot_mapping(
     ``[seq_lens[b] - gather_lens[b], seq_lens[b])``. The block-table row
     token coverage is intentionally separate from the in-block ring modulo.
     """
-    assert entries_per_block > 0
-    assert tokens_per_block_for_block_table > 0
-    assert ring_entries > 0
     device = block_table.device
     B = int(seq_lens.numel())
     if B == 0:
@@ -238,7 +235,6 @@ def _build_suffix_pool_slot_mapping(
 
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
-    assert int(gather_lens_l.numel()) == B
     max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
@@ -278,8 +274,6 @@ def _build_suffix_cp_sliced_slot_mapping(
     physical local SWA block stores only this rank's slice of the full SWA ring,
     whose size is independent of the logical block-table row size.
     """
-    assert local_entries_per_block > 0
-    assert tokens_per_block_for_block_table > 0
     full_entries_per_block = int(local_entries_per_block) * int(cp_size)
     device = block_table.device
     B = int(seq_lens.numel())
@@ -370,8 +364,6 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     weight row gets its own scale row, then hands off to DeepGEMM's
     ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (column-major,
     int32-packed).  Must be called on-device (DeepGEMM helper is CUDA)."""
-    assert scale.dtype == torch.float8_e8m0fnu, f"unexpected scale dtype {scale.dtype}"
-    assert scale.dim() == 2, f"unexpected scale dim {scale.dim()}"
     from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
     N_blk, _ = scale.shape
@@ -415,7 +407,6 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
     TMA-aligned packed layout when needed. Framework descriptor path may
     deliver the scale already packed (dtype int32) — we no-op then."""
-    assert s is not None, "expected non-null FP8 scale"
     if s.dtype == torch.float8_e8m0fnu:
         s = _repack_v4_fp8_scale_to_int32(s)
     # LinearFactory.create_linear_from_weights consumes a (weights_dict,
@@ -584,10 +575,6 @@ def _get_window_topk_idxs_varlen(
     req_id_per_token = _flat_1d(req_id_per_token)
     cu_seqlens = _flat_1d(cu_seqlens)
     prefix_lengths = _flat_1d(prefix_lengths)
-    assert position_ids.numel() == req_id_per_token.numel(), (
-        "position_ids / req_id_per_token must have matching token counts: "
-        f"{position_ids.numel()} vs {req_id_per_token.numel()}"
-    )
     device = position_ids.device
 
     # gather() requires int64 indices — this is the only mandatory long cast.
@@ -862,7 +849,7 @@ class PrefillQKV(NamedTuple):
     :meth:`AttentionFP8._materialize_prefill_q` (called just before the
     ``flash_mla_sparse_fwd`` consumers) so the 16 GiB Q buffer can share the
     union ``PrefillWorkspace`` storage with the compressor gather/restore
-    buffers, which are dead by then. Consumers assert ``q is not None``.
+    buffers, which are dead by then. Consumers enter only after materialization.
     """
 
     qr: torch.Tensor
@@ -920,12 +907,6 @@ class AttentionFP8(nn.Module):
         self.tp_rank = tp_rank
         # Per-rank head + group counts (S7a). Sharding only kicks in when
         # tp_size > 1; tp_size==1 keeps everything bit-exact unchanged.
-        assert (
-            n_heads % tp_size == 0
-        ), f"n_heads={n_heads} not divisible by tp_size={tp_size}"
-        assert (
-            o_groups % tp_size == 0
-        ), f"o_groups={o_groups} not divisible by tp_size={tp_size}"
         self.n_heads = n_heads // tp_size
         self.n_groups = o_groups // tp_size
 
@@ -971,11 +952,6 @@ class AttentionFP8(nn.Module):
             if col_slice is not None:
                 w = w[:, col_slice]
                 if scale_is_packed_int32:
-                    assert col_slice.start % 512 == 0 and col_slice.stop % 512 == 0, (
-                        f"col_slice {col_slice} not aligned to 512 for "
-                        f"packed int32 scale; framework path requires "
-                        f"K-slices on 512-byte boundaries"
-                    )
                     s = s[:, col_slice.start // 512 : col_slice.stop // 512]
                 else:
                     s = s[:, col_slice.start // 128 : col_slice.stop // 128]
@@ -1000,7 +976,6 @@ class AttentionFP8(nn.Module):
         # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
         # fallback path inline-dequants from these via
         # ``_fp8_dequant_to_fp32``.
-        assert (n_heads * head_dim) % o_groups == 0
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
         wo_a_s = layer_weights[W.v4_attn_wo_a_s]
         if tp_size > 1:
@@ -1040,8 +1015,6 @@ class AttentionFP8(nn.Module):
             if tp_size > 1
             else attn_sink_full
         )
-
-        assert (n_heads * head_dim) % o_groups == 0
 
         # Compressor + Indexer (only for compressed layers)
         if compress_ratio:
@@ -1350,7 +1323,6 @@ class AttentionFP8(nn.Module):
         if not self._swa_cp_byte_sliced():
             return None
         raw = self._pool_raw_u8(SWA_KV)
-        assert raw is not None, "byte-sliced FP8 SWA pool unavailable"
         # One INFO per call site so smoke logs positively confirm which paths
         # engaged the CP-RR (byte-sliced) SWA cache layout.
         if validation_site not in _SWA_CP_RR_LOGGED_SITES:
@@ -1367,7 +1339,7 @@ class AttentionFP8(nn.Module):
         return build_cp_byte_sliced_slot_compaction(
             slot_mapping,
             full_entries_per_block=full_entries_per_block,
-            num_blocks=int(raw.shape[0]),
+            num_blocks=int(raw.shape[0]),  # type: ignore[union-attr]
             validation_site=validation_site,
             negative_mode=negative_mode,
             gather_lens=gather_lens,
@@ -1832,9 +1804,6 @@ class AttentionFP8(nn.Module):
         )
 
         HD_DEQUANT = 512
-        assert (
-            dtype == torch.bfloat16
-        ), f"FP8 pool read returns bf16; got requested dtype={dtype}"
         out = torch.zeros((bsz, T, HD_DEQUANT), dtype=torch.bfloat16, device=device)
         seq_lens = torch.full((bsz,), T, dtype=torch.int32, device=device)
         bt_for_kernel = bt[:bsz].to(torch.int32).contiguous()
@@ -1889,8 +1858,6 @@ class AttentionFP8(nn.Module):
         if swa_dense_override is not None:
             swa_dense = swa_dense_override
         elif swa_dense_len is not None:
-            assert sp is not None
-            assert row_seqlens is not None
             swa_dense = self._prefill_read_swa_dense_abs_from_pool(
                 bsz, sp, row_seqlens, int(swa_dense_len)
             )
@@ -2150,8 +2117,6 @@ class AttentionFP8(nn.Module):
                 position_ids,
                 attn_metadata,
             )
-        else:
-            raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
         return decode_output_proj(self, o, qkv.freqs_cis, bsz, q_len)
 
@@ -2202,13 +2167,8 @@ class AttentionFP8(nn.Module):
         The slot tensors are prepared once per decode step. Per-layer code
         only slices stable prefixes and then launches the compressor kernels.
         """
-        assert attn_metadata.req_id_per_token is not None
-        assert attn_metadata.req_id_per_token_long is not None
-        assert attn_metadata.decode_seq_start_per_req is not None
-        assert attn_metadata.decode_cu_seq_per_req is not None
         state_slots = attn_metadata.compressor_state_slot_mappings.get(state_attn_type)
         kv_slots = attn_metadata.pool_write_slot_mappings.get(kv_attn_type)
-        assert state_slots is not None and kv_slots is not None
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, INDEXER_KV
 
         ratio_by_kv = {CSA_KV: 4, INDEXER_KV: 4, HCA_KV: 128}
@@ -2258,27 +2218,12 @@ class AttentionFP8(nn.Module):
             if attn_metadata.pool_block_tables
             else None
         )
-        assert (
-            swa_pool_3d is not None
-            and swa_pool_bt is not None
-            and swa_pool_bt.numel() > 0
-            and attn_metadata.swa_abs_idx is not None
-        ), (
-            f"[DSV4 decode SWA-only] FP8 pool + block table + swa_abs_idx "
-            f"required (layer={self.layer_id}); "
-            f"kv_cache_bound={self._kv_cache is not None}, "
-            f"pool_3d_ok={swa_pool_3d is not None}, "
-            f"pool_block_tables_keys={list(attn_metadata.pool_block_tables.keys()) if attn_metadata.pool_block_tables else None}, "
-            f"swa_pool_bt_shape={tuple(swa_pool_bt.shape) if swa_pool_bt is not None else None}, "
-            f"swa_abs_idx_shape={tuple(attn_metadata.swa_abs_idx.shape) if attn_metadata.swa_abs_idx is not None else None}"
-        )
         win = self.window_size
         T = bsz * q_len
         # FlashMLA's sparse FP8 kernel reads the packed pool via direct
         # ``pool[indices[i]]`` addressing — no block-table indirection on
         # the kernel side — so ``indices`` MUST be global slot ids, not
         # abs positions. Mirrors the CSA/HCA dual-pool path below.
-        assert attn_metadata.swa_global_slots is not None
         swa_global = attn_metadata.swa_global_slots[:T]
         swa_topk_3d = swa_global.view(bsz, q_len, win).contiguous()
 
@@ -2329,7 +2274,6 @@ class AttentionFP8(nn.Module):
             INDEXER_STATE,
         )
 
-        assert self.indexer is not None, "CSA layer must have an indexer"
         indexer_compressor_meta = self._decode_compressor_meta_from_metadata(
             attn_metadata,
             state_attn_type=INDEXER_STATE,
@@ -2391,7 +2335,6 @@ class AttentionFP8(nn.Module):
         (reused across all HCA layers via ``topk_total_by_ratio[128]``)."""
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE
 
-        assert self.indexer is None, "HCA layer must not have an indexer"
         hca_compressor_meta = self._decode_compressor_meta_from_metadata(
             attn_metadata,
             state_attn_type=HCA_STATE,
@@ -2407,10 +2350,6 @@ class AttentionFP8(nn.Module):
         )
         win = self.window_size
         tt_h = attn_metadata.topk_total_by_ratio.get(int(self.compress_ratio))
-        assert tt_h is not None, (
-            f"[DSV4 decode HCA] topk_total_by_ratio[{int(self.compress_ratio)}] "
-            f"missing (layer={self.layer_id})"
-        )
         cmp_local_raw = tt_h[:bsz, :, win:]
         return self._forward_decode_compressed(
             qkv.q,
@@ -2453,24 +2392,8 @@ class AttentionFP8(nn.Module):
         swa_pool_bt = attn_metadata.pool_block_tables.get(SWA_KV)
         cmp_pool_3d = self._pool_view_3d_fp8(cmp_attn_type)
         cmp_pool_bt = attn_metadata.pool_block_tables.get(cmp_attn_type)
-        assert (
-            swa_pool_3d is not None
-            and cmp_pool_3d is not None
-            and swa_pool_bt is not None
-            and swa_pool_bt.numel() > 0
-            and cmp_pool_bt is not None
-            and cmp_pool_bt.numel() > 0
-            and attn_metadata.swa_abs_idx is not None
-        ), (
-            f"[DSV4 decode compressed] FP8 SWA + cmp pools + block tables "
-            f"required (layer={self.layer_id}, cmp_attn_type={cmp_attn_type}); "
-            f"kv_cache_bound={self._kv_cache is not None}"
-        )
-
         # Translate SWA local → global slots (iter3.3: metadata caches
         # the result once per step, shared across all 43 layers).
-        assert attn_metadata.req_id_per_token is not None
-        assert attn_metadata.swa_global_slots is not None
         req_id = attn_metadata.req_id_per_token[:T]
         swa_global = attn_metadata.swa_global_slots[:T]
 
@@ -2560,9 +2483,6 @@ class AttentionFP8(nn.Module):
         ``self._kv_cache`` without threading the handles through
         every signature.
         """
-        assert (
-            x.dim() == 2
-        ), f"DSv4 Attention prefill expects flat [T, dim]; got shape {tuple(x.shape)}"
         # Prefill is FP8-only on this branch — every downstream helper
         # (``_prefill_write_swa_fp8_paged``, ``_attn_fp8_swa_via_kv_full``,
         # ``_attn_via_workspace``) hard-assumes FP8 KV-cache pools. Hoist
@@ -2714,8 +2634,8 @@ class AttentionFP8(nn.Module):
         overlap on the default stream vs the CP communication stream). The baseline sequential path
         below stays byte-equal otherwise.
 
-        FP8 KV-cache is asserted at the public ``forward()`` entry; this
-        body assumes FP8 unconditionally.
+        The public model path establishes the FP8 KV-cache contract before
+        entering this per-layer body.
         """
         with record_function_range("dsv4.fp8.attn.prefill.common_setup"):
             common = self._prefill_common_setup(x, positions)
@@ -2740,7 +2660,6 @@ class AttentionFP8(nn.Module):
         # downstream decode. Safe to do before attention because new K
         # (abs pos [sp, sp+S)) and any cont-prefill prefix tail
         # (abs pos [sp-P, sp)) target disjoint slots.
-        qkv = self._ensure_prefill_kv_full(qkv, common)
         with record_function_range("dsv4.fp8.attn.prefill.swa_write"):
             self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
@@ -2753,8 +2672,6 @@ class AttentionFP8(nn.Module):
         elif self.compress_ratio == 128:
             with record_function_range("dsv4.fp8.attn.prefill.path_hca"):
                 out = self._forward_prefill_hca(x, qkv, common)
-        else:
-            raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
         return out
 
     # ------------------------------------------------------------------
@@ -2793,15 +2710,6 @@ class AttentionFP8(nn.Module):
         pool with hoisted meta. Attention runs through the vLLM-style
         workspace path (dual FP8 dequant + BF16 overlay + flash_mla_sparse_fwd).
         Falls back to BF16 ``kv_full`` attention on warmup (workspace_meta None)."""
-        from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
-
-        assert isinstance(
-            self.indexer, IndexerFP8
-        ), "CSA layer requires IndexerFP8 (BF16 indexer not supported on this branch)"
-        assert common.csa_meta is not None, (
-            "CSA prefill requires common.csa_meta — built by " "_build_csa_prefill_meta"
-        )
-
         # Phase-3a part 3: IndexerFP8.forward + nested CompressorFP8.forward
         # are now flat-input-native (accept ``[T_total, dim]`` /
         # ``[T_total, q_lora]``). Drop the legacy ``unsqueeze(0)`` so the
@@ -2858,20 +2766,6 @@ class AttentionFP8(nn.Module):
         same kernel inputs, same compressor_meta, same indexer chain,
         same workspace path — only the launch ordering differs.
         """
-        from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
-
-        assert isinstance(
-            self.indexer, IndexerFP8
-        ), "CSA overlap requires IndexerFP8 (BF16 indexer not supported)"
-        assert common.csa_meta is not None, (
-            "CSA overlap prefill requires common.csa_meta — built by "
-            "_build_csa_prefill_meta"
-        )
-        assert common.cp_ctx is not None and common.cp_on, (
-            "_forward_prefill_csa_overlapped invoked without CP active — "
-            "_should_overlap_cp_for_prefill guards this"
-        )
-
         cp_stream = self._get_cp_gather_stream(x.device)
         csa_meta = common.csa_meta
         layer_label = f"L{int(getattr(self, 'layer_id', 0)):02d}"
@@ -2901,7 +2795,6 @@ class AttentionFP8(nn.Module):
                     workspace=common.workspace,
                 )
             with record_function_range("dsv4.fp8.attn.csa_overlap.swa_write"):
-                qkv = self._ensure_prefill_kv_full(qkv, common)
                 self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
 
             def wait_main_before_indexer_k() -> None:
@@ -2961,11 +2854,6 @@ class AttentionFP8(nn.Module):
         """HCA path (compress_ratio == 128). Dense compressed indices live
         in ``workspace_meta.dense_cmp_topk``; runtime cmp_topk is None.
         Main compressor writes the HCA pool with hoisted meta."""
-        assert self.indexer is None, "HCA layer must not have an indexer"
-        assert common.hca_meta is not None, (
-            "HCA prefill requires common.hca_meta — built by " "_build_hca_prefill_meta"
-        )
-
         return self._forward_prefill_compressed(
             x,
             qkv,
@@ -3002,16 +2890,6 @@ class AttentionFP8(nn.Module):
         same kernel inputs, same compressor_meta, same workspace path —
         only the launch ordering differs.
         """
-        assert self.indexer is None, "HCA layer must not have an indexer"
-        assert common.hca_meta is not None, (
-            "HCA overlap prefill requires common.hca_meta — built by "
-            "_build_hca_prefill_meta"
-        )
-        assert common.cp_ctx is not None and common.cp_on, (
-            "_forward_prefill_hca_overlapped invoked without CP active — "
-            "_should_overlap_cp_for_prefill guards this"
-        )
-
         cp_stream = self._get_cp_gather_stream(x.device)
         layer_label = f"L{int(getattr(self, 'layer_id', 0)):02d}"
         main_pending = None
@@ -3027,7 +2905,6 @@ class AttentionFP8(nn.Module):
                 )
             with record_function_range("dsv4.fp8.attn.hca_overlap.swa_write"):
                 # Default-stream work that overlaps with the NCCL gather above.
-                qkv = self._ensure_prefill_kv_full(qkv, common)
                 self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
             with record_function_range("dsv4.fp8.attn.hca_overlap.finish_compressor"):
                 self.compressor.finish_prefill(main_pending)
@@ -3142,7 +3019,7 @@ class AttentionFP8(nn.Module):
         ignored and ``workspace_meta.dense_cmp_topk`` (precomputed
         ``arange(N_max)`` per token) is used instead.
         """
-        assert qkv.q is not None, "_attn_via_workspace: prefill Q not materialized"
+        q = qkv.q
 
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
@@ -3158,26 +3035,10 @@ class AttentionFP8(nn.Module):
         swa_pool_raw = self._pool_raw_u8(SWA_KV) if swa_byte_sliced else None
         swa_pool_3d = None if swa_byte_sliced else self._pool_view_3d_fp8(SWA_KV)
         cmp_pool_3d = self._pool_view_3d_fp8(cmp_at)
-        assert cmp_pool_3d is not None, "FP8 CSA/HCA pool required for workspace path"
-        if swa_byte_sliced:
-            assert swa_pool_raw is not None, "byte-sliced FP8 SWA pool unavailable"
-        else:
-            assert swa_pool_3d is not None, "FP8 SWA pool required for workspace path"
-
-        assert workspace_meta is not None, (
-            "_attn_via_workspace requires a non-None WorkspaceMeta; the caller "
-            "must short-circuit to _attn_fp8_swa_via_kv_full when the pool is "
-            "unbound (warmup)."
-        )
         wm = workspace_meta
         # ``B`` from the per-request meta — bit-equal to legacy 1 when meta
         # was built from the scalar branch (swa_seq_lens shape == [1]).
         B = int(wm.swa_seq_lens.shape[0])
-        assert B == common.batch_size, (
-            f"workspace meta B ({B}) != common.batch_size ({common.batch_size}); "
-            "meta builder fed an inconsistent shape — likely a varlen / legacy "
-            "dispatch mismatch."
-        )
         D = self.head_dim
 
         if wm.use_cp_raw_q_merge:
@@ -3201,7 +3062,7 @@ class AttentionFP8(nn.Module):
             # gather, SWA-prefix gather, or fresh-K overlay; keep this
             # uninitialized to avoid a full workspace memset per layer.
             workspace = torch.empty(
-                (B, wm.M, D), dtype=torch.bfloat16, device=qkv.q.device
+                (B, wm.M, D), dtype=torch.bfloat16, device=q.device
             )
 
         cmp_pending = None
@@ -3243,7 +3104,7 @@ class AttentionFP8(nn.Module):
                                 block_table=wm.cmp_bt_int32,
                                 block_size=wm.cmp_eb,
                                 offset=0,
-                                stream=self._get_cp_gather_stream(qkv.q.device),
+                                stream=self._get_cp_gather_stream(q.device),
                             )
                         if cmp_pending is not None:
                             cmp_reader_for_pending = cmp_reader
@@ -3263,10 +3124,7 @@ class AttentionFP8(nn.Module):
             # does not need to read the SWA pool at all.
             if common.any_cont:
                 with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
-                    assert wm.swa_cache_slot_mapping is not None
                     if swa_byte_sliced:
-                        assert common.cp_ctx is not None
-                        assert wm.swa_cache_compaction is not None
                         if async_workspace_reads:
                             with record_function_range(
                                 "dsv4.fp8.attn.workspace.gather_swa_prefix.prefetch_start"
@@ -3280,7 +3138,7 @@ class AttentionFP8(nn.Module):
                                     cp_rank=int(common.cp_ctx.cp_rank),
                                     cp_size=int(common.cp_ctx.cp_size),
                                     compaction=wm.swa_cache_compaction,
-                                    stream=self._get_cp_gather_stream(qkv.q.device),
+                                    stream=self._get_cp_gather_stream(q.device),
                                     profile_name=(
                                         f"dsv4.cp.all_gather.L{self.layer_id:02d}"
                                         ".swa_prefix"
@@ -3299,7 +3157,6 @@ class AttentionFP8(nn.Module):
                                 compaction=wm.swa_cache_compaction,
                             )
                     else:
-                        assert swa_pool_3d is not None
                         _swa_dq.dequantize_and_gather_k_cache_slots(
                             out=workspace,
                             k_cache=swa_pool_3d,
@@ -3338,24 +3195,10 @@ class AttentionFP8(nn.Module):
             # combine_topk: HCA uses precomputed dense arange(N_max); CSA uses
             # the runtime indexer output (raw compressed-pool offsets in [0, N_b)).
             # Indexer output contract: ``[T_total, K] int32 contiguous`` (set in
-            # ``IndexerFP8.forward`` line 754 + ``view(out_shape)``); assert here
-            # so a contract drift surfaces as a loud crash instead of a silent
-            # per-layer ``squeeze``/``to``/``contiguous`` retag in the hot path.
+            # ``IndexerFP8.forward`` line 754 + ``view(out_shape)``).
             if wm.dense_cmp_topk is not None:
                 cmp_topk = wm.dense_cmp_topk
             else:
-                assert (
-                    cmp_topk_runtime is not None
-                ), "CSA workspace path requires cmp_topk_runtime (indexer output)"
-                assert (
-                    cmp_topk_runtime.dim() == 2
-                    and cmp_topk_runtime.dtype == torch.int32
-                    and cmp_topk_runtime.is_contiguous()
-                ), (
-                    "cmp_topk_runtime contract violated: expected 2D int32 "
-                    f"contiguous, got dim={cmp_topk_runtime.dim()} "
-                    f"dtype={cmp_topk_runtime.dtype} contig={cmp_topk_runtime.is_contiguous()}"
-                )
                 cmp_topk = cmp_topk_runtime
 
             # Prepare FlashMLA's KV view before combine_topk. The
@@ -3364,10 +3207,10 @@ class AttentionFP8(nn.Module):
             # while the GPU drains the pre-combine dependency chain.
             kv_view = workspace.view(B * wm.M, 1, D)
             projected_out = torch.empty(
-                qkv.q.shape[0],
+                q.shape[0],
                 self.dim,
                 dtype=torch.bfloat16,
-                device=qkv.q.device,
+                device=q.device,
             )
 
             if common.cp_on:
@@ -3376,11 +3219,8 @@ class AttentionFP8(nn.Module):
                 # is a contiguous slice. Under zigzag CP each rank's Q rows
                 # have non-contiguous global positions, so use the CP fused
                 # kernel that consumes explicit positions directly.
-                assert common.cp_ctx is not None
                 cp_ctx_local = common.cp_ctx
                 legacy_prefix_length = int(cp_ctx_local.prefix_length)
-                assert common.req_id_per_token is not None
-                assert common.prefix_lengths is not None
                 global_positions = cp_ctx_local.global_positions
                 req_id_per_token = common.req_id_per_token
                 prefix_lengths = common.prefix_lengths
@@ -3415,7 +3255,7 @@ class AttentionFP8(nn.Module):
 
             post_gather_stream = None
             if cmp_pending is not None or swa_prefix_pending is not None:
-                post_gather_stream = _get_cp_post_gather_stream(qkv.q.device)
+                post_gather_stream = _get_cp_post_gather_stream(q.device)
 
             # Only the NCCL stage is pulled ahead. Local restore/dequant/scatter
             # is queued after overlay/combine and must finish before FlashMLA
@@ -3424,9 +3264,6 @@ class AttentionFP8(nn.Module):
             # point is moved earlier for more overlap, keep the Work.wait() call
             # inside the post stream helper or gathered bytes can be read early.
             if cmp_pending is not None:
-                assert cmp_reader_for_pending is not None
-                assert cmp_prepare_for_pending is not None
-                assert post_gather_stream is not None
                 with record_function_range(
                     "dsv4.fp8.attn.workspace.gather_cmp.prefetch_prepare"
                 ):
@@ -3436,7 +3273,6 @@ class AttentionFP8(nn.Module):
                     )
 
             if swa_prefix_pending is not None:
-                assert post_gather_stream is not None
                 with record_function_range(
                     "dsv4.fp8.attn.workspace.gather_swa_prefix.prefetch_prepare"
                 ):
@@ -3468,12 +3304,11 @@ class AttentionFP8(nn.Module):
                 swa_prefix_pending = None
 
             return self._flash_mla_sparse_fwd_chunked_projected(
-                q=qkv.q,
+                q=q,
                 kv=kv_view,
                 indices=combined_indices,
                 topk_length=combined_lens,
                 freqs_cis=common.freqs_cis,
-                prefill_workspace=common.workspace,
                 profile_name="dsv4.fp8.attn.workspace.flash_mla_sparse_fwd",
                 out=projected_out,
             )
@@ -3494,7 +3329,6 @@ class AttentionFP8(nn.Module):
     def _cp_full_req_ids_and_positions(
         common: PrefillMeta,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert common.cp_ctx is not None
         cp_ctx = common.cp_ctx
         lengths = cp_ctx.input_lengths_global
         if lengths is None:
@@ -3536,9 +3370,7 @@ class AttentionFP8(nn.Module):
 
     @staticmethod
     def _cp_local_full_row_indices(common: PrefillMeta) -> torch.Tensor:
-        assert common.cp_ctx is not None
         cp_ctx = common.cp_ctx
-        assert cp_ctx.req_id_per_token is not None
         device = common.device
         req = cp_ctx.req_id_per_token.to(device=device, dtype=torch.long).reshape(-1)
         if cp_ctx.prefix_lengths is not None:
@@ -3659,15 +3491,12 @@ class AttentionFP8(nn.Module):
         cmp_pool_3d: torch.Tensor,
         swa_pool_3d: torch.Tensor,
     ) -> torch.Tensor:
-        assert (
-            qkv.q is not None
-        ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
+        q = qkv.q
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
-        assert common.cp_ctx is not None
         cp_ctx = common.cp_ctx
         wm = workspace_meta
         D = self.head_dim
@@ -3711,7 +3540,7 @@ class AttentionFP8(nn.Module):
             cp_ctx.cp_size,
             wm.cmp_eb,
             cp_ctx.cp_rank,
-        ).to(device=qkv.q.device, dtype=torch.int32)
+        ).to(device=q.device, dtype=torch.int32)
         local_N = int(local_cmp_lens.max().item()) if local_cmp_lens.numel() else 0
         gather_len_max = (
             int(wm.swa_gather_lens.max().item()) if wm.swa_gather_lens.numel() else 0
@@ -3719,7 +3548,7 @@ class AttentionFP8(nn.Module):
         local_M = local_N + gather_len_max
         # E5b: raw-Q merge builds compact topk over written local rows only.
         workspace = torch.empty(
-            (B, local_M, D), dtype=torch.bfloat16, device=qkv.q.device
+            (B, local_M, D), dtype=torch.bfloat16, device=q.device
         )
 
         if local_N > 0:
@@ -3753,12 +3582,12 @@ class AttentionFP8(nn.Module):
         req_full, pos_full = self._cp_full_req_ids_and_positions(common)
         if common.cp_ctx.prefix_lengths is not None:
             prefix_lens = common.cp_ctx.prefix_lengths.to(
-                device=qkv.q.device, dtype=torch.long
+                device=q.device, dtype=torch.long
             )
         else:
             prefix_lens = torch.tensor(
                 [int(common.cp_ctx.prefix_length)],
-                device=qkv.q.device,
+                device=q.device,
                 dtype=torch.long,
             )
         P_per_req = torch.clamp_max(prefix_lens, self.window_size - 1)
@@ -3773,11 +3602,11 @@ class AttentionFP8(nn.Module):
             0, new_k_slots, qkv.kv_full.to(torch.bfloat16).reshape(-1, D)
         )
 
-        q_full = cp_all_gather_full_varlen(qkv.q, cp_ctx)
+        q_full = cp_all_gather_full_varlen(q, cp_ctx)
         if wm.dense_cmp_topk is not None:
             if wm.N > 0:
                 dense = (
-                    torch.arange(wm.N, device=qkv.q.device, dtype=torch.int64)
+                    torch.arange(wm.N, device=q.device, dtype=torch.int64)
                     .view(1, wm.N)
                     .expand(int(q_full.shape[0]), wm.N)
                 )
@@ -3792,10 +3621,9 @@ class AttentionFP8(nn.Module):
                 )
             else:
                 cmp_topk_full = torch.empty(
-                    (int(q_full.shape[0]), 0), device=qkv.q.device, dtype=torch.int32
+                    (int(q_full.shape[0]), 0), device=q.device, dtype=torch.int32
                 )
         else:
-            assert cmp_topk_runtime is not None
             cmp_topk_full = cp_all_gather_full_varlen(cmp_topk_runtime, cp_ctx)
 
         local_topk_compact = remap_topk_to_cp_local(
@@ -3880,68 +3708,6 @@ class AttentionFP8(nn.Module):
             if self.indexer.compressor.freqs_cis is None:
                 self.indexer.compressor.freqs_cis = self.freqs_cis
 
-    def _validate_reusable_prefill_common(
-        self,
-        common: "PrefillMeta",
-        *,
-        seqlen: int,
-        seqlen_full: int,
-        rd: int,
-        device: torch.device,
-        cp_ctx: Optional[CPContext],
-        sp_int: int,
-        win: int,
-        sp_per_req: torch.Tensor,
-        cu_seqlens: torch.Tensor,
-        input_lengths: torch.Tensor,
-        prefix_lengths: torch.Tensor,
-        position_ids: torch.Tensor,
-        req_id_per_token: torch.Tensor,
-    ) -> None:
-        """Host-only guards for cross-ratio common metadata reuse.
-
-        The broadcast builder passes the exact same flattened request tensors
-        to every representative. Checking storage/view metadata catches an
-        accidental cross-request or transformed-tensor reuse without launching
-        comparison kernels or synchronizing CUDA.
-        """
-
-        assert common.use_varlen
-        assert common.seqlen == seqlen
-        assert common.seqlen_full == seqlen_full
-        assert common.rd == rd
-        assert common.device == device
-        assert common.cp_ctx is cp_ctx
-        assert common.sp_int == sp_int
-        assert common.batch_size == int(cu_seqlens.numel() - 1)
-        assert common.swa_meta is not None
-        assert common.topk_idxs.shape[-1] == win
-        assert common.row_seqlens_full.shape == (1,)
-        assert common.row_seqlens_full.dtype == torch.long
-        assert common.row_seqlens_full.device == device
-
-        def _same_storage_view(lhs: torch.Tensor, rhs: Optional[torch.Tensor]) -> bool:
-            return rhs is not None and (
-                lhs.dtype == rhs.dtype
-                and lhs.device == rhs.device
-                and lhs.shape == rhs.shape
-                and lhs.stride() == rhs.stride()
-                and lhs.storage_offset() == rhs.storage_offset()
-                and lhs.data_ptr() == rhs.data_ptr()
-            )
-
-        for name, current, cached in (
-            ("sp_per_req", sp_per_req, common.sp_per_req),
-            ("cu_seqlens", cu_seqlens, common.cu_seqlens),
-            ("input_lengths", input_lengths, common.input_lengths),
-            ("prefix_lengths", prefix_lengths, common.prefix_lengths),
-            ("position_ids", position_ids, common.position_ids),
-            ("req_id_per_token", req_id_per_token, common.req_id_per_token),
-        ):
-            assert _same_storage_view(current, cached), (
-                f"cannot reuse prefill common metadata: {name} storage/view changed"
-            )
-
     def _build_shared_prefill_meta(
         self,
         x: torch.Tensor,
@@ -3998,9 +3764,6 @@ class AttentionFP8(nn.Module):
         else:
             sp_int = int(positions)
 
-        # Single contract guard for the entire prefill stack. Every downstream
-        # builder consumes per-request tensors directly; missing varlen metadata
-        # is a hard configuration error.
         use_varlen = True
         win = self.window_size
         # Under CP each rank holds only ``chunk_length`` tokens locally; the
@@ -4010,44 +3773,12 @@ class AttentionFP8(nn.Module):
         # ``seqlen``.
         seqlen_full = cp_ctx.seq_len_full if cp_on else seqlen
 
-        _msg = (
-            "varlen prefill requires the upper layer to populate "
-            "cu_seqlens / input_lengths / prefix_lengths / position_ids / "
-            "req_id_per_token / sp_per_req / batch_size / max_seqlen_q."
-        )
-        assert cu_seqlens is not None, _msg
-        assert input_lengths is not None, _msg
-        assert prefix_lengths is not None, _msg
-        assert position_ids is not None, _msg
-        assert req_id_per_token is not None, _msg
-        assert sp_per_req is not None, _msg
-        assert batch_size > 0 and max_seqlen_q > 0, _msg
-
         cu_seqlens = _flat_1d(cu_seqlens)
         input_lengths = _flat_1d(input_lengths)
         prefix_lengths = _flat_1d(prefix_lengths)
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
-        assert (
-            position_ids.numel() == seqlen
-        ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
-        assert (
-            req_id_per_token.numel() == seqlen
-        ), f"req_id_per_token must be flat [T_total={seqlen}], got {req_id_per_token.shape}"
-        assert (
-            cu_seqlens.numel() == batch_size + 1
-        ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
-        assert (
-            input_lengths.numel() == batch_size
-        ), f"input_lengths must be [B={batch_size}], got {input_lengths.shape}"
-        assert (
-            prefix_lengths.numel() == batch_size
-        ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
-        assert (
-            sp_per_req.numel() == batch_size
-        ), f"sp_per_req must be [B={batch_size}], got {sp_per_req.shape}"
-
         can_reuse_freqs = (
             reuse_freqs_meta is not None
             and reuse_freqs_meta.freqs_cis_source_id == id(self.freqs_cis)
@@ -4056,7 +3787,6 @@ class AttentionFP8(nn.Module):
         if reuse_common_meta is None or not can_reuse_freqs:
             position_ids_eff = position_ids
             if cp_on:
-                assert cp_ctx is not None
                 position_ids_eff = _flat_1d(
                     cp_ctx.global_positions.to(device=device, dtype=torch.long)
                 )
@@ -4065,7 +3795,6 @@ class AttentionFP8(nn.Module):
             # is bit-equal to the retired scalar slice; for B>1 it is the only
             # correct option since requests interleave on the flat token axis.
             with record_function_range("dsv4.fp8.meta.varlen.freqs_topk"):
-                assert position_ids_eff is not None
                 freqs_cis = self.freqs_cis.index_select(
                     0,
                     position_ids_eff.to(
@@ -4078,7 +3807,6 @@ class AttentionFP8(nn.Module):
 
                 cu_seqlens_for_k = cu_seqlens
                 if cp_on:
-                    assert cp_ctx is not None
                     if cp_ctx.cu_seqlens_global is not None:
                         cu_seqlens_for_k = _flat_1d(
                             cp_ctx.cu_seqlens_global.to(
@@ -4113,30 +3841,9 @@ class AttentionFP8(nn.Module):
                 [seqlen_full], device=device, dtype=torch.long
             )
         else:
-            assert self.compress_ratio != 0, (
-                "SWA-only metadata must be the common source, not a reuse target"
-            )
-            self._validate_reusable_prefill_common(
-                reuse_common_meta,
-                seqlen=seqlen,
-                seqlen_full=seqlen_full,
-                rd=rd,
-                device=device,
-                cp_ctx=cp_ctx,
-                sp_int=sp_int,
-                win=win,
-                sp_per_req=sp_per_req,
-                cu_seqlens=cu_seqlens,
-                input_lengths=input_lengths,
-                prefix_lengths=prefix_lengths,
-                position_ids=position_ids,
-                req_id_per_token=req_id_per_token,
-            )
             if can_reuse_freqs:
-                assert reuse_freqs_meta is not None
                 freqs_cis = reuse_freqs_meta.freqs_cis
             else:
-                assert position_ids_eff is not None
                 with record_function_range("dsv4.fp8.meta.varlen.freqs"):
                     freqs_cis = self.freqs_cis.index_select(
                         0,
@@ -4148,7 +3855,6 @@ class AttentionFP8(nn.Module):
             any_cont = reuse_common_meta.any_cont
             row_seqlens_full = reuse_common_meta.row_seqlens_full
             source_swa = reuse_common_meta.swa_meta
-            assert source_swa is not None
             swa_meta = SwaPrefillMeta(
                 slot_mapping=source_swa.slot_mapping,
                 query_start_loc=source_swa.query_start_loc,
@@ -4283,10 +3989,6 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
             build_prepare_metadata_args,
         )
-        from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
-
-        assert isinstance(self.indexer, IndexerFP8), "CSA layer requires IndexerFP8"
-
         idx_bt = (
             self._block_tables_by_type.get(INDEXER_KV)
             if self._block_tables_by_type is not None
@@ -4321,7 +4023,6 @@ class AttentionFP8(nn.Module):
             # global sequence. Build the matching full-sequence metadata once
             # per ratio bucket here (the prefill_meta broadcast path) instead
             # of rebuilding it inside every layer's compressor.forward.
-            assert cp_ctx_local is not None
             with record_function_range("dsv4.fp8.meta.csa.cp_compressor_prepare"):
                 (
                     cp_positions,
@@ -4329,7 +4030,6 @@ class AttentionFP8(nn.Module):
                     cp_seq_start_per_req,
                     cp_cu_seq_per_req,
                 ) = build_cp_full_prefill_positions(cp_ctx_local, device)
-                assert cp_ctx_local.input_lengths_global is not None
                 compressor_meta = self.compressor.prepare_metadata(
                     cp_positions,
                     cp_b_idx,
@@ -4413,7 +4113,6 @@ class AttentionFP8(nn.Module):
                         cp_seq_start_per_req,
                         cp_cu_seq_per_req,
                     ) = build_cp_full_prefill_positions(cp_ctx_local, device)
-                    assert cp_ctx_local.input_lengths_global is not None
                     compressor_meta = self.compressor.prepare_metadata(
                         cp_positions,
                         cp_b_idx,
@@ -4538,31 +4237,11 @@ class AttentionFP8(nn.Module):
         if not use_varlen:
             raise RuntimeError("DSV4 FP8 prefill requires varlen metadata")
         if use_varlen:
-            assert cu_seqlens is not None
-            assert input_lengths is not None
-            assert prefix_lengths is not None
-            assert position_ids is not None
-            assert req_id_per_token is not None
             cu_seqlens = _flat_1d(cu_seqlens)
             input_lengths = _flat_1d(input_lengths)
             prefix_lengths = _flat_1d(prefix_lengths)
             position_ids = _flat_1d(position_ids)
             req_id_per_token = _flat_1d(req_id_per_token)
-            assert (
-                position_ids.numel() == seqlen
-            ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
-            assert (
-                req_id_per_token.numel() == seqlen
-            ), f"req_id_per_token must be flat [T_total={seqlen}], got {req_id_per_token.shape}"
-            assert (
-                cu_seqlens.numel() == batch_size + 1
-            ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
-            assert (
-                input_lengths.numel() == batch_size
-            ), f"input_lengths must be [B={batch_size}], got {input_lengths.shape}"
-            assert (
-                prefix_lengths.numel() == batch_size
-            ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
             B = batch_size
             sp_i32 = prefix_lengths.to(device=device, dtype=torch.int32)
             S_i32 = input_lengths.to(device=device, dtype=torch.int32)
@@ -4593,9 +4272,6 @@ class AttentionFP8(nn.Module):
                 # ``req*M + N + P_req + (pos - sp_req)`` lands each global
                 # token in workspace[req_id]'s SWA tail correctly. For
                 # B==1 this collapses to the previous arange + sp_global.
-                assert (
-                    cp_ctx_local.input_lengths_global is not None
-                ), "CP workspace meta requires cp_ctx.input_lengths_global"
                 S_i32 = cp_ctx_local.input_lengths_global.to(
                     device=device, dtype=torch.int32
                 )
@@ -4972,21 +4648,6 @@ class AttentionFP8(nn.Module):
         prefix_lengths = _flat_1d(prefix_lengths)
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
-        assert (
-            position_ids.numel() == seqlen
-        ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
-        assert (
-            req_id_per_token.numel() == seqlen
-        ), f"req_id_per_token must be flat [T_total={seqlen}], got {req_id_per_token.shape}"
-        assert (
-            cu_seqlens.numel() == batch_size + 1
-        ), f"cu_seqlens must be [B+1={batch_size + 1}], got {cu_seqlens.shape}"
-        assert (
-            input_lengths.numel() == batch_size
-        ), f"input_lengths must be [B={batch_size}], got {input_lengths.shape}"
-        assert (
-            prefix_lengths.numel() == batch_size
-        ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
 
         win = self.window_size
         is_swa_only = self.compress_ratio == 0
@@ -5003,11 +4664,6 @@ class AttentionFP8(nn.Module):
             )  # [T_total]
             local_pos = position_ids.to(torch.int32) - sp_per_token  # [T_total]
             topk_length_kv_full = torch.clamp(local_pos + 1, max=win)
-        else:
-            assert topk_length_kv_full.numel() == num_tokens, (
-                "topk_length_kv_full token count mismatch: "
-                f"{topk_length_kv_full.shape} vs {num_tokens}"
-            )
 
         # Warmup short-circuit — pool not bound, no Group-1 / Group-2 to build.
         bt = (
@@ -5356,7 +5012,6 @@ class AttentionFP8(nn.Module):
         """
         if qkv.q is not None:
             return qkv
-        assert common.workspace is not None, "prefill workspace not bound"
         qr_3d = qkv.qr.unsqueeze(0)  # [1, T, q_lora_rank]
         with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
             seqlen = int(qr_3d.shape[1])
@@ -5366,18 +5021,11 @@ class AttentionFP8(nn.Module):
                 qr_3d,
                 out=q_out.view(seqlen, self.n_heads * self.head_dim),
             )
-            assert q_local_flat.data_ptr() == q_out.data_ptr()
             q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
             q_local = fused_rmsnorm_rope(
                 q_local, None, common.freqs_cis, common.rd, eps=self.eps, out=q_local
             )
         return qkv._replace(q=q_local.squeeze(0))
-
-    def _ensure_prefill_kv_full(
-        self, qkv: PrefillQKV, common: PrefillMeta
-    ) -> PrefillQKV:
-        assert qkv.kv_full is not None, "PrefillQKV must carry materialized kv_full"
-        return qkv
 
     # ------------------------------------------------------------------
     # FP8 SWA-only fast path: paged write + concat-from-cache
@@ -5413,8 +5061,6 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.attn.swa.quant_insert"):
             if cp_byte_sliced:
                 cp_ctx = common.cp_ctx
-                assert cp_ctx is not None
-                assert meta.slot_compaction is not None
                 _ins.quantize_and_insert_k_cache_cp_byte_sliced(
                     k_bf16,
                     raw_u8,
@@ -5435,7 +5081,6 @@ class AttentionFP8(nn.Module):
         indices: torch.Tensor,
         topk_length: torch.Tensor,
         freqs_cis: torch.Tensor,
-        prefill_workspace: Optional[PrefillWorkspace],
         profile_name: str,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -5455,26 +5100,7 @@ class AttentionFP8(nn.Module):
         with preceding GPU work; the same tensor is returned after an in-place
         all-reduce. The caller must keep ``kv`` alive until this method returns.
         """
-        assert prefill_workspace is not None, "prefill workspace not bound"
         s_q = int(q.shape[0])
-        assert s_q > 0, "streaming FlashMLA prefill requires at least one Q row"
-        prefill_workspace.validate_prefill_q_alias(q, s_q)
-        assert q.dtype == torch.bfloat16, f"prefill Q must be bf16, got {q.dtype}"
-        assert q.is_contiguous(), "prefill Q workspace view must be contiguous"
-        assert tuple(q.shape[1:]) == (self.n_heads, self.head_dim), (
-            "prefill Q shape mismatch: expected "
-            f"[T, {self.n_heads}, {self.head_dim}], got {tuple(q.shape)}"
-        )
-        assert (
-            int(indices.shape[0]) == s_q
-        ), f"indices rows ({indices.shape[0]}) != Q rows ({s_q})"
-        assert topk_length.ndim == 1 and int(topk_length.shape[0]) == s_q, (
-            "topk_length must be one-dimensional with one entry per Q row; "
-            f"got shape {tuple(topk_length.shape)} for {s_q} Q rows"
-        )
-        assert (
-            int(freqs_cis.shape[0]) == s_q
-        ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
@@ -5482,18 +5108,6 @@ class AttentionFP8(nn.Module):
         single_chunk = chunk_rows == s_q
         if out is None:
             out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=q.device)
-        else:
-            assert (
-                out.dtype == torch.bfloat16
-            ), f"projected output must be bf16, got {out.dtype}"
-            assert (
-                out.device == q.device
-            ), f"projected output device ({out.device}) != Q device ({q.device})"
-            assert out.is_contiguous(), "projected output must be contiguous"
-            assert tuple(out.shape) == (s_q, self.dim), (
-                "projected output shape mismatch: expected "
-                f"({s_q}, {self.dim}), got {tuple(out.shape)}"
-            )
 
         for start in range(0, s_q, chunk_rows):
             end = min(start + chunk_rows, s_q)
@@ -5549,14 +5163,8 @@ class AttentionFP8(nn.Module):
         ``_prefill_write_swa_fp8_paged``) for future decode reads — write
         order doesn't matter here since this path doesn't read from the pool.
         """
-        assert (
-            qkv.q is not None
-        ), "_attn_fp8_swa_via_kv_full: prefill Q not materialized"
+        q = qkv.q
         meta = common.swa_meta
-        assert meta is not None and meta.topk_length_kv_full is not None, (
-            "FP8 SWA prefill requires common.swa_meta.topk_length_kv_full; "
-            "built in _prefill_common_setup for FP8 SWA-only layers."
-        )
 
         # ``topk_idxs`` shape:
         #   * varlen path → ``[T_total, win]`` flat-KV indices (per-request
@@ -5570,22 +5178,17 @@ class AttentionFP8(nn.Module):
         # all-gathered ``[seq_len_full, D]`` in GLOBAL request order. The
         # varlen topk builder receives CP global positions plus global
         # per-request cu_seqlens, so indices address the gathered KV for B>=1.
-        if common.cp_on:
-            assert (
-                qkv.kv_full.size(0) == common.seqlen_full
-            ), "CP gather should produce kv_full sized to seq_len_full"
         ti = common.topk_idxs
         if ti.dim() == 3:
             ti = ti.squeeze(0)
         indices = ti.unsqueeze(1).to(torch.int32)
 
         out = self._flash_mla_sparse_fwd_chunked_projected(
-            q=qkv.q,
+            q=q,
             kv=qkv.kv_full.unsqueeze(1),
             indices=indices,
             topk_length=meta.topk_length_kv_full,
             freqs_cis=common.freqs_cis,
-            prefill_workspace=common.workspace,
             profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
         )
         # kv_full has no remaining consumer after all attention chunks drain.
@@ -5615,48 +5218,31 @@ class AttentionFP8(nn.Module):
              projected into the final ``[T, dim]`` result.
 
         """
-        assert qkv.q is not None, "_attn_fp8_swa_via_concat: prefill Q not materialized"
+        q = qkv.q
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
         meta = common.swa_meta
-        assert (
-            meta is not None
-            and meta.combined_indices is not None
-            and meta.cache_seq_lens is not None
-            and meta.cache_gather_lens is not None
-        ), (
-            "via_concat path requires swa_meta with cache_* and combined_* "
-            "fields (only built when any request has prefix > 0)"
-        )
 
         cp_byte_sliced = self._swa_cp_byte_sliced()
         packed_3d = None if cp_byte_sliced else self._pool_view_3d_fp8(SWA_KV)
         raw_u8 = self._pool_raw_u8(SWA_KV) if cp_byte_sliced else None
-        if cp_byte_sliced:
-            assert raw_u8 is not None, "byte-sliced FP8 SWA pool unavailable"
-        else:
-            assert packed_3d is not None, "FP8 SWA pool unavailable"
         D = self.head_dim
 
-        assert common.use_varlen, "DSV4 FP8 SWA concat requires varlen metadata"
         B = common.batch_size
 
         # E5b: meta.combined_indices is built from valid prefix/new-K slots only.
         workspace = torch.empty(
             (B, meta.M, D),
             dtype=torch.bfloat16,
-            device=qkv.q.device,
+            device=q.device,
         )
 
         # 1. Prefix tail dequant through precomputed global SWA slots.
         if meta.prefix_len_max > 0:
             with record_function_range("dsv4.fp8.attn.swa_concat.gather_prefix"):
-                assert meta.cache_slot_mapping is not None
                 if cp_byte_sliced:
                     cp_ctx = common.cp_ctx
-                    assert cp_ctx is not None
-                    assert meta.cache_compaction is not None
                     _swa_dq.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                         out=workspace,
                         k_cache_raw=raw_u8,
@@ -5691,9 +5277,6 @@ class AttentionFP8(nn.Module):
         # ``meta.slot_in_flat`` is pre-baked in ``_build_swa_prefill_meta_varlen``
         # (= ``req_id * M + min(prefix, win-1) + local_pos``). Single
         # ``index_copy_`` here — no per-layer casts / gathers / arith.
-        assert (
-            meta.slot_in_flat is not None
-        ), "via_concat varlen path expects pre-baked slot_in_flat in swa_meta"
         with record_function_range("dsv4.fp8.attn.swa_concat.overlay_new_k"):
             workspace.view(B * meta.M, D).index_copy_(
                 0, meta.slot_in_flat, kv_source
@@ -5708,12 +5291,11 @@ class AttentionFP8(nn.Module):
 
         # 3. Chunked flash_mla_sparse_fwd over the [B*M] flat KV view.
         return self._flash_mla_sparse_fwd_chunked_projected(
-            q=qkv.q,
+            q=q,
             kv=workspace.view(B * meta.M, 1, D),
             indices=meta.combined_indices.unsqueeze(1),
             topk_length=meta.combined_lens,
             freqs_cis=common.freqs_cis,
-            prefill_workspace=common.workspace,
             profile_name="dsv4.fp8.attn.swa_concat.flash_mla",
         )
 

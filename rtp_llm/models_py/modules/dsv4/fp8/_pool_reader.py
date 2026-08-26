@@ -211,7 +211,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
         )
 
         # Step 3: all_gather across cp ranks → [cp_size * total_local_kv, 584].
-        # Use raw rank-major all_gather; cp_all_gather_full_async asserts
+        # Use raw rank-major all_gather; cp_all_gather_full_async requires
         # T_local == cp_ctx.chunk_length (prefill-token space), but
         # local_flat lives in KV-pool-entry space (block-aligned).
         # INVARIANT: the compressor writer (cp_wait_gather_full + _launch)
@@ -401,11 +401,9 @@ class CPShardedPoolReader(CompressedKPoolReader):
         #     NaN and propagate through all_gather → restore → workspace.
         local_seq_lens_padded = cfg.local_seq_lens_padded
         local_seq_lens_actual = cfg.local_seq_lens_actual
-        assert local_seq_lens_padded is not None
-        assert local_seq_lens_actual is not None
-        if local_seq_lens_padded.device != device:
+        if local_seq_lens_padded.device != device:  # type: ignore[union-attr]
             local_seq_lens_padded = local_seq_lens_padded.to(device=device)
-        if local_seq_lens_actual.device != device:
+        if local_seq_lens_actual.device != device:  # type: ignore[union-attr]
             local_seq_lens_actual = local_seq_lens_actual.to(device=device)
         if cp_direct_flat_pack_enabled():
             local_flat = torch.empty(
@@ -417,8 +415,8 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 local_flat,
                 k_cache,
                 block_table,
-                local_seq_lens_padded,
-                local_seq_lens_actual,
+                local_seq_lens_padded,  # type: ignore[arg-type]
+                local_seq_lens_actual,  # type: ignore[arg-type]
                 block_size=block_size,
                 has_actual_tokens=bool(cfg.has_local_seq_len_actual),
             ):
@@ -430,7 +428,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
         # is a deterministic 0 and contributes nothing to the gather.
         local_packed = torch.zeros(
             (
-                int(local_seq_lens_padded.shape[0]),
+                int(local_seq_lens_padded.shape[0]),  # type: ignore[union-attr]
                 cfg.max_local_seq_len_padded,
                 ENTRY_BYTES,
             ),
@@ -441,7 +439,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
             gather_k_cache_packed(
                 out=local_packed,
                 k_cache=k_cache,
-                seq_lens=local_seq_lens_actual,
+                seq_lens=local_seq_lens_actual,  # type: ignore[arg-type]
                 gather_lens=None,
                 block_table=block_table,
                 block_size=block_size,
@@ -450,7 +448,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
         # Step 2: pack to flat [total_local_kv, 584] (drop per-row padding).
         return _pack_padded_to_flat(
             local_packed,
-            local_seq_lens_padded,
+            local_seq_lens_padded,  # type: ignore[arg-type]
             cfg.total_local_kv,
             ENTRY_BYTES,
         )

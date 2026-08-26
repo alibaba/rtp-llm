@@ -68,8 +68,7 @@ def _ensure_shared_expert_stream(device: torch.device) -> torch.cuda.Stream | No
     device = _normalize_cuda_device(device)
     if device is None:
         return None
-    device_index = device.index
-    assert device_index is not None
+    device_index: int = device.index  # type: ignore[assignment]
     stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
     if stream is None:
         stream = torch.cuda.Stream(device=device)
@@ -85,8 +84,7 @@ def _get_shared_expert_stream(
     device = _normalize_cuda_device(device)
     if device is None:
         raise RuntimeError(f"shared expert overlap requires CUDA device, got {device}")
-    device_index = device.index
-    assert device_index is not None
+    device_index: int = device.index  # type: ignore[assignment]
     stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
     if stream is not None:
         return stream
@@ -263,6 +261,8 @@ class FusedSharedExpertFastPath:
             raise RuntimeError(f"shared w13 scale must be 2D, got {w13_s.dim()}D")
         if w13_w.shape[0] % 2 != 0:
             raise RuntimeError(f"shared w13 rows must be even, got {w13_w.shape[0]}")
+        inferred_inter_dim = int(w13_w.shape[0]) // 2
+        self.inter_dim = inferred_inter_dim
         self._prepared_shared_experts = shared_experts
         self._w13_parts = (w13_w, w13_s)
         self._w2_parts = (w2_w, w2_s)
@@ -306,11 +306,7 @@ class FusedSharedExpertFastPath:
             self.dim = D
         if D != self.dim:
             raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
-        if self.inter_dim is None:
-            assert self._w13_parts is not None
-            self.inter_dim = self._w13_parts[0].shape[0] // 2
-        inter = self.inter_dim
-        assert inter is not None
+        inter: int = self.inter_dim  # type: ignore[assignment]
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
         workspace = self._workspace
         if (
@@ -414,7 +410,12 @@ class FusedSharedExpertFastPath:
     ) -> torch.Tensor:
         if self._prepared_shared_experts is not shared_experts:
             self.prepare(shared_experts)
-        assert self._w13_parts is not None and self._w2_parts is not None
+        w13_parts: tuple[torch.Tensor, torch.Tensor] = (
+            self._w13_parts  # type: ignore[assignment]
+        )
+        w2_parts: tuple[torch.Tensor, torch.Tensor] = (
+            self._w2_parts  # type: ignore[assignment]
+        )
         workspace = self._ensure_workspace(x)
         T = x.size(0)
 
@@ -435,7 +436,7 @@ class FusedSharedExpertFastPath:
         quant_bf16_fp8_packed_ue8m0(x, x_fp8, x_scale, group_size=128, eps=1.0e-4)
         fp8_gemm_nt(
             (x_fp8, x_scale),
-            self._w13_parts,
+            w13_parts,
             gate_up,
             disable_ue8m0_cast=False,
         )
@@ -448,7 +449,7 @@ class FusedSharedExpertFastPath:
         )
         fp8_gemm_nt(
             (hidden_fp8, hidden_scale),
-            self._w2_parts,
+            w2_parts,
             out,
             disable_ue8m0_cast=False,
         )
@@ -493,8 +494,7 @@ class SequentialSharedExpertExecutor(SharedExpertExecutor):
             self._out = _run_shared_expert(shared_experts, x, self._fast_path)
 
     def finish(self) -> torch.Tensor:
-        assert self._out is not None
-        out = self._out
+        out: torch.Tensor = self._out  # type: ignore[assignment]
         self._out = None
         return out
 
@@ -552,10 +552,9 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
         self._active_stream = stream
 
     def finish(self) -> torch.Tensor:
-        assert self._out is not None
+        out: torch.Tensor = self._out  # type: ignore[assignment]
         if self._active_stream is not None:
-            torch.cuda.current_stream(self._out.device).wait_stream(self._active_stream)
-        out = self._out
+            torch.cuda.current_stream(out.device).wait_stream(self._active_stream)
         self._out = None
         self._active_stream = None
         return out

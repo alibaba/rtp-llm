@@ -202,22 +202,14 @@ def fused_rmsnorm_rope(
     into ``x``.  ``group_heads`` groups Q-style rows sharing the same frequency
     slot; valid values are 1, 2, 4, and 8.
     """
-    assert x.is_cuda
-    assert x.dtype in (torch.bfloat16, torch.float16, torch.float32)
-    assert x.is_contiguous()
-    assert freqs_cis.is_contiguous()
-    assert not (out is not None and inplace), "out and inplace are mutually exclusive"
     orig_shape = x.shape
     D = orig_shape[-1]
     RD = rope_head_dim
-    assert RD % 2 == 0 and RD <= D
     x_flat = x.view(-1, D)
     N = x_flat.shape[0]
     if inplace:
         out_flat = x_flat
     elif out is not None:
-        assert out.shape == x.shape
-        assert out.dtype == x.dtype and out.is_cuda and out.is_contiguous()
         out_flat = out.view(-1, D)
     else:
         out_flat = torch.empty_like(x_flat)
@@ -225,12 +217,6 @@ def fused_rmsnorm_rope(
         return out_flat.view(*orig_shape)
 
     if weight is not None:
-        assert weight.shape == (D,) and weight.is_contiguous()
-        assert weight.is_cuda and weight.dtype in (
-            torch.bfloat16,
-            torch.float16,
-            torch.float32,
-        )
         w = weight
         has_weight = True
     else:
@@ -239,13 +225,10 @@ def fused_rmsnorm_rope(
 
     freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
     N_freq = freqs_flat.shape[0]
-    assert N % N_freq == 0, f"N_tokens={N} not divisible by N_freq={N_freq}"
     freq_stride_n = N // N_freq
     freqs_ri = torch.view_as_real(freqs_flat)
-    assert freqs_ri.shape == (N_freq, RD // 2, 2)
 
     BLOCK_D = triton.next_power_of_2(D)
-    assert BLOCK_D <= 4096
 
     env_group_heads = os.environ.get("DSV4_RMSNORM_ROPE_GROUP_HEADS")
     if group_heads is not None:

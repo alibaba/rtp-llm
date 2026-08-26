@@ -281,9 +281,6 @@ def _alloc_output_buffers(
             (n_groups, M, d_per_group), dtype=torch.float8_e4m3fn, device=device
         )
     else:
-        assert fp8_buf.dtype == torch.float8_e4m3fn
-        assert fp8_buf.shape[0] == n_groups and fp8_buf.shape[1] >= M
-        assert fp8_buf.shape[2] == d_per_group
         fp8_work = fp8_buf[:, :M, :]
 
     if scale_buf is None:
@@ -294,9 +291,6 @@ def _alloc_output_buffers(
             (packed_sf_k * tma_M, 1, tma_M),
         )
     else:
-        assert scale_buf.dtype == torch.int32
-        assert scale_buf.shape[0] == n_groups and scale_buf.shape[1] >= M
-        assert scale_buf.shape[2] == packed_sf_k
         scale_work = scale_buf[:, :M, :]
     return fp8_work, scale_work
 
@@ -342,56 +336,23 @@ def fused_inv_rope_fp8_quant(
         ``deep_gemm.fp8_einsum("bhr,hdr->bhd", (o_fp8, o_scale),
         (wo_a_fp8, wo_a_scale), out, recipe=(1, 1, 128))``.
     """
-    assert o.is_cuda and o.dtype == torch.bfloat16
-    assert freqs_cis_per_b.is_cuda and freqs_cis_per_b.dtype == torch.complex64
-    assert o.is_contiguous()
-    assert freqs_cis_per_b.is_contiguous()
-
     # Normalize input to [M, H, D]
     if o.dim() == 4:
         B, S, H, D = o.shape
         M = B * S
         o_flat = o.view(M, H, D)
         freq_rows = int(freqs_cis_per_b.shape[0])
-        if freq_rows == M:
-            q_len_per_b = 1
-        elif freq_rows == B:
-            q_len_per_b = S
-        else:
-            raise AssertionError(
-                f"freq rows must be B={B} or M={M}; got {freq_rows}"
-            )
+        q_len_per_b = 1 if freq_rows == M else S
     else:
-        assert o.dim() == 3
         M, H, D = o.shape
         B = freqs_cis_per_b.shape[0]
-        assert M % B == 0, f"M={M} not divisible by B={B}"
         q_len_per_b = M // B
         o_flat = o
 
-    assert H == n_groups * heads_per_group
-    assert D == nope_dim + rope_head_dim
-    assert D % quant_group_size == 0
-    assert nope_dim % quant_group_size == (quant_group_size - rope_head_dim), (
-        f"RoPE must end the last {quant_group_size}-column quant block: "
-        f"nope_dim={nope_dim}, rope_head_dim={rope_head_dim}, "
-        f"quant_group_size={quant_group_size}"
-    )
-    assert rope_head_dim % 2 == 0
-    assert freqs_cis_per_b.shape[-1] == rope_head_dim // 2
-
     chunks_per_head = D // quant_group_size
-    assert chunks_per_head <= 4, (
-        f"kernel packs CHUNKS_PER_HEAD UE8M0 bytes into 1 int32; need "
-        f"chunks_per_head<=4, got {chunks_per_head}"
-    )
 
     d_per_group = heads_per_group * D
     num_scale_blocks = d_per_group // quant_group_size
-    assert num_scale_blocks % chunks_per_head == 0, (
-        f"packed_sf_k expects heads_per_group alignment: "
-        f"num_scale_blocks={num_scale_blocks}, chunks_per_head={chunks_per_head}"
-    )
     packed_sf_k = num_scale_blocks // chunks_per_head  # = heads_per_group
 
     fp8_max = torch.finfo(torch.float8_e4m3fn).max

@@ -192,6 +192,33 @@ def _fake_fp8_gemm_nt(a, b, output, *args, **kwargs) -> None:
 
 
 class TestSharedExpertExecutor(unittest.TestCase):
+    @staticmethod
+    def _prepare_only_shared(inter: int = 256, dim: int = 256) -> nn.Module:
+        shared = nn.Module()
+        shared.w13 = mock.Mock(
+            weight=torch.empty((2 * inter, dim)),
+            weight_scales=torch.empty((2 * inter, 1)),
+        )
+        shared.w2 = mock.Mock(
+            weight=torch.empty((dim, inter)),
+            weight_scales=torch.empty((dim, 1)),
+        )
+        return shared
+
+    def test_fast_path_prepare_infers_inter_dim(self):
+        fast_path = FusedSharedExpertFastPath(dim=256, inter_dim=None)
+
+        fast_path.prepare(self._prepare_only_shared(inter=256))
+
+        self.assertEqual(fast_path.inter_dim, 256)
+
+    def test_fast_path_prepare_uses_weight_inter_dim(self):
+        fast_path = FusedSharedExpertFastPath(dim=256, inter_dim=128)
+
+        fast_path.prepare(self._prepare_only_shared(inter=256))
+
+        self.assertEqual(fast_path.inter_dim, 256)
+
     def test_workspace_views_are_shared_and_invalidated_on_growth(self):
         _SHARED_EXPERT_WORKSPACE_CACHE.clear()
         self.addCleanup(_SHARED_EXPERT_WORKSPACE_CACHE.clear)
@@ -363,7 +390,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
         self.assertIn(device_index, _SHARED_EXPERT_STREAM_CACHE)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_capture_requires_precreated_stream(self):
+    def test_overlap_capture_falls_back_to_current_stream(self):
         _SHARED_EXPERT_STREAM_CACHE.clear()
         x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
         shared = _Shared().cuda()
@@ -373,8 +400,11 @@ class TestSharedExpertExecutor(unittest.TestCase):
             "torch.cuda.is_current_stream_capturing",
             return_value=True,
         ):
-            with self.assertRaisesRegex(RuntimeError, "not created before CUDA graph capture"):
-                executor.start(shared, x)
+            executor.start(shared, x)
+            self.assertIsNone(executor._active_stream)
+            got = executor.finish()
+
+        self.assertTrue(torch.equal(got, shared(x).float()))
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_overlap_executor_captures_with_precreated_stream(self):
@@ -394,7 +424,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 executor.start(shared, x)
-                self.assertIs(executor._active_stream, warmup_stream)
+                self.assertIsNone(executor._active_stream)
                 out.copy_(executor.finish())
 
             x.mul_(2.0)

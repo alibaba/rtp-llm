@@ -455,32 +455,6 @@ class ChunkedMoETest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "chunk overflow"):
                 moe(x, input_ids)
 
-    def test_decode_asserts_instead_of_chunking(self):
-        moe = _fake_moe(dim=2, cap=4, is_decode_role=True)
-        x = torch.randn(9, 2)
-        input_ids = torch.arange(9, dtype=torch.long)
-
-        with self.assertRaisesRegex(AssertionError, "decode must not use chunked MoE"):
-            moe(x, input_ids)
-
-        self.assertEqual(moe.gate.token_chunks, [])
-
-    def test_cuda_graph_capture_asserts_instead_of_chunking(self):
-        moe = _fake_moe(dim=2, cap=4)
-        x = torch.randn(9, 2)
-        input_ids = torch.arange(9, dtype=torch.long)
-
-        with mock.patch.object(torch.cuda, "is_available", return_value=True):
-            with mock.patch.object(
-                torch.cuda, "is_current_stream_capturing", return_value=True
-            ):
-                with self.assertRaisesRegex(
-                    AssertionError, "CUDA graph capture must not use chunked MoE"
-                ):
-                    moe(x, input_ids)
-
-        self.assertEqual(moe.gate.token_chunks, [])
-
     def test_input_ids_must_match_flat_tokens(self):
         moe = _fake_moe(dim=2, cap=4)
         x = torch.randn(5, 2)

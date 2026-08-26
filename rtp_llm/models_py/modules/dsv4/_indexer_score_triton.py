@@ -165,19 +165,8 @@ def v4_indexer_score(
     When ``q_pos`` is None (decode / continuation), the causal mask is
     skipped — the caller is responsible for any masking afterwards.
     """
-    assert q.dtype == torch.bfloat16, f"q dtype={q.dtype}"
-    assert kv.dtype == torch.bfloat16, f"kv dtype={kv.dtype}"
-    assert q.is_contiguous(), "q must be contiguous"
-    assert kv.is_contiguous(), "kv must be contiguous"
-    assert q.dim() == 4 and kv.dim() == 3
     B, S, H, D = q.shape
-    Bk, T, Dk = kv.shape
-    assert B == Bk and D == Dk, f"q/kv batch/D mismatch: q={q.shape} kv={kv.shape}"
-    assert weights.shape == (
-        B,
-        S,
-        H,
-    ), f"weights shape={weights.shape} expected {(B,S,H)}"
+    T = kv.shape[1]
 
     weights = weights.contiguous()
     if weights.dtype != torch.float32:
@@ -186,8 +175,6 @@ def v4_indexer_score(
     apply_mask = q_pos is not None
     if apply_mask:
         q_pos = q_pos.contiguous()
-        assert q_pos.shape == (B, S), f"q_pos shape={q_pos.shape} expected {(B,S)}"
-        assert q_pos.dtype in (torch.int32, torch.int64), f"q_pos dtype={q_pos.dtype}"
         if q_pos.dtype != torch.int32:
             q_pos = q_pos.to(torch.int32)
     else:

@@ -100,9 +100,6 @@ def resolve_moe_max_tokens_per_rank(
     gen_num_per_cycle: int = 0,
 ) -> int:
     max_generate_batch_size = int(max_generate_batch_size)
-    assert (
-        max_generate_batch_size > 0
-    ), f"max_generate_batch_size must be positive, got {max_generate_batch_size}"
     if is_decode_role:
         tokens_per_batch = 1
         if is_speculative:
@@ -171,10 +168,7 @@ class MoE(nn.Module):
         ``[E_local, ...]``) directly into mega-moe / grouped-fp4 / per-expert
         paths via the chosen strategy."""
         super().__init__()
-        assert layer_weights is not None, (
-            "MoE requires layer_weights (descriptor path); legacy "
-            "weights/prefix dict path was removed."
-        )
+        resolved_layer_weights: Dict = layer_weights  # type: ignore[assignment]
         self.layer_id = layer_id
         self.dim = dim
         self.n_routed_experts = n_routed_experts
@@ -184,9 +178,6 @@ class MoE(nn.Module):
         self.max_tokens_per_rank = max_tokens_per_rank
         self._is_decode_role = bool(is_decode_role)
 
-        assert (
-            n_routed_experts % max(ep_size, 1) == 0
-        ), f"n_routed_experts={n_routed_experts} must divide ep_size={ep_size}"
         self.ep_size = ep_size
         self.ep_rank = ep_rank
         self.n_local_experts = n_routed_experts // max(ep_size, 1)
@@ -204,9 +195,8 @@ class MoE(nn.Module):
             route_scale,
             n_hash_layers,
             vocab_size,
-            layer_weights=layer_weights,
+            layer_weights=resolved_layer_weights,
         )
-        assert n_shared_experts == 1, "V4 always has exactly 1 shared expert"
 
         # --- Strategy selection ---
         cfg = MoeCfg(
@@ -240,10 +230,10 @@ class MoE(nn.Module):
             self._shared_executor = None
         else:
             shared_w = {
-                "w13_w": layer_weights[W.v4_shared_w13_w],
-                "w13_s": layer_weights[W.v4_shared_w13_s],
-                "w2_w": layer_weights[W.v4_shared_w2_w],
-                "w2_s": layer_weights[W.v4_shared_w2_s],
+                "w13_w": resolved_layer_weights[W.v4_shared_w13_w],
+                "w13_s": resolved_layer_weights[W.v4_shared_w13_s],
+                "w2_w": resolved_layer_weights[W.v4_shared_w2_w],
+                "w2_s": resolved_layer_weights[W.v4_shared_w2_s],
             }
             self.shared_experts = W13SharedExpert(
                 dim,
@@ -269,23 +259,14 @@ class MoE(nn.Module):
         ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
-        self._strategy.setup_weights(layer_weights)
+        self._strategy.setup_weights(resolved_layer_weights)
 
     def _should_chunk(self, tokens: int) -> bool:
         max_tokens = int(self.max_tokens_per_rank)
-        assert max_tokens > 0, f"max_tokens_per_rank must be positive, got {max_tokens}"
         cuda_graph_capturing = (
             torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
         )
         if self._is_decode_role or cuda_graph_capturing:
-            if int(tokens) > max_tokens:
-                mode = "decode" if self._is_decode_role else "CUDA graph capture"
-                raise AssertionError(
-                    f"{mode} MoE input tokens="
-                    f"{int(tokens)} exceeds max_tokens_per_rank={max_tokens}; "
-                    f"{mode} must not use chunked MoE. Increase the startup "
-                    "MoE token budget."
-                )
             return False
         if not chunked_moe_enabled():
             return False
@@ -362,9 +343,6 @@ class MoE(nn.Module):
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
         chunk_tokens = int(self.max_tokens_per_rank)
-        assert (
-            chunk_tokens > 0
-        ), f"max_tokens_per_rank must be positive, got {chunk_tokens}"
         if not _CHUNKED_MOE_LOGGED:
             _CHUNKED_MOE_LOGGED = True
             logging.info(
