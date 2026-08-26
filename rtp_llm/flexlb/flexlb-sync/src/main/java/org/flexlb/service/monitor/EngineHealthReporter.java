@@ -65,6 +65,8 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
+import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
+import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
@@ -122,6 +124,10 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(PREFILL_SELECTED_ESTIMATED_TTFT_MS,
+                FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        this.monitor.register(PREFILL_SELECTED_EXECUTION_TIME_MS,
+                FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
         this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -361,6 +367,24 @@ public class EngineHealthReporter {
 
     public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
         cacheMetricsReporter.reportCacheHitMetrics(roleType, hitTokens, hitRatio);
+    }
+
+    /**
+     * Report request-level estimates captured when a Prefill worker is selected.
+     * These metrics are common to batch and non-batch delivery; the delivery mode
+     * tag keeps their distributions independently queryable. One sample pair is
+     * emitted per successful selection attempt, so retries and reroutes emit again.
+     */
+    public void reportPrefillSelectedEstimates(RoleType roleType,
+                                               String engineIp,
+                                               String deliveryMode,
+                                               long estimatedTtftMs,
+                                               long executionTimeMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", roleType.name(),
+                "delivery_mode", deliveryMode);
+        monitor.report(PREFILL_SELECTED_ESTIMATED_TTFT_MS, tags, estimatedTtftMs);
+        monitor.report(PREFILL_SELECTED_EXECUTION_TIME_MS, tags, executionTimeMs);
     }
 
     /**

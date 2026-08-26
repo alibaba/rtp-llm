@@ -105,6 +105,21 @@ public class MetricConstant {
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
     /**
+     * Selection-time estimate of first-token readiness,
+     * including the selected worker's outstanding work and scheduler-side wait,
+     * in milliseconds.
+     */
+    public static final String PREFILL_SELECTED_ESTIMATED_TTFT_MS =
+            "app.flexlb.prefill.selected.estimated_ttft_ms";
+
+    /**
+     * Predictor-estimated execution time of the selected Prefill request,
+     * excluding worker and scheduler queueing, in milliseconds.
+     */
+    public static final String PREFILL_SELECTED_EXECUTION_TIME_MS =
+            "app.flexlb.prefill.selected.execution_time_ms";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";

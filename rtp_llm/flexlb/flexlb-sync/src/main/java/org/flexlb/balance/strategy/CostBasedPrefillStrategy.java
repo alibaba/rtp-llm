@@ -110,6 +110,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedScore = survivors.score(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);
+        reportSelectedEstimates(
+                roleType, best, config, selectedScore, selectedPrefillMs);
         reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
 
         return buildServerStatus(
@@ -577,6 +579,26 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
         engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
+    }
+
+    private void reportSelectedEstimates(RoleType roleType,
+                                         PrefillEndpoint endpoint,
+                                         FlexlbConfig config,
+                                         long estimatedTtftMs,
+                                         long executionTimeMs) {
+        String deliveryMode = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
+        try {
+            engineHealthReporter.reportPrefillSelectedEstimates(
+                    roleType,
+                    endpoint.getIp(),
+                    deliveryMode,
+                    estimatedTtftMs,
+                    executionTimeMs);
+        } catch (RuntimeException telemetryFailure) {
+            Logger.warn(
+                    "Prefill selected-estimate metric failed: engine={}, delivery_mode={}",
+                    endpoint.ipPort(), deliveryMode, telemetryFailure);
+        }
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep,
