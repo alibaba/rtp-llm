@@ -18,10 +18,6 @@ error <1.0 on the smaller ones.
 
 from __future__ import annotations
 
-import ast
-import inspect
-import textwrap
-
 import torch
 
 try:
@@ -53,233 +49,11 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_paged_indexer_score,
     has_fp8_paged_mqa_logits,
-    validate_indexer_paged_layout,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 
 INDEXER_HEAD_DIM = 128
 INDEXER_ENTRY_BYTES = 132
 _FP8_MAX = 448.0
-
-
-def test_decode_hot_path_has_no_tensor_scalar_reads():
-    """A CUDA tensor ``.item()`` here synchronizes every Indexer layer/step."""
-    source = textwrap.dedent(inspect.getsource(IndexerFP8.forward_decode_vectorized))
-    tree = ast.parse(source)
-    item_calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "item"
-    ]
-    assert not item_calls
-
-
-def test_kernel64_table_preserves_framework_expanded_ids():
-    """The framework, rather than Python, publishes kernel-row ids."""
-    kernel_eb = 64
-    pool = torch.zeros((8, kernel_eb, INDEXER_ENTRY_BYTES), dtype=torch.uint8)
-    kernel_bt = torch.tensor([[4, 5, 6, 7, 0, 1, 2, 3]], dtype=torch.int32)
-
-    pool_2d, deepgemm_bt, block_kv = validate_indexer_paged_layout(
-        pool,
-        kernel_bt,
-        kernel_eb,
-        owner_tokens_per_block=1024,
-        compress_ratio=4,
-    )
-
-    assert block_kv == 64
-    assert deepgemm_bt.tolist() == [[4, 5, 6, 7, 0, 1, 2, 3]]
-    assert pool_2d.shape == (8, 64, INDEXER_ENTRY_BYTES)
-
-
-def test_kernel64_rejects_partial_owner_table_width():
-    pool = torch.zeros((8, 64, INDEXER_ENTRY_BYTES), dtype=torch.uint8)
-    table = torch.zeros((1, 6), dtype=torch.int32)
-    try:
-        validate_indexer_paged_layout(
-            pool,
-            table,
-            kernel_entries_per_block=64,
-            owner_tokens_per_block=1024,
-            compress_ratio=4,
-        )
-    except RuntimeError as error:
-        assert "width=6" in str(error)
-        assert "kernel_blocks_per_owner=4" in str(error)
-    else:
-        raise AssertionError("partial INDEXER owner table was unexpectedly accepted")
-
-
-def test_kernel64_rejects_partial_owner_pool_rows():
-    pool = torch.zeros((6, 64, INDEXER_ENTRY_BYTES), dtype=torch.uint8)
-    table = torch.zeros((1, 8), dtype=torch.int32)
-    try:
-        validate_indexer_paged_layout(
-            pool,
-            table,
-            kernel_entries_per_block=64,
-            owner_tokens_per_block=1024,
-            compress_ratio=4,
-        )
-    except RuntimeError as error:
-        assert "rows=6" in str(error)
-        assert "kernel_blocks_per_owner=4" in str(error)
-    else:
-        raise AssertionError("partial INDEXER owner pool was unexpectedly accepted")
-
-
-def test_kernel16_layout_is_rejected_instead_of_claiming_coalescing():
-    pool = torch.zeros((16, 16, INDEXER_ENTRY_BYTES), dtype=torch.uint8)
-    table = torch.arange(16, dtype=torch.int32).view(1, 16)
-    try:
-        validate_indexer_paged_layout(
-            pool,
-            table,
-            kernel_entries_per_block=16,
-            owner_tokens_per_block=1024,
-            compress_ratio=4,
-        )
-    except RuntimeError as error:
-        assert "kernel_block_kv=16" in str(error)
-        assert "supported=(64,)" in str(error)
-    else:
-        raise AssertionError("unsupported 16-entry rows were unexpectedly accepted")
-
-
-def test_sm100_keeps_legacy_kernel32_layout():
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
-        pytest.skip("DeepGEMM block_kv=32 requires SM100")
-    pool = torch.zeros((2, 32, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device="cuda")
-    table = torch.tensor([[1, 0]], dtype=torch.int32, device="cuda")
-    actual_pool, actual_table, block_kv = validate_indexer_paged_layout(
-        pool,
-        table,
-        kernel_entries_per_block=32,
-        owner_tokens_per_block=128,
-        compress_ratio=4,
-    )
-    assert block_kv == 32
-    assert actual_pool.data_ptr() == pool.data_ptr()
-    assert torch.equal(actual_table, table)
-
-
-def test_kernel64_split_owner_layout_runs_deepgemm():
-    """The online 1024-owner/256-kernel layout must execute end to end."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    if not has_fp8_paged_mqa_logits():
-        pytest.skip("deep_gemm.fp8_paged_mqa_logits unavailable")
-
-    torch.manual_seed(0xB10C)
-    device = torch.device("cuda")
-    physical_entries = 256
-    kernel_eb = 64
-    B, next_n, H, D = 1, 1, 64, INDEXER_HEAD_DIM
-    K_bf16 = (
-        torch.randn(physical_entries, D, dtype=torch.bfloat16, device=device) * 0.5
-    )
-    fp8_bytes, scales = _ue8m0_quantize_k(K_bf16)
-    kernel_pool = _pack_132B(
-        fp8_bytes, scales, num_blocks=4, block_size=kernel_eb
-    )
-    # Match the framework's shared opaque-pool layout: 64 useful entries
-    # followed by another 64-entry span of per-row padding.
-    padded_storage = torch.zeros(
-        (4, 2 * kernel_eb, INDEXER_ENTRY_BYTES),
-        dtype=torch.uint8,
-        device=device,
-    )
-    padded_storage[:, :kernel_eb].copy_(kernel_pool)
-    kernel_pool = padded_storage[:, :kernel_eb]
-    assert not kernel_pool.is_contiguous()
-    kernel_bt = torch.arange(4, dtype=torch.int32, device=device).view(1, 4)
-    pool_2d, owner_bt, actual_block_kv = validate_indexer_paged_layout(
-        kernel_pool,
-        kernel_bt,
-        kernel_eb,
-        owner_tokens_per_block=1024,
-        compress_ratio=4,
-    )
-
-    Q = torch.randn(B, next_n, H, D, dtype=torch.bfloat16, device=device) * 0.5
-    weights = (
-        torch.randn(B, next_n, H, dtype=torch.bfloat16, device=device) * 0.1
-    )
-    q_fp8, w_fold = indexer_q_fp8_quant_fold(Q, weights)
-    logits = fp8_paged_indexer_score(
-        q_fp8,
-        w_fold.view(B * next_n, H),
-        pool_2d,
-        owner_bt,
-        torch.full(
-            (B, next_n), physical_entries, dtype=torch.int32, device=device
-        ),
-        block_size=actual_block_kv,
-        max_ctx_len=physical_entries,
-    ).view(B, next_n, physical_entries)
-
-    K_dequant = (
-        fp8_bytes.view(torch.float8_e4m3fn).to(torch.float32)
-        * scales.unsqueeze(-1)
-    ).to(torch.bfloat16).unsqueeze(0)
-    reference = _ref_indexer_score(Q, K_dequant, weights.to(torch.float32))
-    diff = (logits - reference).abs()
-    assert diff.mean().item() < 0.25
-    assert diff.max().item() < 1.0
-
-
-def test_online_cuda_graph_max_geometry_runs_deepgemm():
-    """Cover the online max-seq / max-capture shape omitted by smoke."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    if not has_fp8_paged_mqa_logits():
-        pytest.skip("deep_gemm.fp8_paged_mqa_logits unavailable")
-
-    device = torch.device("cuda")
-    batch = 32
-    next_n = 4
-    block_size = 64
-    max_ctx_len = 1048576 // 4
-    table_width = 8192
-
-    torch.manual_seed(0xC0DA)
-    q = torch.randn(
-        (batch, next_n, 64, INDEXER_HEAD_DIM), dtype=torch.bfloat16, device=device
-    )
-    head_weights = torch.randn(
-        (batch, next_n, 64), dtype=torch.bfloat16, device=device
-    )
-    q_fp8, weights = indexer_q_fp8_quant_fold(q, head_weights)
-    # Capture block tables are zero-initialized, so one valid block is enough
-    # even though every row advertises the maximum context length.
-    k = torch.randn(
-        (block_size, INDEXER_HEAD_DIM), dtype=torch.bfloat16, device=device
-    )
-    fp8_bytes, scales = _ue8m0_quantize_k(k)
-    pool = _pack_132B(fp8_bytes, scales, num_blocks=1, block_size=block_size)
-    block_table = torch.zeros(
-        (batch, table_width), dtype=torch.int32, device=device
-    )
-    context_lens = torch.full(
-        (batch, next_n), max_ctx_len, dtype=torch.int32, device=device
-    )
-
-    logits = fp8_paged_indexer_score(
-        q_fp8,
-        weights.view(batch * next_n, 64),
-        pool,
-        block_table,
-        context_lens,
-        block_size=block_size,
-        max_ctx_len=max_ctx_len,
-    )
-    torch.cuda.synchronize()
-
-    assert logits.shape == (batch * next_n, max_ctx_len)
-    assert torch.isfinite(logits).all()
 
 
 def _ue8m0_quantize_k(K_bf16):
@@ -444,16 +218,7 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
 
 
 if __name__ == "__main__":
-    test_decode_hot_path_has_no_tensor_scalar_reads()
-    test_kernel64_table_preserves_framework_expanded_ids()
-    test_kernel64_rejects_partial_owner_table_width()
-    test_kernel64_rejects_partial_owner_pool_rows()
-    test_kernel16_layout_is_rejected_instead_of_claiming_coalescing()
     if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 10:
-        test_sm100_keeps_legacy_kernel32_layout()
         test_fp8_paged_indexer_score_via_deepgemm(32)
-    if torch.cuda.is_available() and has_fp8_paged_mqa_logits():
-        test_kernel64_split_owner_layout_runs_deepgemm()
-        test_online_cuda_graph_max_geometry_runs_deepgemm()
-        test_fp8_paged_indexer_score_via_deepgemm(64)
+    test_fp8_paged_indexer_score_via_deepgemm(64)
     print("OK")

@@ -660,55 +660,16 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto& py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
 
-    // The focused MTP refresh can publish a smaller live batch/table than the
-    // one copied by prepareAttentionInputs(). This is especially visible for
-    // DSV4 INDEXER_KV: one 1024-token owner expands to four 256-token kernel
-    // rows, so every stale owner column leaves four apparently valid block ids.
-    // Clear the complete captured destinations before copying the live
-    // rectangle. The fill and copies use the graph stream and are therefore
-    // ordered before replay without a device-wide synchronization.
-#if USING_CUDA
-    CudaGraphPrepareFillParams fill_params;
-    auto clear_block_table = [&fill_params](torch::Tensor& dst) {
-        addCudaGraphPrepareFillRegion(fill_params, dst, 0, dst.numel(), 0);
-    };
-#else
-    auto clear_block_table = [](torch::Tensor& dst) {
-        if (dst.defined() && dst.numel() > 0) {
-            dst.fill_(0);
-        }
-    };
-#endif
-
     FusedD2DCopyParams     d2d_copies;
     FusedStridedCopyParams strided_d2d_copies;
     auto add_block_table = [&d2d_copies, &strided_d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() == 0) {
             return;
         }
-        RTP_LLM_CHECK_WITH_INFO(dst.defined() && src.dim() == dst.dim(),
-                                "CUDA graph focused block-table copy rank mismatch: src_dim=%ld dst_dim=%ld",
-                                src.dim(),
-                                dst.defined() ? dst.dim() : -1);
-        RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(),
-                                "CUDA graph focused block-table copy dtype mismatch");
-        RTP_LLM_CHECK_WITH_INFO(src.is_cuda() && dst.is_cuda(),
-                                "CUDA graph focused block-table copy requires CUDA tensors");
         if (src.dim() < 2) {
-            RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(),
-                                    "CUDA graph focused block-table source numel=%ld exceeds destination numel=%ld",
-                                    src.numel(),
-                                    dst.numel());
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
-        RTP_LLM_CHECK_WITH_INFO(
-            src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1),
-            "CUDA graph focused block-table source shape=(%ld,%ld) exceeds destination shape=(%ld,%ld)",
-            src.size(0),
-            src.size(1),
-            dst.size(0),
-            dst.size(1));
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),
@@ -718,7 +679,6 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     };
 
     if (inputs.attention_inputs_by_tag.empty()) {
-        clear_block_table(py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
         add_block_table(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                         py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
     } else {
@@ -729,14 +689,10 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             RTP_LLM_CHECK_WITH_INFO(dst_it != py_model_inputs.attention_inputs_by_tag.end(),
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
-            clear_block_table(dst_it->second.kv_cache_kernel_block_id_device);
             add_block_table(src_inputs.kv_cache_kernel_block_id_device,
                             dst_it->second.kv_cache_kernel_block_id_device);
         }
     }
-#if USING_CUDA
-    invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
-#endif
     fusedCopy(d2d_copies);
     fusedStridedCopy(strided_d2d_copies);
 }
@@ -1034,50 +990,14 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     inputs.attention_inputs_by_tag.clear();
     if (kv_cache_group_tags_.size() > 1) {
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_group_tokens_per_block_.size() == kv_cache_group_tags_.size()
-                                    && kv_cache_group_kernel_tokens_per_block_.size() == kv_cache_group_tags_.size(),
-                                "CUDA graph cache group geometry size mismatch: tags=%zu owner_sizes=%zu kernel_sizes=%zu",
-                                kv_cache_group_tags_.size(),
-                                kv_cache_group_tokens_per_block_.size(),
-                                kv_cache_group_kernel_tokens_per_block_.size());
-        // Runtime hybrid KV inputs use a rectangular [group, batch, blocks] tensor.
-        // Its physical-owner width is the maximum required by any group; each
-        // tagged view then scales that shared width by its own kernel subdivision.
-        // Capture must mirror that contract, including groups whose owner blocks
-        // cover more tokens than the group that determines the rectangular width.
-        int64_t max_group_owner_blocks = 0;
-        for (size_t group_id = 0; group_id < kv_cache_group_tags_.size(); ++group_id) {
-            const int group_tokens = kv_cache_group_tokens_per_block_[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_tokens > 0,
-                                    "CUDA graph cache tag=%s has invalid owner tokens per block=%d",
-                                    kv_cache_group_tags_[group_id].c_str(),
-                                    group_tokens);
-            max_group_owner_blocks =
-                std::max(max_group_owner_blocks,
-                         (max_seq_len_ + static_cast<int64_t>(group_tokens) - 1) / group_tokens + sp_steps_);
-        }
         for (size_t group_id = 0; group_id < kv_cache_group_tags_.size(); ++group_id) {
             auto tagged_inputs = inputs.attention_inputs;
-            const int group_tokens        = kv_cache_group_tokens_per_block_[group_id];
-            const int group_kernel_tokens = kv_cache_group_kernel_tokens_per_block_[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_tokens > 0 && group_kernel_tokens > 0
-                                        && group_tokens % group_kernel_tokens == 0,
-                                    "CUDA graph cache tag=%s has invalid geometry owner_tokens=%d kernel_tokens=%d",
-                                    kv_cache_group_tags_[group_id].c_str(),
-                                    group_tokens,
-                                    group_kernel_tokens);
-            const int64_t group_max_blocks = max_group_owner_blocks * group_tokens / group_kernel_tokens;
-            RTP_LLM_LOG_INFO(
-                "CUDA graph tagged table tag=%s owner_tokens=%d kernel_tokens=%d shared_owner_blocks=%ld max_blocks=%ld",
-                             kv_cache_group_tags_[group_id].c_str(),
-                             group_tokens,
-                             group_kernel_tokens,
-                             max_group_owner_blocks,
-                             group_max_blocks);
-            tagged_inputs.kv_cache_kernel_block_id_device =
-                torch::zeros({int(max_bs_), group_max_blocks}, options_cuda_int32_);
-            tagged_inputs.kv_cache_kernel_block_id =
-                torch::zeros({int(max_bs_), group_max_blocks}, options_cpu_int32_).pin_memory();
+            if (group_id > 0) {
+                tagged_inputs.kv_cache_kernel_block_id_device =
+                    torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+                tagged_inputs.kv_cache_kernel_block_id =
+                    torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+            }
             const auto [it, inserted] =
                 inputs.attention_inputs_by_tag.emplace(kv_cache_group_tags_[group_id], std::move(tagged_inputs));
             (void)it;

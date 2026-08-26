@@ -76,6 +76,7 @@ void addBlockBudget(KVCacheBlockBudget& total, const KVCacheBlockBudget& additio
 }
 
 void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name) {
+    const auto previous_kernel_seq_size_per_block = config.kernel_seq_size_per_block;
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block % kernel_seq_size_per_block == 0,
@@ -88,25 +89,17 @@ void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_confi
         config.kernel_seq_size_per_block = config.seq_size_per_block;
     }
 
-    if (config.groupNums() == 0) {
+    if (config.kernel_seq_size_per_block == previous_kernel_seq_size_per_block || config.groupNums() == 0) {
         return;
     }
 
     auto groups           = config.topology().groups();
     bool topology_changed = false;
     for (auto& group : groups) {
-        auto expected_kernel_seq_size_per_block =
+        const auto expected_kernel_seq_size_per_block =
             group.policy.group_type == CacheGroupType::FULL && config.kernel_seq_size_per_block > 0 ?
                 std::min(config.kernel_seq_size_per_block, group.seq_size_per_block) :
                 group.seq_size_per_block;
-        // DeepGEMM's paged indexer kernel requires 64 compressed entries.
-        // INDEXER_KV compresses 4 raw tokens into one entry, so keep this
-        // group's storage/table rows at 256 raw tokens even when the global
-        // attention kernel block is smaller. Other groups still honor the
-        // user-provided kernel_seq_size_per_block.
-        if (group.tag == "indexer_kv" && group.seq_size_per_block >= 256) {
-            expected_kernel_seq_size_per_block = 256;
-        }
         if (group.kernel_seq_size_per_block != expected_kernel_seq_size_per_block) {
             group.kernel_seq_size_per_block = expected_kernel_seq_size_per_block;
             topology_changed                = true;
@@ -181,11 +174,7 @@ LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCach
         auto& specs = layer_specs[layer_id];
         specs.reserve(descs.size());
         for (const auto& desc : descs) {
-            auto spec_ctx = ctx;
-            if (desc.tag == "indexer_kv" && ctx.seq_size_per_block >= 256) {
-                spec_ctx.kernel_tokens_per_block = 256;
-            }
-            specs.push_back(SpecBuilder::build(desc, spec_ctx));
+            specs.push_back(SpecBuilder::build(desc, ctx));
         }
     }
     return layer_specs;
