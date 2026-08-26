@@ -4,8 +4,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #if USING_CUDA
@@ -971,7 +973,25 @@ void CudaGraphRunner::initCapture() {
 }
 
 void CudaGraphRunner::replayGraph(int key) {
-    graph_instances_[key].graph_.replay();
+    try {
+        graph_instances_[key].graph_.replay();
+    } catch (const std::exception& exception) {
+        if (!isTorchCudaOom(exception)) {
+            throw;
+        }
+        RTP_LLM_LOG_WARNING("[CudaGraph Replay] OOM, empty torch cache and retry once: key=%d mode=%s "
+                            "target_verify=%d error=%s",
+                            key,
+                            is_prefill_cuda_graph_mode_ ? "prefill" : "decode",
+                            is_target_verify_,
+                            exception.what());
+        if (metrics_reporter_) {
+            metrics_reporter_->report(
+                1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS, nullptr, true);
+        }
+        cuda_graph::graphEmptyCache();
+        graph_instances_[key].graph_.replay();
+    }
 }
 
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {

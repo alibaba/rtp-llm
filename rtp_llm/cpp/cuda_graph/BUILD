@@ -69,9 +69,11 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:torch_cuda_oom",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda",

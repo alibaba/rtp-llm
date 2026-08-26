@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <ATen/record_function.h>
 #include "gtest/gtest.h"
@@ -166,6 +167,19 @@ TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromSync) {
     runner.launch([&counter] { counter.fetch_add(1); });
     runner.sync(currentStream());
     EXPECT_EQ(counter.load(), 1);
+}
+
+TEST_F(AsyncRunnerTest, PreservesWorkerOomTypeAndMessage) {
+    auto        stream = makeStream();
+    AsyncRunner runner(stream);
+
+    runner.launch([] { C10_THROW_ERROR(OutOfMemoryError, "async CUDA OOM marker"); });
+    try {
+        runner.sync(currentStream());
+        FAIL() << "expected worker OOM";
+    } catch (const c10::OutOfMemoryError& exception) {
+        EXPECT_NE(std::string(exception.what()).find("async CUDA OOM marker"), std::string::npos);
+    }
 }
 
 TEST_F(AsyncRunnerTest, RethrowsWorkerExceptionFromNextLaunch) {

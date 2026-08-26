@@ -45,6 +45,17 @@ cc_library(
 )
 
 cc_library(
+    name = "torch_cuda_oom",
+    hdrs = ["TorchCudaOom.h"],
+    srcs = ["TorchCudaOom.cc"],
+    deps = [
+        ":core_utils",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "profiling_scope",
     hdrs = [
         "ProfilingScope.h",

@@ -637,6 +637,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
+    model_init_params.metrics_reporter = metrics_reporter_;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -692,6 +693,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 kv_cache_layer_to_group,
                                 cache_manager,
                                 mtp_params->model_config_.hc_mult});
+        model_params.metrics_reporter = metrics_reporter_;
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;

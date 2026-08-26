@@ -14,6 +14,10 @@
 #include <utility>
 #include <memory>
 
+namespace kmonitor {
+class MetricsReporter;
+}
+
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
@@ -58,7 +62,8 @@ struct GptModelInitParams {
     // is the contract between target and draft for MTP — see
     // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
     // input_hiddens.
-    int64_t hc_mult = 1;
+    int64_t                                    hc_mult = 1;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter;
 };
 
 enum GptModelInputIndex : size_t {
