@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <functional>
@@ -17,8 +18,10 @@ class LogitsProcessorFactory {
 public:
     using ErrorReporter = std::function<void(ErrorCode, const std::string&, bool)>;
 
-    static void
-    init(const std::string& ckpt_path, const std::string& tree_decode_config, const GrammarConfig& grammar_config);
+    static void init(const std::string&           ckpt_path,
+                     const std::string&           tree_decode_config,
+                     const GrammarConfig&         grammar_config,
+                     kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
     static bool hasGrammarConstraint(const GenerateConfig& config);
 

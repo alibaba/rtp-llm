@@ -1238,6 +1238,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
+        .def_readwrite("compile_timeout_ms", &GrammarConfig::compile_timeout_ms)
+        .def_readwrite("compile_concurrency", &GrammarConfig::compile_concurrency)
+        .def_readwrite("compile_queue_size", &GrammarConfig::compile_queue_size)
+        .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
         .def("to_string", &GrammarConfig::to_string)
@@ -1246,19 +1250,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return py::make_tuple(self.grammar_backend,
                                       self.constrained_json_disable_any_whitespace,
                                       self.num_workers,
+                                      self.compile_timeout_ms,
+                                      self.compile_concurrency,
+                                      self.compile_queue_size,
+                                      self.compiler_cache_bytes,
                                       self.tokenizer_info_json,
                                       self.override_stop_tokens);
             },
             [](py::tuple t) {
-                if (t.size() != 5)
+                if (t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
                     c.grammar_backend                         = t[0].cast<std::string>();
                     c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
                     c.num_workers                             = t[2].cast<int>();
-                    c.tokenizer_info_json                     = t[3].cast<std::string>();
-                    c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
+                    c.compile_timeout_ms                      = t[3].cast<int>();
+                    c.compile_concurrency                     = t[4].cast<int>();
+                    c.compile_queue_size                      = t[5].cast<int>();
+                    c.compiler_cache_bytes                    = t[6].cast<int64_t>();
+                    c.tokenizer_info_json                     = t[7].cast<std::string>();
+                    c.override_stop_tokens                    = t[8].cast<std::vector<int32_t>>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }

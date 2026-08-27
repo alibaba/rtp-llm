@@ -23,7 +23,7 @@ namespace rtp_llm {
 
 namespace {
 
-using JsonMap = autil::legacy::json::JsonMap;
+using JsonMap   = autil::legacy::json::JsonMap;
 using JsonArray = autil::legacy::json::JsonArray;
 
 std::mutex            g_grammar_backend_mutex;
@@ -141,7 +141,7 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                               int64_t                               eos_token_id,
                                               const GrammarKeyCpp&                  key,
                                               LogitsProcessorFactory::ErrorReporter error_reporter) {
-    auto config = generate_input->generate_config;
+    auto                  config = generate_input->generate_config;
     XGrammarBackendCppPtr backend;
     {
         std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
@@ -167,20 +167,24 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
     if (!compiled) {
         auto result = backend->compileNow(key);
         if (!result.compiled) {
-            backend->setCacheInvalid(key, result.error_message);
             if (error_reporter) {
-                error_reporter(ErrorCode::INVALID_PARAMS, "failed to compile grammar: " + result.error_message, false);
+                // An overload says nothing about the schema, and the background compile keeps running so a
+                // retry is cheap. It must therefore carry a retryable code, not a 400.
+                const auto code =
+                    result.is_overloaded ? ErrorCode::GRAMMAR_COMPILE_OVERLOADED : ErrorCode::INVALID_PARAMS;
+                const std::string prefix =
+                    result.is_overloaded ? "grammar request rejected: " : "failed to compile grammar: ";
+                error_reporter(code, prefix + result.error_message, false);
             }
             return nullptr;
         }
         compiled = result.compiled;
-        backend->setCache(key, compiled);
     }
 
     const bool terminate_without_stop_token = key.key_type == "json";
     if (config->in_think_mode) {
-        auto matcher = backend->createMatcher(
-            compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+        auto matcher =
+            backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
         return std::make_shared<ReasoningGrammarLogitsProcessor>(std::move(matcher),
                                                                  eos_token_id,
                                                                  config->max_thinking_tokens,
@@ -190,8 +194,8 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                                                  std::move(error_reporter));
     }
 
-    auto matcher = backend->createMatcher(
-        compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
+    auto matcher =
+        backend->createMatcher(compiled, /*require_reasoning=*/false, std::nullopt, terminate_without_stop_token);
     return std::make_shared<GrammarLogitsProcessor>(std::move(matcher), eos_token_id, std::move(error_reporter));
 }
 
@@ -204,11 +208,11 @@ void appendThinkProcessor(std::vector<BaseLogitsProcessorPtr>& result,
     }
 }
 
-void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&       result,
-                            std::shared_ptr<GenerateInput>             generate_input,
-                            int64_t                                    eos_token_id,
-                            const GrammarKeyCpp&                       grammar_key,
-                            LogitsProcessorFactory::ErrorReporter      error_reporter) {
+void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&  result,
+                            std::shared_ptr<GenerateInput>        generate_input,
+                            int64_t                               eos_token_id,
+                            const GrammarKeyCpp&                  grammar_key,
+                            LogitsProcessorFactory::ErrorReporter error_reporter) {
     auto grammar_processor = createGrammarProcessor(generate_input, eos_token_id, grammar_key, error_reporter);
     if (grammar_processor != nullptr) {
         result.push_back(std::move(grammar_processor));
@@ -240,13 +244,24 @@ bool LogitsProcessorFactory::hasGrammarConstraint(const GenerateConfig& config) 
     }
 }
 
-void LogitsProcessorFactory::init(const std::string&   ckpt_path,
-                                  const std::string&   tree_decode_config,
-                                  const GrammarConfig& grammar_config) {
+void LogitsProcessorFactory::init(const std::string&           ckpt_path,
+                                  const std::string&           tree_decode_config,
+                                  const GrammarConfig&         grammar_config,
+                                  kmonitor::MetricsReporterPtr metrics_reporter) {
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(ckpt_path, tree_decode_config);
 
+    // Destroying the previous backend joins its compile pool, which blocks until any running compile
+    // finishes. Hand it off so that join happens after g_grammar_backend_mutex is released, otherwise a
+    // re-init would stall every concurrent grammar request for the length of a pathological compile.
+    XGrammarBackendCppPtr previous;
+    {
+        std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
+        previous = std::move(g_grammar_backend);
+        g_grammar_backend.reset();
+    }
+    previous.reset();
+
     std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
-    g_grammar_backend.reset();
 
     auto backend_name = grammar_config.grammar_backend;
     std::transform(backend_name.begin(), backend_name.end(), backend_name.begin(), [](unsigned char c) {
@@ -268,12 +283,17 @@ void LogitsProcessorFactory::init(const std::string&   ckpt_path,
     XGrammarBackendOptions options;
     options.any_whitespace       = !grammar_config.constrained_json_disable_any_whitespace;
     options.max_compiler_threads = std::max(1, grammar_config.num_workers);
+    options.compile_timeout_ms   = grammar_config.compile_timeout_ms;
+    options.compile_concurrency  = grammar_config.compile_concurrency;
+    options.compile_queue_size   = grammar_config.compile_queue_size;
+    options.compiler_cache_bytes = grammar_config.compiler_cache_bytes;
     if (!grammar_config.override_stop_tokens.empty()) {
         options.override_stop_tokens =
             std::vector<int>(grammar_config.override_stop_tokens.begin(), grammar_config.override_stop_tokens.end());
     }
     try {
-        g_grammar_backend = std::make_shared<XGrammarBackendCpp>(grammar_config.tokenizer_info_json, options);
+        g_grammar_backend = std::make_shared<XGrammarBackendCpp>(
+            grammar_config.tokenizer_info_json, options, std::move(metrics_reporter));
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("failed to initialize xgrammar backend: %s", e.what());
     }

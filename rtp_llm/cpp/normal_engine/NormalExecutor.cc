@@ -171,8 +171,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    LogitsProcessorFactory::init(
-        params.model_config_.ckpt_path, params.sp_config.tree_decode_config, params.grammar_config);
+    LogitsProcessorFactory::init(params.model_config_.ckpt_path,
+                                 params.sp_config.tree_decode_config,
+                                 params.grammar_config,
+                                 params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
 }
 

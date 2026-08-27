@@ -383,9 +383,23 @@ struct FIFOSchedulerConfig {
 };
 
 struct GrammarConfig {
-    std::string          grammar_backend                         = "xgrammar";
-    bool                 constrained_json_disable_any_whitespace = false;
-    int                  num_workers                             = 8;
+    std::string grammar_backend                         = "xgrammar";
+    bool        constrained_json_disable_any_whitespace = false;
+    int         num_workers                             = 8;
+    // Wall-clock budget for one grammar compile; <=0 restores the unbounded synchronous compile.
+    int compile_timeout_ms = 50;
+    // Grammar compiles running at once. Each one internally fans out over num_workers threads, so this
+    // multiplies CPU usage. It caps what used to be unbounded: before the guard every caller compiled
+    // inline on its own thread.
+    int compile_concurrency = 16;
+    // Queued grammar compiles. Soft bound: a slot is freed when a worker picks the compile up, so up to
+    // compile_queue_size + compile_concurrency compiles can be outstanding.
+    int compile_queue_size = 64;
+    // Byte ceiling for cached compiled grammars, applied both to xgrammar's compiler cache and to the
+    // engine's verdict cache. The two share the same compiled grammars, so the per-rank bound is about
+    // 4/3 of this, and a DP8 node holds eight times that. <=0 is unlimited, which is how the engine
+    // behaved before the ceiling existed.
+    int64_t              compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
     std::string          tokenizer_info_json;
     std::vector<int32_t> override_stop_tokens;
     std::string          to_string() const;

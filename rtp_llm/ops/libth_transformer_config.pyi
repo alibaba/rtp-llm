@@ -512,6 +512,10 @@ class FIFOSchedulerConfig:
 
 
 class GrammarConfig:
+    compile_concurrency: int
+    compile_queue_size: int
+    compile_timeout_ms: int
+    compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
     grammar_backend: str
     num_workers: int

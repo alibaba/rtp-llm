@@ -661,8 +661,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.sp_config,
                                                               warm_up_));
 
-    LogitsProcessorFactory::init(
-        params.model_config_.ckpt_path, params.sp_config.tree_decode_config, params.grammar_config);
+    LogitsProcessorFactory::init(params.model_config_.ckpt_path,
+                                 params.sp_config.tree_decode_config,
+                                 params.grammar_config,
+                                 params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
 
     for (auto& mtp_params : *propose_params->mtp_model_params_) {

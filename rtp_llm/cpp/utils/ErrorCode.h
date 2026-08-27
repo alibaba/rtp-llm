@@ -27,6 +27,11 @@ enum class ErrorCode {
     OUTPUT_QUEUE_FULL     = 8102,
     OUTPUT_QUEUE_IS_EMPTY = 8103,
     FINISHED              = 8104,
+    // Grammar compilation was refused or exceeded its wait budget. The schema was not judged, and the
+    // compile keeps running in the background, so the request is safe to retry. Deliberately not the
+    // master's 8431 RESOURCE_EXHAUSTED: that code is only valid paired with an AdmissionRejectReason the
+    // engine has no way to set, and unpaired it is reported as a protocol violation upstream.
+    GRAMMAR_COMPILE_OVERLOADED = 8105,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,
@@ -212,6 +217,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "GET_ALL_NODE_STATUS_FAILED";
         case ErrorCode::PRIORITY_PREEMPTED:
             return "PRIORITY_PREEMPTED";
+        case ErrorCode::GRAMMAR_COMPILE_OVERLOADED:
+            return "GRAMMAR_COMPILE_OVERLOADED";
         default:
             return "Error: Unrecognized ErrorCode";
     }

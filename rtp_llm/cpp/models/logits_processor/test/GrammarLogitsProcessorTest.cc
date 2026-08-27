@@ -37,6 +37,9 @@ std::string makeTokenizerInfoJson() {
 XGrammarBackendCpp makeBackend() {
     XGrammarBackendOptions options;
     options.max_compiler_threads = 1;
+    // These tests assert on matcher behaviour, not on admission control. Disabling the budget keeps the
+    // compile inline and deterministic instead of racing a wall clock on shared CI hardware.
+    options.compile_timeout_ms = 0;
     return XGrammarBackendCpp(makeTokenizerInfoJson(), options);
 }
 

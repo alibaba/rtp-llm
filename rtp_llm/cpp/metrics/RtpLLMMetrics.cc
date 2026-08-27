@@ -23,6 +23,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMWallClockTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMGrammarMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
@@ -329,6 +330,29 @@ bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
     REPORT_GAUGE(step_latency_us);
+}
+
+bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(compile_qps_metric, "rtp_llm_grammar_compile_qps");
+    REGISTER_QPS_MUTABLE_METRIC(compile_invalid_qps_metric, "rtp_llm_grammar_compile_invalid_qps");
+    REGISTER_QPS_MUTABLE_METRIC(cache_hit_qps_metric, "rtp_llm_grammar_cache_hit_qps");
+    REGISTER_QPS_MUTABLE_METRIC(overload_qps_metric, "rtp_llm_grammar_overload_qps");
+    REGISTER_GAUGE_MUTABLE_METRIC(compile_latency_us_metric, "rtp_llm_grammar_compile_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(compile_inflight_metric, "rtp_llm_grammar_compile_inflight");
+    REGISTER_GAUGE_MUTABLE_METRIC(cache_bytes_metric, "rtp_llm_grammar_cache_bytes");
+    return true;
+}
+
+void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector) {
+    REPORT_QPS(compile_qps);
+    REPORT_QPS(compile_invalid_qps);
+    REPORT_QPS(cache_hit_qps);
+    REPORT_QPS(overload_qps);
+    REPORT_GAUGE(compile_latency_us);
+    // Resident-state gauges: report even when zero, otherwise a drained cache is indistinguishable
+    // from a stalled reporter.
+    REPORT_MUTABLE_METRIC(compile_inflight_metric, collector->compile_inflight);
+    REPORT_MUTABLE_METRIC(cache_bytes_metric, collector->cache_bytes);
 }
 
 bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
