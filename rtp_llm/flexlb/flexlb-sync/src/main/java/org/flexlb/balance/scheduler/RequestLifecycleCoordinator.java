@@ -2057,7 +2057,7 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
                             RoleType.PREFILL.name(),
                             publication.item().prefillEp() == null
                                     ? ""
-                                    : publication.item().prefillEp().getIp(),
+                                    : publication.item().prefillEp().ipPort(),
                             latencyMs));
         }
         if (preparationFailure != null) {

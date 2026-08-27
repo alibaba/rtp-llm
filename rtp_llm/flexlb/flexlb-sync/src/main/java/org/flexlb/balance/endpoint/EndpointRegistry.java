@@ -1145,10 +1145,12 @@ public class EndpointRegistry {
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
         try {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
+            // ipPort, not bare IP: mock fleets share one IP, and per-engine
+            // metric series must stay one-per-engine (see BatchSchedulerReporter).
+            reporter.prepareEndpointMetrics(roleType.name(), status.getIpPort());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn("Endpoint metric preparation failed: role={}, engine={}",
-                    roleType, status.getIp(), telemetryFailure);
+                    roleType, status.getIpPort(), telemetryFailure);
         }
     }
 

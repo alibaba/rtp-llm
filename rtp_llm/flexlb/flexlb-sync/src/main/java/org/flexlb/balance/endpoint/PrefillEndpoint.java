@@ -542,23 +542,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.RequestScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
+        // Per-engine series are keyed by ipPort: mock fleets of 1,250+ engines
+        // share one IP, so a bare-IP label would collapse every engine onto a
+        // single sequence and let later reports overwrite earlier ones.
+        String engine = ipPort();
         int queueSize = runtime.queueSize();
-        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), queueSize);
+        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), engine, queueSize);
         // Priority-bucketed batch queue length — single-report with priority tag.
         // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
         Map<Integer, Integer> sizeByPriority =
                 runtime.queueSizeByPriority();
         if (sizeByPriority.isEmpty()) {
-            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), 0, 0);
+            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engine, 0, 0);
         } else {
             sizeByPriority.forEach((priority, size) ->
-                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), priority, size));
+                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), engine, priority, size));
         }
-        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), getLocallyOwnedRequestCount());
+        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), engine, getInflightBatchCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), engine, getLocallyOwnedRequestCount());
         reporter.reportInflightMaxAgeMs(
                 RoleType.PREFILL.name(),
-                getIp(),
+                engine,
                 workLedger.stats().maxObservedAgeMs());
     }
 
@@ -587,7 +591,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         org.flexlb.util.Logger.debug(
                 "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
                 batchId, predictedMs, actualMs, gapMs,
-                completion.originalFeatures().batchSize(), getIp());
+                completion.originalFeatures().batchSize(), ipPort());
 
         // A failed/removed member makes the original batch an invalid learning
         // sample even if another member completed successfully.
@@ -601,7 +605,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
             } catch (RuntimeException learningFailure) {
                 logger.warn("batch predictor learning failed after settlement: batchId={} engine={}",
-                        batchId, getIp(), learningFailure);
+                        batchId, ipPort(), learningFailure);
             }
         }
 
@@ -609,22 +613,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // a metrics outage cannot suppress the scheduler's WorkerStatus
         // reducer or prevent the remaining observations.
         try {
-            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
+            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), ipPort(), predictedMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch predicted-time metric failed: batchId={} engine={}",
-                    batchId, getIp(), telemetryFailure);
+                    batchId, ipPort(), telemetryFailure);
         }
         try {
-            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
+            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), ipPort(), actualMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch actual-time metric failed: batchId={} engine={}",
-                    batchId, getIp(), telemetryFailure);
+                    batchId, ipPort(), telemetryFailure);
         }
         try {
-            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
+            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), ipPort(), gapMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch prediction-gap metric failed: batchId={} engine={}",
-                    batchId, getIp(), telemetryFailure);
+                    batchId, ipPort(), telemetryFailure);
         }
     }
 

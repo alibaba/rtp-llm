@@ -2695,11 +2695,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.RequestScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), getInflightCount());
-        reporter.reportDecodeTotalLoad(getIp(), getTotalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), inflightKvReserved());
-        reporter.reportDecodeInflightHardKvReserved(getIp(), inflightHardKvReserved());
-        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getIp(),
+        // Per-engine series are keyed by ipPort (see PrefillEndpoint): mock
+        // fleets share one IP, so a bare-IP label collapses all engines onto
+        // one overwriting sequence.
+        String engine = ipPort();
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), engine, getInflightCount());
+        reporter.reportDecodeTotalLoad(engine, getTotalLoad());
+        reporter.reportDecodeInflightKvReserved(engine, inflightKvReserved());
+        reporter.reportDecodeInflightHardKvReserved(engine, inflightHardKvReserved());
+        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), engine,
                 TtlEvictor.maxAgeMs(inflightRequests, System.currentTimeMillis()));
     }
 

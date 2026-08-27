@@ -167,6 +167,44 @@ class BatchSchedulerReporterTest {
         verify(monitor).report(INFLIGHT_TTL_EXPIRED_QPS, tags, 1.0);
     }
 
+    // ---- per-engine label format: ipPort ----
+    // Callers now pass "ip:port" (WorkerEndpoint.ipPort()) so that mock fleets
+    // sharing one IP keep one metric series per engine instead of collapsing
+    // 1,250 engines onto a single overwriting sequence.
+
+    @Test
+    void should_report_per_engine_series_with_ip_port_label_verbatim() {
+        reporter.reportDispatchReason("PREFILL", "10.0.0.1:63000", "batch_full");
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "PREFILL",
+                "engineIp", "10.0.0.1:63000",
+                "reason", "batch_full");
+        verify(monitor).report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
+    }
+
+    @Test
+    void should_report_inflight_metrics_with_ip_port_engine_label() {
+        reporter.reportInflightMaxAgeMs("DECODE", "10.0.0.1:63000", 7_000L);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", "10.0.0.1:63000",
+                "role", "DECODE");
+        verify(monitor).report(INFLIGHT_MAX_AGE_MS, tags, 7_000.0);
+    }
+
+    @Test
+    void should_prepare_endpoint_metrics_with_ip_port_engine_label() {
+        reporter.prepareEndpointMetrics("PREFILL", "10.0.0.1:63000");
+
+        FlexMetricTags endpointTags = FlexMetricTags.of(
+                "role", "PREFILL",
+                "engineIp", "10.0.0.1:63000");
+        verify(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
+        verify(monitor).prepare(ROUTE_SUBMIT_TIME_MS, endpointTags);
+        verify(monitor).prepare(ROUTING_QUEUE_WAIT_TIME_MS, endpointTags);
+    }
+
     @Test
     void should_report_decode_inflight_hard_kv_reserved_with_decode_role() {
         reporter.reportDecodeInflightHardKvReserved("10.0.0.2", 8_192L);
