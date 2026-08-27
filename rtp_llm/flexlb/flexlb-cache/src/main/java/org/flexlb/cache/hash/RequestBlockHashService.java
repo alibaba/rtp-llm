@@ -55,6 +55,8 @@ public class RequestBlockHashService {
                 .doOnNext(result -> {
                     request.setBlockCacheKeys(result.blockCacheKeys());
                     request.setInputIds(null);
+                    context.recordBlockHashTiming(
+                            result.queueWaitTimeUs(), result.executionTimeUs());
                 })
                 .then();
     }

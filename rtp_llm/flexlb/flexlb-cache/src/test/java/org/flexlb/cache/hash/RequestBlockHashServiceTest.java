@@ -62,12 +62,15 @@ class RequestBlockHashServiceTest {
         when(executor.calculate(request.getInputIds(), 4L, 0))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(
                         List.of(99L), 12, 34)));
+        BalanceContext context = contextFor(request);
 
-        service.prepareBlockCacheKeys(contextFor(request)).block();
+        service.prepareBlockCacheKeys(context).block();
 
         assertEquals(List.of(99L), request.getBlockCacheKeys());
         assertEquals(4L, request.getBlockSize());
         assertNull(request.getInputIds());
+        assertEquals(12, context.getBlockHashQueueWaitTimeUs());
+        assertEquals(34, context.getBlockHashExecutionTimeUs());
     }
 
     @Test
