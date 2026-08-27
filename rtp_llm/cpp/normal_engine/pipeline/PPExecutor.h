@@ -3,16 +3,17 @@
 #include <functional>
 #include <list>
 #include <memory>
-#include <optional>
 #include <unordered_map>
 #include <vector>
 
 #include <torch/torch.h>
 
+#include "kmonitor/client/MetricsReporter.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_utils/MlaConfig.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
@@ -23,10 +24,12 @@
 namespace rtp_llm {
 
 struct EngineInitParams;
+struct GptModelInitParams;
 class KVCacheManager;
 class ModelBase;
 class Sampler;
 class ExpertBalancer;
+class ModelInputsLogger;
 class NormalBatchStreamProcessor;
 
 using PPTickets = std::vector<std::unique_ptr<PPCommTicket>>;
@@ -43,12 +46,36 @@ public:
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
 
+    bool updateEplbConfig(const EPLBConfig& config) override;
+
+    void setBatchProcessor(std::unique_ptr<NormalBatchStreamProcessor> processor) {
+        batch_stream_processor_ = std::move(processor);
+    }
+
+    void setModel(std::unique_ptr<ModelBase> model) {
+        model_ = std::move(model);
+    }
+
+    using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
+    static ModelFactory test_model_factory;
+
 private:
+    struct SamplingConfig {
+        explicit SamplingConfig(const ModelConfig& model_config);
+
+        std::vector<int64_t> output_vocab_ids;
+        int64_t              processor_eos_token_id = 0;
+    };
+
     struct InflightBatch {
+        bool                         skip_run = true;
         std::list<GenerateStreamPtr> streams;
+        int64_t                      schedule_time_us = 0;
         PPTickets                    plan_sends;
         PPTickets                    activation_sends;
         PPTickets                    sample_result_sends;
+
+        void reset();
     };
 
     struct RequestSamplingState {
@@ -83,22 +110,26 @@ private:
     }
 
 private:
+    std::unique_ptr<ModelBase>                                               model_;
+    std::unique_ptr<Sampler>                                                 sampler_;
+    std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
+    std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
+    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
+    const SamplingConfig                                                     sampling_config_;
+    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
+    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    bool                                              enable_detail_log_ = false;
     const ParallelismConfig                           parallelism_config_;
     const int64_t                                     pp_rank_;
-    std::shared_ptr<KVCacheManager>                   cache_manager_;
-    std::unique_ptr<ModelBase>                        model_;
-    std::unique_ptr<Sampler>                          sampler_;
-    std::unique_ptr<NormalBatchStreamProcessor>       batch_stream_processor_;
-    std::shared_ptr<ExpertBalancer>                   expert_balancer_;
     std::unique_ptr<PPTransport>                      transport_;
     std::function<void()>                             profile_step_start_;
     std::function<void()>                             profile_step_finish_;
-    std::vector<std::optional<InflightBatch>>         slots_;
+    std::vector<InflightBatch>                        slots_;
     TensorHolder                                      buffer_holder_;
     std::unordered_map<int64_t, RequestSamplingState> sampling_states_;
-    std::vector<int64_t>                              output_vocab_ids_;
-    int64_t                                           processor_eos_token_id_ = 0;
-    size_t                                            current_slot_           = 0;
+    size_t                                            current_slot_ = 0;
 };
 
 }  // namespace rtp_llm

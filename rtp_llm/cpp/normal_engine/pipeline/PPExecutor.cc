@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/eplb/ExpertBalancer.h"
@@ -26,6 +27,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -191,6 +193,27 @@ PPSampleResult makeSampleResult(const PPSamplingData&       data,
 
 }  // namespace
 
+PPExecutor::ModelFactory PPExecutor::test_model_factory = nullptr;
+
+PPExecutor::SamplingConfig::SamplingConfig(const ModelConfig& model_config):
+    output_vocab_ids(model_config.output_vocab_ids), processor_eos_token_id(model_config.special_tokens.eos_token_id) {
+    if (output_vocab_ids.empty()) {
+        return;
+    }
+
+    const auto eos_it =
+        std::lower_bound(output_vocab_ids.begin(), output_vocab_ids.end(), model_config.special_tokens.eos_token_id);
+    RTP_LLM_CHECK_WITH_INFO(eos_it != output_vocab_ids.end() && *eos_it == model_config.special_tokens.eos_token_id,
+                            "primary EOS token is absent from the configured output vocabulary");
+    processor_eos_token_id = std::distance(output_vocab_ids.begin(), eos_it);
+}
+
+void PPExecutor::InflightBatch::reset() {
+    skip_run = true;
+    streams.clear();
+    schedule_time_us = 0;
+}
+
 void PPExecutor::sendObject(const torch::Tensor& object, PPTickets& tickets) {
     auto object_size      = torch::tensor({object.numel()}, torch::kInt64).to(torch::kCUDA);
     auto object_on_device = object.to(torch::kCUDA);
@@ -249,6 +272,8 @@ void PPExecutor::waitAll(PPTickets& tickets) {
 }
 
 absl::Status PPExecutor::processSampleResult(InflightBatch& batch) {
+    // TODO: Synchronously receive the serialized sample-result metadata and payload here, then deserialize the
+    // result and apply it to batch.streams. The payload receive cannot be posted before its metadata is received.
     (void)batch;
     return absl::UnimplementedError("PP sample result receive and stream update are not implemented");
 }
@@ -258,14 +283,64 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                        MlaOpsType                             mla_ops_type,
                        std::function<void()>                  profile_step_start,
                        std::function<void()>                  profile_step_finish):
+    Executor(),
+    cache_manager_(cache_manager),
+    sampling_config_(params.model_config_),
+    metrics_reporter_(params.metrics_reporter),
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.world_rank == 0 ? metrics_reporter_ : nullptr)),
+    wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.world_rank == 0 ? metrics_reporter_ : nullptr)),
     parallelism_config_(params.parallelism_config),
     pp_rank_(parallelism_config_.world_rank / parallelism_config_.tp_size),
-    cache_manager_(cache_manager),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     slots_(parallelism_config_.pp_size + 1) {
-    RTP_LLM_FAIL(
-        "PPTransport backend is not implemented: per-rank plan receive and same-TP-lane tensor P2P are required");
+
+    const auto previous_stage = (pp_rank_ + parallelism_config_.pp_size - 1) % parallelism_config_.pp_size;
+    const auto next_stage     = (pp_rank_ + 1) % parallelism_config_.pp_size;
+    const auto previous_rank =
+        static_cast<int>(previous_stage * parallelism_config_.tp_size + parallelism_config_.tp_rank);
+    const auto next_rank = static_cast<int>(next_stage * parallelism_config_.tp_size + parallelism_config_.tp_rank);
+    transport_           = std::make_unique<NcclPPTransport>(previous_rank, next_rank);
+
+    enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
+    RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, parallelism_config_.tp_rank);
+    if (params.profiling_debug_logging_config.enable_model_inputs_log) {
+        model_inputs_logger_ =
+            std::make_shared<ModelInputsLogger>(params.parallelism_config.world_rank,
+                                                params.profiling_debug_logging_config.log_file_backup_count,
+                                                metrics_reporter_);
+    }
+
+    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
+        int         first_moe_layer = params.model_config_.moe_layer_index.front();
+        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
+        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
+        bool        is_gated_activation = params.model_config_.isGatedActivation();
+        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+
+        expert_balancer_ =
+            std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
+                                             params.eplb_config.phy_exp_num(params.model_config_.expert_num),
+                                             params.model_config_.num_layers,
+                                             moe_inter_size,
+                                             params.model_config_.hidden_size,
+                                             params.parallelism_config.ep_rank,
+                                             params.parallelism_config.ep_size,
+                                             params.parallelism_config.world_size,
+                                             params.py_eplb,
+                                             moe_weight_type,
+                                             params.model_config_.quant_algo,
+                                             metrics_reporter_,
+                                             params.eplb_config);
+    }
+
+    if (isLastStage() && isStageRoot()) {
+        const auto initial_sampler_batch_size =
+            static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
+        sampler_ = std::make_unique<Sampler>(SamplerInitParams{initial_sampler_batch_size, false});
+    }
 
     const size_t runtime_tokens_per_block        = cache_manager_ ? cache_manager_->cacheConfig().seq_size_per_block :
                                                                     params.model_config_.attn_config.tokens_per_block;
@@ -295,66 +370,29 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
          params.model_config_.hc_mult});
 
     if (!params.py_model.is_none()) {
+        RTP_LLM_LOG_INFO("init executor with python model");
         model_ = std::make_unique<PyWrappedModel>(model_init_params, params.py_model);
+    } else if (test_model_factory) {
+        RTP_LLM_LOG_INFO("init executor with test model factory");
+        model_ = test_model_factory(model_init_params);
     } else {
-        RTP_LLM_LOG_WARNING("PPExecutor py_model is None; stage forward is unavailable");
+        RTP_LLM_LOG_WARNING("py_model is None — model will not be initialized (test mode)");
     }
 
     const auto& cache_config = cache_manager_ ? cache_manager_->cacheConfig() : CacheConfig();
     batch_stream_processor_  = std::make_unique<NormalBatchStreamProcessor>(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, false);
     LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
-
-    output_vocab_ids_       = params.model_config_.output_vocab_ids;
-    processor_eos_token_id_ = params.model_config_.special_tokens.eos_token_id;
-    if (!output_vocab_ids_.empty()) {
-        const auto& output_vocab_ids = params.model_config_.output_vocab_ids;
-        const auto  eos_it           = std::lower_bound(
-            output_vocab_ids.begin(), output_vocab_ids.end(), params.model_config_.special_tokens.eos_token_id);
-        RTP_LLM_CHECK_WITH_INFO(eos_it != output_vocab_ids.end()
-                                    && *eos_it == params.model_config_.special_tokens.eos_token_id,
-                                "primary EOS token is absent from the configured output vocabulary");
-        processor_eos_token_id_ = std::distance(output_vocab_ids.begin(), eos_it);
-    }
-
-    if (isLastStage() && isStageRoot()) {
-        const auto initial_sampler_batch_size =
-            static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
-        sampler_ = std::make_unique<Sampler>(SamplerInitParams{initial_sampler_batch_size, false});
-    }
-
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
-        const int   first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        const auto  moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        const bool  is_gated_activation = params.model_config_.isGatedActivation();
-        const auto  moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
-
-        expert_balancer_ =
-            std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
-                                             params.eplb_config.phy_exp_num(params.model_config_.expert_num),
-                                             params.model_config_.num_layers,
-                                             moe_inter_size,
-                                             params.model_config_.hidden_size,
-                                             params.parallelism_config.ep_rank,
-                                             params.parallelism_config.ep_size,
-                                             params.parallelism_config.world_size,
-                                             params.py_eplb,
-                                             moe_weight_type,
-                                             params.model_config_.quant_algo,
-                                             params.metrics_reporter,
-                                             params.eplb_config);
-    }
+    cudaProfilerBegin();
 }
 
 PPExecutor::~PPExecutor() {
     for (auto& slot : slots_) {
-        if (slot.has_value()) {
-            waitAll(slot->plan_sends);
-            waitAll(slot->activation_sends);
-            waitAll(slot->sample_result_sends);
-        }
+        waitAll(slot.plan_sends);
+        waitAll(slot.activation_sends);
+        waitAll(slot.sample_result_sends);
     }
+    cudaProfilerEnd();
 }
 
 absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const std::list<GenerateStreamPtr>& streams) {
@@ -438,7 +476,7 @@ absl::StatusOr<SamplerInputs> PPExecutor::makeSamplerInputs(const PPSamplingData
             generate_input->generate_config = config;
             generate_input->input_ids       = data.token_ids[index].narrow(0, 0, input_lengths[index]).clone();
             auto processors_result          = LogitsProcessorFactory::createLogitsProcessors(
-                std::move(generate_input), 1, 1, processor_eos_token_id_);
+                std::move(generate_input), 1, 1, sampling_config_.processor_eos_token_id);
             if (!processors_result.ok()) {
                 return absl::InvalidArgumentError("failed to initialize sampling state for request_id="
                                                   + std::to_string(request_ids[index]) + ": "
@@ -515,7 +553,17 @@ void PPExecutor::advanceSamplingStates(const PPSamplingData& data, PPSampleResul
     }
 }
 
-absl::Status PPExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t) {
+absl::Status PPExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+    if (schedule_time_us <= 0) {
+        schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+    auto tps_active_guard =
+        tps_reporter_.makeActiveGuard(metrics_reporter_ && isFirstStage() && isStageRoot() && !streams.empty());
+    auto wall_tps_active_guard =
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isFirstStage() && isStageRoot() && !streams.empty());
+    RTP_LLM_PROFILE_FUNCTION();
+
+    /** 1. recv the plan from the previous stage */
     PPExecutionPlan plan;
     if (isFirstStage()) {
         auto plan_status = buildPlan(streams);
@@ -525,84 +573,119 @@ absl::Status PPExecutor::process(const std::list<GenerateStreamPtr>& streams, in
         plan = receivePlan();
     }
 
+    /** 2. do the sync across the all ranks in the same stage. */
     tpSyncModelInputs(plan.model_input, parallelism_config_);
-    if (plan.model_input.skip_run) {
-        return absl::OkStatus();
-    }
 
-    auto& slot = slots_[current_slot_];
-    if (slot.has_value()) {
-        waitAll(slot->plan_sends);
-        waitAll(slot->activation_sends);
-        waitAll(slot->sample_result_sends);
-        slot.reset();
-    }
+    /** 3. make sure the current slot is ready. */
+    auto& inflight = slots_[current_slot_];
+    waitAll(inflight.plan_sends);
+    waitAll(inflight.activation_sends);
+    waitAll(inflight.sample_result_sends);
+    inflight.reset();
+    inflight.skip_run = plan.model_input.skip_run;
 
-    auto& inflight = slot.emplace();
-    if (isFirstStage() && isStageRoot()) {
-        inflight.streams = streams;
-    }
-
+    /** 4. send the plan to next stage  */
     if (!isLastStage()) {
         asyncSendPlan(plan, !isStageRoot(), inflight.plan_sends);
+
+        if (isFirstStage() && isStageRoot()) {
+            inflight.streams          = streams;
+            inflight.schedule_time_us = schedule_time_us;
+        }
     }
 
-    PPTickets             tensor_receives;
-    PPIntermediateTensors input_tensors;
-    if (!isFirstStage()) {
-        input_tensors = receiveTensors(tensor_receives);
-    }
+    /** 5. run the batch. */
+    if (!plan.model_input.skip_run) {
+        PPTickets             tensor_receives;
+        PPIntermediateTensors input_tensors;
+        PPIntermediateTensors output_tensors;
 
-    waitAll(tensor_receives);
+        if (!isFirstStage()) {
+            input_tensors = receiveTensors(tensor_receives);
+            waitAll(tensor_receives);
+        }
 
-    if (profile_step_start_) {
-        profile_step_start_();
-    }
+        if (profile_step_start_) {
+            profile_step_start_();
+        }
 
-    RTP_LLM_CHECK_WITH_INFO(model_ != nullptr, "PP stage model is not initialized");
+        GptModelInputs& local_model_input = plan.model_input;
+        buffer_holder_.release();
+        model_->releaseBuffers();
+        if (cache_manager_ && local_model_input.kv_cache_update_mapping.defined()) {
+            cache_manager_->blockBatchCopy(local_model_input.kv_cache_update_mapping);
+        }
 
-    GptModelInputs& local_model_input = plan.model_input;
-    buffer_holder_.release();
-    model_->releaseBuffers();
-    if (cache_manager_ && local_model_input.kv_cache_update_mapping.defined()) {
-        cache_manager_->blockBatchCopy(local_model_input.kv_cache_update_mapping);
-    }
+        const bool force = isStageRoot() && enable_detail_log_;
+        if (force) {
+            RTP_LLM_LOG_INFO("model_input: %s", local_model_input.debugString(force).c_str());
+        } else {
+            RTP_LLM_LOG_TRACE("model_input: %s", local_model_input.debugString(force).c_str());
+        }
+        if (model_inputs_logger_) {
+            model_inputs_logger_->log(local_model_input, ModelInputsModelRole::NORMAL, model_->model_id_);
+        }
+        auto model_output = model_->forwardPP(
+            local_model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
 
-    PPIntermediateTensors output_tensors;
-    auto                  model_output = model_->forwardPP(
-        local_model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
-    if (expert_balancer_) {
-        RtpLLMExecutorMetricsCollector collector;
-        expert_balancer_->stepForward(*model_, collector);
-    }
+        if (expert_balancer_) {
+            RtpLLMExecutorMetricsCollector collector;
+            expert_balancer_->stepForward(*model_, collector);
+        }
 
-    auto forward_done = cuda_graph::makeGraphEvent();
-    forward_done.record(cuda_graph::graphGetCurrentStream());
-    forward_done.synchronize();
+        auto forward_done = cuda_graph::makeGraphEvent();
+        forward_done.record(cuda_graph::graphGetCurrentStream());
+        forward_done.synchronize();
 
-    if (!isLastStage()) {
-        asyncSendTensors(output_tensors, inflight.activation_sends);
-    } else if (isStageRoot()) {
-        auto sampler_inputs_status = makeSamplerInputs(plan.sampling, model_output.logits);
-        RETURN_IF_STATUS_OR_ERROR(sampler_inputs_status);
-        auto sampler_inputs = std::move(sampler_inputs_status.value());
-        auto sampler_output = sampler_->forward(sampler_inputs);
-        auto sample_result  = makeSampleResult(plan.sampling, sampler_output, output_vocab_ids_);
-        advanceSamplingStates(plan.sampling, sample_result);
-        asyncSendSampleResult(sample_result, inflight.sample_result_sends);
-    }
+        if (!isLastStage()) {
+            asyncSendTensors(output_tensors, inflight.activation_sends);
+        } else if (isStageRoot()) {
+            auto sampler_inputs_status = makeSamplerInputs(plan.sampling, model_output.logits);
+            RETURN_IF_STATUS_OR_ERROR(sampler_inputs_status);
+            auto sampler_inputs = std::move(sampler_inputs_status.value());
+            auto sampler_output = sampler_->forward(sampler_inputs);
+            auto sample_result  = makeSampleResult(plan.sampling, sampler_output, sampling_config_.output_vocab_ids);
+            advanceSamplingStates(plan.sampling, sample_result);
+            asyncSendSampleResult(sample_result, inflight.sample_result_sends);
+        }
 
-    if (profile_step_finish_) {
-        profile_step_finish_();
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
     }
 
     current_slot_ = (current_slot_ + 1) % slots_.size();
 
-    /** TODO: lzf, process of sample result could overlap with forward. */
-    if (isFirstStage() && isStageRoot()) {
-        RETURN_IF_STATUS_ERROR(processSampleResult(*slots_[current_slot_]));
+    /** 6. recv the sampled result of next batch and process it. */
+    auto& next_batch = slots_[current_slot_];
+    if (isFirstStage() && isStageRoot() && !next_batch.skip_run) {
+
+        StreamGroups stream_groups(next_batch.streams);
+        auto         token_counts_by_priority = stream_groups.tokenCountsByPriority();
+        RETURN_IF_STATUS_ERROR(processSampleResult(next_batch));
+
+        const int64_t tps_execute_time_us =
+            autil::TimeUtility::currentTimeInMicroSeconds() - next_batch.schedule_time_us;
+        if (metrics_reporter_ && tps_execute_time_us > 0) {
+            RtpLLMTokenPSMetricsCollector tps_collector;
+            tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
+                                       stream_groups.contextExecuteTokenSizeWithCache(),
+                                       stream_groups.totalDecodeBatchSize(),
+                                       stream_groups.modelExecuteTokenSize(),
+                                       tps_execute_time_us);
+            tps_collector.addTokenSizeByPriority(token_counts_by_priority, tps_execute_time_us);
+            tps_reporter_.report(&tps_collector);
+            wall_tps_reporter_.report(&tps_collector);
+        }
     }
     return absl::OkStatus();
+}
+
+bool PPExecutor::updateEplbConfig(const EPLBConfig& config) {
+    if (expert_balancer_) {
+        return expert_balancer_->updateEplbConfig(config);
+    }
+    return true;
 }
 
 }  // namespace rtp_llm
