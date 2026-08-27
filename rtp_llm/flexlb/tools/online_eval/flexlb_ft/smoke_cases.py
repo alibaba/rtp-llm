@@ -29,12 +29,26 @@ Two families:
       aff_prefix_stickiness     <- S2+S5 merged (P9 graded; the legacy
                                     cache_keys>0 assertion demoted to an
                                     observational log — mock-internal cache
-                                    accounting belongs to mock unit tests)
+                                    accounting belongs to mock unit tests);
+                                    task #62 generalization (M1): two seed
+                                    families (ledger-forced apart) + free mix
       bal_gate_no_starvation    <- S9 rebuilt around a REAL queue-depth
                                     gate (P6 + share-shift observation)
       (S12 deleted — the reserve weight-lowering mechanism it asserted
       does not exist on the Java stack; its collapse guard is subsumed by
       bal_decode_spread's P2.)
+
+    Task #62 adds the heterogeneity dimensions (design L/M):
+
+      bal_len_mixed            <- L1 bimodal length mix (P3 token-share
+                                   graded — first P3 calibration + P2 short
+                                   request spread + P6)
+      aff_hot_prefix_tension   <- M2 hot-prefix tension (P9 stickiness vs
+                                   M2 concentration cap — first M2
+                                   calibration + P2 free-flow + P6)
+      aff_match_mixed          <- M3 hit-rate tiers (M3 soft contrast
+                                   bound: full/half vs zero-hit + P2 zero-hit
+                                   spread + P6)
 
     Historical mechanism notes survive as per-case comments only where they
     explain WHY a property band is what it is (e.g. tie-window uniform
@@ -1007,89 +1021,762 @@ def bal_decode_spread(ctx: CaseContext):
 
 @case(
     "aff_prefix_stickiness",
-    source="scheduling_smoke.py S2+S5 (merged, task #61)",
+    source="scheduling_smoke.py S2+S5 (merged, task #61; M1 generalized, task #62)",
 )
 def aff_prefix_stickiness(ctx: CaseContext):
-    """Prefix-reuse traffic sticks to the engine that holds the prefix cache.
+    """Prefix-reuse traffic sticks to the engine that holds the prefix cache —
+    multi-family + free-mixing generalization (M1).
 
-    Result properties: P9 affinity fidelity (graded, lower band: share of
-    prefix-reuse requests landing on the prime engine) + P6 completeness.
-    Single-family base form only — the multi-family / free-mixing
-    generalization is task #62.
+    Result properties (graded): P9 affinity fidelity (family-A followers
+    landing on the family-A seed engine), P2 free-flow multi-engine spread,
+    P6 completeness.
 
-    Construction: one shared key family — a prime request (input_len=2048)
-    seeds the block cache on its landing engine; after KV_CACHE_SYNC_WAIT_S
-    the master's cache-affinity policy (CacheAffinityPolicy.evaluate in
-    CostBasedPrefillStrategy: the cache leader wins when the prefix hit
-    clears minPrefixHitPercent) should keep every follower reusing the
-    SAME keys on the SAME engine.
+    Construction:
+      1. seed A (keys 1001-1008, input_len=8192) fired while both prefills
+         are slowed to 2s — its ~8.2s FORMULA estimate keeps the landing
+         engine's ledger entry live (tie-window override is impossible:
+         the ~8s gap dwarfs the ~0.8s tie window);
+      2. seed B (keys 2001-2008, same shape) scheduled while A is still
+         in flight -> deterministically lands on the OTHER engine — the
+         family separation the design calls for (a plain serial seeding
+         would put both families on the same engine half the time);
+      3. after both seeds complete and the master cache syncs
+         (KV_CACHE_SYNC_WAIT_S), the main phase runs ~30 serial requests:
+         60% family-A continuations (same keys, deterministic stickiness —
+         the 0.7*hitTokens estimate discount ~5s dwarfs the ~0.3s tie
+         window) interleaved with 40% unique-key free requests (no cache
+         affinity on either engine -> uniform tie-window spread).
 
-    The legacy S5 cache_keys>0 assertion is demoted to an observational
+    The legacy S5 cache_keys>0 assertion stays demoted to an observational
     log: mock-internal cache accounting is the mock's own unit-tested
-    behaviour, not an LB contract.
-
-    P9 band note: followers are serial (each completes before the next
-    fires), so the prime engine's ledger is ~0 at every draw and a miss
-    can only come from a tie-window random pick overriding affinity;
-    normal (0.90) tolerates one miss in ten, loose (0.80) two.
+    behaviour, not an LB contract.  Hit-latency benefits are NOT asserted
+    (mock execution time is length/cache-blind — framework fact).
     """
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
-    followers_n = 10
-    # Constant key family disjoint from the rid-derived keys used by other
-    # cases (rid*100+j stays far below 10^7) — no cross-case cache pollution.
-    family_keys = [9900001, 9900002, 9900003]
+    base = rid_base(ctx, "scheduling")
+    family_a_keys = list(range(1001, 1009))
+    family_b_keys = list(range(2001, 2009))
+    prefill_names: list[str] = []
+    fired: list[tuple[int, object]] = []
+    fired_handles: dict[int, object] = {}
     try:
-        rid_prime = ops.next_request_id(rid_base(ctx, "scheduling"))
-        prime_addr, prime_err = ops.run_one_request(
-            rid_prime,
-            input_len=2048,
+        prefill_names = _prefill_names(ops)
+        if len(prefill_names) < 2:
+            return False, "need >=2 prefill workers"
+        for name in prefill_names:
+            ops.set_perf(name, prefill_fixed_ms=2000.0)
+        time.sleep(1.5)  # master perf sync
+
+        # -- seed A: fire-and-forget, engine-side proof of its ledger entry.
+        rid_a = ops.next_request_id(base)
+        seed_a_name, err = _fire_request(
+            ops,
+            rid_a,
+            fired,
+            fired_handles,
+            input_len=8192,
+            output_len=2,
+            block_keys=family_a_keys,
+        )
+        if err:
+            report.invariant("P6", False, detail=f"seed A failed: {err}")
+            return report.finish(f"seed A failed: {err}")
+        if not _poll_engine_pending(ops, seed_a_name, 1):
+            report.invariant(
+                "P6", False, detail=f"seed A never appeared on {seed_a_name}"
+            )
+            return report.finish(f"seed A never appeared on {seed_a_name}")
+
+        # -- seed B: deterministic away from seed A's live ledger.
+        rid_b = ops.next_request_id(base)
+        seed_b_addr, seed_b_err = ops.run_one_request(
+            rid_b,
+            input_len=8192,
+            output_len=2,
+            block_keys=family_b_keys,
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        seed_b_name = ops.addr_to_name().get(seed_b_addr, seed_b_addr)
+        if seed_b_err:
+            report.invariant("P6", False, detail=f"seed B failed: {seed_b_err}")
+            return report.finish(f"seed B failed: {seed_b_err}")
+
+        # -- drain seed A, restore fast perf, let the master sync both caches.
+        outcomes = _drain_fired(ops, fired, fired_handles)
+        fired.clear()
+        fired_handles.clear()
+        seed_a_ok = outcomes and outcomes[0][2]
+        if not seed_a_ok:
+            report.invariant(
+                "P6", False, detail=f"seed A did not complete: {outcomes[0][3]}"
+            )
+            return report.finish(f"seed A did not complete: {outcomes[0][3]}")
+        for name in prefill_names:
+            ops.set_perf(name, prefill_fixed_ms=100.0)
+        time.sleep(KV_CACHE_SYNC_WAIT_S)  # master cache sync
+
+        if seed_a_name == seed_b_name:
+            # The ledger technique makes this practically impossible (the
+            # ~8s ledger gap dwarfs the tie window); keep the design's
+            # "report it" clause as a loud observation.
+            report.invariant(
+                "P6",
+                False,
+                detail=(
+                    f"family separation failed: both seeds landed on "
+                    f"{seed_a_name} (ledger diversion did not fire)"
+                ),
+            )
+            return report.finish(
+                f"family separation failed: both seeds on {seed_a_name}"
+            )
+
+        # -- main phase: 60% family-A continuations + 40% unique-key free.
+        cont_n, free_n = 18, 12
+        addrs_a, addrs_free, failures = [], [], []
+        for i in range(cont_n + free_n):
+            rid = ops.next_request_id(base)
+            if i % 5 < 3:  # 3:2 interleave -> 18 continuations / 12 free
+                addr, err = ops.run_one_request(
+                    rid,
+                    input_len=8192,
+                    output_len=2,
+                    block_keys=family_a_keys,
+                    stream_timeout_s=STREAM_TIMEOUT_S,
+                )
+                if err:
+                    failures.append(f"cont rid={rid}: {err}")
+                else:
+                    addrs_a.append(addr)
+            else:
+                keys = [rid * 100 + j for j in range(8)]
+                addr, err = ops.run_one_request(
+                    rid,
+                    input_len=8192,
+                    output_len=2,
+                    block_keys=keys,
+                    stream_timeout_s=STREAM_TIMEOUT_S,
+                )
+                if err:
+                    failures.append(f"free rid={rid}: {err}")
+                else:
+                    addrs_free.append(addr)
+
+        addr_map = ops.addr_to_name()
+        hits = sum(1 for a in addrs_a if addr_map.get(a, a) == seed_a_name)
+        stick_share = hits / len(addrs_a) if addrs_a else 0.0
+        free_engines = len({addr_map.get(a, a) for a in addrs_free})
+
+        # Observational only (legacy S5 demoted to log).
+        cache_keys_a = ops.snapshot_by_name().get(seed_a_name, {}).get("cache_keys", -1)
+
+        report.invariant(
+            "P6",
+            not failures and len(addrs_a) == cont_n and len(addrs_free) == free_n,
+            detail=f"failures={failures[:2]}",
+        )
+        report.check(
+            "P9",
+            stick_share,
+            context="family_a",
+            detail=(
+                f"seed_a={seed_a_name}, seed_b={seed_b_name} (ledger-forced "
+                f"apart), hits={hits}/{len(addrs_a)}, "
+                f"cache_keys={cache_keys_a} (observational)"
+            ),
+        )
+        report.invariant(
+            "P2",
+            free_engines >= 2,
+            context="free_flow",
+            detail=f"engines={free_engines}, free_n={len(addrs_free)}",
+        )
+        return report.finish(
+            f"seed_a={seed_a_name}, seed_b={seed_b_name}, "
+            f"stick={hits}/{len(addrs_a)}, free_engines={free_engines}, "
+            f"cache_keys={cache_keys_a}(log), grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            for name in prefill_names:
+                ops.set_perf(name, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+        if fired or fired_handles:
+            _drain_fired(ops, fired, fired_handles)
+        try:
+            AssertUtils.inflight_clean(_master_http(ops), 30.0)
+        except Exception:
+            pass
+
+
+# -- shared fire-and-forget helpers (S4 hotspot pattern, task #62 shared) --
+
+
+def _fire_request(ops, rid: int, fired: list, fired_handles: dict, **kwargs):
+    """Schedule without consuming the stream — keeps the request pending
+    (ledger entry live) until the wave/case drain.
+
+    Returns (engine_name, error).  Under NON_BATCH dispatch the engine only
+    sees the request when the CLIENT opens the stream, so the direct stream
+    is opened here fire-and-forget (never waited on).
+    """
+    try:
+        resp = ops.schedule(rid, **kwargs)
+    except Exception as exc:
+        return None, repr(exc)
+    if resp.code != 200 or not resp.success:
+        return None, f"schedule failed: {resp.error_message}"
+    addr = ops.role_addr(resp, "PREFILL")
+    name = ops.addr_to_name().get(addr, addr)
+    fired.append((rid, resp))
+    if not resp.enqueued_by_master:
+        try:
+            input_pb = ops.build_generate_input(rid, **kwargs)
+            fired_handles[rid] = ops.start_stream(resp, rid, input_pb=input_pb)
+        except Exception as exc:
+            return name, f"direct stream failed to open: {exc!r}"
+    return name, None
+
+
+def _poll_engine_pending(
+    ops, engine_name: str, min_pending: int, timeout_s: float = 6.0
+) -> bool:
+    """Engine-side proof that a fired request was really dispatched: poll the
+    mock snapshot until waiting+running >= min_pending on *engine_name*.
+
+    Reaching the engine implies the master-side ledger entry was registered
+    (dispatch precedes engine execution on both dispatch modes).
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        info = ops.snapshot_by_name().get(engine_name, {})
+        if info.get("waiting", 0) + info.get("running", 0) >= min_pending:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _drain_fired(ops, fired: list, fired_handles: dict, wait_s: float = 30.0) -> list:
+    """Consume every fired request to terminal state (S4 drainage lesson:
+    unconsumed fire-and-forget entries linger in master inflight/ledger and
+    poison later phases).  Returns [(rid, engine_name, completed, err)]."""
+    outcomes = []
+    for rid, resp in fired:
+        name = ops.addr_to_name().get(ops.role_addr(resp, "PREFILL"), "")
+        completed = False
+        err = None
+        try:
+            handle = (
+                fired_handles[rid]
+                if rid in fired_handles
+                else ops.start_stream(resp, rid)
+            )
+            ended = handle.wait_end(wait_s)
+            completed = ended and handle.snap.completed and not handle.snap.error
+            if not completed:
+                err = handle.snap.error or "stream did not complete"
+        except Exception as exc:
+            err = repr(exc)
+        if not completed:
+            try:
+                ops.cancel(rid, resp)
+            except Exception:
+                pass
+        outcomes.append((rid, name, completed, err))
+    return outcomes
+
+
+@case(
+    "bal_len_mixed",
+    source="length-heterogeneity dimension L1 (task #62)",
+)
+def bal_len_mixed(ctx: CaseContext):
+    """Bimodal length mix balances TOKEN footprint, not request count.
+
+    Result properties (graded): P3 token-weighted max-share (first
+    calibrated measurement of the P3 band), P2 short-request spread (both
+    engines take short work), P6 completeness.
+
+    Construction (5 waves, each 2 long + 6 short fire-and-forget):
+      * every prefill slowed to 3s fixed — the mock execution time is
+        length-blind (framework fact), so set_perf only widens the window
+        during which the ledger entry of a fired request stays observable;
+      * wave choreography (S4 ledger technique, symmetric — no single hot
+        engine is manufactured):
+        1. L_a fired on an empty ledger pair -> uniform tie-window pick (X);
+        2. poll X pending (engine-side proof the ledger entry exists);
+        3. 3 shorts fired: X carries ~32s of predicted ledger, Y ~0 ->
+           deterministically diverted to Y;
+        4. L_b fired: still sees X heavy (ledger >> Y's ~1.5s short
+           residue) -> deterministically lands on Y;
+        5. 3 more shorts fired: BOTH engines now carry a long request's
+           ledger (~32s each, ~1s apart) — inside the 10% tie window ->
+           uniform random split;
+        6. drain the wave to terminal state + master inflight clean,
+           so the next wave starts from a settled (double-zero) ledger.
+      * per wave: X = L_a + ~1.5 shorts, Y = L_b + ~4.5 shorts in tokens;
+        with L_a/L_b drawn from the same 32768..49152 ladder the aggregate
+        token share stays near 0.5 (see the P3 calibration note in
+        grade.GRADE_BANDS).
+
+    Why not request-count uniformity (P1): the wave deliberately lands
+    BOTH long requests' complements asymmetrically (3+~1.5 shorts vs
+    ~1.5 shorts) — token balance and request-count balance genuinely
+    conflict in this scene, and P3 is the property that matters.
+    """
+    ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "scheduling")
+    prefill_names: list[str] = []
+    fired: list[tuple[int, object]] = []
+    fired_handles: dict[int, object] = {}
+    try:
+        prefill_names = _prefill_names(ops)
+        if len(prefill_names) < 2:
+            return False, "need >=2 prefill workers"
+        for name in prefill_names:
+            ops.set_perf(name, prefill_fixed_ms=3000.0)
+        time.sleep(1.5)  # master perf sync
+
+        # deterministic bimodal ladder 32768..49152 (reproducible reruns)
+        long_lens = [32768 + (i % 5) * 4096 for i in range(10)]
+        landed: list[tuple[int, str, int]] = []  # (rid, engine_name, input_len)
+        failure = None
+
+        for wave in range(5):
+            la, lb = long_lens[2 * wave], long_lens[2 * wave + 1]
+            # 1. L_a on the empty ledger pair.
+            rid = ops.next_request_id(base)
+            name_a, err = _fire_request(
+                ops, rid, fired, fired_handles, input_len=la, output_len=2
+            )
+            if err:
+                failure = f"wave{wave} L_a: {err}"
+                break
+            landed.append((rid, name_a, la))
+            # 2. engine-side proof the ledger entry is live.
+            if not _poll_engine_pending(ops, name_a, 1):
+                failure = f"wave{wave} L_a never appeared on {name_a}"
+                break
+            # 3. 3 shorts deterministically diverted away from L_a's engine.
+            for _ in range(3):
+                rid = ops.next_request_id(base)
+                name, err = _fire_request(
+                    ops, rid, fired, fired_handles, input_len=512, output_len=2
+                )
+                if err:
+                    failure = f"wave{wave} short#1: {err}"
+                    break
+                landed.append((rid, name, 512))
+            if failure:
+                break
+            # 4. L_b deterministically away from L_a's ledger.
+            rid = ops.next_request_id(base)
+            name_b, err = _fire_request(
+                ops, rid, fired, fired_handles, input_len=lb, output_len=2
+            )
+            if err:
+                failure = f"wave{wave} L_b: {err}"
+                break
+            landed.append((rid, name_b, lb))
+            if not _poll_engine_pending(ops, name_b, 1):
+                failure = f"wave{wave} L_b never appeared on {name_b}"
+                break
+            # 5. 3 shorts split uniformly (both engines carry a long ledger).
+            for _ in range(3):
+                rid = ops.next_request_id(base)
+                name, err = _fire_request(
+                    ops, rid, fired, fired_handles, input_len=512, output_len=2
+                )
+                if err:
+                    failure = f"wave{wave} short#2: {err}"
+                    break
+                landed.append((rid, name, 512))
+            if failure:
+                break
+
+            # 6. drain the wave before the next one starts clean.
+            outcomes = _drain_fired(ops, fired, fired_handles)
+            unfinished = [(r, n, e) for (r, n, ok, e) in outcomes if not ok]
+            if unfinished:
+                failure = f"wave{wave} drain incomplete: {unfinished[:2]}"
+                # drop the undrained tail from landed so P3 counts only
+                # completed traffic
+                bad_rids = {r for r, _n, _e in unfinished}
+                landed = [t for t in landed if t[0] not in bad_rids]
+                break
+            fired.clear()
+            fired_handles.clear()
+            clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
+            if not clean_ok:
+                failure = f"wave{wave} inflight not clean: {clean_detail}"
+                break
+
+        if failure:
+            report.invariant("P6", False, detail=failure)
+        else:
+            report.invariant("P6", True, detail="all 40 requests drained")
+
+        if landed:
+            token_by_engine: Counter = Counter()
+            short_by_engine: Counter = Counter()
+            for _rid, name, ln in landed:
+                token_by_engine[name] += ln
+                if ln == 512:
+                    short_by_engine[name] += 1
+            total_tokens = sum(token_by_engine.values())
+            max_share = (
+                max(token_by_engine.values()) / total_tokens if total_tokens else 1.0
+            )
+            short_engines = len(short_by_engine)
+            tokens_json = json.dumps(
+                {k: token_by_engine[k] for k in sorted(token_by_engine)},
+                sort_keys=True,
+            )
+            report.check(
+                "P3",
+                max_share,
+                context="bimodal_5waves",
+                detail=f"tokens={tokens_json}, shorts={dict(short_by_engine)}",
+            )
+            report.invariant(
+                "P2",
+                short_engines >= 2,
+                context="short_spread",
+                detail=f"engines taking shorts={short_engines}",
+            )
+
+        return report.finish(
+            f"waves=5, landed={len(landed)}/40, " f"grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            for name in prefill_names:
+                ops.set_perf(name, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+        if fired or fired_handles:
+            _drain_fired(ops, fired, fired_handles)
+        try:
+            AssertUtils.inflight_clean(_master_http(ops), 30.0)
+        except Exception:
+            pass
+
+
+@case(
+    "aff_hot_prefix_tension",
+    source="hot-prefix tension M2 (task #62)",
+)
+def aff_hot_prefix_tension(ctx: CaseContext):
+    """A 70%-traffic hot prefix family: stickiness holds AND the holder's
+    concentration stays capped.
+
+    Result properties (graded combination): P9 family stickiness (graded —
+    the design's tension axis 1), M2 holder total-share cap (graded upper
+    bound — tension axis 2, first calibrated measurement of the M2 band),
+    P2 free-flow no-starvation (the other engine still takes free traffic),
+    P6 completeness.
+
+    Construction: family F shares a 16-block long prefix (keys 3001-3016,
+    input_len=16384).  One seed request lands on engine X (uniform initial
+    pick); after the master cache sync the main phase runs 40 serial
+    requests in a fixed 7:3 interleave — 28 family continuations (every one
+    carries the ~10.7s estimate discount on X: est = 16384 - 0.7*15360 =
+    5619 vs 16384 elsewhere, a gap ~20x the tie window -> deterministic
+    stickiness) and 12 unique-key free requests (no affinity on either
+    engine -> uniform tie-window spread).
+
+    On X's accumulating state: each completed family request re-admits the
+    same 16 blocks (LRU-refreshed, idempotent) and adds its inputLen to the
+    mock's KV accounting — the holder's cache/KV footprint keeps growing
+    across the phase (observational), while the routing ledger itself
+    resets between serial requests (each completes before the next fires),
+    which is what keeps P9 deterministic and pins the M2 model to the free
+    flow's binomial spread.
+
+    M2 caliber: family and free requests share input_len=16384, so token
+    share and request share coincide; the holder's TOTAL share counts seed,
+    family continuations AND the free requests that tie-window scatter onto
+    it: (29 + k)/41 with k ~ B(12, 0.5) over the free flow (29 = seed + 28
+    continuations deterministically on X when stickiness is perfect), i.e.
+    ~0.854 ± 0.042 (1σ) — see the M2 calibration note in grade.GRADE_BANDS
+    for the false-fail derivation of the band values.
+
+    Free-flow starvation (P2): if all 12 free requests were swallowed by
+    X the other engine would idle — that is the starvation this property
+    forbids (probability 0.5**12 under correct uniform spread).
+    """
+    ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "scheduling")
+    family_keys = list(range(3001, 3017))
+    input_len = 16384
+    try:
+        # -- seed: family F prefix lands on X (uniform initial pick).
+        rid_seed = ops.next_request_id(base)
+        seed_addr, seed_err = ops.run_one_request(
+            rid_seed,
+            input_len=input_len,
             output_len=2,
             block_keys=family_keys,
             stream_timeout_s=STREAM_TIMEOUT_S,
         )
-        if prime_err:
-            report.invariant("P6", False, detail=f"prime failed: {prime_err}")
-            return report.finish(f"prime request failed: {prime_err}")
-
+        if seed_err:
+            report.invariant("P6", False, detail=f"seed failed: {seed_err}")
+            return report.finish(f"seed request failed: {seed_err}")
+        addr_map = ops.addr_to_name()
+        holder = addr_map.get(seed_addr, seed_addr)
+        other_names = [n for n in _prefill_names(ops) if n != holder]
         time.sleep(KV_CACHE_SYNC_WAIT_S)  # master cache sync
 
-        addrs = []
-        failures = []
-        for _ in range(followers_n):
-            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
-            addr, err = ops.run_one_request(
-                rid,
-                input_len=2048,
-                output_len=2,
-                block_keys=family_keys,
-                stream_timeout_s=STREAM_TIMEOUT_S,
-            )
-            if err:
-                failures.append(f"rid={rid}: {err}")
+        # -- main phase: 40 serial, fixed 7:3 interleave (28 family + 12 free).
+        cont_n, free_n = 28, 12
+        cont_addrs, free_addrs, failures = [], [], []
+        for i in range(cont_n + free_n):
+            rid = ops.next_request_id(base)
+            if i % 10 < 7:  # 7 family : 3 free per decade
+                addr, err = ops.run_one_request(
+                    rid,
+                    input_len=input_len,
+                    output_len=2,
+                    block_keys=family_keys,
+                    stream_timeout_s=STREAM_TIMEOUT_S,
+                )
+                if err:
+                    failures.append(f"cont rid={rid}: {err}")
+                else:
+                    cont_addrs.append(addr)
             else:
-                addrs.append(addr)
+                keys = [rid * 100 + j for j in range(16)]
+                addr, err = ops.run_one_request(
+                    rid,
+                    input_len=input_len,
+                    output_len=2,
+                    block_keys=keys,
+                    stream_timeout_s=STREAM_TIMEOUT_S,
+                )
+                if err:
+                    failures.append(f"free rid={rid}: {err}")
+                else:
+                    free_addrs.append(addr)
 
-        addr_map = ops.addr_to_name()
-        prime_name = addr_map.get(prime_addr, prime_addr)
-        hits = sum(1 for a in addrs if a == prime_addr)
-        stick_share = hits / len(addrs) if addrs else 0.0
+        holder_hits = sum(1 for a in cont_addrs if addr_map.get(a, a) == holder)
+        stick_share = holder_hits / len(cont_addrs) if cont_addrs else 0.0
+        free_on_other = sum(1 for a in free_addrs if addr_map.get(a, a) != holder)
+        # M2 caliber: the holder's TOTAL share — seed + family continuations
+        # + free requests scattered onto it by the tie window (token share ==
+        # request share by uniform input_len).
+        free_on_holder = len(free_addrs) - free_on_other
+        holder_total = holder_hits + 1 + free_on_holder  # + seed
+        total = 1 + len(cont_addrs) + len(free_addrs)
+        holder_share = holder_total / total if total else 1.0
+        holder_token_share = (
+            holder_total * input_len / (total * input_len) if total else 1.0
+        )
 
-        # Observational only (legacy S5 demoted to log — mock-internal
-        # cache accounting belongs to mock unit tests, not the LB contract).
-        cache_keys = ops.snapshot_by_name().get(prime_name, {}).get("cache_keys", -1)
-
-        report.invariant("P6", not failures, detail=f"failures={failures[:2]}")
+        report.invariant(
+            "P6",
+            not failures and len(cont_addrs) == cont_n and len(free_addrs) == free_n,
+            detail=f"failures={failures[:2]}",
+        )
         report.check(
             "P9",
             stick_share,
-            context="single_family",
-            detail=f"prime={prime_name}, hits={hits}/{len(addrs)}, "
-            f"cache_keys={cache_keys} (observational)",
+            context="hot_family",
+            detail=(
+                f"holder={holder}, hits={holder_hits}/{len(cont_addrs)}, "
+                f"other={other_names}"
+            ),
+        )
+        report.check(
+            "M2",
+            holder_share,
+            context="holder_total_share",
+            detail=(
+                f"holder={holder}: {holder_total}/{total} requests "
+                f"(token share {holder_token_share:.3f} — equal by uniform "
+                f"input_len), free_on_other={free_on_other}/{len(free_addrs)}"
+            ),
+        )
+        report.invariant(
+            "P2",
+            free_on_other >= 1,
+            context="free_flow",
+            detail=(
+                f"free requests landing off-holder={free_on_other}/"
+                f"{len(free_addrs)} (other engine must not be starved)"
+            ),
         )
         return report.finish(
-            f"prime={prime_name}, stick={hits}/{len(addrs)}, "
-            f"cache_keys={cache_keys}(log), grades: {report.summary()}"
+            f"holder={holder}, stick={holder_hits}/{len(cont_addrs)}, "
+            f"holder_share={holder_share:.3f}, "
+            f"free_off_holder={free_on_other}/{len(free_addrs)}, "
+            f"grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+@case(
+    "aff_match_mixed",
+    source="hit-rate tier contrast M3 (task #62)",
+)
+def aff_match_mixed(ctx: CaseContext):
+    """Prefix hit-rate tiers: full-hit and half-hit traffic concentrate on
+    the holder while zero-hit traffic spreads — a graded contrast.
+
+    Result properties: M3 soft contrast bound (graded lower band on the
+    same-engine concentration of the full-hit and half-hit tiers), P2
+    zero-hit multi-engine spread, P6 completeness.  Hit-latency benefits
+    are NOT asserted (mock execution time is length/cache-blind).
+
+    Construction (fixed input_len=8192, three tiers, all serial):
+      * full-hit tier — seed family keys 4001-4008 on engine X1, then 10
+        continuations reusing the SAME 8 blocks: hitTokens = 7168 (the last
+        partial block is excluded: rawHit >= seqLen -> seqLen - blockSize),
+        estimate discount ~5.0s vs tie window ~0.3s -> deterministic
+        concentration on X1;
+      * half-hit tier — seed keys 5001-5004 (input_len=4096, 4 blocks) on
+        X2, then 10 requests carrying [5001-5004 + 4 fresh keys]: the
+        continuous prefix match stops at 4 blocks -> hitTokens = 4096,
+        discount ~2.9s vs tie window ~0.5s -> deterministic concentration
+        on X2 (a 50% hit rate still clears the affinity threshold — the
+        contrast with the zero-hit tier is the point, not a partial
+        stickiness);
+      * zero-hit tier — 10 requests with fresh unique keys on both
+        engines: no discount anywhere -> uniform tie-window spread.
+
+    Why P2 covers only the zero-hit tier: P2 forbids starving an engine
+    with INDISTINGUISHABLE traffic; full/half-hit requests landing on
+    their holder is correct affinity routing, not starvation.  The
+    zero-hit tier is exactly the indistinguishable population, so its
+    spread carries the P2 contract (probability of a single-engine
+    collapse under correct spread: 2 * 0.5**10 ~= 0.2%).
+    """
+    ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "scheduling")
+    full_keys = list(range(4001, 4009))
+    half_shared_keys = list(range(5001, 5005))
+    try:
+
+        def run_tier_cont(n: int, keys_fn, label: str):
+            """Serial run of *n* requests, each keys from keys_fn(rid, i)."""
+            addrs, failures = [], []
+            for i in range(n):
+                rid = ops.next_request_id(base)
+                addr, err = ops.run_one_request(
+                    rid,
+                    input_len=8192,
+                    output_len=2,
+                    block_keys=keys_fn(rid, i),
+                    stream_timeout_s=STREAM_TIMEOUT_S,
+                )
+                if err:
+                    failures.append(f"{label} rid={rid}: {err}")
+                else:
+                    addrs.append(addr)
+            return addrs, failures
+
+        # -- tier 1: full-hit (8-block family).
+        rid_seed1 = ops.next_request_id(base)
+        seed1_addr, seed1_err = ops.run_one_request(
+            rid_seed1,
+            input_len=8192,
+            output_len=2,
+            block_keys=full_keys,
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        if seed1_err:
+            report.invariant("P6", False, detail=f"seed1 failed: {seed1_err}")
+            return report.finish(f"full-hit seed failed: {seed1_err}")
+        time.sleep(KV_CACHE_SYNC_WAIT_S)
+        full_addrs, full_fail = run_tier_cont(10, lambda rid, i: full_keys, "full")
+
+        # -- tier 2: half-hit (4 shared + 4 fresh per request).
+        rid_seed2 = ops.next_request_id(base)
+        seed2_addr, seed2_err = ops.run_one_request(
+            rid_seed2,
+            input_len=4096,
+            output_len=2,
+            block_keys=half_shared_keys,
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        if seed2_err:
+            report.invariant("P6", False, detail=f"seed2 failed: {seed2_err}")
+            return report.finish(f"half-hit seed failed: {seed2_err}")
+        time.sleep(KV_CACHE_SYNC_WAIT_S)
+        half_addrs, half_fail = run_tier_cont(
+            10,
+            lambda rid, i: half_shared_keys + [rid * 100 + 40 + j for j in range(4)],
+            "half",
+        )
+
+        # -- tier 3: zero-hit (fresh unique keys everywhere).
+        zero_addrs, zero_fail = run_tier_cont(
+            10, lambda rid, i: [rid * 100 + j for j in range(8)], "zero"
+        )
+
+        addr_map = ops.addr_to_name()
+        failures = full_fail + half_fail + zero_fail
+
+        def concentration(addrs, anchor_addr) -> float:
+            if not addrs:
+                return 0.0
+            anchor = addr_map.get(anchor_addr, anchor_addr)
+            return sum(1 for a in addrs if addr_map.get(a, a) == anchor) / len(addrs)
+
+        full_conc = concentration(full_addrs, seed1_addr)
+        half_conc = concentration(half_addrs, seed2_addr)
+        zero_dist = Counter(addr_map.get(a, a) for a in zero_addrs)
+        zero_engines = len(zero_dist)
+        zero_max = max(zero_dist.values()) / len(zero_addrs) if zero_addrs else 1.0
+
+        report.invariant(
+            "P6",
+            not failures
+            and len(full_addrs) == 10
+            and len(half_addrs) == 10
+            and len(zero_addrs) == 10,
+            detail=f"failures={failures[:2]}",
+        )
+        report.check(
+            "M3",
+            full_conc,
+            context="full_hit",
+            detail=(
+                f"concentration on full-hit seed engine={full_conc:.2f} "
+                f"(vs zero-hit baseline ~0.5)"
+            ),
+        )
+        report.check(
+            "M3",
+            half_conc,
+            context="half_hit",
+            detail=(
+                f"concentration on half-hit seed engine={half_conc:.2f} "
+                f"(50% hit still clears the affinity threshold)"
+            ),
+        )
+        report.invariant(
+            "P2",
+            zero_engines >= 2,
+            context="zero_hit",
+            detail=(
+                f"zero-hit spread: engines={zero_engines}, "
+                f"max_share={zero_max:.2f} (observational, expected ~0.5-0.7)"
+            ),
+        )
+        return report.finish(
+            f"full_conc={full_conc:.2f}, half_conc={half_conc:.2f}, "
+            f"zero_dist={json.dumps(dict(zero_dist), sort_keys=True)}, "
+            f"grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"

@@ -75,8 +75,19 @@ GRADE_BANDS: Dict[str, dict] = {
     # P2 no-starvation: hard invariant (an engine receiving zero of the
     # offered homogeneous traffic is starved).
     "P2": {"kind": "invariant"},
-    # P3 token-weighted max-share — initial values, to be calibrated by
-    # task #62 length-heterogeneity cases.
+    # P3 token-weighted max-share (client-side Σ input_len per engine / total).
+    # First e2e calibration (task #62, bal_len_mixed — bimodal 5-wave, per
+    # wave 2 long @32768..49152 + 6 short @512, all prefills set_perf 3s):
+    #   batch-window 0.507, single-nonbatch 0.528, single-batch 0.517,
+    #   window-nonbatch 0.502 — all four inside the predicted 0.5 ± 0.02.
+    # Calibration rationale: the wave choreography deterministically pairs
+    # each long request with ~1.5 shorts on its engine and ~4.5 shorts on the
+    # other (ledger diversion), so the aggregate share concentrates near 0.5
+    # with only the uniform-split tail adding binomial noise — the design
+    # bands (0.65/0.70/0.80) keep ~0.15 of headroom above the deterministic
+    # baseline, tolerating a whole wave's diversion failing before the normal
+    # tier trips; request-count balance is deliberately NOT asserted (it
+    # genuinely conflicts with token balance in this scene).
     "P3": {
         "kind": "upper",
         "bands": {"strict": 0.65, "normal": 0.70, "loose": 0.80},
@@ -117,11 +128,42 @@ GRADE_BANDS: Dict[str, dict] = {
         "kind": "lower",
         "bands": {"strict": 0.95, "normal": 0.90, "loose": 0.80},
     },
-    # M2 concentration cap — reserved for Phase 2 (task #62); parked here so
-    # the table is the single reference point.
+    # M2 concentration cap (upper bound on the hot-family holder's TOTAL
+    # request share).  First e2e calibration: aff_hot_prefix_tension — 70%
+    # family traffic pinned to the holder + 30% uniform free flow.  The
+    # holder's share = (29 + k)/41 with k ~ B(12, .5) over the free requests
+    # scattered onto it (29 = seed + 28 continuations under perfect P9
+    # stickiness), i.e. expected ~0.854 ± 0.042 (1σ).
+    # First measured (task #62, four profiles): 0.805 / 0.902 / 0.902 / 0.829
+    # (batch-window / single-nonbatch / single-batch / window-nonbatch; the
+    # free flow scattered 4/12, 8/12, 8/12, 5/12 onto the holder — all inside
+    # 2σ of the binomial model; an extra batch-window run measured 0.878,
+    # free 7/12, same distribution).
+    # Band derivation (false-fail probabilities from B(12, .5)):
+    #   strict 0.88 -> P(k >= 8)  ≈ 19.4% (quality bar, same philosophy as
+    #                                P1's strict: not a statistical guarantee)
+    #   normal 0.93 -> P(k >= 10) ≈ 1.93% (standard regression stays green)
+    #   loose   0.96 -> P(k >= 11) ≈ 0.317% (< the 1% false-fail floor)
+    # The bands police the CAP only — a share far above ~0.9 means the free
+    # flow collapsed onto the holder (tie-window spread gone wrong), while
+    # P9 separately polices the floor (stickiness itself).
     "M2": {
         "kind": "upper",
-        "bands": {"strict": 0.85, "normal": 0.90, "loose": 0.95},
+        "bands": {"strict": 0.88, "normal": 0.93, "loose": 0.96},
+    },
+    # M3 hit-tier concentration (lower bound on the same-engine share of the
+    # full-hit / half-hit tiers, aff_match_mixed).  Design values (task #62):
+    # the estimate discount (0.7 * hitTokens ms — ~5.0s full-hit, ~2.9s
+    # half-hit) dwarfs the tie window (~0.3s), so a correct affinity router
+    # concentrates both tiers deterministically; a value near 0.5 is the
+    # zero-hit baseline (no affinity signal at all).
+    # First measured (task #62, four profiles): 1.00 / 1.00 on every profile
+    # for BOTH tiers — concentration is fully deterministic (same caliber as
+    # P9's 10/10 in task #61); the lower tiers tolerate tie-window overrides
+    # observed historically in concurrent forms.
+    "M3": {
+        "kind": "lower",
+        "bands": {"strict": 0.8, "normal": 0.7, "loose": 0.6},
     },
 }
 
