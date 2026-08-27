@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import torch
 
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ROW_SCATTER_READY_ARG,
     ROW_SCATTER_TARGET_ARG,
     SKIP_TP_ALLREDUCE_ARG,
     CombineForwardPayload,
@@ -167,16 +168,32 @@ class FusedMoeRowScatterTargetTest(TestCase):
         )
 
         target = torch.zeros_like(hidden_states)
+        ready = object()
         fused_moe(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             row_scatter_target=target,
+            row_scatter_ready=ready,
         )
-        self.assertIs(
-            _extract_extra_finalize_args(router.finalize)[ROW_SCATTER_TARGET_ARG],
-            target,
+        finalize_args = _extract_extra_finalize_args(router.finalize)
+        self.assertIs(finalize_args[ROW_SCATTER_TARGET_ARG], target)
+        self.assertIs(finalize_args[ROW_SCATTER_READY_ARG], ready)
+
+    def test_forward_rejects_a_readiness_event_without_a_target(self):
+        fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (
+            _make_fused_moe(supports_row_scatter=True)
         )
+        with self.assertRaisesRegex(ValueError, "nothing to guard"):
+            fused_moe(
+                hidden_states=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                row_scatter_ready=object(),
+            )
+
+        router.prepare.assert_not_called()
+        experts.execute.assert_not_called()
 
     def test_forward_rejects_row_scatter_target_for_unsupported_router(self):
         fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (

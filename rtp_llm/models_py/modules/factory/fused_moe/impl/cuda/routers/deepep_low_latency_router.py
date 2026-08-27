@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ROW_SCATTER_READY_ARG,
     ROW_SCATTER_TARGET_ARG,
     CombineForwardPayload,
     ExpertForwardPayload,
@@ -297,6 +298,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         combined_x: torch.Tensor,
         target: torch.Tensor,
         original_num_tokens: int,
+        ready_event: Optional[torch.cuda.Event] = None,
     ) -> torch.Tensor:
         """Accumulate this rank's token slice into the caller's full-size buffer.
 
@@ -304,6 +306,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         assembled, and the ragged tail needs no padding because ranks no longer
         have to contribute equal-length shards.
         """
+        # Join before touching the buffer: the caller reduces every row, so even
+        # a rank whose slice is empty needs the producer's writes visible.
+        if ready_event is not None:
+            torch.cuda.current_stream(target.device).wait_event(ready_event)
+
         assert combined_x.dim() == 2
         assert target.shape == (original_num_tokens, combined_x.size(1))
         assert target.dtype == combined_x.dtype
@@ -352,19 +359,23 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             combine_args.update({"opt_level": self._opt_level})
 
         # Normal finalize
-        combined_x = self._normal_finalize(combine_args)
+        try:
+            combined_x = self._normal_finalize(combine_args)
 
-        assert extra_finalize_args is not None
-        row_scatter_target = extra_finalize_args.get(ROW_SCATTER_TARGET_ARG)
-        if row_scatter_target is not None:
-            combined_x = self._finalize_row_scatter(
-                combined_x,
-                row_scatter_target,
-                extra_finalize_args["original_num_tokens"],
-            )
-        else:
-            combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
-        # reset handle
-        self._handle = None
+            assert extra_finalize_args is not None
+            row_scatter_target = extra_finalize_args.get(ROW_SCATTER_TARGET_ARG)
+            if row_scatter_target is not None:
+                combined_x = self._finalize_row_scatter(
+                    combined_x,
+                    row_scatter_target,
+                    extra_finalize_args["original_num_tokens"],
+                    extra_finalize_args.get(ROW_SCATTER_READY_ARG),
+                )
+            else:
+                combined_x = self._finalize_post_tp_gather(
+                    combined_x, extra_finalize_args
+                )
 
-        return combined_x
+            return combined_x
+        finally:
+            self._handle = None
