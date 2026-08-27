@@ -161,12 +161,10 @@ class KimiK3LatentMoE(nn.Module):
         self._setup_deep_gemm_mega()
 
     def _validate_mega_preconditions(self, label: str) -> None:
-        """Check what both mega strategies require of the device and the world.
+        """Check device, distributed, and supported K3 MegaMoE topology.
 
-        K3 hands every rank exactly one EP partition, so attention TP, EP and
-        the distributed world must all be the same size.  ``label`` names the
-        calling strategy so ``mega_moe`` and ``mega_moe_se`` stay
-        distinguishable in the error text.
+        ``label`` names the calling strategy so ``mega_moe`` and
+        ``mega_moe_se`` stay distinguishable in the error text.
         """
 
         import torch.distributed as dist
@@ -176,12 +174,10 @@ class KimiK3LatentMoE(nn.Module):
         if not dist.is_initialized():
             raise RuntimeError(f"{label} requires torch.distributed initialization")
         world_size = int(dist.get_world_size())
-        if self.attn_tp_size != self.ep_size or self.ep_size != world_size:
-            raise RuntimeError(
-                f"{label} requires attention TP, EP, and the full distributed "
-                "world to have the same size; got "
-                f"TP={self.attn_tp_size}, EP={self.ep_size}, world={world_size}"
-            )
+        try:
+            self._mega_parallel_mode(world_size)
+        except RuntimeError as exc:
+            raise RuntimeError(f"{label}: {exc}") from exc
 
     def _validate_shared_expert_weight_layout(self, hidden_size: int) -> None:
         intermediate = self.shared_intermediate_size

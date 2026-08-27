@@ -176,6 +176,57 @@ class KdaParallelContextTest(unittest.TestCase):
                     role_type=RoleType.DECODE,
                 )
 
+    def test_mega_preconditions_use_decode_dp_ktp_topology_contract(self):
+        for width in (8, 16):
+            fake_moe = SimpleNamespace(
+                attn_tp_size=1,
+                dp_size=width,
+                ep_size=width,
+                ktp_size=width,
+                local_expert_count=896 // width,
+                parallelism_config=SimpleNamespace(role_type=RoleType.DECODE),
+            )
+            fake_moe._mega_parallel_mode = lambda world_size, moe=fake_moe: (
+                KimiK3LatentMoE._mega_parallel_mode(moe, world_size)
+            )
+            with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}), patch(
+                "torch.cuda.is_available", return_value=True
+            ), patch(
+                "torch.cuda.get_device_capability", return_value=(10, 0)
+            ), patch(
+                "torch.distributed.is_initialized", return_value=True
+            ), patch(
+                "torch.distributed.get_world_size", return_value=width
+            ):
+                KimiK3LatentMoE._validate_mega_preconditions(
+                    fake_moe, "K3 DeepGEMM MegaMoE SE"
+                )
+
+        invalid_moe = SimpleNamespace(
+            attn_tp_size=1,
+            dp_size=4,
+            ep_size=4,
+            ktp_size=4,
+            local_expert_count=224,
+            parallelism_config=SimpleNamespace(role_type=RoleType.DECODE),
+        )
+        invalid_moe._mega_parallel_mode = lambda world_size: (
+            KimiK3LatentMoE._mega_parallel_mode(invalid_moe, world_size)
+        )
+        with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}), patch(
+            "torch.cuda.is_available", return_value=True
+        ), patch(
+            "torch.cuda.get_device_capability", return_value=(10, 0)
+        ), patch(
+            "torch.distributed.is_initialized", return_value=True
+        ), patch(
+            "torch.distributed.get_world_size", return_value=4
+        ):
+            with self.assertRaisesRegex(RuntimeError, "K3 DeepGEMM MegaMoE SE"):
+                KimiK3LatentMoE._validate_mega_preconditions(
+                    invalid_moe, "K3 DeepGEMM MegaMoE SE"
+                )
+
     def test_target_topology_builds_independent_ktp_view(self):
         config = _target_parallelism()
         with patch.dict(os.environ, {"KIMI_K3_DECODE_KTP": "1"}):
