@@ -55,15 +55,31 @@ std::shared_ptr<LoadAsyncContext> takeLoadContext(BlockTreeMatchResult& result) 
     return context;
 }
 
-size_t transferGroupCount(const std::vector<TransferDescriptor>& descriptors) {
-    std::vector<std::tuple<Tier, Tier, size_t>> groups;
+size_t transferBatchCount(const std::vector<TransferDescriptor>& descriptors, const BlockTreeCacheConfig& config) {
+    std::vector<std::pair<std::tuple<Tier, Tier, size_t>, size_t>> groups;
     for (const auto& descriptor : descriptors) {
         const auto key = std::make_tuple(descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id);
-        if (std::find(groups.begin(), groups.end(), key) == groups.end()) {
-            groups.push_back(key);
+        const auto group = std::find_if(groups.begin(), groups.end(), [&key](const auto& item) {
+            return item.first == key;
+        });
+        if (group == groups.end()) {
+            groups.emplace_back(key, 1);
+        } else {
+            ++group->second;
         }
     }
-    return groups.size();
+
+    size_t batch_count = 0;
+    for (const auto& [key, descriptor_count] : groups) {
+        const Tier source = std::get<0>(key);
+        const Tier target = std::get<1>(key);
+        const bool device_host_direction =
+            (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
+        const size_t batch_limit = device_host_direction ? config.max_descriptors_per_transfer_batch :
+                                                            config.max_descriptors_per_non_device_host_transfer_batch;
+        batch_count += (descriptor_count + batch_limit - 1) / batch_limit;
+    }
+    return batch_count;
 }
 
 class PausablePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
@@ -1946,7 +1962,8 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     EXPECT_FALSE(joined_context->success());
     EXPECT_FALSE(environment->cache->abortPendingLoad(context));
     EXPECT_FALSE(environment->cache->abortPendingLoad(joined_context));
-    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), transferGroupCount(context->loadDescs()));
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(),
+              transferBatchCount(context->loadDescs(), environment->cache->config()));
     EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
     EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
     if (GetParam() == Tier::HOST) {
@@ -2048,7 +2065,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
 
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
-    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), transferGroupCount(context->loadDescs()));
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(),
+              transferBatchCount(context->loadDescs(), environment->cache->config()));
     EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
     EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
     const std::vector<GroupSetResource> resources_after = environment->resourcesForPathNode(0);
@@ -2199,7 +2217,8 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
     context->waitDone();
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(), 3u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(),
+              transferBatchCount(context->loadDescs(), environment->cache->config()));
 
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
         const auto resources_after = environment->resourcesForPathNode(path_index);
