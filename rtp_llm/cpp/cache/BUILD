@@ -204,6 +204,18 @@ cc_library(
 )
 
 cc_library(
+    name = "kda_shadow_cache",
+    srcs = ["KdaShadowCache.cc"],
+    hdrs = ["KdaShadowCache.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":kv_cache_allocator",
+    ],
+)
+
+cc_library(
     name = "batch_kv_cache_resource",
     srcs = ["KVCacheResource.cc"],
     hdrs = [
@@ -297,6 +309,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_core",
+        ":kda_shadow_cache",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",

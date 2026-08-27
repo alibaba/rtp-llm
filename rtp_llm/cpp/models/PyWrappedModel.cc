@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/cache/KdaShadowCache.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <numeric>
 #include <sstream>
+#include <tuple>
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -269,6 +271,46 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths_host   = pinned_host_i32(inputs.prefix_lengths_host_for_log);
     py_attn_inputs.sequence_lengths_host = pinned_host_i32(inputs.sequence_lengths_host_for_log);
     py_attn_inputs.input_lengths_host    = pinned_host_i32(inputs.input_lengths_host_for_log);
+    py_attn_inputs.request_ids_host      = inputs.request_id;
+    py_attn_inputs.generation_epochs_host = inputs.generation_epoch;
+    if (cache_manager_ && cache_manager_->kdaShadowRegistry()) {
+        auto records = cache_manager_->kdaShadowRegistry()->readyRecords();
+        std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
+            return std::tie(lhs.key.request_id, lhs.key.generation_epoch)
+                   < std::tie(rhs.key.request_id, rhs.key.generation_epoch);
+        });
+        size_t physical_width = 0;
+        size_t kernel_width   = 0;
+        for (const auto& record : records) {
+            physical_width = std::max(physical_width, record.blocks.size());
+            kernel_width   = std::max(kernel_width, record.kernel_blocks.size());
+        }
+        const auto pinned_i64 = torch::TensorOptions(torch::kInt64).pinned_memory(true);
+        const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+        py_attn_inputs.kda_shadow_keys_host = torch::empty(
+            {static_cast<int64_t>(records.size()), 2}, pinned_i64);
+        py_attn_inputs.kda_shadow_block_ids_host = torch::zeros(
+            {static_cast<int64_t>(records.size()), static_cast<int64_t>(physical_width)}, pinned_i32);
+        py_attn_inputs.kda_shadow_kernel_block_ids_host = torch::zeros(
+            {static_cast<int64_t>(records.size()), static_cast<int64_t>(kernel_width)}, pinned_i32);
+        auto* keys = py_attn_inputs.kda_shadow_keys_host.data_ptr<int64_t>();
+        auto* physical = py_attn_inputs.kda_shadow_block_ids_host.data_ptr<int32_t>();
+        auto* kernel = py_attn_inputs.kda_shadow_kernel_block_ids_host.data_ptr<int32_t>();
+        for (size_t row = 0; row < records.size(); ++row) {
+            keys[2 * row]     = records[row].key.request_id;
+            keys[2 * row + 1] = static_cast<int64_t>(records[row].key.generation_epoch);
+            std::copy(records[row].blocks.begin(),
+                      records[row].blocks.end(),
+                      physical + row * physical_width);
+            std::copy(records[row].kernel_blocks.begin(),
+                      records[row].kernel_blocks.end(),
+                      kernel + row * kernel_width);
+        }
+        py_attn_inputs.kda_shadow_group_id = cache_manager_->kdaShadowGroupId();
+        buffer_holder_.hold_host(py_attn_inputs.kda_shadow_keys_host);
+        buffer_holder_.hold_host(py_attn_inputs.kda_shadow_block_ids_host);
+        buffer_holder_.hold_host(py_attn_inputs.kda_shadow_kernel_block_ids_host);
+    }
 
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.dim() != 3) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_kernel_block_host)");
@@ -468,6 +510,130 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             py_attn_inputs.kv_cache_kernel_block_id_host_by_group.push_back(all_groups[group_id]);
         }
         py_attn_inputs.kv_cache_kernel_block_id_host = py_attn_inputs.kv_cache_kernel_block_id_host_by_group[0];
+    }
+
+    // Decode DP owns only its MLA requests, whereas every KTP rank owns a
+    // persistent KDA shadow shard for every runnable request.  CUDA Graph
+    // replay mirrors these local rows into its fixed capture buffers before a
+    // captured KTP AllGather builds the global KDA table.  Populate the live
+    // source table here; Python replay is intentionally not involved.
+    const int kda_group_id = py_attn_inputs.kda_shadow_group_id;
+    if (cache_manager_ && cache_manager_->kdaShadowRegistry() && kda_group_id >= 0) {
+        RTP_LLM_CHECK_WITH_INFO(
+            static_cast<size_t>(kda_group_id) < py_attn_inputs.kv_cache_kernel_block_id_device_by_group.size(),
+            "KDA shadow group id %d exceeds device cache groups %zu",
+            kda_group_id,
+            py_attn_inputs.kv_cache_kernel_block_id_device_by_group.size());
+        const auto& original = py_attn_inputs.kv_cache_kernel_block_id_device_by_group[kda_group_id];
+        RTP_LLM_CHECK_WITH_INFO(original.dim() == 2,
+                                "KDA local kernel block table must be 2-D, got dim=%ld",
+                                original.dim());
+        const int64_t batch = original.size(0);
+        const int64_t width = original.size(1);
+        // Cache groups are stacked into one [group, batch, max_kernel_blocks]
+        // tensor, so a LINEAR KDA row can be narrower than the padded live
+        // group view (for example 1 physical KDA block versus a 32-slot MLA
+        // row).  CUDA Graph executes the whole fixed KTP bucket, including
+        // fake rows, so every padding slot must point at BlockPool's permanently
+        // reserved block 0.  Using NULL_BLOCK_IDX here would make captured KDA
+        // state updates index outside the cache pool on idle DP ranks.
+        auto local_host = torch::zeros(
+            {batch, width}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+
+        if (!py_attn_inputs.is_fake_stream && batch > 0) {
+            RTP_LLM_CHECK_WITH_INFO(py_attn_inputs.request_ids_host.defined()
+                                        && py_attn_inputs.generation_epochs_host.defined(),
+                                    "real KTP Decode rows require request ids and generation epochs");
+            auto request_ids = py_attn_inputs.request_ids_host;
+            auto epochs      = py_attn_inputs.generation_epochs_host;
+            if (request_ids.device().is_cuda()) {
+                request_ids = request_ids.cpu();
+            }
+            if (epochs.device().is_cuda()) {
+                epochs = epochs.cpu();
+            }
+            request_ids = request_ids.to(torch::kInt64).contiguous().reshape({-1});
+            epochs      = epochs.to(torch::kInt64).contiguous().reshape({-1});
+            RTP_LLM_CHECK_WITH_INFO(request_ids.numel() == batch && epochs.numel() == batch,
+                                    "KTP request metadata rows mismatch: request=%ld epoch=%ld batch=%ld",
+                                    request_ids.numel(),
+                                    epochs.numel(),
+                                    batch);
+
+            const auto& keys   = py_attn_inputs.kda_shadow_keys_host;
+            const auto& shadow = py_attn_inputs.kda_shadow_kernel_block_ids_host;
+            RTP_LLM_CHECK_WITH_INFO(keys.defined() && shadow.defined() && keys.dim() == 2 && keys.size(1) == 2
+                                        && shadow.dim() == 2 && shadow.size(0) == keys.size(0),
+                                    "KTP Decode requires a valid READY KDA shadow snapshot");
+            const auto* request_ptr = request_ids.data_ptr<int64_t>();
+            const auto* epoch_ptr   = epochs.data_ptr<int64_t>();
+            const auto* key_ptr     = keys.data_ptr<int64_t>();
+            const auto* shadow_ptr  = shadow.data_ptr<int32_t>();
+            auto*       local_ptr   = local_host.data_ptr<int32_t>();
+            const int64_t shadow_width = shadow.size(1);
+            RTP_LLM_CHECK_WITH_INFO(shadow_width <= width,
+                                    "KDA shadow table width exceeds live padded width: snapshot=%ld live=%ld",
+                                    shadow_width,
+                                    width);
+            for (int64_t local_row = 0; local_row < batch; ++local_row) {
+                int64_t snapshot_row = -1;
+                for (int64_t row = 0; row < keys.size(0); ++row) {
+                    if (key_ptr[2 * row] == request_ptr[local_row]
+                        && key_ptr[2 * row + 1] == epoch_ptr[local_row]) {
+                        snapshot_row = row;
+                        break;
+                    }
+                }
+                RTP_LLM_CHECK_WITH_INFO(snapshot_row >= 0,
+                                        "KDA shadow shard is not READY for request=%ld epoch=%ld",
+                                        request_ptr[local_row],
+                                        epoch_ptr[local_row]);
+                if (shadow_width > 0) {
+                    std::memcpy(local_ptr + local_row * width,
+                                shadow_ptr + snapshot_row * shadow_width,
+                                static_cast<size_t>(shadow_width) * sizeof(int32_t));
+                }
+            }
+        }
+
+        buffer_holder_.hold_host(local_host);
+        auto local_device = tensorHoldHostAndToCuda(local_host);
+        py_attn_inputs.kv_cache_kernel_block_id_device_by_group[kda_group_id] = local_device;
+        if (static_cast<size_t>(kda_group_id) < py_attn_inputs.kv_cache_kernel_block_id_host_by_group.size()) {
+            py_attn_inputs.kv_cache_kernel_block_id_host_by_group[kda_group_id] = local_host;
+        }
+        if (kda_group_id == 0) {
+            py_attn_inputs.kv_cache_kernel_block_id_device = local_device;
+            py_attn_inputs.kv_cache_kernel_block_id_host   = local_host;
+        }
+
+        // The KTP graph captures KDA with the per-group table above, while
+        // TokenSpeed MLA still consumes the legacy singular table during
+        // graph replay.  K3 has exactly one non-KDA cache group; point the
+        // compatibility fields at that owner-local MLA table instead of the
+        // group-0 default.  This also keeps non-owner ranks from accidentally
+        // replaying MLA against a KDA shadow table.
+        int non_kda_group_id = -1;
+        for (size_t group_id = 0;
+             group_id < py_attn_inputs.kv_cache_kernel_block_id_device_by_group.size();
+             ++group_id) {
+            if (static_cast<int>(group_id) == kda_group_id) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(non_kda_group_id < 0,
+                                    "K3 KTP CUDA Graph requires exactly one non-KDA cache group");
+            non_kda_group_id = static_cast<int>(group_id);
+        }
+        RTP_LLM_CHECK_WITH_INFO(non_kda_group_id >= 0,
+                                "K3 KTP CUDA Graph requires an owner-local MLA cache group");
+        py_attn_inputs.kv_cache_kernel_block_id_device =
+            py_attn_inputs.kv_cache_kernel_block_id_device_by_group[non_kda_group_id];
+        RTP_LLM_CHECK_WITH_INFO(
+            static_cast<size_t>(non_kda_group_id)
+                < py_attn_inputs.kv_cache_kernel_block_id_host_by_group.size(),
+            "K3 KTP CUDA Graph requires a host MLA cache block table");
+        py_attn_inputs.kv_cache_kernel_block_id_host =
+            py_attn_inputs.kv_cache_kernel_block_id_host_by_group[non_kda_group_id];
     }
 }
 
@@ -1408,8 +1574,12 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
                 micro_model_inputs.request_id   = inputs.request_id.defined() ?
-                                                      inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                      inputs.request_id.narrow(0, sliced_batch_idx, total_batch_size) :
                                                       torch::Tensor();
+                micro_model_inputs.generation_epoch =
+                    inputs.generation_epoch.defined() ?
+                        inputs.generation_epoch.narrow(0, sliced_batch_idx, total_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.request_pd_separation =
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
@@ -1457,6 +1627,14 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.request_id =
+                    inputs.request_id.defined() ?
+                        inputs.request_id.narrow(0, sliced_batch_idx, d_micro_batch_size) :
+                        torch::Tensor();
+                micro_model_inputs.generation_epoch =
+                    inputs.generation_epoch.defined() ?
+                        inputs.generation_epoch.narrow(0, sliced_batch_idx, d_micro_batch_size) :
+                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
 
@@ -1495,6 +1673,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.request_id   = inputs.request_id.defined() ?
                                                       inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                       torch::Tensor();
+                micro_model_inputs.generation_epoch =
+                    inputs.generation_epoch.defined() ?
+                        inputs.generation_epoch.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
                 micro_model_inputs.request_pd_separation =
                     inputs.request_pd_separation.defined() ?
                         inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
@@ -1555,6 +1737,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.input_embeddings_locs);
 
     buffer_holder_.hold_host(inputs.request_id);
+    buffer_holder_.hold_host(inputs.generation_epoch);
     buffer_holder_.hold_host(inputs.request_pd_separation);
     buffer_holder_.hold_host(inputs.cache_keys);
 }

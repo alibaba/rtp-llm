@@ -34,6 +34,13 @@ public:
                               int                            seq_len,
                               int                            reserve_step) const override;
 
+    // Allocate and free a single rank-local LINEAR cache group without
+    // constructing a global BatchKVCacheResource.  This is intentionally a
+    // narrow API for Decode KDA shadow state: every KTP rank owns an
+    // independent allocator namespace, so local block ids need not match.
+    bool mallocLinearGroupBlocks(int group_id, BlockIds& block_ids, int seq_len, int reserve_step = 0);
+    void freeLinearGroupBlocks(int group_id, const BlockIndicesType& blocks);
+
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;

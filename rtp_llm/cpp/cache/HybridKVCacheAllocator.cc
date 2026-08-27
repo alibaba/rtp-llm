@@ -99,6 +99,27 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
                                                int64_t                            reserve_block_ratio):
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
+bool HybridKVCacheAllocator::mallocLinearGroupBlocks(int group_id,
+                                                      BlockIds& block_ids,
+                                                      int       seq_len,
+                                                      int       reserve_step) {
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && static_cast<size_t>(group_id) < kv_cache_groups_.size(),
+                            "invalid KDA shadow cache group id %d",
+                            group_id);
+    auto* group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(group_id)].get());
+    RTP_LLM_CHECK_WITH_INFO(group != nullptr, "KDA shadow cache group %d must be LINEAR", group_id);
+    return group->malloc(block_ids, seq_len, false, reserve_step);
+}
+
+void HybridKVCacheAllocator::freeLinearGroupBlocks(int group_id, const BlockIndicesType& blocks) {
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && static_cast<size_t>(group_id) < kv_cache_groups_.size(),
+                            "invalid KDA shadow cache group id %d",
+                            group_id);
+    auto* group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(group_id)].get());
+    RTP_LLM_CHECK_WITH_INFO(group != nullptr, "KDA shadow cache group %d must be LINEAR", group_id);
+    group->free(blocks);
+}
+
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
                                        const std::shared_ptr<CPSlotMapper>& cp_mapper) {

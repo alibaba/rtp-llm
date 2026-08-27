@@ -137,6 +137,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:kda_shadow_cache",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
