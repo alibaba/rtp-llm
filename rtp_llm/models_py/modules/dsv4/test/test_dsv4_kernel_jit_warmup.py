@@ -53,8 +53,10 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     _run_tilelang_warmup_launch_with_retry,
     _run_triton_warmup_launch_with_retry,
     _sm100_dense_layout_signature,
+    _swa_slot_batch_block_warmup_sizes,
     _state_ring_entries_warmup_values,
     _warmup_fused_kv_compress_norm_rope_insert,
+    resolve_cp_metadata_warmup_max_batch_size,
     resolve_dense_gemm_warmup_max_m,
     warmup_batched_fp8_einsum_jit,
     warmup_compressor_combine_branch_kernels,
@@ -111,11 +113,13 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             _fused_compressor_meta_triton,
             _indexer_cp_gather_triton,
             _swa_dequant_triton,
+            _swa_ops_triton,
         )
 
         pool_calls = []
         indexer_calls = []
         compressor_calls = []
+        swa_slot_batches = []
         metadata_restore_batches = []
         metadata_position_batches = []
         metadata_forward_batches = []
@@ -197,6 +201,18 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             )
             return (), (), ()
 
+        def fake_swa_slot(cu_seqlens, prefix_lengths, **kwargs):
+            swa_slot_batches.append(
+                (
+                    int(prefix_lengths.numel()),
+                    tuple(cu_seqlens.shape),
+                    kwargs,
+                )
+            )
+            return torch.empty(
+                kwargs["num_tokens"], dtype=torch.int64, device=cu_seqlens.device
+            )
+
         def run_launch(_label, _detail, launch_fn, *, device):
             self.assertEqual(device.type, "cpu")
             launch_fn()
@@ -243,11 +259,15 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             _fused_compressor_meta_triton,
             "fused_compressor_slot_mapping",
             side_effect=fake_compressor_meta,
+        ), mock.patch.object(
+            _swa_ops_triton,
+            "compute_swa_slot_in_flat_from_cu",
+            side_effect=fake_swa_slot,
         ):
             warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
             warmup_cp_metadata_jit(
                 cp_size=4,
-                max_batch_size=64,
+                max_batch_size=128,
                 fp8_kv_cache=True,
                 kv_cache_sharded=True,
                 device=torch.device("cpu"),
@@ -255,6 +275,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             warmup_module._CP_METADATA_JIT_WARMED_KEYS.clear()
 
         batch_blocks = (1, 2, 4, 8, 16, 32, 64)
+        swa_slot_batch_blocks = batch_blocks + (128,)
         self.assertEqual(metadata_restore_batches, list(batch_blocks))
         self.assertEqual(metadata_position_batches, list(batch_blocks[1:]))
         self.assertEqual(metadata_forward_batches, list(batch_blocks))
@@ -282,6 +303,22 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             [call[0] for call in compressor_calls],
             [(2 * batch_size,) for batch_size in batch_blocks],
         )
+        self.assertEqual(
+            swa_slot_batches,
+            [
+                (
+                    batch_size,
+                    (batch_size + 1,),
+                    {
+                        "num_tokens": 2 * batch_size,
+                        "M": 4,
+                        "window_size": 128,
+                        "base_offset": 1,
+                    },
+                )
+                for batch_size in swa_slot_batch_blocks
+            ],
+        )
         for batch_size, call in zip(batch_blocks, compressor_calls):
             self.assertEqual(call[2], (batch_size, 2))
             self.assertEqual(call[7], (batch_size,))
@@ -294,6 +331,20 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(_cp_batch_block_warmup_sizes(3), (1, 2, 4))
         self.assertEqual(_cp_batch_block_warmup_sizes(5), (1, 2, 4, 8))
         self.assertEqual(_cp_batch_block_warmup_sizes(1024), (1, 2, 4, 8, 16, 32, 64))
+        self.assertEqual(_swa_slot_batch_block_warmup_sizes(1), (1,))
+        self.assertEqual(
+            _swa_slot_batch_block_warmup_sizes(65),
+            (1, 2, 4, 8, 16, 32, 64, 128),
+        )
+        self.assertEqual(
+            _swa_slot_batch_block_warmup_sizes(1024),
+            (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024),
+        )
+
+    def test_cp_warmup_batch_bound_covers_context_and_scheduler_limits(self):
+        self.assertEqual(resolve_cp_metadata_warmup_max_batch_size(1, 32), 32)
+        self.assertEqual(resolve_cp_metadata_warmup_max_batch_size(64, 32), 64)
+        self.assertEqual(resolve_cp_metadata_warmup_max_batch_size(0, 0), 1)
 
     def test_cp_warmup_non_sharded_only_compiles_reachable_kernels(self):
         from rtp_llm.models_py.modules.dsv4 import _cp_metadata_triton
@@ -1401,6 +1452,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             _indexer_cp_gather_triton,
             _swa_dequant_triton,
             _swa_kv_insert_triton,
+            _swa_ops_triton,
         )
 
         compress_src = inspect.getsource(
@@ -1461,6 +1513,17 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "cache_block_size",
                 "cache_stride_b",
                 "num_cache_blocks",
+            },
+        )
+        swa_slot_kernel = _swa_ops_triton._compute_swa_slot_in_flat_from_cu_kernel
+        self.assertEqual(
+            set(swa_slot_kernel.do_not_specialize),
+            {
+                "num_tokens",
+                "M",
+                "base_offset",
+                "window_size",
+                "num_reqs",
             },
         )
 

@@ -27,6 +27,12 @@ def _load_swa_ops():
 _swa_ops = _load_swa_ops()
 
 
+def _triton_cache_size(kernel_fn) -> int:
+    return sum(
+        len(kernel_cache) for kernel_cache, *_ in kernel_fn.device_caches.values()
+    )
+
+
 def _flat_positions(prefix_lengths: list[int], input_lengths: list[int], device):
     positions = torch.cat(
         [
@@ -179,6 +185,60 @@ class SwaTopkMetaTritonTest(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_cuda_slot_in_flat_from_cu_mixed_batch(self):
         self._check_slot_in_flat_from_cu([0, 7, 1000], [5, 9, 33], device=torch.device("cuda"))
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_cuda_slot_in_flat_from_cu_no_recompile_within_batch_bucket(self):
+        kernel = _swa_ops._compute_swa_slot_in_flat_from_cu_kernel
+        kernel.device_caches.clear()
+
+        def run(batch_size, *, M, window_size, base_offset):
+            input_lengths = [2 + (idx % 3) for idx in range(batch_size)]
+            prefix_lengths = [2048 + idx for idx in range(batch_size)]
+            _pos, _req_id, cu = _flat_positions(
+                prefix_lengths, input_lengths, torch.device("cuda")
+            )
+            prefix = torch.tensor(
+                prefix_lengths, dtype=torch.int32, device="cuda"
+            )
+            num_tokens = sum(input_lengths)
+            got = _swa_ops.compute_swa_slot_in_flat_from_cu(
+                cu,
+                prefix,
+                num_tokens=num_tokens,
+                M=M,
+                window_size=window_size,
+                base_offset=base_offset,
+            )
+            ref = _slot_from_cu_ref(
+                cu,
+                prefix,
+                num_tokens=num_tokens,
+                M=M,
+                window_size=window_size,
+                base_offset=base_offset,
+            )
+            self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
+            torch.cuda.synchronize()
+
+        run(16, M=257, window_size=128, base_offset=0)
+        block16_cache_size = _triton_cache_size(kernel)
+        for batch_size in (10, 15):
+            run(batch_size, M=383, window_size=64, base_offset=17)
+            self.assertEqual(_triton_cache_size(kernel), block16_cache_size)
+
+        run(32, M=511, window_size=128, base_offset=31)
+        block32_cache_size = _triton_cache_size(kernel)
+        self.assertEqual(block32_cache_size, block16_cache_size + 1)
+        for batch_size in (20, 25, 30):
+            run(batch_size, M=769, window_size=96, base_offset=47)
+            self.assertEqual(_triton_cache_size(kernel), block32_cache_size)
+
+        run(128, M=1021, window_size=128, base_offset=63)
+        block128_cache_size = _triton_cache_size(kernel)
+        self.assertEqual(block128_cache_size, block32_cache_size + 1)
+        for batch_size in (65, 100):
+            run(batch_size, M=1537, window_size=80, base_offset=79)
+            self.assertEqual(_triton_cache_size(kernel), block128_cache_size)
 
 
 if __name__ == "__main__":

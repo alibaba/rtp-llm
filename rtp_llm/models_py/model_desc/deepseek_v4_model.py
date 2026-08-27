@@ -864,6 +864,7 @@ class DeepSeekV4Model(GptModelBase):
                     _collect_dsv4_fp8_mqa_logits_shapes,
                     _collect_dsv4_mhc_head_fused_shapes,
                     _collect_dsv4_mhc_prenorm_shapes,
+                    resolve_cp_metadata_warmup_max_batch_size,
                     resolve_dense_gemm_warmup_max_m,
                     warmup_batched_fp8_einsum_jit,
                     warmup_compressor_combine_branch_kernels,
@@ -941,7 +942,12 @@ class DeepSeekV4Model(GptModelBase):
                     is_decode_role=self._is_decode_role,
                     cp_enabled=_prefill_cp_enabled,
                     cp_size=_prefill_cp_size,
-                    max_batch_size=int(self._max_context_batch_size),
+                    # Runtime context batches are bounded by scheduler
+                    # concurrency, not by the singleton startup query shape.
+                    max_batch_size=resolve_cp_metadata_warmup_max_batch_size(
+                        self._max_context_batch_size,
+                        self._max_generate_batch_size,
+                    ),
                     fp8_kv_cache=self.fp8_kv_cache,
                     kv_cache_sharded=_prefill_kv_cache_sharded,
                     device=_jit_device,

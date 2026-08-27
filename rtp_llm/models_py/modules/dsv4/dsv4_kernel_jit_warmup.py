@@ -107,9 +107,12 @@ def _compute_state_ring_entries(
     return ring_capacity_entries
 
 
-def _cp_batch_block_warmup_sizes(max_batch_size: int) -> tuple[int, ...]:
-    """Represent every Triton ``next_power_of_2(B)`` key used by CP fusion."""
-    max_supported_batch = min(max(int(max_batch_size), 1), 64)
+def _batch_block_warmup_sizes(
+    max_batch_size: int, *, max_supported_batch: int
+) -> tuple[int, ...]:
+    max_supported_batch = min(
+        max(int(max_batch_size), 1), int(max_supported_batch)
+    )
     max_batch_block = 1 << (max_supported_batch - 1).bit_length()
     sizes = []
     batch_block = 1
@@ -117,6 +120,22 @@ def _cp_batch_block_warmup_sizes(max_batch_size: int) -> tuple[int, ...]:
         sizes.append(batch_block)
         batch_block *= 2
     return tuple(sizes)
+
+
+def _cp_batch_block_warmup_sizes(max_batch_size: int) -> tuple[int, ...]:
+    """Represent every CP fusion batch bucket, whose kernels support B <= 64."""
+    return _batch_block_warmup_sizes(max_batch_size, max_supported_batch=64)
+
+
+def _swa_slot_batch_block_warmup_sizes(max_batch_size: int) -> tuple[int, ...]:
+    """Represent every SWA slot metadata batch bucket, supporting B <= 1024."""
+    return _batch_block_warmup_sizes(max_batch_size, max_supported_batch=1024)
+
+
+def resolve_cp_metadata_warmup_max_batch_size(
+    max_context_batch_size: int, max_generate_batch_size: int
+) -> int:
+    return max(int(max_context_batch_size), int(max_generate_batch_size), 1)
 
 
 @torch.inference_mode()
@@ -166,6 +185,9 @@ def warmup_cp_metadata_jit(
         HEAD_DIM,
         try_restore_dequantize_scatter_packed_k_cache_flat,
     )
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
+        compute_swa_slot_in_flat_from_cu,
+    )
 
     if not cp_metadata_fusion_supported():
         return
@@ -173,6 +195,7 @@ def warmup_cp_metadata_jit(
     restore_enabled = bool(kv_cache_sharded)
     pool_restore_enabled = bool(fp8_kv_cache and kv_cache_sharded)
     indexer_gather_enabled = bool(fp8_kv_cache and kv_cache_sharded)
+    swa_slot_enabled = bool(fp8_kv_cache)
     compressor_meta_enabled = bool(
         fp8_kv_cache and _fused_compressor_meta_triton._TRITON_AVAILABLE
     )
@@ -181,6 +204,11 @@ def warmup_cp_metadata_jit(
     _dist_barrier()
     t0 = time.time()
     batch_sizes = _cp_batch_block_warmup_sizes(max_batch_size)
+    swa_slot_batch_sizes = (
+        _swa_slot_batch_block_warmup_sizes(max_batch_size)
+        if swa_slot_enabled
+        else ()
+    )
     for batch_size in batch_sizes:
         lengths_host = (2,) * batch_size
         lengths = torch.tensor(lengths_host, dtype=torch.int64, device=device)
@@ -263,7 +291,6 @@ def warmup_cp_metadata_jit(
             dtype=torch.int64,
             device=device,
         )
-
         def _launch() -> None:
             nonlocal restore, positions, forward_metadata, pool_restore
             nonlocal indexer_gather, compressor_meta
@@ -359,13 +386,43 @@ def warmup_cp_metadata_jit(
                 f"batch_size={batch_size} kv_cache_sharded={kv_cache_sharded} "
                 f"missing={missing}"
             )
+    for batch_size in swa_slot_batch_sizes:
+        total_tokens = 2 * batch_size
+        swa_slot_cu = torch.arange(
+            0,
+            total_tokens + 1,
+            2,
+            dtype=torch.int32,
+            device=device,
+        )
+        swa_slot_prefixes = torch.zeros(
+            batch_size, dtype=torch.int32, device=device
+        )
+
+        def _launch_swa_slot() -> None:
+            compute_swa_slot_in_flat_from_cu(
+                swa_slot_cu,
+                swa_slot_prefixes,
+                num_tokens=total_tokens,
+                M=4,
+                window_size=128,
+                base_offset=1,
+            )
+
+        _run_triton_warmup_launch_with_retry(
+            "DSV4 CPMetadata SWASlot",
+            f"batch_size={batch_size}",
+            _launch_swa_slot,
+            device=device,
+        )
     _sync_cuda(device)
     _dist_barrier()
     if _dist_rank() == 0:
         logging.info(
-            "[DSV4 CPMetadata] JIT warmup batches=%s "
+            "[DSV4 CPMetadata] JIT warmup batches=%s swa_slot_batches=%s "
             "kv_cache_sharded=%s done in %.2fs",
             batch_sizes,
+            swa_slot_batch_sizes,
             bool(kv_cache_sharded),
             time.time() - t0,
         )
