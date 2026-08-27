@@ -169,7 +169,9 @@ struct KVCacheConfig {
     int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
+    // "auto" preserves a model-declared recurrent-state dtype. Models
+    // without such a declaration keep LinearAttentionConfig's BF16 default.
+    std::string ssm_state_dtype           = "auto";
     int64_t     kv_cache_mem_mb           = -1;
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;

@@ -298,8 +298,11 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
     model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
-    // Migrate the 3-D KV kernel block id tensor with one H2D, replacing the
-    // former per-group tensorHoldHostAndToCuda copies in PyWrappedModel.
+    // Publish the physical/kernel page-table pair together. Hybrid models
+    // consume both views, and the speculative async path snapshots the pair
+    // atomically for the next round. This also replaces the former per-group
+    // tensorHoldHostAndToCuda copies in PyWrappedModel.
+    model_input.kv_cache_block_id        = publishInt32ToCuda(model_input.kv_cache_block_id, host_holder);
     model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
 }
 
@@ -391,6 +394,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
         for (const auto& stream : stream_groups.decodeStreams()) {
+            if (stream->hasMtpCacheSnapshot()) {
+                use_normal_device_state = false;
+                break;
+            }
             const auto& state = stream->getNormalAsyncDeviceState();
             if (stream->currentBatchSize() != 1 || !state.last_sample_token_gpu.defined()
                 || !state.last_sample_token_gpu.is_cuda() || !state.next_seq_len_gpu.defined()
@@ -410,14 +417,35 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     for (const auto& stream : stream_groups.decodeStreams()) {
         model_input.need_all_logits        = model_input.need_all_logits || stream->calculateLoss();
         model_input.need_all_hidden_states = model_input.need_all_hidden_states || stream->needReturnHiddenStates();
-        auto  current_batch_size           = stream->currentBatchSize();
-        auto& kv_cache                     = *stream->kvCachePtr();
-        RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
-        RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
+        const bool use_mtp_cache_snapshot = stream->hasMtpCacheSnapshot();
+        const auto current_batch_size     = use_mtp_cache_snapshot ? 1 : stream->currentBatchSize();
+        if (use_mtp_cache_snapshot) {
+            RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->hasNumBeams(),
+                                    "MTP cache snapshots require one non-beam sequence per stream, stream=%ld",
+                                    stream->streamId());
+        }
+        auto& kv_cache = *stream->kvCachePtr();
+        if (!use_mtp_cache_snapshot) {
+            RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
+            RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
+        }
 
         for (auto i = 0; i < current_batch_size; ++i) {
             model_input.trace_ids.push_back(stream->traceId());
-            if (use_normal_device_state) {
+            if (use_mtp_cache_snapshot) {
+                // MtpBatchStreamProcessor replaces every model-semantic field
+                // below from the immutable per-round device state. Populate
+                // only shape-safe sentinels here; reading token history,
+                // seqLength or MRoPE state would race the prior worker.
+                ctx.merged_tokens[ctx.batch_idx]    = 0;
+                ctx.input_lengths[ctx.batch_idx]    = 1;
+                ctx.sequence_lengths[ctx.batch_idx] = 0;
+                if (ctx.need_cal_position_id) {
+                    std::fill_n(ctx.combo_position_ids + ctx.batch_idx * config_.position_id_len_factor,
+                                config_.position_id_len_factor,
+                                0);
+                }
+            } else if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
                 static std::atomic<int> debug_log_budget{200};
                 if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()
@@ -451,8 +479,16 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                                    + ctx.batch_idx * config_.position_id_len_factor);
                 }
             }
-            copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+            // MTP may intentionally overlap this gather with the previous
+            // worker's host-side linear-cache swaps.  In that case the row is
+            // filled from the immutable device snapshot by
+            // MtpBatchStreamProcessor after this generic gather completes.
+            // Leave both host tables zeroed here instead of racing the mutable
+            // BlockIds vectors.
+            if (!use_mtp_cache_snapshot) {
+                copyKvCacheBlocksToModelInput(
+                    model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+            }
             ctx.batch_idx += 1;
         }
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), config_.kv_cache_group_tags);

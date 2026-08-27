@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
@@ -105,8 +106,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
-    is_context_stream_  = std::make_shared<bool>();
-    *is_context_stream_ = true;
+    is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
     generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
@@ -415,7 +415,11 @@ bool GenerateStream::returnCumLogProbs() const {
 }
 
 bool GenerateStream::genTimeline() const {
-    return seqLength() <= inputLength() + profileStep() - 1 ? gen_timeline_ : false;
+    return genTimelineAtSeqLength(seqLength());
+}
+
+bool GenerateStream::genTimelineAtSeqLength(int seq_length) const {
+    return seq_length <= inputLength() + profileStep() - 1 ? gen_timeline_ : false;
 }
 
 void GenerateStream::setGenTimeline(bool gen_timeline) {
@@ -552,7 +556,7 @@ void GenerateStream::incLastOutputPos() {
 }
 
 bool GenerateStream::isContextStream() const {
-    return *is_context_stream_;
+    return is_context_stream_->load(std::memory_order_acquire);
 }
 
 const torch::Tensor& GenerateStream::cumLogProbs() const {
@@ -751,6 +755,37 @@ bool GenerateStream::isActive() const {
     return !hasErrorWithoutLock() && getStatus() != StreamState::FINISHED;
 }
 
+bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason) {
+    RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "finishOrCancel wait_timeout_ms must be non-negative");
+
+    std::unique_lock<std::mutex> lock(*mutex_);
+    const auto                   lifecycle_finished = [this] { return getStatus() == StreamState::FINISHED; };
+    if (lifecycle_finished()) {
+        return true;
+    }
+
+    const bool successful_completion_pending =
+        hasEventWithoutLock(StreamEvents::GenerateDone) && !hasErrorWithoutLock();
+    if (!successful_completion_pending) {
+        reportEventWithoutLock(StreamEvents::Error, ErrorCode::CANCELLED, cancel_reason);
+    }
+
+    bool finished = false;
+    if (wait_timeout_ms == 0) {
+        consumer_cv_->wait(lock, lifecycle_finished);
+        finished = true;
+    } else {
+        finished = consumer_cv_->wait_for(lock, std::chrono::milliseconds(wait_timeout_ms), lifecycle_finished);
+    }
+
+    if (!finished && !hasErrorWithoutLock()) {
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::CANCELLED,
+                               cancel_reason + ": timed out waiting for scheduler lifecycle commit");
+    }
+    return finished;
+}
+
 void GenerateStream::setReserveStep(size_t reserve_step) {
     // Keep GenerateStream as the only entry point for setting reserve_step.
     reserve_step_ = reserve_step;
@@ -759,6 +794,15 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 }
 
 StreamState GenerateStream::moveToNext() {
+    // Most MTP rounds can execute from the immutable device page-table
+    // snapshot while the previous host commit is in flight.  A page-capacity
+    // boundary is different: the allocator must append blocks to the mutable
+    // host table, so join the worker before acquiring mutex_.  Waiting after
+    // taking mutex_ would deadlock with specUpdate().
+    if (needsAsyncBookkeepingJoinForKvReservation()) {
+        waitPendingAsyncBookkeeping();
+    }
+
     StreamState state;
     bool        should_report_metric = false;
     {
@@ -783,6 +827,24 @@ StreamState GenerateStream::moveToNext() {
         reportMetricOnce();
     }
     return state;
+}
+
+bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
+    if (getStatus() != StreamState::RUNNING || !hasPendingAsyncBookkeeping()) {
+        return false;
+    }
+
+    const auto& state = getMtpAsyncDeviceState();
+    if (!hasMtpCacheSnapshot() || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
+        return true;
+    }
+
+    // Reading group vector sizes is safe while specUpdate only swaps existing
+    // elements.  No allocator mutation can run concurrently: scheduler calls
+    // moveToNext serially on this engine thread.
+    return stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound,
+                                                         static_cast<int>(reserve_step_))
+           > 0;
 }
 
 bool GenerateStream::hasError() const {
@@ -947,7 +1009,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
-    *is_context_stream_ = false;
+    is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
@@ -1079,7 +1141,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
-    *is_context_stream_ = false;
+    is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
@@ -1398,7 +1460,7 @@ void GenerateStream::setPerfTest(bool perf_test) {
 }
 
 void GenerateStream::setIsContextStream(bool is_context_stream) {
-    *is_context_stream_ = is_context_stream;
+    is_context_stream_->store(is_context_stream, std::memory_order_release);
 }
 
 StreamCacheResource& GenerateStream::streamCacheResource() {

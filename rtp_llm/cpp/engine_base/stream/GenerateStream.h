@@ -213,6 +213,7 @@ public:
     bool   returnPromptLogits() const;
     bool   returnCumLogProbs() const;
     bool   genTimeline() const;
+    bool   genTimelineAtSeqLength(int seq_length) const;
     int    profileStep() const;
     void   setGenTimeline(bool gen_timeline);
     bool   updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
@@ -327,6 +328,12 @@ public:
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
     bool                isActive() const;    // Returns true if stream is active (no error and not finished)
+
+    // A response consumer may observe GenerateDone before the scheduler has
+    // committed RUNNING -> FINISHED. Preserve that successful completion and
+    // wait for scheduler-owned resource release; otherwise publish cancellation
+    // and wait for the same terminal transition.
+    bool finishOrCancel(int64_t wait_timeout_ms, const std::string& cancel_reason);
     bool                isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
@@ -561,21 +568,6 @@ public:
         return sp_output_buffer_;
     }
 
-    // Opaque CUDA event used by async MTP to wait for linear-attention KV swaps
-    // without including cuda_runtime.h in this header.
-    void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        pending_swap_done_event_ = std::move(event);
-    }
-    std::shared_ptr<void> getPendingSwapDoneEvent() const {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        return pending_swap_done_event_;
-    }
-    void clearPendingSwapDoneEvent() {
-        std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
-        pending_swap_done_event_.reset();
-    }
-
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
@@ -594,20 +586,36 @@ public:
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
         torch::Tensor next_seq_len_gpu;
+        // Position tuple of the next round's newest committed token.  DSpARK
+        // carries this beside next_seq_len so MRoPE target-verify graphs can
+        // be prepared without consulting worker-owned host bookkeeping.
+        torch::Tensor next_position_ids_gpu;
         torch::Tensor propose_tokens_gpu;
+        // Immutable physical and logical-to-kernel page tables for the next
+        // speculative round. The async worker may still be committing the
+        // equivalent host-side swaps; model input gathering consumes this
+        // pair instead of racing the mutable BlockIds object. Keeping the pair
+        // atomic at the state level is required by hybrid models: attention
+        // consumes the physical table while recurrent kernels consume the
+        // kernel-granularity table.
+        torch::Tensor next_kv_cache_block_id_gpu;
+        torch::Tensor next_kv_cache_kernel_block_id_gpu;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
-        // True host seqLength observed when this state is published. MTP async
-        // uses it as the base for the next KV allocation upper bound.
+        // Upper bound for the sequence length represented by the previous
+        // round. It equals host seqLength when no worker is pending; otherwise
+        // it chains from the prior published bound so multiple overlapped
+        // bookkeeping rounds can never make cache allocation underestimate
+        // the device sequence.
         // -1 = unset (first iter / cleared).
-        int last_real_seq_len = -1;
-        // Host seq_len override for the next iter's incrKVBlock. In async MTP
-        // this may be an upper bound based on last_real_seq_len, not a value to
-        // chain as the next round's true length.
+        int previous_seq_len_upper_bound = -1;
+        // Conservative host-visible bound for the next iteration. It advances
+        // monotonically while workers overlap and resets to exact host state
+        // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
-        int next_real_seq_len = -1;
+        int next_seq_len_upper_bound = -1;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -649,8 +657,30 @@ public:
     const torch::Tensor& getNextSeqLenGpu() const {
         return mtp_async_state_.next_seq_len_gpu;
     }
+    const torch::Tensor& getNextPositionIdsGpu() const {
+        return mtp_async_state_.next_position_ids_gpu;
+    }
     const torch::Tensor& getProposeTokensGpu() const {
         return mtp_async_state_.propose_tokens_gpu;
+    }
+    const torch::Tensor& getNextKVCacheBlockIdGpu() const {
+        return mtp_async_state_.next_kv_cache_block_id_gpu;
+    }
+    const torch::Tensor& getNextKVCacheKernelBlockIdGpu() const {
+        return mtp_async_state_.next_kv_cache_kernel_block_id_gpu;
+    }
+    bool hasMtpCacheSnapshot() const {
+        const auto valid = [](const torch::Tensor& table) {
+            return table.defined() && table.is_cuda() && table.scalar_type() == torch::kInt32 && table.dim() == 3
+                   && table.size(1) == 1;
+        };
+        const auto& physical = mtp_async_state_.next_kv_cache_block_id_gpu;
+        const auto& kernel   = mtp_async_state_.next_kv_cache_kernel_block_id_gpu;
+        return valid(physical) && valid(kernel) && physical.size(0) == kernel.size(0);
+    }
+    void clearMtpCacheSnapshot() {
+        mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
+        mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
     }
     const torch::Tensor& getLastHiddenStatesGpu() const {
         return mtp_async_state_.last_hidden_states_gpu;
@@ -766,6 +796,11 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    // moveToNext() runs under mutex_, while the async MTP worker needs the
+    // same mutex to commit accepted tokens/cache swaps.  Decide whether a
+    // capacity-boundary join is needed before taking mutex_.
+    bool needsAsyncBookkeepingJoinForKvReservation() const;
+
     // Consumer-visible state is read and written under mutex_. Public readers
     // acquire the lock; already-locked engine paths use these helpers.
     void         checkTimeoutWithoutLock();
@@ -809,7 +844,10 @@ protected:
     int64_t                               loading_cache_latency_us_    = 0;
     int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
-    std::shared_ptr<bool>                 is_context_stream_;
+    // Prefill-to-decode transition is committed by the output/bookkeeping
+    // worker and observed by the scheduler thread. Keep this flag atomic; the
+    // shared_ptr preserves the existing CopyOnWrite sharing semantics.
+    std::shared_ptr<std::atomic<bool>>    is_context_stream_;
     size_t                                iter_count_    = 0;
     size_t                                sp_iter_count_ = 0;
     std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
@@ -870,12 +908,6 @@ protected:
     bool                               contain_propose_token_ = false;
     int                                mtp_token_index_       = 0;
     SpeculativeExecutorStreamOutputPtr sp_output_buffer_      = nullptr;
-    // cudaEvent_t (type-erased) recorded after specUpdate runs
-    // swapLinearBlocks. MtpExecutor waits on it before issuing the next
-    // target verify. nullptr on streams without pending swaps.
-    std::shared_ptr<void>       pending_swap_done_event_;
-    std::shared_ptr<std::mutex> pending_swap_done_event_mutex_ = std::make_shared<std::mutex>();
-
     // Separate lock/cv avoids deadlocking releaseResource with worker updates
     // that need mutex_. Shared ownership preserves the coordinator across
     // GenerateStream copies captured by async workers.

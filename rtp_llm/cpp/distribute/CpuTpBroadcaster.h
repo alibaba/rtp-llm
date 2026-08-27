@@ -2,15 +2,18 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace rtp_llm {
 
-// CPU-only UDS broadcaster for intra-node TP input sync.
+// CPU-only framed UDS broadcaster for intra-node TP input sync.
 // It avoids NCCL cudaDeviceSynchronize for small CPU tensors; cross-node or
-// uninitialized callers fall back to NCCL. broadcast() is main-thread only.
+// uninitialized callers fall back to NCCL. Each frame carries its sequence and
+// payload size so a rank-local input-layout mismatch fails immediately instead
+// of consuming part of the next frame and hanging the TP group.
 class CpuTpBroadcaster {
 public:
     static CpuTpBroadcaster& instance();
@@ -20,9 +23,9 @@ public:
     // throws.
     void initialize(int tp_rank, int tp_size, const std::string& base_path);
 
-    // Blocking broadcast of `nbytes` bytes from `buf` originating at root.
-    // root rank writes to all peer sockets; non-root reads from its peer-0 fd.
-    // Throws on transport error.
+    // Blocking broadcast of one framed payload from `buf` originating at root.
+    // Calls are serialized per process. Throws on transport or frame-contract
+    // mismatch before reading a differently sized payload.
     void broadcast(void* buf, std::size_t nbytes, int root);
 
     // Close all sockets and return the singleton to its initial state so a
@@ -36,10 +39,11 @@ public:
 private:
     CpuTpBroadcaster() = default;
     ~CpuTpBroadcaster();
-    CpuTpBroadcaster(const CpuTpBroadcaster&)            = delete;
+    CpuTpBroadcaster(const CpuTpBroadcaster&) = delete;
     CpuTpBroadcaster& operator=(const CpuTpBroadcaster&) = delete;
 
     std::mutex        mu_;
+    std::mutex        broadcast_mu_;
     std::atomic<bool> initialized_{false};
     int               tp_rank_ = 0;
     int               tp_size_ = 1;
@@ -48,6 +52,7 @@ private:
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.
     std::vector<int> peer_fds_;
     std::string      my_uds_path_;  // path to unlink at shutdown (rank 0 only)
+    uint64_t         next_sequence_ = 0;
 };
 
 }  // namespace rtp_llm

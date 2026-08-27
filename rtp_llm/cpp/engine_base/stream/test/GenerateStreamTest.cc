@@ -274,6 +274,41 @@ TEST_F(GenerateStreamTest, pendingCompletionIsConsumerVisibleBeforeSchedulerComm
     EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
 }
 
+TEST_F(GenerateStreamTest, finishOrCancelPreservesPendingSuccessfulCompletion) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    auto stop_result = std::async(std::launch::async, [stream] { return stream->finishOrCancel(1000, "cancel stream"); });
+    EXPECT_EQ(stop_result.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    EXPECT_FALSE(stream->hasError());
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stop_result.get());
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
+TEST_F(GenerateStreamTest, finishOrCancelCancelsIncompleteStreamAndWaitsForCommit) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->setNeedReleaseResource(true);
+    stream->generate_status_->status.store(StreamState::RUNNING);
+
+    auto stop_result = std::async(std::launch::async, [stream] { return stream->finishOrCancel(1000, "client closed"); });
+    for (int i = 0; i < 100 && !stream->hasError(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_TRUE(stop_result.get());
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+}
+
 TEST_F(GenerateStreamTest, nextOutputDrainsFinalOutputBeforeCompletion) {
     auto builder = GenerateStreamBuilder();
     auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
@@ -646,12 +681,12 @@ TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen)
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
     GenerateStream::MtpAsyncDeviceState state;
-    state.last_real_seq_len = stream->seqLength();
-    state.next_real_seq_len = state.last_real_seq_len + 2;
+    state.previous_seq_len_upper_bound = stream->seqLength();
+    state.next_seq_len_upper_bound     = state.previous_seq_len_upper_bound + 2;
     stream->setMtpAsyncDeviceState(std::move(state));
 
-    ASSERT_EQ(stream->getMtpAsyncDeviceState().last_real_seq_len, stream->seqLength());
-    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, stream->seqLength() + 2);
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().previous_seq_len_upper_bound, stream->seqLength());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_seq_len_upper_bound, stream->seqLength() + 2);
 }
 
 // setSpecDecodeDeviceState / clearSpecDecodeDeviceState

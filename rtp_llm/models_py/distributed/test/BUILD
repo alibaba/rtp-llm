@@ -50,6 +50,39 @@ py_test(
 )
 
 py_test(
+    name = "symm_mem_unit_test",
+    srcs = ["symm_mem_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "flashinfer_all_reduce_unit_test",
+    srcs = ["flashinfer_all_reduce_unit_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "flashinfer_all_reduce_integration_test",
+    srcs = ["flashinfer_all_reduce_integration_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "2"},
+    exec_properties = {"gpu": "H20", "gpu_count": "2"},
+    tags = ["H20", "open_skip"],
+    timeout = "moderate",
+)
+
+py_test(
    name = "user_buffers_test",
    srcs = ["user_buffers_test.py"],
    deps = [

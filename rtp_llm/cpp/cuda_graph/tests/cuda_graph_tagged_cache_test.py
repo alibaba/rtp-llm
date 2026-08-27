@@ -43,10 +43,54 @@ class TaggedSequenceLengthModel:
                 full_inputs.cu_seqlens_device[-1],
                 full_inputs.cu_kv_seqlens_device[-1],
                 full_inputs.input_lengths_device.sum(),
-                full_inputs.prefix_lengths_device.sum(),
+                full_inputs.sequence_lengths_plus_1_device[-1],
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class TaggedDecodePaddingModel:
+    """Expose metadata that must describe rounded decode rows as safe dummies."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        full_inputs = inputs.attention_inputs["full"]
+        signature = torch.stack(
+            (
+                full_inputs.sequence_lengths_plus_1_device.sum(),
+                full_inputs.sequence_lengths_plus_1_device[-1],
+                full_inputs.decode_cu_seqlens_device[-1],
+                full_inputs.decode_cu_seqlens_device[-2],
+            )
+        ).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class StaticInputTailModel:
+    """Expose stale hidden rows retained by a reused graph input buffer."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        tail_signature = inputs.input_hiddens[-1].sum()
+        return PyModelOutputs(inputs.input_hiddens + tail_signature)
+
+
+class AuxiliaryOutputModel:
+    """Return a second output whose view must follow the selected graph bucket."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        hidden_states = inputs.input_hiddens + 1
+        target_features = torch.cat(
+            (inputs.input_hiddens + 2, inputs.input_hiddens + 3), dim=1
+        )
+        return PyModelOutputs(hidden_states, target_features)
 
 
 def _tag_attention_inputs(
@@ -104,6 +148,7 @@ def _build_decode_inputs(
     tags: list[str],
     values: dict[str, int],
     batch_size: int = 2,
+    block_count: int = 1,
 ) -> PyModelInputs:
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
@@ -137,7 +182,7 @@ def _build_decode_inputs(
         values,
         batch_size=batch_size,
         token_count=batch_size,
-        block_count=1,
+        block_count=block_count,
     )
 
 
@@ -362,7 +407,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self.assertFalse(runner.canRun(non_prefill))
 
-    def test_target_verify_clears_rounded_batch_sequence_lengths(self) -> None:
+    def test_target_verify_uses_reserved_block_dummy_rows(self) -> None:
         query_len = 5
         prefix_len = 11
         runner = CudaGraphRunner()
@@ -378,7 +423,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             query_len,
         )
 
-        for batch_size in (1, 2, 4):
+        # Exercise both growth and shrink on the same graph instance. The
+        # production failure appeared only after a full bucket lost a request.
+        for batch_size in (4, 3, 2, 1, 4):
             with self.subTest(batch_size=batch_size):
                 inputs = _build_target_verify_inputs(
                     GROUP_TAGS,
@@ -396,10 +443,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 total_kv_length = batch_size * (query_len + prefix_len)
                 expected_signature = torch.tensor(
                     [
-                        total_query_length,
-                        total_kv_length,
-                        total_query_length,
-                        batch_size * prefix_len,
+                        4 * query_len,
+                        total_kv_length + (4 - batch_size) * query_len,
+                        4 * query_len,
+                        prefix_len + 1 if batch_size == 4 else query_len,
                     ],
                     dtype=output.hidden_states.dtype,
                     device=output.hidden_states.device,
@@ -407,6 +454,137 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 torch.testing.assert_close(
                     output.hidden_states,
                     expected_signature.unsqueeze(0).expand_as(output.hidden_states),
+                )
+
+    def test_block_table_copy_clips_wider_hybrid_staging_rows(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTableModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+        )
+
+        # Hybrid cache assembly may expose a common staging row wider than a
+        # model-local graph table. Only the representable intersection is part
+        # of this graph; copying the complete staging stride would overwrite the
+        # next captured buffer.
+        inputs = _build_decode_inputs(
+            GROUP_TAGS,
+            {"full": 5, "aux": 3},
+            batch_size=3,
+            block_count=4,
+        )
+        self._assert_replay_signature(runner, inputs, 53)
+
+    def test_decode_clears_rounded_batch_sequence_metadata(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedDecodePaddingModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+        )
+
+        full_inputs = _build_decode_inputs(
+            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=4
+        )
+        self.assertTrue(runner.canRun(full_inputs))
+        runner.forward(full_inputs)
+        torch.cuda.synchronize()
+
+        inputs = _build_decode_inputs(
+            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
+        )
+        self.assertTrue(runner.canRun(inputs))
+        self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected_signature = torch.tensor(
+            [7, 1, 4, 3],
+            dtype=output.hidden_states.dtype,
+            device=output.hidden_states.device,
+        )
+        torch.testing.assert_close(
+            output.hidden_states,
+            expected_signature.unsqueeze(0).expand_as(output.hidden_states),
+        )
+
+    def test_decode_clears_hidden_rows_after_batch_shrink(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            StaticInputTailModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+        )
+
+        full_inputs = _build_decode_inputs(
+            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=4
+        )
+        full_inputs.input_hiddens[-1].fill_(7)
+        self.assertTrue(runner.canRun(full_inputs))
+        runner.forward(full_inputs)
+        torch.cuda.synchronize()
+
+        inputs = _build_decode_inputs(
+            GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=3
+        )
+        self.assertTrue(runner.canRun(inputs))
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.hidden_states,
+            torch.zeros_like(output.hidden_states),
+        )
+
+    def test_auxiliary_output_view_follows_each_graph_bucket(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            AuxiliaryOutputModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [1, 4],
+            GROUP_TAGS,
+        )
+
+        for batch_size in (4, 1, 3, 1, 4):
+            with self.subTest(batch_size=batch_size):
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 2, "aux": 1}, batch_size=batch_size
+                )
+                inputs.input_hiddens.copy_(
+                    torch.arange(
+                        batch_size * HIDDEN_SIZE,
+                        dtype=inputs.input_hiddens.dtype,
+                        device=inputs.input_hiddens.device,
+                    ).reshape(batch_size, HIDDEN_SIZE)
+                )
+                self.assertTrue(runner.canRun(inputs))
+                output = runner.forward(inputs)
+                torch.cuda.synchronize()
+
+                expected = torch.cat(
+                    (inputs.input_hiddens + 2, inputs.input_hiddens + 3), dim=1
+                )
+                self.assertEqual(
+                    (batch_size, HIDDEN_SIZE * 2),
+                    tuple(output.mtp_target_hidden_states.shape),
+                )
+                torch.testing.assert_close(
+                    output.mtp_target_hidden_states, expected
                 )
 
 

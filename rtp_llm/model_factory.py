@@ -511,10 +511,21 @@ class ModelFactory:
             )
 
         noise_token_id = int(propose_model_config.dspark_noise_token_id)
-        if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:
+        # The noise token is consumed by the draft backbone embedding, not by
+        # the reduced Markov output head.  Speculators checkpoints may expose
+        # a 20K draft output vocabulary while retaining the target-sized input
+        # embedding, so validate in the input-token id space.
+        input_vocab_size = int(
+            getattr(
+                propose_model_config,
+                "input_vocab_size",
+                propose_model_config.vocab_size,
+            )
+        )
+        if noise_token_id < 0 or noise_token_id >= input_vocab_size:
             raise ValueError(
-                f"invalid dspark_noise_token_id {noise_token_id} for vocab_size "
-                f"{propose_model_config.vocab_size}"
+                f"invalid dspark_noise_token_id {noise_token_id} for "
+                f"input_vocab_size {input_vocab_size}"
             )
 
         target_layer_ids = [
@@ -522,6 +533,11 @@ class ModelFactory:
         ]
         if not target_layer_ids:
             raise ValueError("dspark_target_layer_ids must not be empty")
+        if target_layer_ids != sorted(set(target_layer_ids)):
+            raise ValueError(
+                "dspark_target_layer_ids must be unique and ordered by target "
+                f"layer boundary, got {target_layer_ids}"
+            )
         invalid_layer_ids = [
             layer_id
             for layer_id in target_layer_ids

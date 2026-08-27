@@ -338,6 +338,15 @@ class QWenV2Weight(ModelDeployWeightInfo):
 class QWenV2(QWen):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config_path = os.path.join(ckpt_path, "config.json")
+        with open(config_path) as reader:
+            config_json = json.load(reader)
+        return cls._create_config_from_json(ckpt_path, config_json)
+
+    @classmethod
+    def _create_config_from_json(
+        cls, ckpt_path: str, config_json: Dict[str, Any]
+    ) -> ModelConfig:
         config = ModelConfig()
         config.ckpt_path = ckpt_path
         config.vocab_size = 152064
@@ -350,7 +359,7 @@ class QWenV2(QWen):
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_id_list = [[151645], [151644]]
 
-        QWenV2._from_hf(config, ckpt_path)
+        cls._from_config_json(config, config_json)
         assert (
             config.attn_config.head_num > 0
             and config.attn_config.kv_head_num > 0
@@ -388,14 +397,19 @@ class QWenV2(QWen):
         if config_json.get("hidden_size") is not None:
             config.hidden_size = config_json["hidden_size"]
         config.num_layers = config_json["num_hidden_layers"]
-        config.attn_config.rope_config.base = int(
-            config_json.get("rope_theta", config.attn_config.rope_config.base)
-        )
+        # Transformers 5.2 moved rope_theta under rope_parameters. Preserve
+        # the legacy top-level field's precedence when both are present.
+        rope_parameters = config_json.get("rope_parameters") or {}
+        rope_theta = config_json.get("rope_theta")
+        if rope_theta is None and isinstance(rope_parameters, dict):
+            rope_theta = rope_parameters.get("rope_theta")
+        if rope_theta is not None:
+            config.attn_config.rope_config.base = int(rope_theta)
         config.vocab_size = config_json["vocab_size"]
         config.attn_config.rope_config.dim = config.attn_config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.config_dtype = config_json.get("torch_dtype", None)
+        config.config_dtype = config_json.get("torch_dtype") or config_json.get("dtype")
         config.headwise_config = config_json.get("headwise_config", None)
 
     @staticmethod

@@ -59,6 +59,8 @@ protected:
     std::shared_ptr<GenerateStream> stream_;
     bool                            retryable_ = true;
 
+    static constexpr int64_t kStopStreamWaitTimeoutMs = 2000;
+
 protected:
     void stopStream();
 };

@@ -1,5 +1,9 @@
 """Qwen3 DSpark draft-model registration."""
 
+from typing import Any, List
+
+import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.weight_module import AtomicWeight
@@ -8,12 +12,34 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 from rtp_llm.utils.util import get_config_from_path
 
 
+def dspark_offset_d2t_to_absolute(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Normalize Speculators' offset d2t table to absolute target token ids."""
+    offsets = identity(ts).to(torch.int64)
+    return offsets + torch.arange(
+        offsets.numel(), dtype=offsets.dtype, device=offsets.device
+    )
+
+
 class Qwen3DSparkWeight(QWenV3Weight):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._d2t_path = None
+        self._hidden_norm_path = "model.hidden_norm.weight"
+
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        super()._process_meta(meta_dicts, weight_keys)
+        if "hidden_norm.weight" in weight_keys:
+            self._hidden_norm_path = "hidden_norm.weight"
+        if "d2t" in weight_keys:
+            self._d2t_path = "d2t"
+        elif "model.d2t" in weight_keys:
+            self._d2t_path = "model.d2t"
+
     def _get_weight_info(self):
         info = super()._get_weight_info()
         extras = (
             (W.dspark_fc_w, "fc.weight", transpose),
-            (W.dspark_hidden_norm_gamma, "model.hidden_norm.weight", identity),
+            (W.dspark_hidden_norm_gamma, self._hidden_norm_path, identity),
             (W.dspark_markov_w1, "markov_head.markov_w1.weight", identity),
             (W.dspark_markov_w2, "markov_head.markov_w2.weight", identity),
         )
@@ -21,18 +47,44 @@ class Qwen3DSparkWeight(QWenV3Weight):
             AtomicWeight(name, [CkptWeightInfo(path, identity)], transform)
             for name, path, transform in extras
         )
+        if self._d2t_path is not None:
+            transform = (
+                dspark_offset_d2t_to_absolute
+                if self._d2t_path == "d2t"
+                else identity
+            )
+            info.weights.append(
+                AtomicWeight(
+                    W.multi_tokens_predict_d2t_map,
+                    [CkptWeightInfo(self._d2t_path, identity)],
+                    transform,
+                    data_type=torch.int64,
+                )
+            )
         return info
 
 
 class Qwen3DSpark(QwenV3):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = super()._create_config(ckpt_path)
-        config.attn_config.is_causal = False
         dspark = get_config_from_path(ckpt_path)
         assert dspark is not None, f"config.json missing under {ckpt_path}"
+        backbone = dspark.get("transformer_layer_config", dspark)
+        if not isinstance(backbone, dict):
+            raise TypeError("transformer_layer_config must be an object")
+        config = cls._create_config_from_json(ckpt_path, backbone)
+        config.attn_config.is_causal = False
+        config.input_vocab_size = int(backbone["vocab_size"])
+        config.vocab_size = int(dspark.get("draft_vocab_size", backbone["vocab_size"]))
         config.dspark_noise_token_id = int(dspark["mask_token_id"])
-        config.dspark_target_layer_ids = list(dspark["aux_hidden_state_layer_ids"])
+        target_layer_ids = [int(x) for x in dspark["aux_hidden_state_layer_ids"]]
+        if dspark.get("speculators_model_type") == "dspark":
+            target_layer_ids = [x - 1 for x in target_layer_ids]
+            if any(x < 0 for x in target_layer_ids):
+                raise ValueError(
+                    "Speculators DSpark aux_hidden_state_layer_ids must be positive"
+                )
+        config.dspark_target_layer_ids = target_layer_ids
         config.dspark_markov_rank = int(dspark.get("markov_rank", 0) or 0)
         if config.dspark_markov_rank <= 0:
             raise ValueError("Qwen3 DSpark requires markov_rank > 0")

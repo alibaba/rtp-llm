@@ -389,6 +389,16 @@ class PyModelOutputs:
         Initialize with hidden states tensor
         """
 
+    @typing.overload
+    def __init__(
+        self,
+        hidden_states: torch.Tensor,
+        mtp_target_hidden_states: torch.Tensor,
+    ) -> None:
+        """
+        Initialize with hidden states and speculative target features
+        """
+
     @property
     def hidden_states(self) -> torch.Tensor:
         """
@@ -397,6 +407,15 @@ class PyModelOutputs:
 
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
+
+    @property
+    def mtp_target_hidden_states(self) -> torch.Tensor | None:
+        """
+        Optional target features consumed by speculative decoding
+        """
+
+    @mtp_target_hidden_states.setter
+    def mtp_target_hidden_states(self, arg0: torch.Tensor) -> None: ...
 
 class PyMultimodalInputs:
     def __init__(self) -> None: ...

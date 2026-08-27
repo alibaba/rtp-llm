@@ -42,11 +42,11 @@ def kv_cache_dtype_to_torch_dtype(
 
 def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
     ssm_state_dtype = ssm_state_dtype.lower()
-    if ssm_state_dtype == "bf16":
+    if ssm_state_dtype in ("bf16", "bfloat16"):
         return DataType.TYPE_BF16
-    if ssm_state_dtype == "fp16":
+    if ssm_state_dtype in ("fp16", "float16"):
         return DataType.TYPE_FP16
-    if ssm_state_dtype == "fp32":
+    if ssm_state_dtype in ("fp32", "float32"):
         return DataType.TYPE_FP32
     raise ValueError(f"Unsupported ssm_state_dtype: {ssm_state_dtype}")
 
@@ -906,9 +906,11 @@ def build_model_config(
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
     )
-    model_config.linear_attention_config.ssm_state_dtype = (
-        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
-    )
+    configured_ssm_state_dtype = kv_cache_config.ssm_state_dtype.lower()
+    if configured_ssm_state_dtype != "auto":
+        model_config.linear_attention_config.ssm_state_dtype = (
+            ssm_state_dtype_str_to_data_type(configured_ssm_state_dtype)
+        )
     model_config.linear_attention_config.conv_state_dtype = model_config.data_type
 
     model_config.use_kvcache = model_config.task_type == TaskType.LANGUAGE_MODEL

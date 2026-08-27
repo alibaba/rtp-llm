@@ -343,7 +343,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             // The per-step refresher (MtpExecutor's device-state publish) is gated
             // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
             // this static snapshot without those pipelines active would leave a
-            // stale next_real_seq_len that overrides incrKVBlock forever (same
+            // stale next_seq_len_upper_bound that overrides incrKVBlock forever (same
             // failure mode as the normal-decode grpc device state).
             auto env_on = [](const char* name) {
                 const char* value = std::getenv(name);
@@ -358,8 +358,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                     .propose_tokens_gpu     = std::move(propose_tokens_gpu),
                     .last_hidden_states_gpu = sp_output_buffer->hidden_states,
                     .draft_all_probs_gpu    = sp_output_buffer->all_probs,
-                    .last_real_seq_len      = generate_stream->seqLength(),
-                    .next_real_seq_len      = generate_stream->seqLength(),
+                    .previous_seq_len_upper_bound = generate_stream->seqLength(),
+                    .next_seq_len_upper_bound     = generate_stream->seqLength(),
                 });
             }
         }

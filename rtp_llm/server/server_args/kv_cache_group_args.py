@@ -106,9 +106,12 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="SSM_STATE_DTYPE",
         bind_to=(kv_cache_config, "ssm_state_dtype"),
         type=str,
-        choices=["bf16", "fp32"],
-        default="bf16",
-        help="线性注意力 SSM state 的数据类型。默认 bf16，可选 fp32 和 bf16。",
+        choices=["auto", "bf16", "fp32"],
+        default="auto",
+        help=(
+            "线性注意力 SSM state 的数据类型。默认 auto，优先采用模型配置；"
+            "模型未声明时使用 bf16，也可显式指定 fp32 或 bf16。"
+        ),
     )
     kv_cache_group.add_argument(
         "--test_block_num",

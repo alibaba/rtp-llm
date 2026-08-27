@@ -7,6 +7,9 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import (
+    select_attention_inputs_for_layer,
+)
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.factory.attention.common import (
@@ -14,7 +17,7 @@ from rtp_llm.models_py.modules.factory.attention.common import (
 )
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
 from rtp_llm.ops import ParallelismConfig
-from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -75,18 +78,21 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         kv_heads = self.attn_configs.kv_head_num
         head_dim = self.attn_configs.size_per_head
         q_cols = heads * head_dim
-        self.context_kv_projections = nn.ModuleList()
+        context_kv_weights = []
         self.context_k_norms = nn.ModuleList()
         for layer_weights in weights.weights[: self.layer_num]:
             qkv = layer_weights[W.attn_qkv_w]
-            self.context_kv_projections.append(
-                LinearFactory.create_linear(
-                    qkv[:, q_cols:], None, None, None, py_hw_kernel_config
-                )
-            )
+            context_kv_weights.append(qkv[:, q_cols:])
             self.context_k_norms.append(
                 RMSNorm(layer_weights[W.k_ln_gamma], eps=config.layernorm_eps)
             )
+        self.context_kv_projection = LinearFactory.create_linear(
+            torch.cat(context_kv_weights, dim=1),
+            None,
+            None,
+            None,
+            py_hw_kernel_config,
+        )
 
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
             MhaRotaryEmbeddingOp,
@@ -100,11 +106,22 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
     def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
         return self.fc(features)
 
+    def dspark_attention_inputs(self, inputs: PyModelInputs):
+        attention = select_attention_inputs_for_layer(inputs, self.kv_cache, 0)
+        if isinstance(attention, list):
+            if len(attention) != 1:
+                raise RuntimeError(
+                    "Qwen3 DSpark requires exactly one KV cache group per layer, "
+                    f"got {len(attention)}"
+                )
+            attention = attention[0]
+        return attention
+
     def _block_table(self, inputs: PyModelInputs) -> torch.Tensor:
-        attention = inputs.attention_inputs
-        table = attention.kv_cache_block_id_device
+        attention = self.dspark_attention_inputs(inputs)
+        table = attention.kv_cache_kernel_block_id_device
         if table is None or table.numel() == 0:
-            table = attention.kv_cache_block_id_host.to(
+            table = attention.kv_cache_kernel_block_id.to(
                 device=self.embed_tokens.weight.device, non_blocking=True
             )
         return table[0] if table.dim() == 3 else table
@@ -129,10 +146,11 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         kv_heads = self.attn_configs.kv_head_num
         dummy_q = hidden.new_zeros((hidden.shape[0], 1, head_dim))
 
+        all_kv = self.context_kv_projection(hidden).view(
+            -1, self.layer_num, 2, kv_heads, head_dim
+        )
         for layer_idx in range(self.layer_num):
-            key, value = self.context_kv_projections[layer_idx](hidden).view(
-                -1, 2, kv_heads, head_dim
-            ).unbind(1)
+            key, value = all_kv[:, layer_idx].unbind(1)
             key = self.context_k_norms[layer_idx](key.reshape(-1, head_dim)).view(
                 -1, kv_heads, head_dim
             )
@@ -143,12 +161,16 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             cache[pages, 0, :, slots, :] = key.to(cache.dtype)
             cache[pages, 1, :, slots, :] = value.to(cache.dtype)
 
-        writer = create_write_cache_store_impl(
-            inputs.attention_inputs, self.kv_cache
-        )
+        writer = create_write_cache_store_impl(self.dspark_attention_inputs(inputs))
         if writer is not None:
             for layer_idx in range(self.layer_num):
-                writer(self.kv_cache.get_layer_caches(layer_idx))
+                layer_caches = self.kv_cache.get_layer_cache_groups(layer_idx)
+                if len(layer_caches) != 1:
+                    raise RuntimeError(
+                        "Qwen3 DSpark requires exactly one KV cache group per layer, "
+                        f"got {len(layer_caches)} for layer {layer_idx}"
+                    )
+                writer(layer_caches[0])
 
     def forward_query_block(
         self,
@@ -162,21 +184,16 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         del query_ids, query_positions, prefix_lengths, active_requests
         return super().forward(inputs, fmha_impl).hidden_states
 
-    @torch.inference_mode()
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        phase = getattr(inputs, "dspark_call_phase", DSparkCallPhase.NONE)
-        if phase == DSparkCallPhase.NONE:
-            raise RuntimeError("Qwen3 DSpark requires an explicit phase")
+    def _forward_device(self) -> torch.device:
         device = self.embed_tokens.weight.device
+        return device
+
+    @torch.inference_mode()
+    def forward_propose(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        device = self._forward_device()
         if self.kv_cache is None:
-            if phase == DSparkCallPhase.COMMIT:
-                return PyModelOutputs(
-                    torch.empty(
-                        (0, self.config.hidden_size),
-                        dtype=torch.bfloat16,
-                        device=device,
-                    )
-                )
             tokens = int(inputs.input_ids.numel())
             batch = max(
                 (tokens + self._dspark_query_width - 1)
@@ -184,9 +201,30 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
                 1,
             )
             return self.dspark_empty_outputs(batch, device)
-        if phase == DSparkCallPhase.COMMIT:
-            return self.run_commit_step(inputs, device)
         return self.run_propose_step(inputs, fmha_impl, device)
+
+    @torch.inference_mode()
+    def forward_commit(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
+        del fmha_impl
+        device = self._forward_device()
+        if self.kv_cache is None:
+            return PyModelOutputs(
+                torch.empty(
+                    (0, self.config.hidden_size),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+            )
+        return self.run_commit_step(inputs, device)
+
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        del inputs, fmha_impl
+        raise RuntimeError(
+            "Qwen3DSparkModel requires a fixed forward_propose or "
+            "forward_commit entrypoint"
+        )
 
 
 __all__ = ["Qwen3DSparkModel"]
