@@ -44,6 +44,19 @@ Suite ``chaos`` (fault injection & self-healing):
 The mock is a SINGLE JVM hosting all engines: /add_engine opens a new port
 inside the same process (no per-engine kill possible — use /stop_engine for
 the stop/start variants, /remove_engine for permanent detach).
+
+Profile semantics (v2, task #55): every environment in this file except
+chaos_coldstart_burst pins the legacy chaos axes (QUEUE + PRIORITY +
+FIXED_WINDOW + BATCH) via FLEXLB_CONFIG in its EnvSpec —
+chaos_flexlb_config / ttl_spec / quota_spec and their injection-gate
+counterparts — so re-running those cases under another --profile would
+execute the identical configuration.  They are declared
+profiles=["batch-window"] for label honesty and regression efficiency
+(new profile variants are dedicated-phase material).  chaos_coldstart_burst
+runs on a real per-profile config (coldstart_spec has no config override)
+but stays scoped to batch-window this round — its intake-probe LB
+assertion is dispatcher-independent, and spreading it is deliberate
+later-phase work, not a semantic restriction.
 """
 
 from __future__ import annotations
@@ -81,7 +94,9 @@ REMOVE_CONVERGENCE_S = 10.0
 MASTER_EVICT_S = 30.0
 
 
-def case(name: str, profiles=None, source: str = "", suite: str = "chaos"):
+def case(
+    name: str, profiles=None, requires=None, source: str = "", suite: str = "chaos"
+):
     """Register into CHAOS_CASES; *suite* drives the runner grouping.
 
     The elastic_* cases pass suite="smoke" (functional taxonomy — see the
@@ -90,7 +105,14 @@ def case(name: str, profiles=None, source: str = "", suite: str = "chaos"):
 
     def deco(fn):
         CHAOS_CASES.append(
-            CaseDef(name=name, suite=suite, fn=fn, profiles=profiles, source=source)
+            CaseDef(
+                name=name,
+                suite=suite,
+                fn=fn,
+                profiles=profiles,
+                requires=requires,
+                source=source,
+            )
         )
         return fn
 
@@ -450,6 +472,7 @@ def _pump_until_accepted(ops, engine_name: str, base: int, timeout_s: float) -> 
 
 @case(
     "elastic_add_flow",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="elastic acceptance: add under load (FileDiscoveryDynamicScaleEndToEndTest phase 2)",
     suite="smoke",
 )
@@ -500,6 +523,7 @@ def elastic_add_flow(ctx: CaseContext):
 
 @case(
     "elastic_remove_flow",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="elastic acceptance: remove under load (FileDiscoveryDynamicScaleEndToEndTest phase 3)",
     suite="smoke",
 )
@@ -579,6 +603,7 @@ def elastic_remove_flow(ctx: CaseContext):
 
 @case(
     "elastic_add_remove_cycle",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="elastic acceptance: 3x add→verify→remove→verify cycle",
     suite="smoke",
 )
@@ -657,6 +682,7 @@ def elastic_add_remove_cycle(ctx: CaseContext):
 
 @case(
     "elastic_rebalance",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="elastic acceptance: cost-based rebalance after scale-out (share < 60%)",
     suite="smoke",
 )
@@ -752,6 +778,7 @@ def elastic_rebalance(ctx: CaseContext):
 
 @case(
     "elastic_stop_after_add",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="elastic acceptance: add → traffic → /stop_engine (3-fail evict) → /start_engine recovery",
     suite="smoke",
 )
@@ -841,6 +868,7 @@ def elastic_stop_after_add(ctx: CaseContext):
 
 @case(
     "elastic_concurrent_ops",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="elastic acceptance: concurrent add/remove storm, master stays healthy",
     suite="smoke",
 )
@@ -1012,6 +1040,12 @@ def coldstart_burst(ctx: CaseContext):
     3-strike dead marking on first connect, non-atomic getOrCreateWorkerStatus.
     Expected to FAIL or pass marginally today — the failure rate and the
     marked-dead sample count are recorded as the baseline for the intake fix.
+
+    Profile semantics (v2, task #55): coldstart_spec carries NO config
+    override, so the case would genuinely exercise each profile's config
+    (unlike the pinned-spec cases above); it stays scoped to batch-window
+    this round as a deliberate scope decision — spreading the intake probe
+    across profiles is later-phase work.
     """
     env = ctx.env_manager.ensure(coldstart_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -1126,8 +1160,13 @@ def coldstart_burst(ctx: CaseContext):
 def inflight_ttl_cleanup(ctx: CaseContext):
     """S1 port: slow prefill → inflight stuck → /stop_engine → TTL cleans.
 
-    Batch mode only — the stuck-inflight state lives in the master's batcher
-    (enqueued_by_master path); direct/queue modes have no enqueue bookkeeping.
+    Profile semantics (v2, task #55): the stuck-inflight state is built
+    from fire-and-forget requests whose master-side batch bookkeeping
+    never settles, and ttl_spec pins the legacy chaos axes (PRIORITY +
+    FIXED_WINDOW + BATCH) via FLEXLB_CONFIG — the declaration stays
+    batch-window (label honesty + regression efficiency).  A NON_BATCH
+    variant would need its own stuck-direct-ledger construction
+    (dedicated-phase material).
     """
     env = ctx.env_manager.ensure(ttl_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -1191,6 +1230,7 @@ def inflight_ttl_cleanup(ctx: CaseContext):
 
 @case(
     "chaos_engine_down_http_stop_prefill",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="flexlb_behavior_test.sh S2/S4 merged — five-phase engine-down assertion set",
 )
 def engine_down_http_stop_prefill(ctx: CaseContext):
@@ -1290,6 +1330,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
 
 @case(
     "chaos_master_kill",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="master HA: kill -9 master → restart → clean state + recovery",
 )
 def master_kill(ctx: CaseContext):
@@ -1355,6 +1396,12 @@ def master_kill(ctx: CaseContext):
 def master_quota_block(ctx: CaseContext):
     """S3 port: fill the 1-batch inflight quota → stop the only prefill →
     new requests fail (≥50%) → TTL cleanup → start engine → recovery ≥90%.
+
+    Profile semantics (v2, task #55): the quota knob itself
+    (dispatcher.maxInflightBatchesPerPrefillWorker) exists only under the
+    BATCH dispatcher, and quota_spec pins the legacy chaos axes (PRIORITY +
+    FIXED_WINDOW + BATCH, maxInflightBatches=1) via FLEXLB_CONFIG — the
+    declaration stays batch-window.
     """
     env = ctx.env_manager.ensure(quota_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -1460,6 +1507,7 @@ def master_quota_block(ctx: CaseContext):
 
 @case(
     "chaos_engine_flap",
+    profiles=["batch-window"],  # elastic_spec pins the legacy chaos axes
     source="gap G2: rapid /stop_engine+/start_engine oscillation, 3-strike eviction vs re-discovery race",
 )
 def engine_flap(ctx: CaseContext):
