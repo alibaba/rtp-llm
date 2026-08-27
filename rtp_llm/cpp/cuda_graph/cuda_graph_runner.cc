@@ -564,6 +564,19 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
         RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId(fused_d2d_copy)");
         launchFusedD2DCopies(d2d_copies, strided_d2d_copies);
     }
+
+    // TokenSpeed MLA rebuilds its replay plan from the singular pinned-host
+    // block table.  K3 PD may replace that table after the asynchronous KDA
+    // shadow load has completed, so refreshing only the device/group buffers
+    // leaves multi-page MLA replay using the table captured before the load.
+    // Mirror the host table in the focused update hook as well; this is the
+    // same strided H2H copy used by prepareAttentionInputs and does not add a
+    // device synchronization.
+    {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId(host_mirror_copy)");
+        copyStridedHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
+                        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
+    }
 }
 
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {

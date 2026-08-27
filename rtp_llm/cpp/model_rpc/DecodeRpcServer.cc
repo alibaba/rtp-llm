@@ -729,20 +729,39 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     if (!kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
         return loadCacheAsyncForTp(decode_context, load_context);
     }
-    auto status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_RESERVE);
-    if (status.ok()) {
-        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_LOAD);
-    }
-    if (status.ok()) {
-        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_COMMIT);
-    }
-    if (!status.ok()) {
+    const int64_t configured_retries = maga_init_params_.pd_sep_config.rdma_connect_retry_times;
+    const size_t  max_attempts = configured_retries > 0 ? static_cast<size_t>(configured_retries) + 1 : 1;
+    ErrorInfo     status       = ErrorInfo::OkStatus();
+    for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
+        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_RESERVE);
+        if (status.ok()) {
+            status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_LOAD);
+        }
+        if (status.ok()) {
+            status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_COMMIT);
+        }
+        if (status.ok()) {
+            return status;
+        }
+
         auto rollback = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_ROLLBACK);
         if (!rollback.ok()) {
             RTP_LLM_LOG_ERROR("request [%s] KDA shadow rollback also failed: %s",
                               decode_context.request_key.c_str(),
                               rollback.ToString().c_str());
+            return status;
         }
+
+        const bool connect_failure = status.code() == ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
+                                     || status.code() == ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED;
+        if (!connect_failure || attempt + 1 >= max_attempts) {
+            return status;
+        }
+        RTP_LLM_LOG_WARNING("request [%s] KDA shadow load connect failed; retrying transaction (%zu/%zu): %s",
+                            decode_context.request_key.c_str(),
+                            attempt + 1,
+                            max_attempts - 1,
+                            status.ToString().c_str());
     }
     return status;
 }

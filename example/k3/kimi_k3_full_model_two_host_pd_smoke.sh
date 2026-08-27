@@ -291,6 +291,7 @@ smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
 smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
 smoke_rdma_prewarm_settle_s="${SMOKE_RDMA_PREWARM_SETTLE_S:-2}"
 smoke_rdma_connect_timeout_ms="${SMOKE_RDMA_CONNECT_TIMEOUT_MS:-120000}"
+smoke_rdma_connect_retry_times="${SMOKE_RDMA_CONNECT_RETRY_TIMES:-3}"
 for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
@@ -312,6 +313,8 @@ for seconds_value in \
     [[ "${seconds_value}" =~ ^[0-9]+([.][0-9]+)?$ ]] \
         || die "RDMA prewarm backoff/settle values must be non-negative numbers"
 done
+[[ "${smoke_rdma_connect_retry_times}" =~ ^[0-9]+$ ]] \
+    || die "SMOKE_RDMA_CONNECT_RETRY_TIMES must be a non-negative integer"
 
 service_pid=
 listener_pid=
@@ -487,6 +490,7 @@ verify_role_environment() {
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
         "${smoke_rdma_connect_timeout_ms}" \
+        "${smoke_rdma_connect_retry_times}" \
         "${smoke_prefill_kv_cache_mem_mb}" \
         "${smoke_decode_kv_cache_mem_mb}" \
         "${decode_topology}" \
@@ -505,6 +509,7 @@ import sys
     linear_step,
     chunkwise_rdma,
     rdma_connect_timeout_ms,
+    rdma_connect_retry_times,
     prefill_kv_cache_mem_mb,
     decode_kv_cache_mem_mb,
     decode_topology,
@@ -527,6 +532,7 @@ expected = {
     "LINEAR_STEP": linear_step,
     "CACHE_STORE_RDMA_MODE": "1",
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": rdma_connect_timeout_ms,
+    "RDMA_CONNECT_RETRY_TIMES": rdma_connect_retry_times,
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
@@ -659,6 +665,7 @@ apply_validated_common_profile() {
     export LINEAR_STEP="${smoke_linear_step}"
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS="${smoke_rdma_connect_timeout_ms}"
+    export RDMA_CONNECT_RETRY_TIMES="${smoke_rdma_connect_retry_times}"
     export KIMI_K3_CHUNKWISE_RDMA="${smoke_chunkwise_rdma}"
     export DSV4_MEGA_MOE_INPUT_PACKER=fused
     export DSV4_MEGA_MOE_INPUT_PACKER_IMPL=optimized
