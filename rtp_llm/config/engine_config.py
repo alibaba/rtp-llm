@@ -252,6 +252,8 @@ class EngineConfig:
         grammar_config = py_env_configs.grammar_config
         load_config = py_env_configs.load_config
 
+        derive_grammar_compile_threads(grammar_config, parallelism_config)
+
         # Setup pd_sep_config role_type based on vit_separation
         if (
             py_env_configs.vit_config.vit_separation
@@ -375,6 +377,51 @@ def setup_pd_sep_config(
     # Override with values from other sources
     if pd_sep_config.role_type in [RoleType.PREFILL, RoleType.DECODE]:
         pd_sep_config.cache_store_rdma_mode = cache_store_config.cache_store_rdma_mode
+
+
+GRAMMAR_MIN_COMPILE_THREADS = 8
+GRAMMAR_MAX_COMPILE_THREADS = 32
+
+
+def derive_grammar_compile_threads(
+    grammar_config: Any,  # GrammarConfig
+    parallelism_config: Any,  # ParallelismConfig
+) -> None:
+    """Resolve an auto grammar compile fanout into a concrete thread count.
+
+    A grammar compile spends nearly all of its time in a phase that parallelises
+    almost perfectly, so the fanout should absorb the CPU this rank actually owns.
+    Every rank on the node runs its own compiler, so the node's CPU budget is split
+    between them. Past a point extra threads stop buying latency and start losing to
+    lock and memory contention, hence the upper bound, held under the cpuset so a rank
+    can never fan out wider than the CPU visible to it. The lower bound deliberately
+    sits above a rank's fair share on a small node: a fanout narrower than that leaves
+    a compile slow enough to exhaust the caller's budget, which costs more than the
+    contention of overlapping with the other ranks' compilers. A no-op unless the fanout
+    was left at its auto value.
+    """
+    if grammar_config.num_workers > 0:
+        return
+
+    # os.cpu_count() reports the host; only the affinity mask reflects our cpuset.
+    cores = len(os.sched_getaffinity(0))
+    # local_world_size is resolved during parallelism setup, from the launcher or from the
+    # visible device count, and can outlive a job smaller than the node it was sized for.
+    ranks = max(
+        1, min(parallelism_config.local_world_size, parallelism_config.world_size)
+    )
+
+    grammar_config.num_workers = min(
+        max(
+            GRAMMAR_MIN_COMPILE_THREADS,
+            min(GRAMMAR_MAX_COMPILE_THREADS, cores // ranks),
+        ),
+        max(1, cores),
+    )
+    logging.info(
+        f"grammar compile fanout derived: num_workers={grammar_config.num_workers} "
+        f"(affinity_cores={cores}, ranks_on_node={ranks})"
+    )
 
 
 def finalize_scheduler_config(

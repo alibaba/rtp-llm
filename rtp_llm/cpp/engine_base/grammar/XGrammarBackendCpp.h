@@ -53,30 +53,42 @@ struct CompileResult {
 };
 
 struct XGrammarBackendOptions {
-    bool any_whitespace        = true;
-    bool strict_mode           = true;
+    bool any_whitespace = true;
+    bool strict_mode    = true;
+    // Threads one compile fans out over, and the main lever on compile latency: a compile spends nearly all
+    // of its time in a phase that parallelises almost perfectly. Normally supplied from config, where it is
+    // derived from the CPU the rank owns; the value here is the fallback for direct construction and for a
+    // config value that arrived unresolved.
     int  max_compiler_threads  = 8;
     bool enable_compiler_cache = true;
     // Ceiling on cached compiled grammars, measured with xgrammar's own MemorySizeBytes() estimate. It is
     // handed to xgrammar's compiler cache and applied again to the verdict cache here, whose strong
     // references would otherwise keep alive exactly what xgrammar evicts. The two hold the same
-    // CompiledGrammar objects, so the resident total is not twice the ceiling: only xgrammar's rule-level
-    // cache, one third of its budget, is distinct, putting the per-process bound near 4/3 of this. Every
-    // rank owns a backend, so a DP8 node holds eight times that. The ceiling is soft by one entry: a
-    // verdict too large to fit under it on its own is kept anyway, because dropping it would recompile the
-    // grammar on every request. <=0 removes the ceiling and restores unbounded growth.
+    // CompiledGrammar objects, so the resident total is not twice the ceiling; only xgrammar's rule-level
+    // cache is distinct. Every rank owns a backend, so a node holds one per rank. The ceiling is soft by
+    // one entry: a verdict too large to fit under it on its own is kept anyway, because dropping it would
+    // recompile the grammar on every request. <=0 removes the ceiling and restores unbounded growth.
     int64_t compiler_cache_bytes = 2LL << 30;
-    // Wall-clock budget a caller waits for one compile. <=0 keeps the legacy unbounded synchronous
-    // compile on the caller thread. The default is short on purpose: the caller thread is an enqueue
-    // thread, so waiting there costs latency for a request whose retry will hit the cache anyway.
-    int compile_timeout_ms = 50;
-    // Compiles allowed to run at once. Each compile internally fans out over max_compiler_threads, so
-    // this multiplies CPU usage. Before this guard every caller compiled inline with no bound at all,
-    // so this is a cap on what used to be unbounded, not a restriction of previous behaviour.
-    int compile_concurrency = 16;
-    // Queued compiles. The bound is soft: autil frees a slot when a worker picks an item up rather than
-    // when it finishes, so up to compile_queue_size + compile_concurrency compiles can be outstanding.
-    int                             compile_queue_size = 64;
+    // Wall-clock budget a caller waits for one compile. <=0 keeps the legacy unbounded synchronous compile
+    // on the caller thread. The compile keeps running past the budget, so this bounds only the wait before
+    // the request is rejected as overloaded, not the CPU the compile costs. Sized to cover a legitimately
+    // expensive grammar rather than to fail fast, because the cache is per rank: a rejected request that
+    // retries onto another rank pays the compile again.
+    int compile_timeout_ms = 2000;
+    // Compiles allowed to run at once. This times max_compiler_threads is the compile thread budget, which
+    // should stay within the CPU the rank owns or compiles contend with the engine's own threads. For a
+    // fixed budget, fanout finishes one compile sooner where concurrency finishes several slowly together,
+    // so the budget belongs in max_compiler_threads. The cost of a single lane is head-of-line blocking: one
+    // pathological grammar delays every other distinct grammar on the rank until it finishes. Before this
+    // guard every caller compiled inline with no bound at all, so this is a cap on what used to be
+    // unbounded, not a restriction of previous behaviour.
+    int compile_concurrency = 1;
+    // Queued compiles, kept shallow: with a single lane, only the entries near the head can still finish
+    // inside compile_timeout_ms, and anything behind them outlives its caller and runs only to warm the cache
+    // for a retry. Rejecting those early is cheaper than paying for them. The bound is soft: a slot frees
+    // when a worker picks an item up rather than when it finishes, and the queue is only refused once it is
+    // over size, so a little more than compile_queue_size plus compile_concurrency can be outstanding.
+    int                             compile_queue_size = 2;
     std::optional<std::vector<int>> override_stop_tokens;
 };
 

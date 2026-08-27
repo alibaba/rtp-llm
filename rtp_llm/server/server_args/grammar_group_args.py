@@ -24,22 +24,32 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         env_name="GRAMMAR_NUM_WORKERS",
         bind_to=(grammar_config, "num_workers"),
         type=int,
-        default=8,
-        help="xgrammar compiler worker count",
+        default=0,
+        help=(
+            "Threads one grammar compile fans out over. A compile spends nearly all of its time in a phase "
+            "that parallelises almost perfectly, so this is the main lever on compile latency. <=0 derives it "
+            "from the CPU this rank actually owns, namely the process CPU affinity split across the ranks "
+            "sharing the node, clamped so a small cpuset stays usable and a large one does not run past the "
+            "point where extra threads lose to lock and memory contention. Also feeds the frontend admission "
+            "sandbox's automatic pool sizing, where a wider fanout per compile means fewer grammars validated "
+            "in parallel, up to a ceiling on the number of sandbox processes; "
+            "--grammar_admission_sandbox_pool_size overrides that."
+        ),
     )
     grammar_group.add_argument(
         "--grammar_compile_timeout_ms",
         env_name="GRAMMAR_COMPILE_TIMEOUT_MS",
         bind_to=(grammar_config, "compile_timeout_ms"),
         type=int,
-        default=50,
+        default=2000,
         help=(
-            "Engine-side wall-clock budget for one grammar compile; <=0 restores the unbounded synchronous "
-            "compile. A compile that exceeds this keeps running in the background, so the caller is told to "
-            "retry and the retry is served from cache. Kept short because the caller is an enqueue thread: "
-            "waiting there only adds latency to a request whose retry hits the cache anyway. Note the "
-            "frontend admission sandbox (--grammar_admission_compile_timeout_s) applies its own, larger "
-            "budget."
+            "Engine-side wall-clock budget a caller waits for one grammar compile; <=0 restores the unbounded "
+            "synchronous compile. A compile that exceeds this keeps running in the background, so the budget "
+            "does not bound CPU cost, only how long the caller waits before the request is rejected as "
+            "overloaded. Sized to cover a legitimately expensive grammar rather than to fail fast, because "
+            "the compiled grammar is cached per rank: a rejected request that retries onto another rank pays "
+            "the compile again. Note the frontend admission sandbox "
+            "(--grammar_admission_compile_timeout_s) applies its own, larger budget."
         ),
     )
     grammar_group.add_argument(
@@ -47,11 +57,14 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         env_name="GRAMMAR_COMPILE_CONCURRENCY",
         bind_to=(grammar_config, "compile_concurrency"),
         type=int,
-        default=16,
+        default=1,
         help=(
-            "Engine-side grammar compiles running at once. Each compile internally fans out over "
-            "--grammar_num_workers threads, so this multiplies CPU usage. It caps what used to be "
-            "unbounded: before this guard every caller compiled inline on its own thread."
+            "Engine-side grammar compiles running at once. This times --grammar_num_workers is the compile "
+            "thread budget, which should stay within the CPU the rank owns or compiles will contend with the "
+            "engine's own threads. For a fixed budget, spending it on fanout rather than on concurrency "
+            "finishes each compile sooner instead of finishing several slowly together, which is why this "
+            "defaults to serial. It also caps what used to be unbounded: before this guard every caller "
+            "compiled inline on its own thread."
         ),
     )
     grammar_group.add_argument(
@@ -59,10 +72,14 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         env_name="GRAMMAR_COMPILE_QUEUE_SIZE",
         bind_to=(grammar_config, "compile_queue_size"),
         type=int,
-        default=64,
+        default=2,
         help=(
-            "Queued engine-side grammar compiles; further ones are rejected. Soft bound: a slot is freed "
-            "when a worker picks the compile up, so up to queue_size + concurrency can be outstanding."
+            "Queued engine-side grammar compiles; further ones are rejected. Kept shallow because compiles "
+            "run serially: only the entries near the head can still finish inside the compile timeout, and "
+            "anything behind them outlives its caller and runs only to warm the cache for a retry. Soft "
+            "bound: a slot is freed when a worker picks the compile up rather than when it finishes, and the "
+            "queue is only refused once it is over size, so a little more than queue_size + concurrency can "
+            "be outstanding."
         ),
     )
     grammar_group.add_argument(
@@ -73,11 +90,12 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         default=2 * 1024 * 1024 * 1024,
         help=(
             "Byte ceiling for engine-side cached compiled grammars, using xgrammar's own memory estimate. "
-            "Applied both to xgrammar's compiler cache and to the engine verdict cache; the two share the "
-            "same compiled grammars, so the per-rank bound is about 4/3 of this, and a DP8 node holds eight "
-            "times that. Least-recently-used grammars are dropped first; a single grammar larger than the "
-            "ceiling is served but not cached. <=0 is unlimited. The frontend admission sandbox has its own "
-            "cache, capped by --grammar_admission_compiler_cache_bytes."
+            "Applied both to xgrammar's compiler cache and to the engine verdict cache; the two hold the same "
+            "compiled grammars, so the resident total is not the sum of the two, and every rank owns a "
+            "backend, so a node holds one per rank. Least-recently-used grammars are dropped first. The "
+            "ceiling is soft by one entry: a grammar too large to fit under it on its own is cached anyway, "
+            "because dropping it would recompile it on every request. <=0 is unlimited. The frontend "
+            "admission sandbox has its own cache, capped by --grammar_admission_compiler_cache_bytes."
         ),
     )
     grammar_group.add_argument(

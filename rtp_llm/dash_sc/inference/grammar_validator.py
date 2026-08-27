@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 _CRASH_CONFIRMATION_ATTEMPTS = 2
 _MAX_COMPILE_ERROR_MESSAGE_LENGTH = 4096
 _MAX_WORKER_FAULT_TRACE_BYTES = 16 * 1024
+# Every pool slot is a spawned process carrying its own compiler, so what caps an
+# automatically sized pool is memory rather than CPU: without this, a narrow compile
+# fanout would divide the cpuset into far more workers than a host can hold. The sizing
+# below is per frontend process and several of them share one cpuset, so this ceiling is
+# what keeps the node-wide worker count finite.
+_MAX_AUTO_SANDBOX_POOL_SIZE = 8
 _JSON_OBJECT_RESPONSE_SCHEMA = {"anyOf": [{"type": "object"}, {"type": "array"}]}
 
 
@@ -199,8 +205,11 @@ class GrammarValidator:
         if configured_pool_size > 0:
             self._pool_target = configured_pool_size
         else:
+            # os.cpu_count() reports the host, not our cpuset; affinity does.
+            cores = len(os.sched_getaffinity(0))
             self._pool_target = max(
-                1, (os.cpu_count() or 8) // (2 * self._compile_threads)
+                1,
+                min(_MAX_AUTO_SANDBOX_POOL_SIZE, cores // (2 * self._compile_threads)),
             )
 
         # Persistent pool of N spawned workers, each compiling one spec at a time, so
@@ -449,6 +458,8 @@ class GrammarValidator:
         self._disable_any_whitespace = bool(
             grammar_config.constrained_json_disable_any_whitespace
         )
+        # The caller resolves an auto fanout from the rank's CPU budget, so this only
+        # floors a value that arrived non-positive.
         self._compile_threads = max(1, int(grammar_config.num_workers))
         config_cache_bytes = int(admission_config.compiler_cache_bytes)
         self._cache_limit_bytes = config_cache_bytes if config_cache_bytes > 0 else -1
