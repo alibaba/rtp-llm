@@ -629,7 +629,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
-    resources[0][0].disk_slot = disk_block;
+    resources[0][0].disk_block = disk_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     BlockTreeMatchResult              match   = cache->match({100});
     std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
@@ -709,7 +709,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::HOST));
     EXPECT_TRUE(resource.hasTier(Tier::DISK));
-    const BlockIdxType disk_slot = resource.disk_slot;
+    const BlockIdxType disk_block = resource.disk_block;
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
@@ -721,7 +721,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::H2DISK);
         EXPECT_EQ(worker_request.copy_items_size(), 1);
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
-        EXPECT_EQ(worker_request.copy_items(0).disk_block(), disk_slot);
+        EXPECT_EQ(worker_request.copy_items(0).disk_block(), disk_block);
         EXPECT_EQ(worker_request.copy_items(0).group_set_id(), 0u);
     }
 }
@@ -777,7 +777,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     for (const MemoryOperationRequestPB& request : state->requests) {
         EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
         ASSERT_EQ(request.copy_items_size(), 1);
-        EXPECT_EQ(request.copy_items(0).disk_block(), resource.disk_slot);
+        EXPECT_EQ(request.copy_items(0).disk_block(), resource.disk_block);
         expectSingleGroupBlock(request.copy_items(0), 0, 0, device_block);
     }
 }
