@@ -1,5 +1,6 @@
 import importlib
 import os
+import pickle
 import sys
 from unittest import TestCase, main
 
@@ -38,6 +39,10 @@ class ServerArgsSetTest(TestCase):
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit"
         os.environ["JIT_CACHE_SETUP_TIMEOUT_S"] = "60"
         os.environ["MANAGE_JIT_CACHE"] = "1"
+        os.environ["GRAMMAR_COMPILE_TIMEOUT_MS"] = "1500"
+        os.environ["GRAMMAR_COMPILE_CONCURRENCY"] = "3"
+        os.environ["GRAMMAR_COMPILE_QUEUE_SIZE"] = "16"
+        os.environ["GRAMMAR_COMPILER_CACHE_BYTES"] = "4294967296"
 
         sys.argv = ["prog"]
 
@@ -83,6 +88,20 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
             6000000,
         )
+
+        # Verify grammar_config compile guards
+        self.assertEqual(py_env_configs.grammar_config.compile_timeout_ms, 1500)
+        self.assertEqual(py_env_configs.grammar_config.compile_concurrency, 3)
+        self.assertEqual(py_env_configs.grammar_config.compile_queue_size, 16)
+        self.assertEqual(py_env_configs.grammar_config.compiler_cache_bytes, 4294967296)
+        # GrammarConfig crosses a process boundary, and these fields widened its pickle tuple.
+        restored_grammar_config = pickle.loads(
+            pickle.dumps(py_env_configs.grammar_config)
+        )
+        self.assertEqual(restored_grammar_config.compile_timeout_ms, 1500)
+        self.assertEqual(restored_grammar_config.compile_concurrency, 3)
+        self.assertEqual(restored_grammar_config.compile_queue_size, 16)
+        self.assertEqual(restored_grammar_config.compiler_cache_bytes, 4294967296)
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++

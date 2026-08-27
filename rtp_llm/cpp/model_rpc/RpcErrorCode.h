@@ -16,6 +16,7 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         // RESOURCE_EXHAUSTED (HTTP 429 upstream); exact 8429 travels in
         // ErrorDetailsPB trailing metadata.
         {ErrorCode::PRIORITY_PREEMPTED, grpc::StatusCode::RESOURCE_EXHAUSTED},
+        {ErrorCode::GRAMMAR_COMPILE_OVERLOADED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::GENERATE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::CONNECT_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::DEADLINE_EXCEEDED, grpc::StatusCode::DEADLINE_EXCEEDED},

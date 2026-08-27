@@ -63,6 +63,11 @@ class ExceptionType(IntEnum):
     OUTPUT_QUEUE_FULL = 8102, ExceptionCategory.CAPACITY
     OUTPUT_QUEUE_IS_EMPTY = 8103
     FINISHED = 8104
+    # Grammar compilation was refused or exceeded its wait budget. Not the
+    # master's 8431: that code is part of the Auto-TPM admission contract and
+    # is only valid paired with an AdmissionRejectReason, which the engine
+    # cannot set. This one takes the generic capacity mapping.
+    GRAMMAR_COMPILE_OVERLOADED = 8105, ExceptionCategory.CAPACITY
 
     # rpc error
     GET_HOST_FAILED = 8200

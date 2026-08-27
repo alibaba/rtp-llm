@@ -28,6 +28,59 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         help="xgrammar compiler worker count",
     )
     grammar_group.add_argument(
+        "--grammar_compile_timeout_ms",
+        env_name="GRAMMAR_COMPILE_TIMEOUT_MS",
+        bind_to=(grammar_config, "compile_timeout_ms"),
+        type=int,
+        default=50,
+        help=(
+            "Engine-side wall-clock budget for one grammar compile; <=0 restores the unbounded synchronous "
+            "compile. A compile that exceeds this keeps running in the background, so the caller is told to "
+            "retry and the retry is served from cache. Kept short because the caller is an enqueue thread: "
+            "waiting there only adds latency to a request whose retry hits the cache anyway. Note the "
+            "frontend admission sandbox (--grammar_admission_compile_timeout_s) applies its own, larger "
+            "budget."
+        ),
+    )
+    grammar_group.add_argument(
+        "--grammar_compile_concurrency",
+        env_name="GRAMMAR_COMPILE_CONCURRENCY",
+        bind_to=(grammar_config, "compile_concurrency"),
+        type=int,
+        default=16,
+        help=(
+            "Engine-side grammar compiles running at once. Each compile internally fans out over "
+            "--grammar_num_workers threads, so this multiplies CPU usage. It caps what used to be "
+            "unbounded: before this guard every caller compiled inline on its own thread."
+        ),
+    )
+    grammar_group.add_argument(
+        "--grammar_compile_queue_size",
+        env_name="GRAMMAR_COMPILE_QUEUE_SIZE",
+        bind_to=(grammar_config, "compile_queue_size"),
+        type=int,
+        default=64,
+        help=(
+            "Queued engine-side grammar compiles; further ones are rejected. Soft bound: a slot is freed "
+            "when a worker picks the compile up, so up to queue_size + concurrency can be outstanding."
+        ),
+    )
+    grammar_group.add_argument(
+        "--grammar_compiler_cache_bytes",
+        env_name="GRAMMAR_COMPILER_CACHE_BYTES",
+        bind_to=(grammar_config, "compiler_cache_bytes"),
+        type=int,
+        default=2 * 1024 * 1024 * 1024,
+        help=(
+            "Byte ceiling for engine-side cached compiled grammars, using xgrammar's own memory estimate. "
+            "Applied both to xgrammar's compiler cache and to the engine verdict cache; the two share the "
+            "same compiled grammars, so the per-rank bound is about 4/3 of this, and a DP8 node holds eight "
+            "times that. Least-recently-used grammars are dropped first; a single grammar larger than the "
+            "ceiling is served but not cached. <=0 is unlimited. The frontend admission sandbox has its own "
+            "cache, capped by --grammar_admission_compiler_cache_bytes."
+        ),
+    )
+    grammar_group.add_argument(
         "--grammar_admission_queue_timeout_s",
         env_name="DS_LLM_GRAMMAR_QUEUE_TIMEOUT_S",
         bind_to=(grammar_admission_config, "queue_timeout_s"),
