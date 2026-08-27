@@ -148,8 +148,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                     claim = slotPort.tryCommit(
                             item,
                             SlotDeliveryPort.Identity.commitConfirmation(),
-                            pointOfNoReturn -> admission.transfer(
-                                    item, pointOfNoReturn));
+                            () -> admission.transfer(item));
                 } catch (Throwable claimFailure) {
                     try {
                         slotPort.failPrepared(item, claimFailure);

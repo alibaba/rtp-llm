@@ -55,13 +55,15 @@ public interface PrefillAdmissionPort {
      * transfer, or transfer after close are illegal and must throw. Closing
      * releases only capabilities that have not already moved to an endpoint.
      * Post-commit cleanup failures are isolated from the terminal business
-     * result and are never retried by this capability.
+     * result and are never retried by this capability. Transfer is a local,
+     * synchronous leaf operation: implementations may acquire endpoint-local
+     * locks and publish capacity signals in their documented order, but must
+     * not perform I/O, await external completion, or call back into a request
+     * slot, delivery lifecycle, or user code.
      */
     interface CommittedAdmission extends AutoCloseable {
 
-        boolean transfer(
-                DeliveryItem exactItem,
-                Runnable pointOfNoReturn);
+        boolean transfer(DeliveryItem exactItem);
 
         @Override
         void close();

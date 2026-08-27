@@ -299,7 +299,7 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     @Test
-    void tryCommitRunsEndpointTransferWhileOwningTheExactSlotMonitor()
+    void tryCommitKeepsEndpointTransferAndSlotClaimAtomic()
             throws Exception {
         Registered registered = registerItem(201L);
         try (RequestLifecycleCoordinator.AdmissionScope admission =
@@ -328,11 +328,10 @@ class RequestLifecycleDeliveryLockContractTest {
                     lifecycle.tryCommit(
                             registered.item(),
                             SlotDeliveryPort.Identity.commitConfirmation(),
-                            pointOfNoReturn -> {
+                            () -> {
                                 assertTrue(Thread.holdsLock(slot));
                                 transferEntered.countDown();
                                 await(releaseTransfer);
-                                pointOfNoReturn.run();
                                 return true;
                             }));
 
@@ -361,6 +360,70 @@ class RequestLifecycleDeliveryLockContractTest {
             owner.shutdownNow();
             contender.join(TimeUnit.SECONDS.toMillis(5));
         }
+    }
+
+    @Test
+    void failedEndpointTransferLeavesTheSlotUnclaimed() {
+        Registered rejected = registerItem(202L);
+        bind(rejected);
+
+        assertThrows(IllegalStateException.class, () -> lifecycle.tryCommit(
+                rejected.item(),
+                SlotDeliveryPort.Identity.commitConfirmation(),
+                () -> false));
+        assertQueuedWithoutClaim(rejected.item().requestId());
+
+        Registered failed = registerItem(203L);
+        bind(failed);
+        IllegalStateException expected = new IllegalStateException(
+                "synthetic endpoint failure");
+        assertSame(expected, assertThrows(IllegalStateException.class,
+                () -> lifecycle.tryCommit(
+                        failed.item(),
+                        SlotDeliveryPort.Identity.commitConfirmation(),
+                        () -> {
+                            throw expected;
+                        })));
+        assertQueuedWithoutClaim(failed.item().requestId());
+    }
+
+    @Test
+    void batchClaimIsCompleteWhenTryCommitReturns() {
+        Registered registered = registerItem(204L);
+        bind(registered);
+
+        SlotDeliveryPort.Claim claim = lifecycle.tryCommit(
+                registered.item(),
+                SlotDeliveryPort.Identity.externalAcknowledgement(701L),
+                () -> true);
+
+        assertNotNull(claim);
+        RequestLifecycleSnapshot snapshot = lifecycle.getRequestState(
+                registered.item().requestId(), 0L);
+        assertEquals(RequestLifecycleState.DISPATCHING, snapshot.state());
+        assertEquals(DeliveryClaimKind.BATCH_ENQUEUE,
+                snapshot.deliveryClaimKind());
+        assertEquals(701L, snapshot.batchId());
+        assertTrue(lifecycle.requestSlot(registered.item().requestId())
+                .getBatchEnqueueStartedAtMs() > 0L);
+    }
+
+    private void bind(Registered registered) {
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             registered.item().requestId(),
+                             registered.future())) {
+            assertNotNull(admission);
+            assertTrue(lifecycle.commitInflight(
+                    registered.item(), false, () -> true));
+        }
+    }
+
+    private void assertQueuedWithoutClaim(long requestId) {
+        RequestLifecycleSnapshot snapshot = lifecycle.getRequestState(
+                requestId, 0L);
+        assertEquals(RequestLifecycleState.QUEUED, snapshot.state());
+        assertEquals(DeliveryClaimKind.NONE, snapshot.deliveryClaimKind());
     }
 
     private Registered registerItem(long requestId) {

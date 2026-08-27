@@ -341,9 +341,7 @@ final class PrefillAdmissionResources {
         }
 
         @Override
-        public synchronized boolean transfer(
-                DeliveryItem exactItem,
-                Runnable pointOfNoReturn) {
+        public synchronized boolean transfer(DeliveryItem exactItem) {
             if (closed) {
                 throw new IllegalStateException(
                         "committed admission is closed");
@@ -361,13 +359,11 @@ final class PrefillAdmissionResources {
                 throw new IllegalStateException(
                         "committed item was already transferred");
             }
-            Objects.requireNonNull(pointOfNoReturn, "pointOfNoReturn");
             DecodeEndpoint.EngineDispatchPermitTransferStatus transfer =
                     member.permit.transferToEngineLifecycle();
             return switch (transfer) {
                 case TRANSFERRED -> {
                     member.state = MemberState.ENDPOINT_OWNED;
-                    pointOfNoReturn.run();
                     yield true;
                 }
                 case OWNERSHIP_LOST -> {

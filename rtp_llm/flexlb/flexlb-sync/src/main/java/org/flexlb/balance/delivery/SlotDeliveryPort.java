@@ -16,6 +16,12 @@ public interface SlotDeliveryPort {
      * Atomically transfer endpoint admission and commit the slot
      * point-of-no-return. Returns {@code null} if another reducer already owns
      * this exact request generation.
+     *
+     * <p>The endpoint transfer is a local, synchronous leaf operation executed
+     * while the exact request slot is locked. It may acquire endpoint-local
+     * locks and publish capacity signals in their documented order, but must
+     * not perform I/O, await external completion, or call back into a request
+     * slot, delivery lifecycle, or user code.
      */
     Claim tryCommit(
             DeliveryItem exactItem,
@@ -98,10 +104,14 @@ public interface SlotDeliveryPort {
         }
     }
 
-    /** Exact endpoint handoff which invokes the supplied slot commit once. */
+    /**
+     * Exact endpoint handoff. A successful return is the endpoint ownership
+     * point-of-no-return; {@link #tryCommit} immediately commits the matching
+     * slot claim before releasing the request lock.
+     */
     @FunctionalInterface
     interface EndpointTransfer {
 
-        boolean commit(Runnable pointOfNoReturn);
+        boolean commit();
     }
 }

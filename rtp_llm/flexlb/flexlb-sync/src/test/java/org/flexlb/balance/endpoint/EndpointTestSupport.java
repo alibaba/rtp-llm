@@ -288,7 +288,7 @@ final class EndpointTestSupport {
                 Identity identity,
                 EndpointTransfer endpointTransfer) {
             TestClaim claim = new TestClaim(exactItem);
-            return endpointTransfer.commit(() -> { }) ? claim : null;
+            return endpointTransfer.commit() ? claim : null;
         }
 
         @Override
@@ -430,14 +430,11 @@ final class EndpointTestSupport {
             }
 
             @Override
-            public boolean transfer(
-                    DeliveryItem exactItem,
-                    Runnable pointOfNoReturn) {
+            public boolean transfer(DeliveryItem exactItem) {
                 if (closed || untransferred.remove(exactItem) == null) {
                     throw new IllegalStateException(
                             "unknown or already-transferred item");
                 }
-                pointOfNoReturn.run();
                 return true;
             }
 

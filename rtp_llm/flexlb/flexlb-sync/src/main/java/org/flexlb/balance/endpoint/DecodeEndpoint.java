@@ -3138,6 +3138,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
         }
+        // Capacity listeners may acquire scheduler queue locks. Keep that
+        // one-way notification strictly outside the endpoint admission lock.
         if (capacityIncreased) {
             notifyEngineDispatchCapacityListeners();
         }

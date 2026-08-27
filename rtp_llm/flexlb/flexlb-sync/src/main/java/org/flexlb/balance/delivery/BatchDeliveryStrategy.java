@@ -240,8 +240,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                                     SlotDeliveryPort.Identity
                                             .externalAcknowledgement(
                                             batch.batchId()),
-                                    pointOfNoReturn -> batch.transfer(
-                                            item, pointOfNoReturn));
+                                    () -> batch.transfer(item));
                     if (claim == null) {
                         continue;
                     }
@@ -664,14 +663,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
-        private boolean transfer(
-                DeliveryItem exactItem,
-                Runnable pointOfNoReturn) {
+        private boolean transfer(DeliveryItem exactItem) {
             if (state != State.COMMITTED) {
                 throw new IllegalStateException(
                         "batch admission cannot transfer in " + state);
             }
-            return admission.transfer(exactItem, pointOfNoReturn);
+            return admission.transfer(exactItem);
         }
 
         private void submit(

@@ -187,11 +187,8 @@ final class DeliveryStrategyTestSupport {
                                 new AtomicBoolean();
 
                         @Override
-                        public boolean transfer(
-                                DeliveryItem exactItem,
-                                Runnable pointOfNoReturn) {
+                        public boolean transfer(DeliveryItem exactItem) {
                             transferred.add(exactItem);
-                            pointOfNoReturn.run();
                             events.add("admission-transfer-"
                                     + exactItem.requestId());
                             return true;
@@ -304,8 +301,10 @@ final class DeliveryStrategyTestSupport {
             if (exactItem == commitLostFor) {
                 return null;
             }
-            endpointTransfer.commit(() -> events.add(
-                    "point-of-no-return-" + exactItem.requestId()));
+            if (!endpointTransfer.commit()) {
+                return null;
+            }
+            events.add("point-of-no-return-" + exactItem.requestId());
             return new TestClaim(exactItem);
         }
 

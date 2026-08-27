@@ -1593,34 +1593,26 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             if (!ownsPreparedDelivery(entry, item)) {
                 return null;
             }
-            Runnable pointOfNoReturn = switch (identity.boundary()) {
-                case EXTERNAL_ACK -> () -> {
-                    entry.startBatchEnqueue(
-                            identity.requiredCorrelationId());
-                    entry.markBatchEnqueueStarted();
-                };
-                case COMMIT_CONFIRMED -> entry::startRouteDecisionDelivery;
-            };
-            boolean transferred = endpointTransfer.commit(pointOfNoReturn);
-            if (!transferred) {
-                if (ownsPreparedDelivery(entry, item)) {
-                    throw new IllegalStateException(
-                            "endpoint ownership was lost without a concurrent"
-                                    + " RequestSlot owner request_id="
-                                    + item.requestId());
-                }
-                return null;
-            }
-            RequestLifecycleSnapshot committed = entry.snapshot();
-            if (committed.deliveryClaimKind() != claimKind(identity)
-                    || committed.batchId() != claimCorrelationId(identity)
-                    || committed.state() != RequestLifecycleState.DISPATCHING) {
+            SlotDeliveryPort.Identity.ConfirmationBoundary boundary =
+                    identity.boundary();
+            long expectedCorrelationId = claimCorrelationId(identity);
+            SlotDeliveryClaim claim = new SlotDeliveryClaim(
+                    this, entry, item, identity);
+            if (!endpointTransfer.commit()) {
                 throw new IllegalStateException(
-                        "endpoint transfer did not commit the exact RequestSlot"
-                                + " delivery identity request_id="
+                        "endpoint ownership was lost while the exact"
+                                + " RequestSlot was locked request_id="
                                 + item.requestId());
             }
-            return new SlotDeliveryClaim(this, entry, item, identity);
+            switch (boundary) {
+                case EXTERNAL_ACK -> {
+                    entry.startBatchEnqueue(expectedCorrelationId);
+                    entry.markBatchEnqueueStarted();
+                }
+                case COMMIT_CONFIRMED ->
+                        entry.startRouteDecisionDelivery();
+            }
+            return claim;
         }
     }
 
