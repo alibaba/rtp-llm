@@ -20,6 +20,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -558,6 +559,60 @@ public final class JavaMockEngineCluster {
         // over-admission).
         private final ArrayDeque<DecodePendingTask> decodePendingQueue = new ArrayDeque<>();
         private final Object decodeQueueLock = new Object();
+        // ── Per-step continuous batching decode engine (production FIFOScheduler
+        // alignment) ──
+        // A decode request admitted into a running slot becomes a DecodeStream.
+        // The engine advances ALL running streams one step at a time on a single
+        // chained scheduler task: each step emits one token per stream and takes
+        // decodeStepDelayMs(currentRunningCount) — the step_ms_by_batch curve
+        // re-read at every step boundary, so a batch-size change (completion,
+        // top-up, cancel) re-prices the NEXT step. A stream reaching outputLen
+        // completes at that step boundary (terminal ownership claimed under
+        // decodeQueueLock, publishing outside the lock) and the waiting-queue
+        // head is admitted immediately (production top-up semantics). This
+        // replaces the former one-shot sleep: decodeMs(outputLen, batchSizeAtAdmission)
+        // computed once at admission, immune to later concurrency changes.
+        // decode exec statistics now measure the SUM OF ACTUAL STEP DURATIONS
+        // (old caliber: one-shot estimate at admission — numbers shift when the
+        // running batch size changes mid-flight; both are ms per request).
+        private final LinkedHashMap<Long, DecodeStream> decodeRunning = new LinkedHashMap<>();
+        /** True while a step tick is pending on the shared scheduler (decodeQueueLock-guarded); at most one per engine. */
+        private boolean decodeStepScheduled = false;
+        /** Duration of the currently pending step, locked in when the step was
+         * armed (decodeQueueLock-guarded): the batch size at THAT boundary
+         * prices the whole step, exactly like production where a step's duration
+         * is fixed by the batch that entered it. The tick consumes this value
+         * for exec accounting, so booked time always matches elapsed time. */
+        private long pendingStepDelayMs = 0;
+
+        /** One decode stream occupying a running slot in the per-step loop. */
+        private static final class DecodeStream {
+            final MockPerformanceModel.RequestShape shape;
+            final long batchId;
+            final LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue;
+            /** Tokens left until finished; decremented once per step. */
+            int remainingTokens;
+            /** Σ actual step durations (the per-step exec caliber). */
+            double accumulatedExecMs;
+            /** Set under decodeQueueLock when this step's terminal ownership is claimed (cancel may win it first). */
+            boolean owned;
+            /** True while a step is already executing (tick pending) and this
+             * stream joined mid-step: the stream joins the running batch at the
+             * NEXT step boundary and produces its first token there, mirroring
+             * production where a request arriving during step k first participates
+             * in step k+1. Flipped to false by the boundary tick. */
+            boolean awaitsFirstStep;
+
+            DecodeStream(MockPerformanceModel.RequestShape shape, long batchId,
+                         LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
+                         boolean awaitsFirstStep) {
+                this.shape = shape;
+                this.batchId = batchId;
+                this.responseQueue = responseQueue;
+                this.remainingTokens = shape.outputLen();
+                this.awaitsFirstStep = awaitsFirstStep;
+            }
+        }
         // ── Prefill batch-level wait queue (change 2) ──
         // Pending prefill batches waiting for a maxPrefillConcurrency slot. Drained
         // by the prefill completion callback. waitingPrefillRequests now reports the
@@ -1045,12 +1100,12 @@ public final class JavaMockEngineCluster {
             // Queued-vs-running discrimination, the runningTasks removal, the
             // slot/KV release, and the freed-slot drain all run under
             // decodeQueueLock in ONE atomic section, mirroring the completion
-            // path in runDecode. Splitting them (removeIf in one locked section,
+            // path in the per-step decode loop (runDecodeStep). Splitting them
+            // (removeIf in one locked section,
             // release outside any lock, drain in a second locked section) opened
             // a transient over-admission: a concurrent admission could observe
             // the freed slot before our unconditional drain re-consumed it,
             // pushing activeDecodeRequests to cap+1.
-            DecodePendingTask drainNext = null;
             EngineRpcService.TaskPhase cancelledPhase = null;
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
                 synchronized (decodeQueueLock) {
@@ -1074,24 +1129,15 @@ public final class JavaMockEngineCluster {
                         if (!wasQueuedDecode) {
                             activeDecodeRequests.decrementAndGet();
                             activeKvTokens.addAndGet(-removed.getInputLength());
-                            // Drain the queue to hand the freed slot to a queued
-                            // request. Without this, a cancelled running request's
-                            // slot would sit idle until the next completion fires,
-                            // stalling queued requests. Reuses the same
-                            // skip-cancelled + pollFirst + activeDecodeRequests++
-                            // pattern as the completion drain; releasing the slot
-                            // in the same locked section keeps "release + drain"
-                            // atomic so the cap is never transiently exceeded.
-                            while (!decodePendingQueue.isEmpty()) {
-                                DecodePendingTask candidate = decodePendingQueue.peekFirst();
-                                if (!runningTasks.containsKey(candidate.shape().input().getRequestId())) {
-                                    decodePendingQueue.pollFirst();
-                                    continue;
-                                }
-                                activeDecodeRequests.incrementAndGet();
-                                drainNext = decodePendingQueue.pollFirst();
-                                break;
-                            }
+                            // Drop the stream from the per-step loop (no further
+                            // step advances it) and hand the freed slot to queued
+                            // requests in the SAME locked section — release +
+                            // top-up stay atomic so the cap is never transiently
+                            // exceeded and no slot is stranded until the next
+                            // step boundary.
+                            decodeRunning.remove(requestId);
+                            topUpDecodeRunningLocked();
+                            scheduleDecodeStepLocked();
                         } else if (performance.reportQueuedAsKvAllocated()) {
                             // Opt-in KV fidelity (P2-5): the queued request's KV
                             // was counted at enqueue — release it here. Default
@@ -1154,13 +1200,8 @@ public final class JavaMockEngineCluster {
                 // to remove it from the map after offering the cancel response.
                 responseQueues.remove(requestId);
             }
-            // Run the next queued decode request outside the lock (slot already
-            // reserved by the drain above) to avoid holding decodeQueueLock while
-            // scheduling.
-            if (drainNext != null) {
-                lastEnqueueTime.set(System.nanoTime());
-                runDecode(drainNext.shape(), drainNext.batchId(), drainNext.responseQueue());
-            }
+            // (A cancelled running slot's top-up ran under decodeQueueLock inside
+            // the decode branch above — nothing to schedule outside the lock.)
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
                 clearUpstreamOwnership(requestId);
             }
@@ -1738,25 +1779,34 @@ public final class JavaMockEngineCluster {
                     return true; // already accepted/scheduled on this engine
                 }
                 if (activeDecodeRequests.get() < decodeMaxConcurrency) {
-                    // A slot is free — admit immediately. The slot is reserved
-                    // here (under the lock) so a concurrent completion-callback
-                    // drain cannot admit another request into the same slot.
-                    // runDecode does the actual scheduling outside the lock;
-                    // activeDecodeRequests is already accounted here.
-                    // pendingRequests is incremented here to match the
-                    // unconditional decrement in the completion callback
-                    // (wasRunning path). The queued path increments it at enqueue;
-                    // both must balance so checkLeakDrain / periodicCleanup see
-                    // net zero.
+                    // A slot is free — admit immediately as a running DecodeStream
+                    // in the per-step loop. ALL run-start bookkeeping (slot + KV +
+                    // the stream itself) is claimed under the lock so the step
+                    // loop can never advance a half-admitted stream and a
+                    // concurrent completion/cancel drain cannot admit another
+                    // request into the same slot. pendingRequests is incremented
+                    // here to match the unconditional decrement in the
+                    // step-completion terminal path (owned). The queued path
+                    // increments it at enqueue; both must balance so
+                    // checkLeakDrain / periodicCleanup see net zero.
                     activeDecodeRequests.incrementAndGet();
                     pendingRequests.incrementAndGet();
-                    // Opt-in KV fidelity (P2-5): KV is reserved at admission
-                    // (KV_ALLOCATED = "KV reserved"), so it is counted here and
-                    // runDecode skips its run-start add in this mode. Default
-                    // OFF keeps today's run-start accounting untouched.
-                    if (performance.reportQueuedAsKvAllocated()) {
-                        activeKvTokens.addAndGet(shape.inputLen());
-                    }
+                    // KV is added exactly once here for both modes (the admission
+                    // point reserves it either way): default mode counts KV at run
+                    // start (run start == admission into the step loop), the opt-in
+                    // accepted-layer mode counts it at admission — "KV reserved".
+                    // Only the WAITING-queue path differs: opt-in counts at enqueue
+                    // (see below), so the drain must not count it again.
+                    activeKvTokens.addAndGet(shape.inputLen());
+                    // awaitsFirstStep: if a step tick is already pending (another
+                    // stream is running), this stream joins MID-step and first
+                    // produces a token at the next boundary — production: a
+                    // request arriving during step k participates from step k+1.
+                    // When no tick is pending, the arm below prices the step with
+                    // this stream already in the count.
+                    decodeRunning.put(requestId,
+                            new DecodeStream(shape, batchId, responseQueue, decodeStepScheduled));
+                    scheduleDecodeStepLocked();
                 } else {
                     // Concurrency gate hit — park the request in the unbounded
                     // pending queue (production waiting_streams_ semantics:
@@ -1787,122 +1837,191 @@ public final class JavaMockEngineCluster {
                     return true; // queued (accepted, will run when a slot frees)
                 }
             }
-            // Admitted immediately — record lifecycle and run (outside the lock so
-            // scheduler.schedule never blocks the admission/drain critical section).
+            // Admitted immediately — record lifecycle outside the lock (the
+            // stream itself is already registered and the step loop armed
+            // under the lock above).
             recordLifecycleStart(requestId, batchId,
                     batchId >= 0 ? "enqueue_batch" : "generate_stream");
             lastEnqueueTime.set(System.nanoTime());
-            runDecode(shape, batchId, responseQueue);
             return true;
         }
 
         /**
-         * Actually schedule a decode completion. The concurrency slot is already
-         * reserved by the caller (scheduleDecodeCompletion admission or the
-         * pending-queue drain), so this method must NOT touch activeDecodeRequests
-         * — only activeKvTokens (modelled when the request starts running, default
-         * path; the opt-in accepted-layer mode counts KV at admission/enqueue
-         * instead, so run start must not count it twice).
+         * Per-step decode loop tick. Runs on the SHARED completion scheduler (one
+         * chained task per engine, guarded by decodeStepScheduled, so 1250 engines
+         * cost 1250 lightweight pending timers on the completionThreads pool —
+         * no per-engine thread). Advances every running stream by one token;
+         * the step's duration was locked in when it was ARMED (the batch size at
+         * that boundary prices the whole step — see pendingStepDelayMs), and a
+         * batch-size change (completion, top-up, cancel) re-prices the NEXT
+         * step. Streams that joined mid-step (awaitsFirstStep) first participate
+         * at the next boundary. Streams that hit outputLen complete here; the
+         * waiting batch is topped up immediately (production top-up semantics),
+         * then the next step is chained. Terminal bookkeeping is claimed under
+         * decodeQueueLock (racing cancel); the completion frame, stats and
+         * cleanup publish outside the lock, mirroring the former one-shot
+         * completion callback's split.
          */
-        private void runDecode(MockPerformanceModel.RequestShape shape, long batchId,
-                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
-            // Flip a queued-phase marker back to RUNNING when the request leaves
-            // the pending queue and starts executing (opt-in path only — default
-            // entries are already TASK_PHASE_RUNNING, zero behavior change).
-            if (performance.reportQueuedAsKvAllocated()) {
-                runningTasks.computeIfPresent(shape.input().getRequestId(), (rid, tracked) ->
-                        tracked.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED
-                                ? tracked.toBuilder()
-                                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
-                                        .build()
-                                : tracked);
-            }
-            // Default path: KV is modelled from run start. The opt-in
-            // accepted-layer mode already counted this request's KV at
-            // admission/enqueue (KV_ALLOCATED = KV reserved) — starting to run
-            // must not count it a second time.
-            if (!performance.reportQueuedAsKvAllocated()) {
-                activeKvTokens.addAndGet(shape.inputLen());
-            }
-            int activeBatch = activeDecodeRequests.get();
-            long executionMs = performance.decodeMs(shape.outputLen(), activeBatch);
-            scheduler.schedule(() -> {
-                long requestId = shape.input().getRequestId();
-                EngineRpcService.TaskInfoPB removed;
-                boolean wasRunning;
-                // Free the slot and drain one pending request under the same lock
-                // that guards admission, so the freed slot is handed to a queued
-                // request atomically (no lost slot, no over-admission). Skip
-                // queued requests cancelled while queued (cancel removed their
-                // runningTasks entry and already decremented pendingRequests).
-                DecodePendingTask nextPending = null;
-                synchronized (decodeQueueLock) {
-                    // Claim normal terminal ownership under the same lock as an
-                    // upstream cancel. Whichever path removes the reverse mapping
-                    // first owns the terminal transition.
-                    clearUpstreamOwnership(requestId);
-                    removed = runningTasks.remove(requestId);
-                    wasRunning = removed != null;
-                    if (wasRunning) {
-                        activeDecodeRequests.decrementAndGet();
-                        activeKvTokens.addAndGet(-shape.inputLen());
-                        pendingRequests.decrementAndGet();
-                        // Only drain when this completion actually freed a slot.
-                        // If wasRunning=false the request was cancelled before the
-                        // completion fired; cancel() already released the slot and
-                        // drained the queue, so draining here would over-admit
-                        // beyond decodeMaxConcurrency.
-                        while (!decodePendingQueue.isEmpty()) {
-                            DecodePendingTask candidate = decodePendingQueue.peekFirst();
-                            if (!runningTasks.containsKey(candidate.shape().input().getRequestId())) {
-                                decodePendingQueue.pollFirst();
-                                continue;
-                            }
-                            activeDecodeRequests.incrementAndGet();
-                            nextPending = decodePendingQueue.pollFirst();
-                            break;
-                        }
+        private void runDecodeStep() {
+            List<DecodeStream> finished = new ArrayList<>();
+            synchronized (decodeQueueLock) {
+                decodeStepScheduled = false;
+                if (shuttingDown || decodeRunning.isEmpty()) {
+                    return;
+                }
+                // Consume the duration locked in when this step was ARMED: the
+                // batch size at that boundary priced the whole step, so booked
+                // exec time always matches elapsed time. The count read here
+                // only decides WHO advances, not how long the step was.
+                long stepDelayMs = pendingStepDelayMs;
+                for (Iterator<DecodeStream> it = decodeRunning.values().iterator(); it.hasNext(); ) {
+                    DecodeStream stream = it.next();
+                    if (stream.awaitsFirstStep) {
+                        // Joined while this step was already in flight (admission
+                        // or cancel-path top-up saw decodeStepScheduled=true): it
+                        // did not participate in THIS step — no token advance, no
+                        // exec time. It joins the batch at the next boundary,
+                        // which scheduleDecodeStepLocked prices with the new count.
+                        stream.awaitsFirstStep = false;
+                        continue;
+                    }
+                    stream.remainingTokens--;
+                    stream.accumulatedExecMs += stepDelayMs;
+                    if (stream.remainingTokens <= 0) {
+                        it.remove();
+                        finished.add(stream);
                     }
                 }
-                if (wasRunning) {
-                    recordCompletion(shape, batchId, executionMs, 0);
+                for (DecodeStream stream : finished) {
+                    claimDecodeTerminalLocked(stream);
                 }
-                if (wasRunning) {
-                    // Feed the per-sample decode completion window (java_mock_stats
-                    // decode_done / decode_exec_*). wasRunning=false means the
-                    // request was cancelled before this completion fired (while
-                    // still queued or mid-run), so it never produced a normal
-                    // completion and must not contribute a window sample.
-                    stats.recordDecodeDone(executionMs);
-                    // Per-engine decode busy: one executionMs per completed request
-                    // (cancelled requests contribute nothing, same rule as the window).
-                    busyMs.addAndGet(executionMs);
+                topUpDecodeRunningLocked();
+                scheduleDecodeStepLocked();
+            }
+            for (DecodeStream stream : finished) {
+                if (stream.owned) {
+                    publishDecodeCompletion(stream);
                 }
-                boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
-                recordLifecycleEnd(requestId, alreadyCancelled);
-                if (!alreadyCancelled) {
-                    completedCount.incrementAndGet();
-                    requestStates.put(requestId, "completed");
+            }
+        }
+
+        /**
+         * Arm the next step tick. MUST be called holding decodeQueueLock.
+         * At most one pending tick per engine: admission, top-up and the tick
+         * itself all funnel through here, so the loop is a single chained task
+         * while streams are running and stops naturally when the engine idles.
+         */
+        private void scheduleDecodeStepLocked() {
+            if (decodeStepScheduled || decodeRunning.isEmpty() || shuttingDown) {
+                return;
+            }
+            long delayMs = performance.decodeStepDelayMs(decodeRunning.size());
+            pendingStepDelayMs = delayMs; // lock in this step's price at arm time
+            decodeStepScheduled = true;
+            scheduler.schedule(this::runDecodeStep, delayMs, TimeUnit.MILLISECONDS);
+        }
+
+        /**
+         * Admit waiting-queue heads into free running slots (production top-up:
+         * freed slots are handed to queued requests immediately at the step
+         * boundary where the slot was released). MUST be called holding
+         * decodeQueueLock. Reuses the skip-cancelled pattern of the former
+         * completion drain: a queued request cancelled while queued has no
+         * runningTasks entry (cancel already released its pendingRequests) and
+         * is dropped here.
+         */
+        private void topUpDecodeRunningLocked() {
+            while (!decodePendingQueue.isEmpty()
+                    && activeDecodeRequests.get() < decodeMaxConcurrency) {
+                DecodePendingTask candidate = decodePendingQueue.peekFirst();
+                long candidateId = candidate.shape().input().getRequestId();
+                if (!runningTasks.containsKey(candidateId)) {
+                    decodePendingQueue.pollFirst();
+                    continue;
                 }
-                // Python compat (_run_decode): no_respond on the
-                // decode engine only suppresses the intermediate first-step output;
-                // the finished output is still delivered, so keep this unconditional.
-                if (responseQueue != null && !alreadyCancelled) {
-                    responseQueue.offer(buildOutput(shape, true));
+                decodePendingQueue.pollFirst();
+                activeDecodeRequests.incrementAndGet();
+                // Run-start bookkeeping, mirroring the immediate-admission path:
+                // default mode counts KV at run start; the opt-in accepted-layer
+                // mode counted it at enqueue and only needs the phase flip.
+                if (!performance.reportQueuedAsKvAllocated()) {
+                    activeKvTokens.addAndGet(candidate.shape().inputLen());
+                } else {
+                    runningTasks.computeIfPresent(candidateId, (rid, tracked) ->
+                            tracked.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED
+                                    ? tracked.toBuilder()
+                                            .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                                            .build()
+                                    : tracked);
                 }
-                // Clean up per-request state to prevent unbounded map growth
-                responseQueues.remove(requestId);
-                cancelledRequests.remove(requestId);
-                if (performance.shouldAdmitCache() && cache.admit(shape.blockKeys())) {
-                    cacheVersion.incrementAndGet();
-                }
-                // Run the next queued decode request (slot already reserved).
-                if (nextPending != null) {
-                    lastEnqueueTime.set(System.nanoTime());
-                    runDecode(nextPending.shape(), nextPending.batchId(),
-                            nextPending.responseQueue());
-                }
-            }, executionMs, TimeUnit.MILLISECONDS);
+                // awaitsFirstStep = decodeStepScheduled: from inside a tick the
+                // flag is already false (the tick resets it first), so a boundary
+                // top-up joins the next armed step immediately; from cancel-path
+                // top-up a tick may be pending, and the promoted request waits
+                // for that boundary like a mid-step admission.
+                decodeRunning.put(candidateId,
+                        new DecodeStream(candidate.shape(), candidate.batchId(),
+                                candidate.responseQueue(), decodeStepScheduled));
+                lastEnqueueTime.set(System.nanoTime());
+            }
+        }
+
+        /**
+         * Claim the terminal transition for a stream that just hit outputLen.
+         * MUST be called holding decodeQueueLock. Whichever of this path or
+         * cancel() removes the runningTasks entry first owns the terminal: the
+         * winner releases the slot/KV/pendingRequests counters; the loser does
+         * nothing (stream.owned stays false and no completion publishes).
+         */
+        private void claimDecodeTerminalLocked(DecodeStream stream) {
+            long requestId = stream.shape.input().getRequestId();
+            clearUpstreamOwnership(requestId);
+            EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+            if (removed == null) {
+                return; // cancel won the terminal race; it released everything
+            }
+            stream.owned = true;
+            activeDecodeRequests.decrementAndGet();
+            activeKvTokens.addAndGet(-stream.shape.inputLen());
+            pendingRequests.decrementAndGet();
+        }
+
+        /**
+         * Publish the normal completion of a stream whose terminal ownership was
+         * claimed at a step boundary. Caliber note: executionMs is the SUM OF
+         * ACTUAL STEP DURATIONS the stream experienced (per-step continuous
+         * batching), replacing the former one-shot estimate
+         * decodeMs(outputLen, batchSizeAtAdmission) — the two diverge whenever
+         * the running batch size changes mid-flight, which is exactly the
+         * production-shaped behaviour this model now reproduces.
+         */
+        private void publishDecodeCompletion(DecodeStream stream) {
+            MockPerformanceModel.RequestShape shape = stream.shape;
+            long requestId = shape.input().getRequestId();
+            long executionMs = Math.round(stream.accumulatedExecMs);
+            recordCompletion(shape, stream.batchId, executionMs, 0);
+            // Feed the per-sample decode completion window (java_mock_stats
+            // decode_done / decode_exec_*): Σ actual step durations.
+            stats.recordDecodeDone(executionMs);
+            // Per-engine decode busy: one executionMs per completed request.
+            busyMs.addAndGet(executionMs);
+            boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
+            recordLifecycleEnd(requestId, alreadyCancelled);
+            if (!alreadyCancelled) {
+                completedCount.incrementAndGet();
+                requestStates.put(requestId, "completed");
+            }
+            // Python compat (_run_decode): no_respond on the decode engine only
+            // suppresses the intermediate first-step output; the finished output
+            // is still delivered, so keep this unconditional.
+            if (stream.responseQueue != null && !alreadyCancelled) {
+                stream.responseQueue.offer(buildOutput(shape, true));
+            }
+            responseQueues.remove(requestId);
+            cancelledRequests.remove(requestId);
+            if (performance.shouldAdmitCache() && cache.admit(shape.blockKeys())) {
+                cacheVersion.incrementAndGet();
+            }
         }
 
         /** Snapshot size of the decode pending queue (for waitingQueryLen reporting). */

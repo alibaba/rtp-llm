@@ -287,6 +287,29 @@ final class MockPerformanceModel {
         return scaledMs(outputLen * stepMs * effectiveScale);
     }
 
+    /**
+     * Per-step decode delay for the continuous-batching decode loop (production
+     * FIFOScheduler semantics): the step unit WITHOUT output-length
+     * multiplication, resolved with the same caliber priority as
+     * {@link #decodeMs} (runtime override > per_token_ms > step_ms_by_batch
+     * curve at the CURRENT running batch size), then scaled by decode scale +
+     * sleep scale and jittered (same formula as {@code scaledMs}). Returns
+     * >= 1 ms. The curve itself already amortizes speculative decoding, so a
+     * per-step consumer needs no separate acceptance-rate modeling.
+     */
+    long decodeStepDelayMs(int activeBatchSize) {
+        double stepMs;
+        if (overrideDecodeStepMs != null) {
+            stepMs = overrideDecodeStepMs;
+        } else if (perTokenMs != null) {
+            stepMs = perTokenMs;
+        } else {
+            stepMs = interpolateStepMs(activeBatchSize);
+        }
+        double effectiveScale = overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
+        return scaledMs(stepMs * effectiveScale);
+    }
+
     boolean shouldAdmitCache() {
         if (cacheAdmissionRate >= 1.0) {
             return true;
