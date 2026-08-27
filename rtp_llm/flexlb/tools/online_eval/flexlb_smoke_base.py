@@ -2,7 +2,9 @@
 
 Provides reusable gRPC infrastructure (channel management, proto building,
 stream consumption, cancel, recovery verification, and HTTP mock-engine
-API access) shared by ``cancel_smoke.py`` and ``scheduling_smoke.py``.
+API access) shared by the smoke clients (currently
+``priority_preemption_smoke.py``; the retired ``cancel_smoke.py`` /
+``scheduling_smoke.py`` coverage lives in the ``flexlb_ft/`` framework).
 """
 
 from __future__ import annotations

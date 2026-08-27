@@ -4,11 +4,19 @@ This tool chain evaluates a running SpringBoot `flexlb-api` against a mock
 rtp-llm engine cluster. The mock engine cluster and the load client are
 Java-only (`flexlb-mock-engine`, JDK 21+); the Python mock engine / Python
 load client implementations have been removed. The retained Python tools —
-the smoke client family (`flexlb_smoke_base.py`, `priority_preemption_smoke.py`,
-`scheduling_smoke.py`, `cancel_smoke.py`, `anomaly_smoke.py`),
-`stability_monitor.py`, and the `analyze_*.py` / `sanitize_*.mjs` tooling —
+the smoke client family (`flexlb_smoke_base.py`,
+`priority_preemption_smoke.py`), `stability_monitor.py`, and the
+`analyze_*.py` / `sanitize_*.mjs` tooling —
 run on the system `python3` and are intended for the `luoli_gpu` container,
 where `grpcio`, `grpcio-tools`, and `protobuf` are available.
+
+The legacy standalone smoke/chaos scripts (`cancel_smoke.py`,
+`scheduling_smoke.py`, `anomaly_smoke.py`, `flexlb_behavior_test.sh`,
+`engine_kill_restart_test.sh`, `master_kill_restart_test.sh`,
+`master_recovery_ttft_test.sh`, `engine_disconnect_ttft_test.sh`,
+`run_matrix_smoke.sh`, `run_cancel_smoke.sh`) have been removed: their
+coverage now lives in the `flexlb_ft/` functional-test framework
+(`flexlb_functional_tests.py --suite smoke|chaos --mode batch|queue|direct`).
 
 ## One-command run
 

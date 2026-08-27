@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end smoke for RUNNING Decode priority preemption.
 
-This is deliberately separate from ``cancel_smoke.py``: the existing six
-scenarios cover client cancellation, while this scenario proves that a P70
+This scenario complements client-cancel coverage (now in the
+``flexlb_ft/`` framework): it proves that a P70
 incoming request evicts a P30 request already running on Decode through the
 Master -> original-Prefill weak-Cancel protocol.
 """
