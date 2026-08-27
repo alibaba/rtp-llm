@@ -43,10 +43,14 @@ def trans_tensor(t: TensorPB):
         raise Exception("unkown error type")
 
 
-def trans_from_tensor(t: torch.Tensor):
+def trans_from_tensor(t: torch.Tensor, res: TensorPB | None = None):
+    """Serialize a tensor into ``res`` when supplied, avoiding a message CopyFrom."""
+    if res is None:
+        res = TensorPB()
+    else:
+        res.Clear()
     if t is None or t.numel() == 0:
-        return TensorPB()
-    res = TensorPB()
+        return res
     # RPC serialization is an inference boundary. Callers may still hand us
     # tensors produced by an autograd-enabled module, and NumPy rejects such
     # tensors even though gradients are never meaningful on the wire.
