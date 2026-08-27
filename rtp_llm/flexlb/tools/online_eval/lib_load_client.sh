@@ -302,6 +302,7 @@ start_java_mock_cluster() {
   if [[ -n "${MOCK_DECODE_DOMAIN:-}" ]]; then
     cluster_args+=(--decode-domain "${MOCK_DECODE_DOMAIN}")
   fi
+  cluster_args+=(--unique-engine-ips=false)
 
   java -Xms"${MOCK_JVM_XMS:-4g}" -Xmx"${MOCK_JVM_XMX:-4g}" \
     -XX:+ExitOnOutOfMemoryError \

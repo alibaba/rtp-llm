@@ -942,6 +942,7 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
     --endpoint-file "${ENDPOINT_FILE}" \
     --env-file "${FLEXLB_ENV_FILE}" \
+    --unique-engine-ips=false \
     "${JAVA_MOCK_DISCOVERY_ARGS[@]}" \
     >"${RUN_DIR}/mock_engine.log" 2>&1 &
   MOCK_PID="$!"
