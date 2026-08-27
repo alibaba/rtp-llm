@@ -21,7 +21,9 @@ public:
     std::shared_ptr<TransferRequest>
     makeAvailableRequest(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer);
     std::shared_ptr<TransferRequest> makeAvailableRequest(const std::vector<std::shared_ptr<BlockBuffer>>& blocks);
-    void notifyRequestDone(const std::map<std::string, std::string>& block_keys, bool success);
+    void notifyRequestDone(const std::map<std::string, std::string>& block_keys,
+                           bool                                      success,
+                           CacheStoreErrorCode                       error_code);
     bool done() const {
         return done_;
     }

@@ -60,12 +60,26 @@ void CacheTransferServiceImplContext::notifyDone(bool                           
     }
 
     if (error_code != CacheStoreErrorCode::None) {
-        RTP_LLM_LOG_WARNING("cache store service transfer failed, request id is %s, request from %s, error code is %d",
+        RTP_LLM_LOG_WARNING("cache store service transfer failed, request_id=%s request_from=%s error_code=%s "
+                            "callback_blocks=%zu unfinished_blocks=%d total_blocks=%zu",
                             request_id_.c_str(),
                             client_ip_.c_str(),
-                            error_code);
+                            CacheStoreErrorCodeToString(error_code).c_str(),
+                            blocks.size(),
+                            unfinished_count_,
+                            local_blocks_.size());
         finished_ = true;
-        runFailed(CacheStoreErrorCode::LoadRdmaWriteFailed);
+        runFailed(error_code);
+        return;
+    }
+
+    if (blocks.size() > static_cast<size_t>(unfinished_count_)) {
+        RTP_LLM_LOG_ERROR(
+            "cache store service transfer completion invariant violated, request_id=%s request_from=%s "
+            "unfinished_blocks=%d callback_blocks=%zu total_blocks=%zu",
+            request_id_.c_str(), client_ip_.c_str(), unfinished_count_, blocks.size(), local_blocks_.size());
+        finished_ = true;
+        runFailed(CacheStoreErrorCode::LoadErrorUnknown);
         return;
     }
 

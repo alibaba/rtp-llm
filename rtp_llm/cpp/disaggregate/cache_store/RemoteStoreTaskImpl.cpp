@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <chrono>
@@ -108,7 +109,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::shared_ptr<RequestBlockBuff
             bool success, CacheStoreErrorCode err_code, const std::map<std::string, std::string>& block_keys) {
             auto task = weak_task.lock();
             if (task) {
-                task->notifyRequestDone(block_keys, success);
+                task->notifyRequestDone(block_keys, success, err_code);
             } else {
                 RTP_LLM_LOG_DEBUG("transfer request %s finish after task done", request_id.c_str());
             }
@@ -174,7 +175,7 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
             bool success, CacheStoreErrorCode err_code, const std::map<std::string, std::string>& block_keys) {
             auto task = weak_task.lock();
             if (task) {
-                task->notifyRequestDone(block_keys, success);
+                task->notifyRequestDone(block_keys, success, err_code);
             } else {
                 RTP_LLM_LOG_INFO("transfer request %s finish after task done", request_id.c_str());
             }
@@ -185,7 +186,9 @@ RemoteStoreTaskImpl::makeAvailableRequest(const std::vector<std::shared_ptr<Bloc
     return transfer_request;
 }
 
-void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::string>& block_keys, bool success) {
+void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::string>& block_keys,
+                                            bool                                      success,
+                                            CacheStoreErrorCode                       error_code) {
     RTP_LLM_PROFILE_FUNCTION();
     {
         std::lock_guard<std::shared_mutex> lock(buffers_mutex_);
@@ -208,10 +211,20 @@ void RemoteStoreTaskImpl::notifyRequestDone(const std::map<std::string, std::str
             // 有部分请求失败, 直接退出
             all_success_    = false;
             done_           = true;
-            auto error_code = ErrorCode::UNKNOWN_ERROR;
-            error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
-            RTP_LLM_LOG_WARNING("remote store task notify request done, some request failed, request id is %s",
-                                request_->request_id.c_str());
+            auto internal_error_code = transCacheStoreErrorCode(error_code);
+            error_info_ = ErrorInfo(internal_error_code,
+                                    "remote store transfer failed: " + CacheStoreErrorCodeToString(error_code));
+            RTP_LLM_LOG_WARNING(
+                "remote store task transfer failed, request_id=%s cache_store_error_code=%s internal_error_code=%s "
+                "callback_blocks=%zu completed_blocks=%zu expected_blocks=%d loading_blocks=%zu pending_blocks=%zu",
+                request_->request_id.c_str(),
+                CacheStoreErrorCodeToString(error_code).c_str(),
+                ErrorCodeToString(internal_error_code).c_str(),
+                block_keys.size(),
+                done_buffers_.size(),
+                expect_done_buffer_count_,
+                loading_buffers_.size(),
+                to_load_buffers_.size());
         } else {
             done_ = done_buffers_.size() == expect_done_buffer_count_;
         }
