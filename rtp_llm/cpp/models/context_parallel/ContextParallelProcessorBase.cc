@@ -303,6 +303,24 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const int64_t global_token_num        = total_input_tokens.numel();
     const int64_t local_token_num         = cp_split_input_tokens.numel();
 
+    // A PD prefix-reuse transfer can carry position ids for the original
+    // context, while this request only contains the uncached suffix.  Such a
+    // side-channel tensor is no longer aligned with the current global token
+    // stream (and cannot be remapped by CP).  For text-only requests the
+    // regular prefix-aware absolute-position synthesis below is equivalent;
+    // drop the stale tensor instead of aborting on the divisibility check in
+    // remapPositionIds().  Keep explicit multimodal position ids strict,
+    // since their extra position-id factor carries semantic information.
+    if (!has_multimodal_input && has_prefix_reuse && model_input.combo_position_ids.defined()
+        && model_input.combo_position_ids.numel() > 0 && global_token_num > 0
+        && model_input.combo_position_ids.numel() % global_token_num != 0) {
+        RTP_LLM_LOG_WARNING(
+            "Discard stale CP prefix-reuse combo_position_ids: numel=%ld global_tokens=%ld",
+            model_input.combo_position_ids.numel(),
+            global_token_num);
+        model_input.combo_position_ids = torch::Tensor();
+    }
+
     // Per-local-token remap: for each token this rank keeps after the CP split,
     // record its global source index + validity. Reused to CP-split every per-token
     // side input the same way as combo_tokens: text_tokens_mask and combo_tokens_type_ids.
