@@ -76,6 +76,8 @@ public:
     int32_t                  prefill_cache_dtype               = 0;
     int32_t                  prefill_ssm_state_dtype           = 0;
     int32_t                  prefill_conv_state_dtype          = 0;
+    int32_t                  mla_cache_owner_rank              = -1;
+    uint64_t                 generation_epoch                 = 0;
 
     // for debug, will delete in future
     TimeInfo time_info;

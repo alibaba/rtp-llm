@@ -107,6 +107,9 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 61;
     google.protobuf.StringValue structural_tag = 62;
     google.protobuf.StringValue response_format = 63;
+    // Decode DP owner for the replicated MLA block and KDA shadow lifecycle.
+    // An explicit value may assert the RPC route but cannot override it.
+    google.protobuf.Int32Value mla_cache_owner_rank = 64;
 }
 
 message MMPreprocessConfigPB {
@@ -347,6 +350,9 @@ message GenerateRequestPB {
     int32 prefill_cache_dtype = 17;
     int32 prefill_ssm_state_dtype = 18;
     int32 prefill_conv_state_dtype = 19;
+    bool prefill_mla_cache_tp = 20 [deprecated = true];
+    int32 mla_cache_layout_version = 21 [deprecated = true];
+    int32 mla_cache_shard_count = 22 [deprecated = true];
 }
 
 // in tp case, decode master broadcast to decode worker
@@ -365,6 +371,26 @@ message BroadcastLoadRequestPB {
     repeated IntVector group_block_ids = 12;
     int32 prefill_cp_size = 13;
     bool force_disable_sp_run = 14;
+    // Retired MLA Cache-TP fan-in fields. Receivers reject non-default values
+    // so mixed binaries cannot silently interpret the old 576/TP ABI.
+    repeated string mla_peer_addrs = 15 [deprecated = true];
+    int32 mla_cache_owner_rank = 16;
+    int32 mla_cache_layout_version = 17 [deprecated = true];
+    int32 mla_cache_shard_count = 18 [deprecated = true];
+    uint64 generation_epoch = 19;
+    KdaShadowCommandPB kda_shadow_command = 20;
+    int32 kda_target_rank = 21;
+    int32 kda_seq_len = 22;
+    repeated IntVector group_kernel_block_ids = 23;
+}
+
+enum KdaShadowCommandPB {
+    KDA_SHADOW_NONE = 0;
+    KDA_SHADOW_RESERVE = 1;
+    KDA_SHADOW_LOAD = 2;
+    KDA_SHADOW_COMMIT = 3;
+    KDA_SHADOW_ROLLBACK = 4;
+    KDA_SHADOW_RELEASE = 5;
 }
 
 message BroadcastLoadResponsePB {

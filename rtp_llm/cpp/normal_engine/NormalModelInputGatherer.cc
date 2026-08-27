@@ -316,8 +316,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, cuda_i32);
-    model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
-    model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    model_input.request_id            = torch::empty({(int64_t)total_batch_size}, pinned_i64);
+    model_input.generation_epoch      = torch::empty({(int64_t)total_batch_size}, pinned_i64);
+    model_input.request_pd_separation = torch::zeros({(int64_t)total_batch_size}, pinned_bool);
 
     if (max_blocks_num) {
         model_input.kv_cache_kernel_block_id =
@@ -445,6 +446,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
 
         for (auto i = 0; i < current_batch_size; ++i) {
+            model_input.request_id.data_ptr<int64_t>()[ctx.batch_idx]       = stream->streamId();
+            model_input.generation_epoch.data_ptr<int64_t>()[ctx.batch_idx] = stream->generationEpoch();
             model_input.trace_ids.push_back(stream->traceId());
             if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
@@ -612,8 +615,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                             stream->cacheKeys(i).size() * sizeof(int64_t));
             }
 
-            *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();
-            *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + prefill_batch_idx) =
+            *(model_input.request_id.data_ptr<int64_t>() + ctx.batch_idx) = stream->streamId();
+            *(model_input.generation_epoch.data_ptr<int64_t>() + ctx.batch_idx) = stream->generationEpoch();
+            *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + ctx.batch_idx) =
                 stream->queryPdSep();
 
             ctx.batch_idx += 1;

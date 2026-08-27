@@ -89,8 +89,6 @@ class RequestExtractor:
                         )
                         for addr_data in generate_config.role_addrs
                     ]
-                # Store original role_addrs for PD separation scenario
-                generate_config.original_role_addrs = generate_config.role_addrs.copy()
             except Exception as e:
                 logging.warning(f"Failed to parse role_addrs: {e}")
 

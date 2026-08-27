@@ -19,6 +19,13 @@ cc_library(
 )
 
 cc_library(
+    name = "k3_pd_topology",
+    hdrs = ["K3PdTopology.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "rpc_error_code",
     hdrs = [
         "RpcErrorCode.h",
@@ -59,10 +66,12 @@ cc_library(
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
+        ":k3_pd_topology",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:kda_shadow_cache",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",

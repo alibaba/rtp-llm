@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
@@ -7,18 +8,26 @@
 #include <condition_variable>
 #include <exception>
 #include <sstream>
+#include <unordered_map>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/KdaShadowCache.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/K3PdTopology.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
+
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime_api.h>
+#endif
 
 using namespace std;
 using namespace autil::legacy;
@@ -65,6 +74,12 @@ bool hasSegmentedLinearCacheGroup(const CacheConfig& cache_config) {
     return std::any_of(cache_config.cache_specs.begin(), cache_config.cache_specs.end(), [](const auto& spec) {
         return dynamic_cast<const LinearKVCacheSpec*>(spec.get()) != nullptr;
     });
+}
+
+bool kdaKtpDecodeEnabled(const ParallelismConfig& config) {
+    const char* value = std::getenv("KIMI_K3_DECODE_KTP");
+    return value != nullptr && std::strcmp(value, "1") == 0 && config.ktp_size > 1
+           && config.role_type == RoleType::DECODE;
 }
 
 }  // namespace
@@ -121,6 +136,26 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     decode_context.prefill_cache_dtype               = allocate_request.prefill_cache_dtype();
     decode_context.prefill_ssm_state_dtype           = allocate_request.prefill_ssm_state_dtype();
     decode_context.prefill_conv_state_dtype          = allocate_request.prefill_conv_state_dtype();
+    GRPC_RET_IF_ERROR(decode_context,
+                      !allocate_request.prefill_mla_cache_tp()
+                          && allocate_request.mla_cache_layout_version() == 0
+                          && allocate_request.mla_cache_shard_count() == 0,
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      "legacy sharded MLA cache metadata is unsupported; Prefill must publish replicated width 576");
+
+    if (kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
+        // The RPC route is authoritative. The explicit field is only a test or
+        // diagnostic assertion and cannot redirect data across Decode DP ranks.
+        decode_context.mla_cache_owner_rank = maga_init_params_.parallelism_config.dp_rank;
+        if (allocate_request.input().generate_config().has_mla_cache_owner_rank()) {
+            GRPC_RET_IF_ERROR(
+                decode_context,
+                allocate_request.input().generate_config().mla_cache_owner_rank().value()
+                    == decode_context.mla_cache_owner_rank,
+                grpc::StatusCode::INVALID_ARGUMENT,
+                "explicit MLA owner must match the Decode DP route; cross-rank owner override is forbidden");
+        }
+    }
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     if (cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config)) {
@@ -151,17 +186,25 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_cache_dtype,
                                 static_cast<int32_t>(cache_config.dtype));
-        // K3 PD is equal-TP only.  Prefill rank i and decode rank i own the same
-        // KDA/MLA attention shard, so the state moves rank-to-rank with no
-        // re-slicing.  The removed P8->D1 fan-in instead required one decode rank
-        // to reassemble all 96 KDA heads, which is what forced the cache layout to
-        // reserve a full-head slot and pad every rank-local block up to it.
+        // KDA is rank-to-rank in both supported topologies. In the Decode KTP
+        // topology the physical KDA partition is KTP8 even though MLA attention
+        // uses global TP1; therefore compare Prefill TP against the effective KDA
+        // partition rather than blindly against Decode attention TP.
         const int decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
-        RTP_LLM_CHECK_WITH_INFO(decode_attention_tp == decode_context.prefill_attention_tp_size,
-                                "request [%s] K3 PD requires equal attention TP on both sides, got P%d->D%d",
+        const int decode_kda_tp = kdaKtpDecodeEnabled(maga_init_params_.parallelism_config) ?
+                                      static_cast<int>(maga_init_params_.parallelism_config.ktp_size) :
+                                      decode_attention_tp;
+        RTP_LLM_CHECK_WITH_INFO(isK3PdTopologySupported(decode_context.prefill_attention_tp_size,
+                                                        decode_attention_tp,
+                                                        decode_kda_tp,
+                                                        decode_context.peer_addrs.size()),
+                                "request [%s] unsupported K3 PD topology, "
+                                "got P-TP%d -> D-TP%d/KTP%d peers=%zu",
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_attention_tp_size,
-                                decode_attention_tp);
+                                decode_attention_tp,
+                                decode_kda_tp,
+                                decode_context.peer_addrs.size());
         for (const auto& spec : cache_config.cache_specs) {
             const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(spec.get());
             if (linear_spec == nullptr) {
@@ -176,25 +219,26 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                 decode_context.prefill_conv_state_dtype,
                 static_cast<int32_t>(linear_spec->ssm_state_dtype),
                 static_cast<int32_t>(linear_spec->conv_state_dtype));
-            // Equal TP was already asserted above, so the decode side always holds
-            // exactly its own 96/8 KDA heads.  The dropped branch existed only to
-            // let a TP1 decode accept the full 96 heads.
             constexpr uint32_t kK3TotalLinearHeads = 96;
-            constexpr uint32_t kK3LocalLinearHeads = kK3TotalLinearHeads / kK3PrefillAttentionTp;
+            const uint32_t kK3LocalLinearHeads = kK3TotalLinearHeads / static_cast<uint32_t>(decode_kda_tp);
             RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == kK3LocalLinearHeads
                                         && linear_spec->local_num_v_heads == kK3LocalLinearHeads,
-                                    "request [%s] equal-TP K3 PD requires 12 local KDA heads, got k=%u v=%u",
+                                    "request [%s] K3 PD KTP%d requires %u local KDA heads, got k=%u v=%u",
                                     decode_context.request_key.c_str(),
+                                    decode_kda_tp,
+                                    kK3LocalLinearHeads,
                                     linear_spec->local_num_k_heads,
                                     linear_spec->local_num_v_heads);
         }
         RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d peers=%zu physical_block=%zu "
-                         "kernel_block=%zu",
+                         "KTP=%d KDA_partition_count=%d MLA_width=576 replicated=1 kernel_block=%zu",
                          decode_context.request_key.c_str(),
                          decode_context.prefill_attention_tp_size,
                          decode_attention_tp,
                          decode_context.peer_addrs.size(),
                          cache_config.seq_size_per_block,
+                         decode_kda_tp,
+                         decode_kda_tp / kK3PrefillAttentionTp,
                          cache_config.kernel_seq_size_per_block);
     }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
@@ -230,6 +274,10 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         input->generate_config->gen_timeline = true;
     }
     auto generate_stream              = engine_->makeStream(input);
+    // Capture the immutable stream lifetime epoch before P->D load.  The
+    // scheduler enqueue timestamp changes after localGenerate() enqueues the
+    // stream and therefore cannot be used as a distributed shadow-cache key.
+    decode_context.generation_epoch   = generate_stream->generationEpoch();
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
     // Set CanRun event so that handleWaiting() will execute initKVBlock()
@@ -385,6 +433,34 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                          dynamic_cast<grpc::internal::WriterInterface<GenerateOutputsPB>*>(grpc_stream),
                          generate_stream);
     decode_context.time_info.updateGenerateEndTime();
+    if (kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
+        const auto& cache_keys = generate_stream->cacheKeys(0);
+        const auto& groups     = generate_stream->kvCachePtr()->groupBlocks(0);
+        LoadKVCacheContext release_context{decode_context.request_id,
+                                           decode_context.request_key,
+                                           decode_context.peer_addrs,
+                                           cache_keys,
+                                           groups,
+                                           generate_stream->reuseBlockSize(),
+                                           LOAD_TIMEOUT_MS,
+                                           1,
+                                           0,
+                                           decode_context.server_context,
+                                           decode_context.prefill_cp_size,
+                                           generate_stream->forceDisableSpRun(),
+                                           decode_context.mla_cache_owner_rank,
+                                           decode_context.generation_epoch,
+                                           -1,
+                                           generate_stream->seqLength(),
+                                           groups};
+        auto release_status =
+            loadCacheAsyncForTp(decode_context, release_context, KDA_SHADOW_RELEASE);
+        if (!release_status.ok()) {
+            RTP_LLM_LOG_ERROR("request [%s] failed to release KDA shadow cache: %s",
+                              decode_context.request_key.c_str(),
+                              release_status.ToString().c_str());
+        }
+    }
     meta_->dequeue(decode_context.request_id, decode_context.getStream());
 
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", decode_context.request_key.c_str());
@@ -396,45 +472,58 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_request_id(load_context.request_id);
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
-    request.set_partition_count(1);
-    request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
     request.set_force_disable_sp_run(load_context.force_disable_sp_run);
+    request.set_mla_cache_owner_rank(load_context.mla_cache_owner_rank);
+    request.set_generation_epoch(load_context.generation_epoch);
+    request.set_kda_target_rank(index);
+    request.set_kda_seq_len(load_context.kda_seq_len);
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
     const bool  segmented_linear_cache =
         load_context.prefill_cp_size <= 1 && peer_addrs.size() > 1 && hasSegmentedLinearCacheGroup(cache_config);
     const int  decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
-    const bool equal_attention_tp  = segmented_linear_cache && decode_attention_tp > 1
-                                    && static_cast<size_t>(decode_attention_tp) == peer_addrs.size();
-    // A segmented linear cache is head-sharded, so it can only be moved
-    // rank-to-rank.  The removed P8->D1 fan-in pulled every prefill peer so one
-    // decode rank could stitch all 96 segments together; with that gone an
-    // unequal mapping must fail loudly instead of silently falling through to the
-    // generic block split below, which would hand decode the wrong head slices.
-    RTP_LLM_CHECK_WITH_INFO(!segmented_linear_cache || equal_attention_tp,
-                            "K3 hybrid cache PD requires equal attention TP, got D%d with %zu prefill peers",
+    const int  decode_kda_tp = kdaKtpDecodeEnabled(maga_init_params_.parallelism_config) ?
+                                   static_cast<int>(maga_init_params_.parallelism_config.ktp_size) :
+                                   decode_attention_tp;
+    const bool supported_k3_topology = segmented_linear_cache
+                                       && isK3PdTopologySupported(static_cast<int>(peer_addrs.size()),
+                                                                 decode_attention_tp,
+                                                                 decode_kda_tp,
+                                                                 peer_addrs.size());
+    RTP_LLM_CHECK_WITH_INFO(!segmented_linear_cache || supported_k3_topology,
+                            "unsupported K3 hybrid cache PD topology D-TP%d/KTP%d "
+                            "with %zu prefill peers",
                             decode_attention_tp,
+                            decode_kda_tp,
                             peer_addrs.size());
 
     if (load_context.prefill_cp_size > 1) {
+        request.set_partition_count(1);
+        request.set_partition_id(0);
         // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
-    } else if (equal_attention_tp) {
-        RTP_LLM_CHECK_WITH_INFO(index >= 0 && static_cast<size_t>(index) < peer_addrs.size(),
-                                "equal-TP K3 PD worker index %d outside ordered peer list size %zu",
-                                index,
-                                peer_addrs.size());
-        // P rank i and D rank i own the same KDA/MLA attention shard.
-        request.add_peer_addrs(peer_addrs[index]);
+    } else if (supported_k3_topology) {
+        const auto plan = makeK3PdPartitionPlan(static_cast<int>(peer_addrs.size()),
+                                                decode_attention_tp,
+                                                decode_kda_tp,
+                                                peer_addrs.size(),
+                                                index);
+        request.set_partition_count(plan.remote_kda_partition_count);
+        request.set_partition_id(plan.remote_kda_partition_id);
+        request.add_peer_addrs(peer_addrs[plan.prefill_peer_index]);
     } else if (resource_.workers.size() % peer_addrs.size() == 0) {
         // D >= P
         int part_cnt = resource_.workers.size() / peer_addrs.size();
+        request.set_partition_count(part_cnt);
+        request.set_partition_id(index % part_cnt);
         request.add_peer_addrs(peer_addrs[index / part_cnt]);
     } else {
         // P >= D, load multi block of prefill
+        request.set_partition_count(1);
+        request.set_partition_id(0);
         int group_num = peer_addrs.size() / resource_.workers.size();
         request.add_peer_addrs(peer_addrs[index * group_num]);
     }
@@ -450,6 +539,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
             }
         }
     }
+    for (const auto& group_block : load_context.kernel_block_ids_by_group) {
+        auto* row = request.add_group_kernel_block_ids();
+        for (const auto block_id : group_block->kernelBlocks()) {
+            row->add_values(block_id);
+        }
+    }
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
 }
@@ -463,17 +558,25 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
     request.set_force_disable_sp_run(load_context.force_disable_sp_run);
+    request.set_generation_epoch(load_context.generation_epoch);
+    request.set_kda_target_rank(index);
+    request.set_kda_seq_len(load_context.kda_seq_len);
     const auto& cache_config        = engine_->resourceContext().cache_manager->cacheConfig();
     const bool  k3_hybrid_cache     = cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config);
     const int   decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
-    const bool  equal_attention_tp =
-        k3_hybrid_cache && decode_attention_tp > 1 && static_cast<size_t>(decode_attention_tp) == peer_addrs.size();
-    // Same reason as constructRemoteLoadRequestForMla: without the removed
-    // P8->D1 fan-in an unequal mapping would drop through to the generic block
-    // split and give decode the wrong KDA head slices, silently.
-    RTP_LLM_CHECK_WITH_INFO(!k3_hybrid_cache || load_context.prefill_cp_size > 1 || equal_attention_tp,
-                            "K3 hybrid cache PD requires equal attention TP, got D%d with %zu prefill peers",
+    const int decode_kda_tp = kdaKtpDecodeEnabled(maga_init_params_.parallelism_config) ?
+                                  static_cast<int>(maga_init_params_.parallelism_config.ktp_size) :
+                                  decode_attention_tp;
+    const bool supported_k3_topology = k3_hybrid_cache
+                                       && isK3PdTopologySupported(static_cast<int>(peer_addrs.size()),
+                                                                 decode_attention_tp,
+                                                                 decode_kda_tp,
+                                                                 peer_addrs.size());
+    RTP_LLM_CHECK_WITH_INFO(!k3_hybrid_cache || load_context.prefill_cp_size > 1 || supported_k3_topology,
+                            "unsupported K3 hybrid cache PD topology D-TP%d/KTP%d "
+                            "with %zu prefill peers",
                             decode_attention_tp,
+                            decode_kda_tp,
                             peer_addrs.size());
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
@@ -482,14 +585,15 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
-    } else if (equal_attention_tp) {
-        RTP_LLM_CHECK_WITH_INFO(index >= 0 && static_cast<size_t>(index) < peer_addrs.size(),
-                                "equal-TP K3 PD worker index %d outside ordered peer list size %zu",
-                                index,
-                                peer_addrs.size());
-        request.set_partition_count(1);
-        request.set_partition_id(0);
-        request.add_peer_addrs(peer_addrs[index]);
+    } else if (supported_k3_topology) {
+        const auto plan = makeK3PdPartitionPlan(static_cast<int>(peer_addrs.size()),
+                                                decode_attention_tp,
+                                                decode_kda_tp,
+                                                peer_addrs.size(),
+                                                index);
+        request.set_partition_count(plan.remote_kda_partition_count);
+        request.set_partition_id(plan.remote_kda_partition_id);
+        request.add_peer_addrs(peer_addrs[plan.prefill_peer_index]);
     } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
         int part_cnt = resource_.workers.size();
         int peer_cnt = peer_addrs.size();
@@ -525,6 +629,12 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             for (const auto& block_id : group_block->blocks()) {
                 row->add_values(block_id);
             }
+        }
+    }
+    for (const auto& group_block : load_context.kernel_block_ids_by_group) {
+        auto* row = request.add_group_kernel_block_ids();
+        for (const auto block_id : group_block->kernelBlocks()) {
+            row->add_values(block_id);
         }
     }
     request.set_timeout_ms(load_context.timeout_ms);
@@ -595,7 +705,12 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     0,
                                     decode_context.server_context,
                                     decode_context.prefill_cp_size,
-                                    generate_stream->forceDisableSpRun()};
+                                    generate_stream->forceDisableSpRun(),
+                                    decode_context.mla_cache_owner_rank,
+                                    decode_context.generation_epoch,
+                                    -1,
+                                    generate_stream->seqLength(),
+                                    *block_ids_by_group};
 
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
@@ -608,11 +723,30 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
         }
     }
 
-    return loadCacheAsyncForTp(decode_context, load_context);
+    if (!kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
+        return loadCacheAsyncForTp(decode_context, load_context);
+    }
+    auto status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_RESERVE);
+    if (status.ok()) {
+        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_LOAD);
+    }
+    if (status.ok()) {
+        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_COMMIT);
+    }
+    if (!status.ok()) {
+        auto rollback = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_ROLLBACK);
+        if (!rollback.ok()) {
+            RTP_LLM_LOG_ERROR("request [%s] KDA shadow rollback also failed: %s",
+                              decode_context.request_key.c_str(),
+                              rollback.ToString().c_str());
+        }
+    }
+    return status;
 }
 
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
-                                               LoadKVCacheContext&    load_context) {
+                                               LoadKVCacheContext&    load_context,
+                                               KdaShadowCommandPB     command) {
     RTP_LLM_PROFILE_FUNCTION();
     int64_t load_cache_begin_time_us = currentTimeUs();
 
@@ -656,6 +790,7 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
         } else {
             load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
         }
+        load_request.set_kda_shadow_command(command);
         std::unique_ptr<ClientAsyncResponseReader<BroadcastLoadResponsePB>> reader(rpc_context.stub->AsyncRemoteLoad(
             rpc_context.client_context.get(), load_request, &completion_queues[i % completion_queues.size()]));
         reader->Finish(&rpc_context.response, &rpc_context.status, reinterpret_cast<void*>(i));
@@ -1017,8 +1152,19 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return cache_key_index < cache_key_count;
     };
-    for (int i = 0; i < load_context.peer_addrs.size(); i++) {
-        auto&                                            peer_addr = load_context.peer_addrs[i];
+    struct PeerLoadRoute {
+        std::string peer_addr;
+        int         source_rank;
+    };
+    std::vector<PeerLoadRoute> peer_routes;
+    peer_routes.reserve(load_context.peer_addrs.size());
+    for (int i = 0; i < static_cast<int>(load_context.peer_addrs.size()); ++i) {
+        peer_routes.push_back({load_context.peer_addrs[i], i});
+    }
+
+    for (const auto& route : peer_routes) {
+        const auto&                                      peer_addr = route.peer_addr;
+        const int                                        i         = route.source_rank;
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
         RTP_LLM_LOG_DEBUG("load context request id is %d", load_context.request_id);
 
@@ -1090,10 +1236,20 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     auto cache_key = makeCacheKey(
                         model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, region_name);
 
-                    const int local_part_cnt = hybrid_linear_fan_in ? (segmented_linear_group ? peer_cnt : 1) :
-                                                                      (is_page_level_rr ? 1 : peer_cnt);
-                    const int local_part_id =
-                        hybrid_linear_fan_in ? (segmented_linear_group ? i : 0) : (is_page_level_rr ? 0 : i);
+                    // partition_count/id select the remote Prefill KDA source
+                    // slice. Decode KTP storage is already sized to the local
+                    // head count (12 for KTP8, 6 for KTP16), so partitioning
+                    // the destination again would incorrectly turn KTP16's
+                    // six heads into three. MLA also remains a full width-576
+                    // destination because it is not a segmented linear group.
+                    const auto kda_destination = segmented_linear_group ?
+                                                     makeK3PdDestinationPlan(load_context.partition_count,
+                                                                            load_context.partition_id) :
+                                                     K3PdDestinationPlan{0, 0};
+                    const int local_part_cnt = segmented_linear_group ? kda_destination.partition_count :
+                                                (hybrid_linear_fan_in ? 1 : (is_page_level_rr ? 1 : peer_cnt));
+                    const int local_part_id = segmented_linear_group ? kda_destination.partition_id :
+                                              (hybrid_linear_fan_in ? 0 : (is_page_level_rr ? 0 : i));
                     auto parts =
                         (region_name != KVCacheRegionName::DEFAULT) ?
                             cache_manager->convertIndexToBuffer(
@@ -1336,7 +1492,8 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                          const BroadcastLoadRequestPB* request,
                                          BroadcastLoadResponsePB*      response) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
+    const bool kda_shadow_request = request->kda_shadow_command() != KDA_SHADOW_NONE;
+    if (!kda_shadow_request && request->dp_rank() != maga_init_params_.parallelism_config.dp_rank) {
         RTP_LLM_LOG_WARNING("only load when in dp group, skip load for dp rank %d", request->dp_rank());
         return grpc::Status::OK;
     }
@@ -1350,8 +1507,126 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         block_ids_holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
         block_ids_by_group.push_back(std::move(block_ids_holder));
     }
+    GroupBlockIds kernel_block_ids_by_group;
+    kernel_block_ids_by_group.reserve(static_cast<size_t>(request->group_kernel_block_ids_size()));
+    for (int i = 0; i < request->group_kernel_block_ids_size(); ++i) {
+        const auto& row              = request->group_kernel_block_ids(i);
+        auto        block_ids_holder = std::make_shared<BlockIds>();
+        block_ids_holder->assign(BlockIndicesType(row.values().begin(), row.values().end()));
+        kernel_block_ids_by_group.push_back(std::move(block_ids_holder));
+    }
 
+    if (request->mla_peer_addrs_size() != 0 || request->mla_cache_layout_version() != 0
+        || request->mla_cache_shard_count() != 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "legacy sharded MLA load metadata is unsupported; use one replicated Prefill peer");
+    }
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
+
+    if (kda_shadow_request) {
+        const auto& parallelism = maga_init_params_.parallelism_config;
+        RTP_LLM_CHECK_WITH_INFO(kdaKtpDecodeEnabled(parallelism),
+                                "received KDA shadow command while Decode KTP is disabled");
+        RTP_LLM_CHECK_WITH_INFO(request->kda_target_rank() == parallelism.ktp_rank,
+                                "KDA shadow command target rank %d reached KTP rank %ld",
+                                request->kda_target_rank(),
+                                parallelism.ktp_rank);
+        auto cache_manager = engine_->resourceContext().cache_manager;
+        auto registry      = cache_manager->kdaShadowRegistry();
+        RTP_LLM_CHECK_WITH_INFO(registry != nullptr, "Decode KTP shadow registry is not initialized");
+        const int  kda_group_id = cache_manager->kdaShadowGroupId();
+        const bool is_owner     = parallelism.dp_rank == request->mla_cache_owner_rank();
+        KdaShadowKey key{request->request_id(), request->generation_epoch()};
+        KdaShadowResult shadow_result;
+
+        switch (request->kda_shadow_command()) {
+            case KDA_SHADOW_RESERVE: {
+                if (is_owner) {
+                    RTP_LLM_CHECK_WITH_INFO(
+                        kda_group_id >= 0 && kda_group_id < static_cast<int>(block_ids_by_group.size())
+                            && kda_group_id < static_cast<int>(kernel_block_ids_by_group.size()),
+                        "owner KDA shadow adoption is missing physical/kernel group rows");
+                    KdaShadowCommand command{KdaShadowCommandType::ADOPT, key, request->kda_seq_len()};
+                    command.adopted_blocks = block_ids_by_group[kda_group_id]->blocks();
+                    command.adopted_kernel_blocks = kernel_block_ids_by_group[kda_group_id]->blocks();
+                    shadow_result = registry->apply(command);
+                } else {
+                    shadow_result = registry->apply(
+                        {KdaShadowCommandType::RESERVE, key, request->kda_seq_len(), {}});
+                }
+                break;
+            }
+            case KDA_SHADOW_LOAD: {
+                shadow_result = registry->apply({KdaShadowCommandType::LOAD, key, 0, {}});
+                if (shadow_result.success) {
+                    const auto group_count = cache_manager->cacheConfig().groupNums();
+                    GroupBlockIds local_groups;
+                    local_groups.reserve(group_count);
+                    for (size_t gid = 0; gid < group_count; ++gid) {
+                        if (static_cast<int>(gid) == kda_group_id) {
+                            auto ids = std::make_shared<BlockIds>();
+                            ids->assign(shadow_result.blocks);
+                            local_groups.push_back(std::move(ids));
+                        } else if (is_owner && gid < block_ids_by_group.size()) {
+                            local_groups.push_back(block_ids_by_group[gid]);
+                        } else {
+                            local_groups.push_back(std::make_shared<BlockIds>());
+                        }
+                    }
+                    LoadKVCacheContext context{request->request_id(),
+                                               request->request_key(),
+                                               peer_addrs,
+                                               cache_keys,
+                                               local_groups,
+                                               request->reuse_block_size(),
+                                               request->timeout_ms(),
+                                               request->partition_count(),
+                                               request->partition_id(),
+                                               server_context,
+                                               std::max(1, request->prefill_cp_size()),
+                                               request->force_disable_sp_run(),
+                                               request->mla_cache_owner_rank(),
+                                               request->generation_epoch(),
+                                               request->kda_target_rank(),
+                                               request->kda_seq_len()};
+                    auto load_status = loadCache(context);
+                    if (!load_status.ok()) {
+                        KdaShadowCommand fail{KdaShadowCommandType::FAIL, key};
+                        fail.error = load_status.ToString();
+                        registry->apply(fail);
+                        response->mutable_error_info()->set_error_code(transErrorCodeToRPC(load_status.code()));
+                        response->mutable_error_info()->set_error_message(load_status.ToString());
+                        response->set_done_time_us(currentTimeUs());
+                        return grpc::Status::OK;
+                    }
+                }
+                break;
+            }
+            case KDA_SHADOW_COMMIT:
+                shadow_result = registry->apply({KdaShadowCommandType::COMMIT, key});
+                break;
+            case KDA_SHADOW_ROLLBACK:
+                shadow_result = registry->apply({KdaShadowCommandType::ROLLBACK, key});
+                break;
+            case KDA_SHADOW_RELEASE:
+                shadow_result = registry->apply({KdaShadowCommandType::RELEASE, key});
+                break;
+            case KDA_SHADOW_NONE:
+                RTP_LLM_FAIL("unreachable KDA shadow command");
+            default:
+                RTP_LLM_FAIL("unknown KDA shadow protobuf command: %d",
+                             static_cast<int>(request->kda_shadow_command()));
+        }
+        if (!shadow_result.success) {
+            response->mutable_error_info()->set_error_code(
+                transErrorCodeToRPC(ErrorCode::LOAD_KV_CACHE_FAILED));
+            response->mutable_error_info()->set_error_message(shadow_result.error);
+        } else {
+            response->mutable_error_info()->set_error_code(ErrorCodePB::NONE_ERROR);
+        }
+        response->set_done_time_us(currentTimeUs());
+        return grpc::Status::OK;
+    }
 
     // TODO(xinfei.sxf) add retry
     auto error_info = loadCache({request->request_id(),
@@ -1365,7 +1640,12 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                  request->partition_id(),
                                  server_context,
                                  std::max(1, request->prefill_cp_size()),
-                                 request->force_disable_sp_run()});
+                                 request->force_disable_sp_run(),
+                                 request->mla_cache_owner_rank(),
+                                 request->generation_epoch(),
+                                 request->kda_target_rank(),
+                                 request->kda_seq_len(),
+                                 std::move(kernel_block_ids_by_group)});
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());
