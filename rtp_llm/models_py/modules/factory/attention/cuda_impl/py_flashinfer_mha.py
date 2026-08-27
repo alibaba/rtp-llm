@@ -195,6 +195,14 @@ class PyFlashinferPrefillPagedAttnOp(object):
         block_id_host = attn_inputs.kv_cache_kernel_block_id
         if block_id_host is None or block_id_host.numel() == 0:
             block_id_host = attn_inputs.kv_cache_kernel_block_id_device
+        graph_copy_params = (
+            self.prefill_cuda_graph_copy_params
+            if self.prefill_cuda_graph_copy_params is not None
+            else attn_inputs.prefill_cuda_graph_copy_params
+        )
+        planned_batch_size = (
+            graph_copy_params.max_batch_size if graph_copy_params is not None else -1
+        )
         # Keep the same fill path for capture and replay: the host fill sizes
         # buffers exactly while the device fill sizes for the worst case, so
         # switching paths between capture and replay forces a (forbidden)
@@ -212,6 +220,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 ),
                 self.page_size,
                 forbid_realloc,
+                planned_batch_size,
             )
         else:
             self.fmha_params.fill_params(
@@ -221,6 +230,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 _host_i32(block_id_host),
                 self.page_size,
                 forbid_realloc,
+                planned_batch_size,
             )
         # Store CUDA graph copy parameters
         # Define qo_indptr early for CUDA graph initialization

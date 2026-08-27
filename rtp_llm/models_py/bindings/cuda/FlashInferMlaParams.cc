@@ -243,6 +243,7 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
                                                  torch::Tensor t_sequence_lengths,
                                                  torch::Tensor t_input_lengths,
                                                  torch::Tensor t_kv_cache_block_id_host,
+                                                 int           input_batch_size,
                                                  int           batch_size,
                                                  int           seq_size_per_block,
                                                  int&          input_token_num,
@@ -296,8 +297,9 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
         if (prefix_lengths) {
-            int input_length  = input_lengths[i];
-            int prefix_length = prefix_lengths[i];
+            const bool has_input     = i < input_batch_size;
+            int        input_length  = has_input ? input_lengths[i] : 0;
+            int        prefix_length = has_input ? prefix_lengths[i] : 0;
 
             RTP_LLM_CHECK_WITH_INFO(offset + input_length <= max_input_token_num_,
                                     "input_token_num exceed reserved %d > %d",
@@ -343,7 +345,7 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
                 batch_reuse_info_vec_ptr[i * 4 + 2] = 0;
                 batch_reuse_info_vec_ptr[i * 4 + 3] = 0;
             }
-        } else {
+        } else if (i < input_batch_size) {
             // Decode mode: ensure batch_size <= max_input_token_num_
             RTP_LLM_CHECK_WITH_INFO(batch_size <= max_input_token_num_,
                                     "batch_size exceed max_input_token_num_ in decode mode %d > %d",
@@ -355,19 +357,27 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
             accu_q_len += 1;
             accu_kv_len += 1;
         }
-        paged_kv_last_page_len_ptr[i] = (seq_len - 1) % seq_size_per_block + 1;
+        // FlashInfer's SM90 planner rejects zero-length KV entries. CUDA graph
+        // replay retains the captured batch size, so represent inactive tail
+        // slots with a one-token dummy page. Their Q output is discarded.
+        const int planner_seq_len     = seq_len > 0 ? seq_len : 1;
+        paged_kv_last_page_len_ptr[i] = (planner_seq_len - 1) % seq_size_per_block + 1;
         kvlen_ptr[i]                  = seq_len;
         max_kv_len                    = std::max(seq_len, max_kv_len);
 
-        int current_page_num = (seq_len + seq_size_per_block - 1) / seq_size_per_block;
+        int current_page_num = (planner_seq_len + seq_size_per_block - 1) / seq_size_per_block;
         RTP_LLM_CHECK_WITH_INFO(total_page_idx + current_page_num <= max_page_num_,
                                 "page_num exceed reserved %d > %d",
                                 total_page_idx + current_page_num,
                                 max_page_num_);
         if (kv_cache_block_id) {
-            for (int j = 0; j < current_page_num; j++) {
-                auto page_idx                     = kv_cache_block_id[i * max_batch_blocks + j];
-                page_indice_ptr[total_page_idx++] = page_idx;
+            if (seq_len == 0) {
+                page_indice_ptr[total_page_idx++] = 0;
+            } else {
+                for (int j = 0; j < current_page_num; j++) {
+                    auto page_idx                     = kv_cache_block_id[i * max_batch_blocks + j];
+                    page_indice_ptr[total_page_idx++] = page_idx;
+                }
             }
         }
         decode_page_indptr_ptr[i + 1]           = total_page_idx;
@@ -439,13 +449,19 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                                          torch::Tensor t_input_lengths,
                                          torch::Tensor t_kv_cache_block_id_host,
                                          int           seq_size_per_block,
-                                         bool          forbid_realloc) {
+                                         bool          forbid_realloc,
+                                         int           planned_batch_size) {
     auto t_prefix_lengths_host   = toHostContiguousI32(t_prefix_lengths);
     auto t_sequence_lengths_host = toHostContiguousI32(t_sequence_lengths);
     auto t_input_lengths_host    = toHostContiguousI32(t_input_lengths);
     t_kv_cache_block_id_host     = toHostContiguousI32(t_kv_cache_block_id_host);
 
-    const int batch_size = t_input_lengths_host.size(0);
+    const int input_batch_size = t_input_lengths_host.size(0);
+    const int batch_size       = planned_batch_size < 0 ? input_batch_size : planned_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(batch_size >= input_batch_size,
+                            "planned batch size %d is smaller than input batch size %d",
+                            batch_size,
+                            input_batch_size);
 
     // First pass: calculate required sizes accurately
     auto input_lengths_ptr    = t_input_lengths_host.data_ptr<int32_t>();
@@ -464,16 +480,18 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
     for (int i = 0; i < batch_size; i++) {
         int seq_len = 0;
         if (prefix_lengths_ptr) {
-            int input_length  = input_lengths_ptr[i];
-            int prefix_length = prefix_lengths_ptr[i];
+            const bool has_input     = i < input_batch_size;
+            int        input_length  = has_input ? input_lengths_ptr[i] : 0;
+            int        prefix_length = has_input ? prefix_lengths_ptr[i] : 0;
             input_token_num += input_length;
             seq_len = input_length + prefix_length;
             reuse_page_num += (prefix_length + seq_size_per_block - 1) / seq_size_per_block;
-        } else {
+        } else if (i < input_batch_size) {
             input_token_num += 1;
             seq_len = sequence_lengths_ptr[i] + 1;
         }
-        page_num += (seq_len + seq_size_per_block - 1) / seq_size_per_block;
+        const int planner_seq_len = seq_len > 0 ? seq_len : 1;
+        page_num += (planner_seq_len + seq_size_per_block - 1) / seq_size_per_block;
     }
 
     // Ensure tensors are allocated with sufficient size
@@ -484,6 +502,7 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
                        t_sequence_lengths_host,
                        t_input_lengths_host,
                        t_kv_cache_block_id_host,
+                       input_batch_size,
                        batch_size,
                        seq_size_per_block,
                        input_token_num,
@@ -622,10 +641,16 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                                                   torch::Tensor t_input_lengths,
                                                   torch::Tensor t_kv_cache_block_id_device,
                                                   int           seq_size_per_block,
-                                                  bool          forbid_realloc) {
+                                                  bool          forbid_realloc,
+                                                  int           planned_batch_size) {
     RTP_LLM_CHECK_WITH_INFO(t_input_lengths.defined() && t_input_lengths.dim() == 1,
                             "fillParamsMhaDevice: input_lengths must be a 1-D tensor");
-    const int batch_size = t_input_lengths.size(0);
+    const int input_batch_size = t_input_lengths.size(0);
+    const int batch_size       = planned_batch_size < 0 ? input_batch_size : planned_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(batch_size >= input_batch_size,
+                            "planned batch size %d is smaller than input batch size %d",
+                            batch_size,
+                            input_batch_size);
     if (batch_size == 0) {
         decode_page_indptr     = decode_page_indptr_d;
         page_indice            = page_indice_d;
@@ -640,7 +665,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
     auto t_block_id_dev         = toDeviceContiguousI32(t_kv_cache_block_id_device);
 
     RTP_LLM_CHECK_WITH_INFO(t_block_id_dev.defined() && t_block_id_dev.dim() == 2
-                                && t_block_id_dev.size(0) >= batch_size,
+                                && t_block_id_dev.size(0) >= input_batch_size,
                             "fillParamsMhaDevice: kv_cache_block_id_device must be 2-D and cover the batch");
     const int max_blocks_per_bs = t_block_id_dev.size(1);
 
@@ -672,6 +697,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                            page_indice_d,
                            batch_indice_d,
                            positions_d,
+                           batch_size,
                            stream);
 
     // FlashInfer uses paged_kv_last_page_len/decode_page_indptr sizes;
@@ -700,20 +726,23 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     input_lengths,
                torch::Tensor                     kv_cache_block_id_host,
                int                               seq_size_per_block,
-               bool                              forbid_realloc) {
+               bool                              forbid_realloc,
+               int                               planned_batch_size) {
                 self.fillParams(prefix_lengths,
                                 sequence_lengths,
                                 input_lengths,
                                 kv_cache_block_id_host,
                                 seq_size_per_block,
-                                forbid_realloc);
+                                forbid_realloc,
+                                planned_batch_size);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
             pybind11::arg("input_lengths"),
             pybind11::arg("kv_cache_block_id_host"),
             pybind11::arg("seq_size_per_block"),
-            pybind11::arg("forbid_realloc") = false,
+            pybind11::arg("forbid_realloc")     = false,
+            pybind11::arg("planned_batch_size") = -1,
             "Fill parameters for attention execution (forbid_realloc=true only when called from prepare_cuda_graph/replay)")
         .def("fill_decode_cuda_graph_params",
              &rtp_llm::FlashInferMlaAttnParams::fillDecodeCudaGraphParams,
@@ -729,20 +758,23 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     input_lengths,
                torch::Tensor                     kv_cache_block_id_device,
                int                               seq_size_per_block,
-               bool                              forbid_realloc) {
+               bool                              forbid_realloc,
+               int                               planned_batch_size) {
                 self.fillParamsMhaDevice(prefix_lengths,
                                          sequence_lengths,
                                          input_lengths,
                                          kv_cache_block_id_device,
                                          seq_size_per_block,
-                                         forbid_realloc);
+                                         forbid_realloc,
+                                         planned_batch_size);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
             pybind11::arg("input_lengths"),
             pybind11::arg("kv_cache_block_id_device"),
             pybind11::arg("seq_size_per_block"),
-            pybind11::arg("forbid_realloc") = false,
+            pybind11::arg("forbid_realloc")     = false,
+            pybind11::arg("planned_batch_size") = -1,
             "MHA-only device-resident planner — fills decode_page_indptr_d / paged_kv_last_page_len_d / page_indice_d via a single CUDA kernel, leaving MLA-only fields untouched")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
