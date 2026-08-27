@@ -2,9 +2,9 @@ package org.flexlb.cache.hash;
 
 import org.flexlb.cache.domain.BlockHashConfig;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 

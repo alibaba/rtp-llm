@@ -190,7 +190,22 @@ export FLEXLB_CONFIG='{
         "path": "/home/admin/ai-whale/logs/master_theory_hit.log"
       }
     }
-  }
+  },
+  "serviceDiscovery": {
+    "connectTimeoutMs": 500,
+    "readTimeoutMs": 500,
+    "pollIntervalMs": 1000,
+    "maxIdleConnections": 5,
+    "keepAliveDurationMs": 300000
+  },
+  "cacheMatching": {"type": "LOCAL_SYNC"},
+  "optimizer": {
+    "enabled": false,
+    "discoveryPollIntervalMs": 1000
+  },
+  "consistency": {"type": "NONE"},
+  "blockHashStrategy": "VLLM",
+  "enableFallback": false
 }'
 
 # Optional: prometheus, kmonitor, or noop (the default).
@@ -200,8 +215,9 @@ export FLEXLB_MONITOR_PROVIDER=prometheus
 
 The top-level `enableFallback` switch defaults to `false`. When enabled, the gRPC
 schedule endpoint returns `success=false`, code `8600`, and error message `FALLBACK`
-before forwarding or routing so the caller can use domain routing. The compatibility
-environment variable `ENABLE_FALLBACK=true|false` overrides the JSON baseline.
+before forwarding or routing so the caller can use domain routing. FlexLB behavior is
+read only from `FLEXLB_CONFIG`; legacy field-level variables such as `ENABLE_FALLBACK`,
+`BLOCK_HASH_STRATEGY`, `FLEXLB_LOG_LEVEL`, and `ENABLE_STDOUT_LOG` are ignored.
 
 `MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
 not a second FlexLB behavior configuration:
@@ -209,7 +225,6 @@ not a second FlexLB behavior configuration:
 ```bash
 export MODEL_SERVICE_CONFIG='{
     "service_id": "model.service",
-    "load_balance": true,
     "role_endpoints": [
         {
             "group": "blue-group",
@@ -316,24 +331,26 @@ Each endpoint must contain exactly one `discovery` object. Supported types are:
 When omitted, FlexLB uses the endpoint gRPC port (`http` discovery port + 1, or the discovered
 port itself when `protocol` is `grpc`).
 
-DashScope tuning fields are optional and belong to the same `discovery` object:
+Discovery runtime policy belongs to `FLEXLB_CONFIG`, not to each topology endpoint:
 
 ```json
 {
-  "type": "dashscope",
-  "base_url": "http://127.0.0.1:8880",
-  "connect_timeout_ms": 500,
-  "read_timeout_ms": 500,
-  "poll_interval_ms": 1000,
-  "max_idle_connections": 5,
-  "keep_alive_duration_ms": 300000
+  "serviceDiscovery": {
+    "connectTimeoutMs": 500,
+    "readTimeoutMs": 500,
+    "pollIntervalMs": 1000,
+    "maxIdleConnections": 5,
+    "keepAliveDurationMs": 300000
+  }
 }
 ```
 
-The values shown above are the code defaults. There is no global discovery strategy or fallback.
+The values shown above are the code defaults and are exposed to discovery providers from the
+current FlexLB snapshot. Endpoint `discovery` objects contain only locator data: `type`, optional
+`base_url`, and `hosts` for `static-env`. There is no global discovery strategy or fallback.
 
-To query cache matches from KVCM instead of the local cache index, add a `kvcm`
-object at the same level as `role_endpoints`:
+To query cache matches from KVCM instead of the local cache index, configure KVCM topology in
+`MODEL_SERVICE_CONFIG`:
 
 ```json
 {
@@ -349,22 +366,39 @@ object at the same level as `role_endpoints`:
     }
   }],
   "kvcm": {
-    "enabled": true,
     "address": "v-kvcm",
     "port": 6381,
     "discovery": {
       "type": "dashscope"
-    },
-    "request_timeout_ms": 500,
-    "max_query_retry_count": 1,
-    "leader_refresh_interval_ms": 10000,
-    "local_standby": {
-      "auto_switch": true,
-      "ttl_ms": 300000,
-      "minimum_ttl_ms": 100000,
-      "ttl_reduction_start_ratio": 0.8,
-      "maximum_entries": 2000000,
-      "capacity_multiplier": 10
+    }
+  }
+}
+```
+
+Select KVCM and configure its runtime behavior in `FLEXLB_CONFIG`:
+
+```json
+{
+  "cacheMatching": {
+    "type": "KVCM",
+    "requestTimeoutMs": 500,
+    "leaderRefreshIntervalMs": 10000,
+    "heartbeatFailureThreshold": 3,
+    "queryFailureThreshold": 10,
+    "maxQueryRetryCount": 1,
+    "recoverySuccessThreshold": 3,
+    "p2pHostCount": 0,
+    "localStandby": {
+      "autoSwitch": true,
+      "blockSize": 0,
+      "ttlMs": 300000,
+      "minimumTtlMs": 100000,
+      "ttlReductionStartRatio": 0.8,
+      "maximumEntries": 2000000,
+      "capacityMultiplier": 10,
+      "asyncQueueCapacity": 100000,
+      "hashThreadCount": 4,
+      "hashQueueCapacity": 100000
     }
   }
 }
@@ -378,17 +412,18 @@ The optional KVCM `port` defaults to `6381` and is used with discovered seed IPs
 `leader_endpoint`.
 
 Each cache query is retried once by default before that request falls back to Local Standby.
-`max_query_retry_count` controls the maximum retry count and does not include the initial attempt. KVCM is
+`cacheMatching.maxQueryRetryCount` controls the maximum retry count and does not include the
+initial attempt. KVCM is
 marked unhealthy after three consecutive `GetClusterInfo` failures or ten logical cache-query
 failures after retries are exhausted. It recovers only after three consecutive successful
-background `GetClusterInfo` probes. The optional `heartbeat_failure_threshold`,
-`query_failure_threshold`, and `recovery_success_threshold` fields override those defaults.
-`local_standby.auto_switch` controls whether an unhealthy KVCM changes subsequent requests to
+background `GetClusterInfo` probes. The optional `heartbeatFailureThreshold`,
+`queryFailureThreshold`, and `recoverySuccessThreshold` fields override those defaults.
+`localStandby.autoSwitch` controls whether an unhealthy KVCM changes subsequent requests to
 Local Standby automatically; the current request still falls back after its KVCM retries fail.
 Local Standby multiplies each worker's HBM block capacity reported by `GetWorkerStatus` by
-`capacity_multiplier`, sums the results, and caps the global metadata budget at
-`maximum_entries`. The global TTL starts decreasing linearly at
-`ttl_reduction_start_ratio` utilization, from `ttl_ms` to `minimum_ttl_ms` at full
+`capacityMultiplier`, sums the results, and caps the global metadata budget at
+`maximumEntries`. The global TTL starts decreasing linearly at
+`ttlReductionStartRatio` utilization, from `ttlMs` to `minimumTtlMs` at full
 utilization. Below 80% utilization, cleanup runs every 30 seconds and scans roughly 10% of block
 hashes. Between 80% and 90%, it runs every 20 seconds and scans roughly 20%. At or above 90%, it
 runs every 10 seconds and scans the full index. The request that first raises utilization to 90%
@@ -402,7 +437,6 @@ metadata budget, concurrent additions may exceed the limit slightly.
 ```json
 {
   "kvcm": {
-    "enabled": true,
     "address": "v-kvcm",
     "namespace": "vllm-test-0",
     "discovery": {
@@ -418,6 +452,13 @@ worker discovery metadata.
 
 When KVCM is enabled, FlexLB stops polling `GetCacheStatus`. Engines must return
 `available_kv_cache`, `total_kv_cache`, and `block_size` from `GetWorkerStatus`.
+
+Optimizer follows the same split: `MODEL_SERVICE_CONFIG.optimizer` contains only
+`address`, `port`, `path`, and `discovery`, while `FLEXLB_CONFIG.optimizer.enabled` and
+`discoveryPollIntervalMs` control behavior. ZooKeeper consistency is selected by
+`FLEXLB_CONFIG.consistency={"type":"ZOOKEEPER",...}` with `connectString`,
+`sessionTimeoutMs`, `connectionTimeoutMs`, and `masterRefreshIntervalMs`; `{"type":"NONE"}`
+disables it.
 
 ### Run
 
@@ -468,7 +509,9 @@ Authorization: Bearer <token>
   `router.roles.prefill`, `router.roles.decode`, and `router.roles.vit`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
-- **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.
+- **Cache matching, Optimizer, discovery runtime policy, and ZooKeeper consistency**:
+  their behavior lives in `FLEXLB_CONFIG`; only service locators live in
+  `MODEL_SERVICE_CONFIG`.
 
 ## Monitoring
 
@@ -480,11 +523,14 @@ FlexLB provides comprehensive monitoring through:
 
 At Spring startup, the environment document establishes the strict baseline. If
 `FLEXLB_NACOS_SERVER_ADDR` is configured, Nacos supplies higher-priority recursive partial
-overrides and subsequent valid updates replace the in-memory `FlexlbConfig` snapshot. Unknown
-fields, scalar coercion, `null`, and invalid cross-field combinations are rejected; a rejected
-runtime update leaves the last-known-good snapshot active. `MODEL_SERVICE_CONFIG` and
-`FLEXLB_SYNC_CONSISTENCY_CONFIG` remain independent environment documents and are not overridden
-by Nacos.
+overrides and subsequent valid updates replace the in-memory `FlexlbConfig` snapshot. A missing
+field—including a field deleted from Nacos—is a no-op and retains its current in-memory value;
+objects merge recursively, while arrays and scalars replace as a whole. Changing a tagged-union
+`type` replaces that complete branch. Blank content and `{}` are also no-ops. Unknown fields,
+scalar coercion, `null`, and invalid cross-field combinations are rejected; a rejected runtime
+update leaves the last-known-good snapshot active. `MODEL_SERVICE_CONFIG` remains a startup-only
+topology document and is never overridden by Nacos. Whether a valid FlexLB update takes effect
+immediately or after restart is determined by the consuming component, not by the Nacos layer.
 
 ## Contributing
 

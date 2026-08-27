@@ -14,9 +14,6 @@ public class OptimizerConfig {
     public static final String DEFAULT_PATH = "/api/optimizer";
     public static final int DEFAULT_PORT = 8082;
 
-    @JsonProperty("enabled")
-    private boolean enabled;
-
     @JsonProperty("address")
     private String address;
 
