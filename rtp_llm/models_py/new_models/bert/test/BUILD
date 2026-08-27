@@ -7,10 +7,16 @@ bert_newloader_test_deps = [
     "//rtp_llm/models_py:new_weight_loader",
 ]
 
+# The CUDA build imports librtp_compute_ops during model construction, which
+# requires the NVML runtime even though these tests keep tensors on CPU.
 py_test(
     name = "bert_newloader_integration_test",
     srcs = ["bert_newloader_test.py"],
     main = "bert_newloader_test.py",
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
     args = [
         "BertNewloaderTest.test_direct_model_tree_forward_matches_torch_reference",
         "BertNewloaderTest.test_linear_layers_consume_native_checkpoint_orientation",
@@ -20,6 +26,7 @@ py_test(
         "BertNewloaderTest.test_roberta_and_layernorm_gamma_beta_are_supported",
         "BertNewloaderTest.test_tp2_loads_rank_local_attention_and_ffn_shards",
     ],
+    tags = ["H20"],
     deps = bert_newloader_test_deps,
 )
 
@@ -27,6 +34,10 @@ py_test(
     name = "bert_newloader_integrity_test",
     srcs = ["bert_newloader_test.py"],
     main = "bert_newloader_test.py",
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
     args = [
         "BertNewloaderTest.test_attention_config_invariants_fail_fast",
         "BertNewloaderTest.test_custom_weights_use_exact_declared_contract",
@@ -38,6 +49,7 @@ py_test(
         "BertNewloaderTest.test_unknown_floating_tensor_is_not_silently_accepted",
         "BertNewloaderTest.test_wrong_model_prefix_is_rejected",
     ],
+    tags = ["H20"],
     deps = bert_newloader_test_deps,
 )
 
