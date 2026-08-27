@@ -52,6 +52,11 @@ class StreamSnapshot:
     error: Optional[str] = None
     terminated: bool = False
     terminated_s: Optional[float] = None  # monotonic time when stream ended
+    # Monotonic time when the FIRST output arrived — the client-observed
+    # TTFT anchor for graded property P7 (see bal_overload_avoid_prefill;
+    # under BATCH dispatch the first FetchResponse message only surfaces
+    # after decode completes, so P7 uses the completion-duration口径 there).
+    first_received_s: Optional[float] = None
 
 
 class StreamHandle:
@@ -68,6 +73,7 @@ class StreamHandle:
             for output in self.call:
                 if not self.snap.first_received:
                     self.snap.first_received = True
+                    self.snap.first_received_s = time.monotonic()
                 self.snap.outputs.append(output)
                 finished = output.flatten_output.finished
                 if finished and any(finished):

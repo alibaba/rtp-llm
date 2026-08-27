@@ -47,11 +47,15 @@ class CaseContext:
         profile: str,
         run_root: Path,
         log_fn: Optional[Callable[[str], None]] = None,
+        grade: str = "normal",
     ):
         CaseContext._case_seq += 1
         self.case_seq = CaseContext._case_seq
         self.env_manager = env_manager
         self.profile = profile  # scheduling profile (harness.PROFILES)
+        # Assertion grade for this run (grade.GRADES): strict/normal/loose —
+        # graded property cases build their GradeReport from it.
+        self.grade = grade
         self.run_root = run_root
         self._log_fn = log_fn or (lambda msg: None)
         self._ops_cache: dict = {}
