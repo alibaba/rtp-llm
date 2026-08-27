@@ -207,6 +207,13 @@ export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
 # FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE: no script default — code default (1000) applies
 # unless the caller exports it explicitly (still forwarded via the environment).
 
+# Batch dispatcher admission gate sizing. No script default — code default
+# (64 threads + 256 queue = 320 permits) applies unless the caller exports
+# them explicitly. Overload benchmarks raise the queue capacity to widen the
+# admission gate (RST mitigation); production keeps the upstream 320.
+# FLEXLB_BATCH_DISPATCH_THREADS="${FLEXLB_BATCH_DISPATCH_THREADS:-}"
+# FLEXLB_BATCH_DISPATCH_QUEUE_CAPACITY="${FLEXLB_BATCH_DISPATCH_QUEUE_CAPACITY:-}"
+
 MOCK_PID=""
 FLEXLB_PID=""
 MASTER_COUNTER_POLLER_PID=""
@@ -1047,6 +1054,8 @@ OVERRIDE_ENV_KEYS=(
   FLEXLB_GRPC_EXECUTOR_CORE_SIZE
   FLEXLB_GRPC_EXECUTOR_MAX_SIZE
   FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
+  FLEXLB_BATCH_DISPATCH_THREADS
+  FLEXLB_BATCH_DISPATCH_QUEUE_CAPACITY
   FLEXLB_JVM_HEAP_SIZE
   FLEXLB_MONITOR_ENABLED
   FLEXLB_MONITOR_MODE
