@@ -232,13 +232,13 @@ def compute_window_topk_and_length_varlen(
         topk_length.copy_(torch.clamp(local_query_pos + 1, max=window_size))
         return topk_idxs, topk_length
 
-    if cu_seqlens.dtype != torch.int32:
+    if cu_seqlens.dtype != torch.int32 or cu_seqlens.device != device:
         cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
-    if prefix_lengths.dtype != torch.int32:
+    if prefix_lengths.dtype != torch.int32 or prefix_lengths.device != device:
         prefix_lengths = prefix_lengths.to(
             device=device, dtype=torch.int32
         ).contiguous()
-    if req_id_per_token.dtype != torch.int32:
+    if req_id_per_token.dtype != torch.int32 or req_id_per_token.device != device:
         req_id_per_token = req_id_per_token.to(
             device=device, dtype=torch.int32
         ).contiguous()
