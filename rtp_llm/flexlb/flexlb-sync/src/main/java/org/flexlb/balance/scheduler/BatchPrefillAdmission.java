@@ -1,11 +1,17 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.CapacityBoundary.Attempt;
+import org.flexlb.balance.delivery.CapacityBoundary.Attempt.Accepted;
+import org.flexlb.balance.delivery.CapacityBoundary.Attempt.Rejected;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.PrefillAdmissionPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillWorkLedger;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.PrefillAdmissionResources.CommittedAdmissionAdapter;
+import org.flexlb.balance.scheduler.PrefillAdmissionResources.Member;
+import org.flexlb.balance.scheduler.PrefillAdmissionResources.PreparedState;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -24,7 +30,6 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMemb
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.preserveRejectedCause;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejected;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejectedPrefill;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.restorePreparedTail;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackMember;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackReservation;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentitySequence;
@@ -52,7 +57,7 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
     }
 
     @Override
-    public CapacityBoundary.Attempt<PreparedAdmission> prepare(
+    public Attempt<PreparedAdmission> prepare(
             DeliveryItem head,
             long predictedMs) {
         final BatchItem exactHead;
@@ -72,76 +77,23 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
         if (prefill == null) {
             return failed(missingEndpoint("Prefill", exactHead));
         }
-        final PreparedTransaction transaction;
-        final CapacityBoundary.Attempt<PreparedAdmission> acceptedTransaction;
         try {
-            transaction = new PreparedTransaction(batchId, prefill);
-            acceptedTransaction = accepted(transaction);
+            return new PreparedTransaction(batchId, prefill)
+                    .prepareHead(exactHead);
         } catch (Throwable failure) {
             return failed(failure);
         }
-        PrefillWorkLedger.BatchReservationResult reservationResult;
-        try {
-            reservationResult = prefill.reserveBatch(
-                    exactHead,
-                    batchId,
-                    exactHead.maxInflightDeliveriesPerPrefillWorker());
-        } catch (RuntimeException | Error failure) {
-            return failed(failure);
-        }
-        if (reservationResult.status()
-                != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
-            return rejectedPrefill(
-                    exactHead,
-                    reservationResult.status(),
-                    new CapacityBoundary.Unavailable(
-                            prefill.batchAdmissionAvailability(
-                                    exactHead.maxInflightDeliveriesPerPrefillWorker()),
-                            CAPACITY_BLOCK));
-        }
-
-        PrefillWorkLedger.BatchReservation reservation =
-                reservationResult.reservation();
-        final CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
-                memberAttempt;
-        try {
-            memberAttempt = prepareMember(exactHead);
-        } catch (Throwable failure) {
-            return failed(rollbackReservation(reservation, failure));
-        }
-        if (memberAttempt
-                instanceof CapacityBoundary.Attempt.Rejected<
-                        PrefillAdmissionResources.Member> rejectedMember) {
-            Throwable rollbackFailure = rollbackReservation(
-                    reservation, null);
-            if (rollbackFailure != null) {
-                preserveRejectedCause(
-                        rollbackFailure, rejectedMember.boundary());
-                return failed(rollbackFailure);
-            }
-            return rejected(rejectedMember.boundary());
-        }
-        PrefillAdmissionResources.Member headMember =
-                ((CapacityBoundary.Attempt.Accepted<
-                        PrefillAdmissionResources.Member>) memberAttempt)
-                        .value();
-        try {
-            transaction.bind(reservation, headMember);
-        } catch (Throwable bindFailure) {
-            Throwable failure = rollbackMember(headMember, bindFailure);
-            failure = rollbackReservation(reservation, failure);
-            return failed(failure);
-        }
-        return acceptedTransaction;
     }
 
     private static final class PreparedTransaction
             implements PreparedAdmission {
         private final long batchId;
         private final PrefillEndpoint prefill;
+        private final Attempt<PreparedAdmission> acceptedTransaction;
         private PrefillWorkLedger.BatchReservation reservation;
-        private List<PrefillAdmissionResources.Member> members;
-        private PrefillAdmissionResources.PreparedState state = PREPARED;
+        private ArrayList<Member> members;
+        private Member pendingMember;
+        private PreparedState state = PREPARED;
 
         private PreparedTransaction(
                 long batchId,
@@ -149,15 +101,37 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
             this.batchId = batchId;
             this.prefill = prefill;
             members = new ArrayList<>(1);
-            members.add(null);
+            acceptedTransaction = accepted(this);
         }
 
-        /** Bind only references into storage allocated before acquisition. */
-        private void bind(
-                PrefillWorkLedger.BatchReservation exactReservation,
-                PrefillAdmissionResources.Member head) {
-            reservation = exactReservation;
-            members.set(0, head);
+        private Attempt<PreparedAdmission> prepareHead(BatchItem head) {
+            try {
+                PrefillWorkLedger.BatchReservationResult result =
+                        prefill.reserveBatch(
+                                head,
+                                batchId,
+                                head.maxInflightDeliveriesPerPrefillWorker());
+                if (result.status()
+                        != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
+                    return rejectedPrefill(
+                            head,
+                            result.status(),
+                            new CapacityBoundary.Unavailable(
+                                    prefill.batchAdmissionAvailability(
+                                            head.maxInflightDeliveriesPerPrefillWorker()),
+                                    CAPACITY_BLOCK));
+                }
+
+                reservation = result.reservation();
+                return switch (prepareAndAddMember(
+                        head, acceptedTransaction)) {
+                    case Accepted<PreparedAdmission> accepted -> accepted;
+                    case Rejected<PreparedAdmission> rejected ->
+                            abort(rejected.boundary());
+                };
+            } catch (Throwable failure) {
+                return abort(failure);
+            }
         }
 
         @Override
@@ -166,7 +140,7 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
         }
 
         @Override
-        public synchronized CapacityBoundary.Attempt<DeliveryItem> append(
+        public synchronized Attempt<DeliveryItem> append(
                 DeliveryItem exactNextItem,
                 long predictedMs) {
             requirePrepared("append");
@@ -177,48 +151,43 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
                 return failed(failure);
             }
 
-            final int originalSize = members.size();
-            final CapacityBoundary.Attempt<DeliveryItem> acceptedItem;
             try {
-                acceptedItem = accepted(exact);
-                members.add(null);
+                Attempt<DeliveryItem> acceptedItem = accepted(exact);
+                members.ensureCapacity(Math.addExact(members.size(), 1));
+                return prepareAndAddMember(exact, acceptedItem);
             } catch (Throwable failure) {
-                return failed(restorePreparedTail(
-                        members, originalSize, failure));
+                Member exactPending = pendingMember;
+                pendingMember = null;
+                return failed(rollbackMember(exactPending, failure));
             }
+        }
 
-            final CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
-                    attempt;
-            try {
-                attempt = prepareMember(exact);
-            } catch (Throwable failure) {
-                return failed(restorePreparedTail(
-                        members, originalSize, failure));
-            }
-            if (attempt
-                    instanceof CapacityBoundary.Attempt.Rejected<
-                            PrefillAdmissionResources.Member> rejectedMember) {
-                Throwable rollbackFailure = restorePreparedTail(
-                        members, originalSize, null);
-                if (rollbackFailure != null) {
-                    preserveRejectedCause(
-                            rollbackFailure, rejectedMember.boundary());
-                    return failed(rollbackFailure);
+        /** Capture before the no-allocation list bind. */
+        private <T> Attempt<T> prepareAndAddMember(
+                BatchItem item,
+                Attempt<T> acceptedResult) {
+            return switch (prepareMember(item)) {
+                case Accepted<Member>(var member) -> {
+                    pendingMember = member;
+                    members.add(pendingMember);
+                    pendingMember = null;
+                    yield acceptedResult;
                 }
-                return rejected(rejectedMember.boundary());
+                case Rejected<Member>(var boundary) -> rejected(boundary);
+            };
+        }
+
+        private <T> Attempt<T> abort(CapacityBoundary boundary) {
+            Throwable rollbackFailure = rollbackAll(null);
+            if (rollbackFailure == null) {
+                return rejected(boundary);
             }
-            PrefillAdmissionResources.Member member =
-                    ((CapacityBoundary.Attempt.Accepted<
-                            PrefillAdmissionResources.Member>) attempt).value();
-            try {
-                members.set(originalSize, member);
-            } catch (Throwable bindFailure) {
-                Throwable failure = restorePreparedTail(
-                        members, originalSize, bindFailure);
-                failure = rollbackMember(member, failure);
-                return failed(failure);
-            }
-            return acceptedItem;
+            preserveRejectedCause(rollbackFailure, boundary);
+            return failed(rollbackFailure);
+        }
+
+        private <T> Attempt<T> abort(Throwable failure) {
+            return failed(rollbackAll(failure));
         }
 
         @Override
@@ -230,7 +199,7 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
                 throw new IllegalArgumentException(
                         "batch commit does not match prepared identities");
             }
-            PrefillAdmissionResources.CommittedAdmissionAdapter committedOwner =
+            CommittedAdmissionAdapter committedOwner =
                     prepareCommitted(members, 1);
             PrefillWorkLedger.CommittedHandoff handoff =
                     reservation.commitUnderLock(exactItems, predictedMs);
@@ -243,28 +212,36 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
 
         @Override
         public void close() {
+            Throwable rollbackFailure = rollbackAll(null);
+            if (rollbackFailure != null) {
+                throwRollbackFailure(rollbackFailure);
+            }
+        }
+
+        /** Detach once, then attempt every rollback leaf. */
+        private Throwable rollbackAll(Throwable priorFailure) {
             PrefillWorkLedger.Reservation exactReservation;
-            List<PrefillAdmissionResources.Member> exactMembers;
+            ArrayList<Member> exactMembers;
+            Member exactPending;
             synchronized (this) {
                 if (state != PREPARED) {
-                    return;
+                    return priorFailure;
                 }
                 state = CLOSED;
                 exactReservation = reservation;
                 reservation = null;
                 exactMembers = members;
-                members = List.of();
+                members = null;
+                exactPending = pendingMember;
+                pendingMember = null;
             }
-            Throwable rollbackFailure = null;
-            for (PrefillAdmissionResources.Member member : exactMembers) {
-                rollbackFailure = rollbackMember(
-                        member, rollbackFailure);
+
+            Throwable failure = rollbackMember(
+                    exactPending, priorFailure);
+            for (Member member : exactMembers) {
+                failure = rollbackMember(member, failure);
             }
-            rollbackFailure = rollbackReservation(
-                    exactReservation, rollbackFailure);
-            if (rollbackFailure != null) {
-                throwRollbackFailure(rollbackFailure);
-            }
+            return rollbackReservation(exactReservation, failure);
         }
 
         private void requirePrepared(String operation) {
