@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -108,6 +109,60 @@ std::shared_ptr<const PlanResult> P2PConnectorSchedulerDecode::planFor(int prefi
     return it->second;
 }
 
+P2PBroadcastClient::RankRoutes
+P2PConnectorSchedulerDecode::buildDecodeRankRoutes(const TransferPlan&        plan,
+                                                   KVCacheResource&           resource,
+                                                   const std::pair<int, int>& block_range,
+                                                   size_t                     worker_num) const {
+    P2PBroadcastClient::RankRoutes rank_routes(worker_num);
+
+    // logical_count 必须是**全序列**的 cache_keys 数量，不是 block_range 窗口长度：
+    // prefill 侧不知道 decode 的 block_range（prefix 部分命中的结果），两侧若用不同的
+    // count，include_final_key 与 tail_count 会算出不同的键，破坏键集包含契约。
+    const size_t logical_count = resource.cacheKeys().size();
+    const size_t window_begin  = static_cast<size_t>(std::max(0, block_range.first));
+    const size_t window_end    = block_range.second > 0 ?
+                                     std::min(logical_count, window_begin + static_cast<size_t>(block_range.second)) :
+                                     logical_count;
+
+    for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
+        for (const auto* route : plan.forDecodeRank(static_cast<int>(worker_rank))) {
+            auto positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, logical_count);
+            // block_range 窗口只在 decode 侧叠加在 resolveKeys 结果之上。
+            positions.erase(std::remove_if(positions.begin(),
+                                           positions.end(),
+                                           [&](size_t pos) { return pos < window_begin || pos >= window_end; }),
+                            positions.end());
+            if (positions.empty()) {
+                // 该 route 在本请求长度 / 窗口下解析为空是预期行为（两侧规则相同故一致判空）。
+                continue;
+            }
+            auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(resource,
+                                                                         *config_.topology,
+                                                                         route->cache_tag,
+                                                                         positions,
+                                                                         config_.cp_rank,
+                                                                         config_.cp_size);
+            if (layer_buffers.empty()) {
+                continue;
+            }
+            TransferRoutePB pb;
+            RouteCodec::encodeForDecode(*route, &pb);
+            for (const auto& buffer : layer_buffers) {
+                auto* layer_block = pb.add_layer_blocks();
+                layer_block->set_layer_id(buffer->getLayerId());
+                layer_block->set_cache_tag(buffer->cacheTag());
+                for (const auto& [key, block_id] : buffer->blockIdMap()) {
+                    layer_block->add_cache_keys(key);
+                    layer_block->add_block_ids(block_id);
+                }
+            }
+            rank_routes[worker_rank].push_back(std::move(pb));
+        }
+    }
+    return rank_routes;
+}
+
 void P2PConnectorSchedulerDecode::stopChecker() {
     if (checker_) {
         checker_->stop();
@@ -184,69 +239,44 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             return {nullptr, drift};
         }
     }
-    // 编排层：计算传输计划。当前阶段**只影子运行**——plan 被算出、校验、随广播下发，
-    // 但执行路径仍是下面的 rank_layer_cache_buffers。等 worker 改成按 route 执行
-    // （slice 2 剩余部分）再切换，并同时删掉下面这条 CP 对称硬拒。
-    std::shared_ptr<const PlanResult> plan;
+    // 编排层：计算传输计划并投影成每个 worker 的 route 列表。route 现在**驱动执行**，
+    // §2.1 那条「两侧 CP 必须相等」的硬拒因此删除 —— 非对称 CP 由 planner 的白名单
+    // （dst.cpSize() ∈ {1, src.cpSize()}）判定，不再由这里一刀切。
+    P2PBroadcastClient::RankRoutes rank_routes;
+    uint64_t                       plan_digest = 0;
+    const size_t                   worker_num  = config_.worker_grpc_addrs.size();
     if (!no_transfer) {
-        plan = planFor(prefill_tp_size, prefill_cp_size);
-        if (!plan->ok()) {
-            // 影子阶段不因 plan 失败而拒绝请求，只上报——否则会把当前可用的对称场景
-            // 拖下水。切换执行路径时这里要改成硬失败。
-            RTP_LLM_LOG_WARNING("asyncRead: transfer plan unavailable (shadow mode, request continues): %s",
-                                plan->error.ToString().c_str());
-        } else {
-            RTP_LLM_LOG_DEBUG("asyncRead: transfer plan ready, routes=%zu, digest=%llu, unique_key=%s",
-                              plan->plan.routes.size(),
-                              static_cast<unsigned long long>(plan->plan.digest()),
-                              unique_key.c_str());
+        if (worker_num == 0) {
+            collector->success = false;
+            return {nullptr,
+                    ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty")};
         }
-    }
-    if (!no_transfer && prefill_cp_size != config_.cp_size) {
-        RTP_LLM_LOG_WARNING("asyncRead: source/target CP layout mismatch, prefill_cp_size=%d, decode_cp_size=%d",
-                            prefill_cp_size,
-                            config_.cp_size);
-        collector->success = false;
-        return {nullptr,
-                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                          "source and target CP sizes must match")};
-    }
-    P2PBroadcastClient::RankLayerCacheBuffers rank_layer_cache_buffers;
-    if (!no_transfer) {
-        const size_t worker_num = config_.worker_grpc_addrs.size();
-        if (config_.cp_size <= 0 || worker_num == 0 || worker_num % static_cast<size_t>(config_.cp_size) != 0) {
-            RTP_LLM_LOG_WARNING(
-                "asyncRead: invalid CP layout, worker_num=%zu, cp_size=%d", worker_num, config_.cp_size);
+        auto plan = planFor(prefill_tp_size, prefill_cp_size);
+        if (!plan->ok()) {
+            RTP_LLM_LOG_WARNING("asyncRead: transfer plan failed, unique_key=%s, error=%s",
+                                unique_key.c_str(),
+                                plan->error.ToString().c_str());
+            collector->success = false;
+            return {nullptr, plan->error};
+        }
+        plan_digest = plan->plan.digest();
+        rank_routes = buildDecodeRankRoutes(plan->plan, *resource, block_range, worker_num);
+
+        const bool all_routes_empty =
+            std::all_of(rank_routes.begin(), rank_routes.end(), [](const auto& routes) { return routes.empty(); });
+        if (all_routes_empty) {
+            RTP_LLM_LOG_WARNING("asyncRead: transfer plan resolved to no routes for any worker, unique_key=%s",
+                                unique_key.c_str());
             collector->success = false;
             return {nullptr,
                     ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                              "worker count is incompatible with CP size")};
-        }
-
-        // Scheduler only runs on rank 0. Build every worker's local view here;
-        // allocator block ids are rank-synchronized before asyncRead starts.
-        rank_layer_cache_buffers.reserve(worker_num);
-        for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
-            const int cp_rank = static_cast<int>(worker_rank % static_cast<size_t>(config_.cp_size));
-            rank_layer_cache_buffers.push_back(LayerCacheBufferUtil::convert(*resource,
-                                                                             *config_.topology,
-                                                                             block_range.first,
-                                                                             block_range.second,
-                                                                             cp_rank,
-                                                                             config_.cp_size));
+                              "transfer plan resolved to no routes")};
         }
     }
-    const bool all_rank_buffers_empty =
-        std::all_of(rank_layer_cache_buffers.begin(), rank_layer_cache_buffers.end(), [](const auto& buffers) {
-            return buffers.empty();
-        });
-    if (!no_transfer && all_rank_buffers_empty) {
-        RTP_LLM_LOG_WARNING("asyncRead: all rank layer_cache_buffers are empty");
-        collector->success = false;
-        return {nullptr,
-                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                          "all rank layer_cache_buffers are empty")};
-    }
+    // layer_blocks 已随 route 逐条下发（TransferRoutePB::layer_blocks），此处只留一个
+    // 与 worker 数等长的空壳以满足 broadcastPerRank 的形状校验。旧的 per-rank 投影
+    // （worker_rank % cp_size）连同 LayerCacheBufferUtil::convert 的调用一并退场。
+    P2PBroadcastClient::RankLayerCacheBuffers rank_layer_cache_buffers(no_transfer ? 0 : worker_num);
 
     auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(resource,
                                                                         unique_key,
@@ -264,6 +294,8 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
          request_deadline_ms,
          transfer_deadline_ms,
          rank_layer_cache_buffers = std::move(rank_layer_cache_buffers),
+         rank_routes = std::move(rank_routes),
+         plan_digest,
          collector,
          async_context,
          prefill_tp_size,
@@ -283,7 +315,9 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                                                         collector,
                                                         start_error,
                                                         prefill_tp_size,
-                                                        no_transfer);
+                                                        no_transfer,
+                                                        rank_routes,
+                                                        plan_digest);
             if (!async_calls) {
                 async_context->markStartFailed(start_error);
                 return;
@@ -329,7 +363,9 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
     ErrorInfo&                                              out_error,
     int                                                     prefill_tp_size,
-    bool                                                    no_transfer) {
+    bool                                                    no_transfer,
+    const P2PBroadcastClient::RankRoutes&                   rank_routes,
+    uint64_t                                                plan_digest) {
 
     const int64_t entry_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("[PD-DIAG] startAsyncReadCalls entry, unique_key=%s, prefill=%s:%u, timestamp_us=%ld",
@@ -379,8 +415,9 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
                                                                 unique_key,
                                                                 transfer_deadline_ms,
                                                                 P2PConnectorBroadcastType::READ,
-                                                                prefill_tp_size,
-                                                                request_deadline_ms);
+                                                                request_deadline_ms,
+                                                                rank_routes,
+                                                                plan_digest);
     }
     const int64_t broadcast_cost_us = currentTimeUs() - broadcast_start_us;
     if (broadcast_cost_us >= 100000) {

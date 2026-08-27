@@ -101,6 +101,8 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
 
         GroupBase group;
         group.tag                       = tag;
+        group.kv_block_stride_bytes     = spec->block_size_bytes();
+        group.kv_scale_stride_bytes     = spec->scale_block_size_bytes();
         group.spec                      = std::move(spec);
         group.policy                    = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
                                                                      group_types[static_cast<size_t>(group_id)]);

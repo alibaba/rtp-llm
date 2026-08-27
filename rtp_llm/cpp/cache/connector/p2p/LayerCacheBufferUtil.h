@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/TransferPlan.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
 #include <vector>
@@ -66,6 +67,19 @@ public:
                                                         const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
                                                         int                                         partition_count = 1,
                                                         int                                         partition_id = 0);
+
+    /// @brief 带 CP 字节切分的版本。切分语义与 CPSlotMapper::sliceBlockForPeer 保持一致：
+    ///   EQUAL_BYTES   -> 分母是 block.size_bytes（整个 stride）
+    ///   PAYLOAD_BYTES -> 分母是 k_block_payload_bytes，只覆盖 payload 区间，
+    ///                    stride 的对齐填充尾部不参与传输
+    /// 且要求被切的 block 只有一个子块（sliceBlockForPeer 的 parts.size() == 1 前提），
+    /// 即与 head 维切分互斥 —— planner 的 Step 1 已保证这一点。
+    static transfer::KeyBlockInfoMap buildKeyBlockInfosSliced(const std::shared_ptr<LayerBlockConverter>& converter,
+                                                             const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
+                                                             int                                      partition_count,
+                                                             int                                      partition_id,
+                                                             const SliceSpec&                         slice,
+                                                             size_t k_block_payload_bytes);
 };
 
 }  // namespace rtp_llm

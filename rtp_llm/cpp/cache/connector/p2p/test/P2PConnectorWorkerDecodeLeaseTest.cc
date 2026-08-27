@@ -277,9 +277,20 @@ protected:
                                 int64_t                                               deadline_ms,
                                 const std::vector<std::shared_ptr<LayerCacheBuffer>>& buffers,
                                 std::shared_ptr<ReadResult>                           result,
-                                int                                                   remote_tp_size = 1) {
-        return std::thread([this, key, deadline_ms, buffers, result, remote_tp_size]() {
-            result->error = decode_->read(1, key, deadline_ms, buffers, remote_tp_size);
+                                int                                                   route_count = 1) {
+        return std::thread([this, key, deadline_ms, buffers, result, route_count]() {
+            // 编排层现在下发 route：把「N 个 partition」等价表达为「N 条 route」，
+            // 每条 route 的 partition 为 {route_count, i}，与旧的 recv_partition_count 语义一致。
+            P2PWorkerRoutePlan plan;
+            for (int i = 0; i < std::max(1, route_count); ++i) {
+                P2PWorkerRoute route;
+                route.route_id      = i;
+                route.cache_tag     = buffers.empty() ? std::string("full") : buffers[0]->cacheTag();
+                route.partition     = PartitionSpec{std::max(1, route_count), i};
+                route.layer_buffers = buffers;
+                plan.routes.push_back(route);
+            }
+            result->error = decode_->read(1, key, deadline_ms, plan);
             result->done  = true;
         });
     }
@@ -777,10 +788,10 @@ TEST_F(DecodeLeaseRaceTest, E1_MultiTP_CancelOnePartitionDoneOneInflight) {
     const std::string key            = "e1_multi_partition";
     auto              buffers        = makeBuffers(1);  // 1 layer, but 2 partitions
     int64_t           deadline_ms    = currentTimeMs() + 5000;
-    int               remote_tp_size = 2;  // → recv_partition_count = 2/1 = 2
+    int               route_count = 2;  // → recv_partition_count = 2/1 = 2
 
     auto result      = std::make_shared<ReadResult>();
-    auto read_thread = startReadThread(key, deadline_ms, buffers, result, remote_tp_size);
+    auto read_thread = startReadThread(key, deadline_ms, buffers, result, route_count);
 
     // Should create 2 tasks (1 layer × 2 partitions)
     inflight_receiver_->waitForTaskCount(2);
@@ -842,10 +853,10 @@ TEST_F(DecodeLeaseRaceTest, E2_MultiTP_4Partitions_LastOneInflight) {
     const std::string key            = "e2_4partitions";
     auto              buffers        = makeBuffers(1);
     int64_t           deadline_ms    = currentTimeMs() + 5000;
-    int               remote_tp_size = 4;  // → 4 partitions
+    int               route_count = 4;  // → 4 partitions
 
     auto result      = std::make_shared<ReadResult>();
-    auto read_thread = startReadThread(key, deadline_ms, buffers, result, remote_tp_size);
+    auto read_thread = startReadThread(key, deadline_ms, buffers, result, route_count);
 
     inflight_receiver_->waitForTaskCount(4);
     auto task_keys = inflight_receiver_->getTaskKeys();
@@ -907,10 +918,10 @@ TEST_F(DecodeLeaseRaceTest, E3_MultiLayerMultiPartition_StaggeredCompletion) {
     const std::string key            = "e3_multi_layer_multi_part";
     auto              buffers        = makeBuffers(2);
     int64_t           deadline_ms    = currentTimeMs() + 5000;
-    int               remote_tp_size = 2;  // 2 layers × 2 partitions = 4 tasks
+    int               route_count = 2;  // 2 layers × 2 partitions = 4 tasks
 
     auto result      = std::make_shared<ReadResult>();
-    auto read_thread = startReadThread(key, deadline_ms, buffers, result, remote_tp_size);
+    auto read_thread = startReadThread(key, deadline_ms, buffers, result, route_count);
 
     inflight_receiver_->waitForTaskCount(4);
     auto task_keys = inflight_receiver_->getTaskKeys();

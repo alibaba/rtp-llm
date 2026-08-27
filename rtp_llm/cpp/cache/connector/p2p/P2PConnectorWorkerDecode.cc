@@ -36,29 +36,36 @@ P2PConnectorWorkerDecode::~P2PConnectorWorkerDecode() {
     }
 }
 
-ErrorInfo
-P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                         int                                                   recv_partition_count,
-                                         const std::string&                                    unique_key,
-                                         int64_t                                               deadline_ms,
-                                         const std::shared_ptr<ReadTaskGroup>&                 task_group,
-                                         int& total_block_count) const {
+ErrorInfo P2PConnectorWorkerDecode::buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
+                                                   const std::string&                    unique_key,
+                                                   int64_t                               deadline_ms,
+                                                   const std::shared_ptr<ReadTaskGroup>& task_group,
+                                                   int&                                  total_block_count) const {
     // 与 return_deadline_ms（D - p2p_read_return_before_deadline_ms）对齐，TransferTask / TCP 侧 isTimeout 与 worker
     // 必须结束 read 的时刻一致。
     const int64_t recv_task_deadline_ms = deadline_ms - config_.p2p_read_return_before_deadline_ms;
 
-    for (const auto& layer_cache_buffer : layer_cache_buffers) {
-        if (!layer_cache_buffer) {
-            continue;
-        }
-        const int layer_id = layer_cache_buffer->getLayerId();
+    for (const auto& route : worker_plan.routes) {
+        const size_t payload_bytes =
+            config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0;
 
-        for (int partition_id = 0; partition_id < recv_partition_count; ++partition_id) {
-            auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfos(
-                layer_block_converter_, layer_cache_buffer, recv_partition_count, partition_id);
+        for (const auto& layer_cache_buffer : route.layer_buffers) {
+            if (!layer_cache_buffer) {
+                continue;
+            }
+            const int layer_id = layer_cache_buffer->getLayerId();
 
-            const std::string partition_layer_key =
-                P2PKeyUtil::makePartitionLayerKey(unique_key, layer_id, layer_cache_buffer->cacheTag(), partition_id);
+            // partition / slice 均来自 route（本侧那一半），worker 不再自行推导。
+            auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
+                                                                                 layer_cache_buffer,
+                                                                                 route.partition.count,
+                                                                                 route.partition.id,
+                                                                                 route.slice,
+                                                                                 payload_bytes);
+
+            // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
+            const std::string partition_layer_key = P2PKeyUtil::makeRouteLayerKey(
+                unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
 
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = partition_layer_key;
@@ -69,7 +76,7 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
             if (!task) {
                 cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
                 const std::string error_msg = "read: create recv task failed for layer=" + std::to_string(layer_id)
-                                              + " partition=" + std::to_string(partition_id)
+                                              + " route=" + std::to_string(route.route_id)
                                               + " unique_key=" + unique_key;
                 RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
                 return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, error_msg);
@@ -178,23 +185,19 @@ void P2PConnectorWorkerDecode::reportReadMetrics(int     total_block_count,
     metrics_reporter_->report<P2PConnectorMetrics, DecodeWorkerMetricsCollector>(nullptr, collector.get());
 }
 
-ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                               request_id,
-                                         const std::string&                                    unique_key,
-                                         int64_t                                               deadline_ms,
-                                         const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                         int                                                   remote_tp_size) {
-    int recv_partition_count = calculateRecvPartitionCount(remote_tp_size);
+ErrorInfo P2PConnectorWorkerDecode::read(int64_t                   request_id,
+                                         const std::string&        unique_key,
+                                         int64_t                   deadline_ms,
+                                         const P2PWorkerRoutePlan& worker_plan) {
+    RTP_LLM_LOG_DEBUG("read start, request_id: %ld, unique_key: %s, deadline_ms: %ld, routes: %zu, plan_digest: %llu",
+                      request_id,
+                      unique_key.c_str(),
+                      deadline_ms,
+                      worker_plan.routes.size(),
+                      static_cast<unsigned long long>(worker_plan.plan_digest));
 
-    RTP_LLM_LOG_DEBUG(
-        "read start, request_id: %ld, unique_key: %s, deadline_ms: %ld, layers: %zu, remote_tp_size: %d, recv_partition_count: %d",
-        request_id,
-        unique_key.c_str(),
-        deadline_ms,
-        layer_cache_buffers.size(),
-        remote_tp_size,
-        recv_partition_count);
-
-    if (layer_cache_buffers.empty()) {
+    // routes 为空 = 编排层判定本 worker 无任务。
+    if (worker_plan.empty()) {
         return ErrorInfo::OkStatus();
     }
 
@@ -216,8 +219,7 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
         building_read_keys_.insert(unique_key);
     }
 
-    ErrorInfo build_result = buildRecvTasks(
-        layer_cache_buffers, recv_partition_count, unique_key, deadline_ms, task_group, total_block_count);
+    ErrorInfo build_result = buildRecvTasks(worker_plan, unique_key, deadline_ms, task_group, total_block_count);
     if (build_result.hasError()) {
         {
             std::lock_guard<std::mutex> lock(read_tasks_mutex_);
@@ -343,16 +345,6 @@ P2PConnectorWorkerDecode::aggregateRecvTaskResults(const std::shared_ptr<ReadTas
         result.error_code = ErrorCode::P2P_CONNECTOR_WORKER_READ_FAILED;
     }
     return result;
-}
-
-int P2PConnectorWorkerDecode::calculateRecvPartitionCount(int remote_tp_size) const {
-    if (config_.is_mla) {
-        return 1;
-    }
-    if (remote_tp_size <= 0 || config_.tp_size <= 0) {
-        return 1;
-    }
-    return std::max(1, remote_tp_size / static_cast<int>(config_.tp_size));
 }
 
 bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {

@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include <torch/extension.h>
-#include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/StoreWaitContext.h"
@@ -48,11 +48,12 @@ public:
                          const std::shared_ptr<torch::Event>& event,
                          int64_t                               deadline_ms);
 
-    ErrorInfo sendKVCache(int64_t                                              request_id,
-                          const std::string&                                   unique_key,
-                          int64_t                                              deadline_ms,
-                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-                          int64_t                                              request_deadline_ms = 0);
+    /// @brief 按编排层下发的 route 发送。worker 不再自选目标、不再推导 partition。
+    ErrorInfo sendKVCache(int64_t                   request_id,
+                          const std::string&        unique_key,
+                          int64_t                   deadline_ms,
+                          const P2PWorkerRoutePlan& worker_plan,
+                          int64_t                   request_deadline_ms = 0);
 
     void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms = 0);
 
@@ -85,7 +86,7 @@ private:
     /// return_deadline_ms：须在此刻前结束 dispatch 与 send（与 decode recv_req.deadline_ms 对齐，均为 D -
     /// p2p_read_return_before_deadline_ms）
     int dispatchPendingLayerTransfers(const std::shared_ptr<ComputedLayerCacheBuffer>& computed_buffer,
-                                      const std::vector<AsymmetricTPContext>&          tp_partition_ctxs,
+                                      const P2PWorkerRoutePlan&                       worker_plan,
                                       const std::string&                               unique_key,
                                       int64_t                                          return_deadline_ms,
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
@@ -95,7 +96,7 @@ private:
                                       int                                              total_transfers);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
-                              const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
+                              const P2PWorkerRoutePlan&                 worker_plan,
                               const std::string&                         unique_key,
                               int64_t                                    transfer_deadline_ms,
                               int                                        scheduled_transfer_count,
@@ -155,7 +156,6 @@ private:
     std::shared_ptr<LayerBlockConverter>                                layer_block_converter_;
     kmonitor::MetricsReporterPtr                                        metrics_reporter_;
     transfer::IKVCacheSenderPtr                                         sender_;
-    std::shared_ptr<AsymmetricTpUtil>                                   asymmetric_tp_util_;  // depends on config_
     std::shared_ptr<ComputedLayerCacheBufferStore>                      computed_buffers_;
     int64_t                                                             store_wait_timeout_ms_ = 10 * 1000;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;

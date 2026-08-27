@@ -329,7 +329,10 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     p2p_request->set_unique_key("malformed-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
 
-    auto* layer_block = p2p_request->add_layer_blocks();
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("group0");
+    auto* layer_block = route->add_layer_blocks();
     layer_block->set_layer_id(3);
     layer_block->add_cache_keys(101);
     layer_block->add_cache_keys(102);
@@ -342,16 +345,16 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     EXPECT_NE(response.p2p_response().error_message().find("cache_keys size 2 != block_ids size 1"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestIsImplicitlyEmpty) {
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenReadRequestHasNoRoutes) {
     FunctionRequestPB request;
-    auto* p2p_request = request.mutable_p2p_request();
+    auto*             p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
 
     FunctionResponsePB response;
-    EXPECT_FALSE(connector_->executeFunction(request, response));
-    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(connector_->executeFunction(request, response));
+    EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplicit) {
@@ -365,7 +368,6 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplic
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("explicit-empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
-    p2p_request->set_allow_empty_projection(true);
 
     FunctionResponsePB response;
     EXPECT_TRUE(cp_connector->executeFunction(request, response));
@@ -383,7 +385,6 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExp
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("expired-empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() - 1);
-    p2p_request->set_allow_empty_projection(true);
 
     FunctionResponsePB response;
     EXPECT_FALSE(cp_connector->executeFunction(request, response));
@@ -391,26 +392,29 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExp
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidBlockId) {
-    auto config = config_;
+    auto      config = config_;
     GroupBase group;
-    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    auto      spec                  = std::make_shared<MHAKVCacheSpec>();
     spec->tag                       = "full";
     group.tag                       = "full";
     group.spec                      = std::move(spec);
     group.layer_ids                 = {0};
     group.seq_size_per_block        = 1;
     group.kernel_seq_size_per_block = 1;
-    auto topology   = CacheTopology::create({std::move(group)}, {{0, {"full"}}});
-    config.worker_config.topology = topology;
-    auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
+    auto topology                   = CacheTopology::create({std::move(group)}, {{0, {"full"}}});
+    config.worker_config.topology   = topology;
+    auto connector                  = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
     ASSERT_TRUE(connector->init());
 
     FunctionRequestPB request;
-    auto* p2p_request = request.mutable_p2p_request();
+    auto*             p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("invalid-block-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
-    auto* layer_block = p2p_request->add_layer_blocks();
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("full");
+    auto* layer_block = route->add_layer_blocks();
     layer_block->set_layer_id(0);
     layer_block->set_cache_tag("full");
     layer_block->add_cache_keys(101);
@@ -422,9 +426,9 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLayerTag) {
-    auto config = config_;
+    auto      config = config_;
     GroupBase group;
-    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    auto      spec                  = std::make_shared<MHAKVCacheSpec>();
     spec->tag                       = "full";
     group.tag                       = "full";
     group.spec                      = std::move(spec);
@@ -433,16 +437,19 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     group.kernel_seq_size_per_block = 1;
     auto topology                   = CacheTopology::create({std::move(group)}, {{0, {"full"}}});
     config.worker_config.topology   = topology;
-    auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
+    auto connector                  = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
     ASSERT_TRUE(connector->init());
 
     FunctionRequestPB request;
-    auto* p2p_request = request.mutable_p2p_request();
+    auto*             p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("duplicate-layer-tag-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("full");
     for (int block_id = 1; block_id <= 2; ++block_id) {
-        auto* layer_block = p2p_request->add_layer_blocks();
+        auto* layer_block = route->add_layer_blocks();
         layer_block->set_layer_id(0);
         layer_block->set_cache_tag("full");
         layer_block->add_cache_keys(100 + block_id);
@@ -489,21 +496,20 @@ TEST_F(P2PConnectorTest, ExecuteNoTransferReleasesLocalPrefillResource) {
 }
 
 TEST_F(P2PConnectorTest, ExecuteHandleReadFailureStillReleasesLocalPrefillResource) {
-    auto rank1_config = config_;
-    rank1_config.tp_rank = 1;
+    auto rank1_config                  = config_;
+    rank1_config.tp_rank               = 1;
     rank1_config.worker_config.tp_rank = 1;
-    auto rank1_connector =
-        std::make_unique<P2PConnector>(rank1_config, mock_layer_block_converter_, nullptr);
+    auto rank1_connector = std::make_unique<P2PConnector>(rank1_config, mock_layer_block_converter_, nullptr);
     ASSERT_TRUE(rank1_connector->init());
 
-    const std::string unique_key  = "handle-read-failure-release";
-    const int64_t     request_id  = 6003;
-    const int64_t     timeout_ms  = 5000;
-    const int64_t     deadline_ms = currentTimeMs() + timeout_ms;
-    auto resource = createValidKVCacheResource(2, 2);
+    const std::string              unique_key    = "handle-read-failure-release";
+    const int64_t                  request_id    = 6003;
+    const int64_t                  timeout_ms    = 5000;
+    const int64_t                  deadline_ms   = currentTimeMs() + timeout_ms;
+    auto                           resource      = createValidKVCacheResource(2, 2);
     std::weak_ptr<KVCacheResource> weak_resource = resource;
-    auto stream = createGenerateStream(unique_key, request_id, timeout_ms);
-    auto meta   = createMockMeta(stream.get());
+    auto                           stream        = createGenerateStream(unique_key, request_id, timeout_ms);
+    auto                           meta          = createMockMeta(stream.get());
     ASSERT_NE(rank1_connector->asyncMatch(resource, meta), nullptr);
     resource.reset();
     EXPECT_FALSE(weak_resource.expired());
@@ -515,6 +521,10 @@ TEST_F(P2PConnectorTest, ExecuteHandleReadFailureStillReleasesLocalPrefillResour
     p2p_request->set_unique_key(unique_key);
     p2p_request->set_deadline_ms(deadline_ms);
     p2p_request->set_request_deadline_ms(deadline_ms);
+    auto* route = p2p_request->add_routes();
+    route->set_route_id(0);
+    route->set_cache_tag("group0");
+    route->set_peer_index(0);
 
     FunctionResponsePB response;
     EXPECT_FALSE(rank1_connector->executeFunction(request, response));

@@ -19,9 +19,16 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kSenderPoolThreadCount                  = 4;
-constexpr size_t kSenderPoolQueueSize                    = 10000;
-constexpr int    kMaxOutstandingAsyncSendTasksPerRequest = static_cast<int>(kSenderPoolThreadCount * 2);
+constexpr size_t kSenderPoolThreadCount = 4;
+constexpr size_t kSenderPoolQueueSize   = 10000;
+// 以「层」为单位的流水深度。真正的 outstanding 传输数要乘上每层的 route 数 ——
+// 该阈值若按传输次数计量，一层的 route 就会填满窗口，per-layer overlap 塌成 1 层。
+// 每次传输的字节是 1/route 数，故乘上去后 in-flight 字节数守恒，不是内存回归。
+constexpr int kMaxOutstandingLayersPerRequest = static_cast<int>(kSenderPoolThreadCount * 2);
+
+int outstandingSendBudget(int routes_per_layer) {
+    return kMaxOutstandingLayersPerRequest * std::max(1, routes_per_layer);
+}
 
 int64_t addWithSaturation(int64_t base_ms, int64_t delta_ms) {
     if (delta_ms <= 0) {
@@ -53,9 +60,6 @@ P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig   
     layer_block_converter_(layer_block_converter),
     metrics_reporter_(metrics_reporter),
     sender_(sender),
-    // Note: config_ is already initialized (declared before asymmetric_tp_util_ in the class),
-    // so reading config_.tp_size/tp_rank here is safe.
-    asymmetric_tp_util_(std::make_shared<AsymmetricTpUtil>(config_.tp_size, config_.tp_rank)),
     computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
 
 P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
@@ -180,6 +184,9 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                           layer
         RTP_LLM_LOG_ERROR("writeByLayer failed: resource or cache topology is null");
         return false;
     }
+    // 本地投影：prefill worker 按自身 cp_rank 取出它持有的那一份。在 planner 允许的
+    // 所有 CP 形态下，(src_rank, dst_rank, tag) 唯一确定一条 route，且该 route 的键集
+    // 恰好等于这份本地投影 —— 因此 prefill 侧不需要下发键规则，也不必再筛。
     auto layer_cache_buffers =
         LayerCacheBufferUtil::convertLayer(
             *resource, *config_.topology, layer_id, 0, -1, config_.tp_rank % config_.cp_size, config_.cp_size);
@@ -304,7 +311,7 @@ void P2PConnectorWorkerPrefill::loopCheckProc() {
 
 int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
     const std::shared_ptr<ComputedLayerCacheBuffer>& computed_buffer,
-    const std::vector<AsymmetricTPContext>&          tp_partition_ctxs,
+    const P2PWorkerRoutePlan&                        worker_plan,
     const std::string&                               unique_key,
     int64_t                                          return_deadline_ms,
     const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
@@ -332,7 +339,7 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
             }
             sent_buffer_keys.insert(buffer_key);
             if (layer_cache_buffer->blockIdMap().empty()) {
-                const int completed_partition_count = static_cast<int>(tp_partition_ctxs.size());
+                const int completed_partition_count = worker_plan.routeCountForTag(layer_cache_buffer->cacheTag());
                 sent_count += completed_partition_count;
                 transfer_result->done_count.fetch_add(completed_partition_count, std::memory_order_relaxed);
                 {
@@ -343,11 +350,11 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
             }
             sent_count += sendLayerToPartitions(
                 layer_cache_buffer,
-                tp_partition_ctxs,
+                worker_plan,
                 unique_key,
                 return_deadline_ms,
                 sent_count,
-                kMaxOutstandingAsyncSendTasksPerRequest,
+                outstandingSendBudget(worker_plan.maxRoutesPerTag()),
                 cancel_flag,
                 transfer_result);
         }
@@ -360,7 +367,7 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
 }
 
 int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
-                                                     const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
+                                                     const P2PWorkerRoutePlan&                  worker_plan,
                                                      const std::string&                         unique_key,
                                                      int64_t                                    transfer_deadline_ms,
                                                      int                                        scheduled_transfer_count,
@@ -394,7 +401,14 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
         };
     };
 
-    for (const auto& partition_ctx : tp_partition_ctxs) {
+    const size_t payload_bytes =
+        config_.topology ? config_.topology->group(layer_cache_buffer->cacheTag()).spec->k_block_payload_bytes() : 0;
+
+    for (const auto& route : worker_plan.routes) {
+        // route 与 layer 无关：只发本 buffer 所属 tag 的那些 route。
+        if (route.cache_tag != layer_cache_buffer->cacheTag()) {
+            continue;
+        }
         if (!waitForAsyncSendSlot(transfer_result,
                                   scheduled_transfer_count + count,
                                   max_outstanding_tasks,
@@ -403,18 +417,21 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
             return count;
         }
 
-        auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfos(layer_block_converter_,
-                                                                        layer_cache_buffer,
-                                                                        partition_ctx.local_partition_count,
-                                                                        partition_ctx.local_partition_id);
+        // partition / slice 均来自 route（本侧那一半）。§2.3 的修正就在这里生效：
+        // NP1D 下 planner 给源端的是 {1,0}（整块），不再对本地 block 二次切分。
+        auto key_block_infos = LayerCacheBufferUtil::buildKeyBlockInfosSliced(layer_block_converter_,
+                                                                            layer_cache_buffer,
+                                                                            route.partition.count,
+                                                                            route.partition.id,
+                                                                            route.slice,
+                                                                            payload_bytes);
 
-        std::string partition_layer_key =
-            P2PKeyUtil::makePartitionLayerKey(
-                unique_key, layer_id, layer_cache_buffer->cacheTag(), partition_ctx.remote_partition_id);
+        std::string partition_layer_key = P2PKeyUtil::makeRouteLayerKey(
+            unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
 
         transfer::SendRequest send_req;
-        send_req.ip          = partition_ctx.decode_ip;
-        send_req.port        = partition_ctx.decode_port;
+        send_req.ip          = route.dst_ip;
+        send_req.port        = route.dst_port;
         send_req.unique_key  = partition_layer_key;
         send_req.block_info  = std::move(key_block_infos);
         send_req.deadline_ms = transfer_deadline_ms;
@@ -594,11 +611,11 @@ bool P2PConnectorWorkerPrefill::waitSendCallbacksWithTimeout(const std::shared_p
 }
 
 ErrorInfo
-P2PConnectorWorkerPrefill::sendKVCache(int64_t                                              request_id,
-                                       const std::string&                                   unique_key,
-                                       int64_t                                              deadline_ms,
-                                       const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-                                       int64_t                                              request_deadline_ms) {
+P2PConnectorWorkerPrefill::sendKVCache(int64_t                   request_id,
+                                       const std::string&        unique_key,
+                                       int64_t                   deadline_ms,
+                                       const P2PWorkerRoutePlan& worker_plan,
+                                       int64_t                   request_deadline_ms) {
     if (request_deadline_ms <= 0) {
         request_deadline_ms = deadline_ms;
     }
@@ -618,54 +635,41 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
         computed_buffers_->removeBuffer(request_id, request_deadline_ms);
         return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "sendKVCache: invalid topology");
     }
-    // For MLA, KV cache is identical across all TP ranks. Only the primary rank
-    // within each decode-target group needs to send. In NP1D mode (prefill_tp > decode_tp),
-    // multiple prefill ranks map to the same decode server; only partition_id=0 rank sends.
-    // This matches the old DecodeRpcServer behavior where partition_count=1 was used.
-    if (config_.is_mla && !decode_transfer_servers.empty()
-        && config_.tp_size > static_cast<int64_t>(decode_transfer_servers.size())) {
-        int local_partition_count = static_cast<int>(config_.tp_size / decode_transfer_servers.size());
-        int local_partition_id    = static_cast<int>(config_.tp_rank % local_partition_count);
-        if (local_partition_id != 0) {
-            RTP_LLM_LOG_DEBUG(
-                "sendKVCache [P2P]: skip for MLA non-primary rank, request_id=%ld, unique_key=%s, tp_rank=%ld",
-                request_id,
-                unique_key.c_str(),
-                config_.tp_rank);
-            computed_buffers_->removeBuffer(request_id);
-            return ErrorInfo::OkStatus();
-        }
+    // 「MLA 只有主 rank 发送」这条规则已由 planner 的副本类选举取代：落选的 rank 收到
+    // 零条 route，在此直接返回。worker 不再自行判断自己是不是主 rank。
+    if (worker_plan.empty()) {
+        RTP_LLM_LOG_DEBUG("sendKVCache [P2P]: no routes for this worker, request_id=%ld, unique_key=%s, tp_rank=%ld",
+                          request_id,
+                          unique_key.c_str(),
+                          config_.tp_rank);
+        computed_buffers_->removeBuffer(request_id);
+        return ErrorInfo::OkStatus();
     }
 
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
     RTP_LLM_LOG_DEBUG(
-        "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, return_deadline_ms=%ld, decode_servers=%zu",
+        "sendKVCache [P2P]: start request_id=%ld, unique_key=%s, deadline_ms=%ld, return_deadline_ms=%ld, routes=%zu",
         request_id,
         unique_key.c_str(),
         deadline_ms,
         return_deadline_ms,
-        decode_transfer_servers.size());
+        worker_plan.routes.size());
     const int64_t start_time_us = currentTimeUs();
     auto          collector     = std::make_shared<PrefillWorkerSendMetricsCollector>();
 
-    // 不对称TP
-    auto tp_partition_ctxs = asymmetric_tp_util_->handleAsymmetricTP(decode_transfer_servers);
-    if (tp_partition_ctxs.empty()) {
-        const std::string error_msg = "sendKVCache: tp_partition_ctxs is empty, unique_key: " + unique_key;
-        RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
-        if (metrics_reporter_) {
-            collector->success = false;
-            metrics_reporter_->report<P2PConnectorMetrics, PrefillWorkerSendMetricsCollector>(nullptr, collector.get());
-        }
-        computed_buffers_->removeBuffer(request_id, request_deadline_ms);
-        return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_ASYMMETRIC_TP_FAILED, error_msg);
-    }
-
+    // 不对称 TP / CP 的配对已由编排层算完，worker 只按 route 执行。
     const auto expected_buffer_keys = buildExpectedBufferKeys(*config_.topology);
-    const int total_transfers =
-        static_cast<int>(expected_buffer_keys.size()) * static_cast<int>(tp_partition_ctxs.size());
+
+    // 每个 (layer, tag) 上的传输数 = 该 tag 的 route 数，故按 tag 逐个累加，
+    // 不能再用「buffer_key 数 × 单一 partition 数」。
+    int total_transfers = 0;
+    for (const auto& buffer_key : expected_buffer_keys) {
+        const auto colon = buffer_key.find(':');
+        const auto tag   = colon == std::string::npos ? buffer_key : buffer_key.substr(colon + 1);
+        total_transfers += worker_plan.routeCountForTag(tag);
+    }
     if (total_transfers == 0) {
         computed_buffers_->removeBuffer(request_id);
         RTP_LLM_LOG_DEBUG("sendKVCache [P2P]: no local blocks in requested range, request_id=%ld, unique_key=%s",
@@ -715,7 +719,7 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
     const int64_t dispatch_start_us = currentTimeUs();
     std::set<std::string> sent_buffer_keys;
     const int sent_transfer_count = dispatchPendingLayerTransfers(computed_layer_cache_buffer,
-                                                                  tp_partition_ctxs,
+                                                                  worker_plan,
                                                                   unique_key,
                                                                   return_deadline_ms,
                                                                   cancel_flag,

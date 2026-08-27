@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -46,19 +47,18 @@ public:
                          const std::shared_ptr<torch::Event>& event,
                          int64_t                               deadline_ms);
 
-    ErrorInfo sendKVCache(int64_t                                              request_id,
-                          const std::string&                                   unique_key,
-                          int64_t                                              deadline_ms,
-                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-                          int64_t                                              request_deadline_ms = 0);
+    ErrorInfo sendKVCache(int64_t                   request_id,
+                          const std::string&        unique_key,
+                          int64_t                   deadline_ms,
+                          const P2PWorkerRoutePlan& worker_plan,
+                          int64_t                   request_deadline_ms = 0);
 
     void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms = 0);
 
-    ErrorInfo read(int64_t                                               request_id,
-                   const std::string&                                    unique_key,
-                   int64_t                                               deadline_ms,
-                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                   int                                                   remote_tp_size = 1);
+    ErrorInfo read(int64_t                   request_id,
+                   const std::string&        unique_key,
+                   int64_t                   deadline_ms,
+                   const P2PWorkerRoutePlan& worker_plan);
 
     bool cancelRead(const std::string& unique_key, int64_t request_deadline_ms = 0);
     bool cancelSend(const std::string& unique_key);

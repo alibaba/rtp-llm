@@ -18,6 +18,8 @@ public:
     using TpBroadcastResult    = ::rtp_llm::BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
     using LayerCacheBuffers    = std::vector<std::shared_ptr<LayerCacheBuffer>>;
     using RankLayerCacheBuffers = std::vector<LayerCacheBuffers>;
+    /// 每个 worker 一份 route 列表，顺序与 worker_addrs 一致。空表示该 worker 无任务。
+    using RankRoutes = std::vector<std::vector<TransferRoutePB>>;
 
     explicit P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
                                 int64_t                         cancel_broadcast_timeout_ms = 1000);
@@ -66,7 +68,6 @@ public:
                                       const std::string&                                    unique_key,
                                       int64_t                                               deadline_ms,
                                       P2PConnectorBroadcastType                             type,
-                                      int                                                   remote_tp_size = 0,
                                       int64_t                                               request_deadline_ms = 0);
 
     /// @brief 向每个 worker 发送与其 CP rank 对应的 KV cache block 视图
@@ -78,8 +79,9 @@ public:
                      const std::string&                                   unique_key,
                      int64_t                                              deadline_ms,
                      P2PConnectorBroadcastType                            type,
-                     int                                                  remote_tp_size = 0,
-                     int64_t                                              request_deadline_ms = 0);
+                     int64_t                                              request_deadline_ms = 0,
+                     const RankRoutes&                                    rank_routes = {},
+                     uint64_t                                             plan_digest = 0);
 
     /// @brief 向所有 TP worker 广播 cancel 请求
     std::shared_ptr<Result>
@@ -126,8 +128,9 @@ private:
                              const std::string&                                    unique_key,
                              int64_t                                               deadline_ms,
                              P2PConnectorBroadcastType                             type,
-                             int                                                   remote_tp_size,
-                             int64_t                                               request_deadline_ms);
+                             int64_t                                               request_deadline_ms,
+                             const std::vector<TransferRoutePB>&                   routes = {},
+                             uint64_t                                              plan_digest = 0);
 
 private:
     std::vector<std::string>          worker_addrs_;

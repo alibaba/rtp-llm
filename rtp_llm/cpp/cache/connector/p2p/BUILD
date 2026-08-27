@@ -31,6 +31,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@havenask//aios/autil:thread",
     ],
@@ -71,7 +72,6 @@ cc_library(
     srcs = [
         "P2PBroadcastClient.cc",
         "PrefillLoadCaller.cc",
-        "AsymmetricTpUtil.cc",
         "ComputedLayerCacheBuffer.cc",
         "P2PConnectorResourceStore.cc",
         "StoreWaitContext.cc",
@@ -79,7 +79,6 @@ cc_library(
     hdrs = [
         "P2PBroadcastClient.h",
         "PrefillLoadCaller.h",
-        "AsymmetricTpUtil.h",
         "ComputedLayerCacheBuffer.h",
         "P2PConnectorResourceStore.h",
         "StoreWaitContext.h",
@@ -124,6 +123,7 @@ cc_library(
         "P2PConnectorWorker.h",
         "P2PConnectorWorkerPrefill.h",
         "P2PConnectorWorkerDecode.h",
+        "P2PWorkerRoute.h",
         "P2PConnector.h",
     ],
     deps = [

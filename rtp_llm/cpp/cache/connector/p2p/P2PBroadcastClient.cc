@@ -32,7 +32,6 @@ P2PBroadcastClient::broadcast(int64_t                                           
                               const std::string&                                    unique_key,
                               int64_t                                               deadline_ms,
                               P2PConnectorBroadcastType                             type,
-                              int                                                   remote_tp_size,
                               int64_t                                               request_deadline_ms) {
     // 构建 FunctionRequestPB
     std::vector<FunctionRequestPB> requests;
@@ -48,7 +47,6 @@ P2PBroadcastClient::broadcast(int64_t                                           
                             unique_key,
                             deadline_ms,
                             type,
-                            remote_tp_size,
                             request_deadline_ms);
         requests.push_back(std::move(request));
     }
@@ -63,9 +61,17 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::broadcastPerRank
     const std::string&                                   unique_key,
     int64_t                                              deadline_ms,
     P2PConnectorBroadcastType                            type,
-    int                                                  remote_tp_size,
-    int64_t                                              request_deadline_ms) {
+    int64_t                                              request_deadline_ms,
+    const RankRoutes&                                    rank_routes,
+    uint64_t                                             plan_digest) {
     const size_t worker_num = tp_broadcast_manager_->workerNum();
+    if (!rank_routes.empty() && rank_routes.size() != worker_num) {
+        RTP_LLM_LOG_WARNING("broadcastPerRank route count %zu does not match worker count %zu, unique_key=%s",
+                            rank_routes.size(),
+                            worker_num,
+                            unique_key.c_str());
+        return nullptr;
+    }
     if (rank_layer_cache_buffers.size() != worker_num) {
         RTP_LLM_LOG_WARNING("broadcastPerRank buffer count %zu does not match worker count %zu, unique_key=%s",
                             rank_layer_cache_buffers.size(),
@@ -85,11 +91,9 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::broadcastPerRank
                             unique_key,
                             deadline_ms,
                             type,
-                            remote_tp_size,
-                            request_deadline_ms);
-        if (type == P2PConnectorBroadcastType::READ && rank_layer_cache_buffers[worker_rank].empty()) {
-            request.mutable_p2p_request()->set_allow_empty_projection(true);
-        }
+                            request_deadline_ms,
+                            rank_routes.empty() ? std::vector<TransferRoutePB>{} : rank_routes[worker_rank],
+                            plan_digest);
         requests.push_back(std::move(request));
     }
 
@@ -137,8 +141,9 @@ void P2PBroadcastClient::genBroadcastRequest(
     const std::string&                                    unique_key,
     int64_t                                               deadline_ms,
     P2PConnectorBroadcastType                             type,
-    int                                                   remote_tp_size,
-    int64_t                                               request_deadline_ms) {
+    int64_t                                               request_deadline_ms,
+    const std::vector<TransferRoutePB>&                   routes,
+    uint64_t                                              plan_digest) {
     auto p2p_request = request.mutable_p2p_request();
 
     // 设置 layer_blocks
@@ -164,7 +169,13 @@ void P2PBroadcastClient::genBroadcastRequest(
     p2p_request->set_deadline_ms(deadline_ms);
     p2p_request->set_request_deadline_ms(request_deadline_ms > 0 ? request_deadline_ms : deadline_ms);
     p2p_request->set_type(type);
-    p2p_request->set_remote_tp_size(remote_tp_size);
+
+    // 本 worker 那一份传输计划。为空即「该 worker 无任务」—— 这取代了
+    // allow_empty_projection 作为空投影的权威信号。
+    for (const auto& route : routes) {
+        p2p_request->add_routes()->CopyFrom(route);
+    }
+    p2p_request->set_plan_digest(plan_digest);
 }
 
 bool P2PBroadcastClient::Result::success() const {

@@ -7,24 +7,12 @@ namespace rtp_llm {
 
 class P2PKeyUtil {
 public:
-    /// @brief 传输 key（旧版，按 partition_id 命名）。
-    ///
-    /// 保留至执行路径切到 makeRouteLayerKey 为止（slice 2 / P2）。它的问题是 partition_id
-    /// 在源端由 AsymmetricTpUtil::remote_partition_id 算、在目的端由 buildRecvTasks 的循环
-    /// 下标算 —— 两个独立公式碰巧相等，是全链路最脆的耦合点。
-    static std::string makePartitionLayerKey(const std::string& base_key,
-                                             int                layer_id,
-                                             const std::string& cache_tag,
-                                             int                partition_id) {
-        return base_key + "_" + std::to_string(layer_id) + "_" + cache_tag + "_" + std::to_string(partition_id);
-    }
-
     /// @brief 传输 key：由编排层签发的 route_id 命名，而非两侧各自推导的 partition_id。
     ///
     /// 这是「双端约定」被彻底消灭的落点：send_req.unique_key 与 recv_req.unique_key 必须逐字节
     /// 相同，传输层靠它在 TransferTaskStore::task_map_ 里做 rendezvous。旧的
     /// makePartitionLayerKey 用 partition_id 命名，而 partition_id 在源端由
-    /// AsymmetricTpUtil::remote_partition_id 算、在目的端由循环下标算 —— 两个独立公式碰巧相等，
+    /// 源端的不对称 TP 工具算、在目的端由接收循环下标算 —— 两个独立公式碰巧相等，
     /// 是全链路最脆的耦合点。
     ///
     /// @param plan_digest 计划摘要。两侧 plan 若因配置漂移而分歧，key 不匹配 ⇒ 退化为

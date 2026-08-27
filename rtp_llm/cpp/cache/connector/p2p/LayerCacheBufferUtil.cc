@@ -146,4 +146,73 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     return key_block_infos;
 }
 
+transfer::KeyBlockInfoMap
+LayerCacheBufferUtil::buildKeyBlockInfosSliced(const std::shared_ptr<LayerBlockConverter>& converter,
+                                               const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
+                                               int                                         partition_count,
+                                               int                                         partition_id,
+                                               const SliceSpec&                            slice,
+                                               size_t                                      k_block_payload_bytes) {
+    if (slice.mode == CpBlockSliceMode::NONE || slice.count <= 1) {
+        return buildKeyBlockInfos(converter, layer_cache_buffer, partition_count, partition_id);
+    }
+
+    transfer::KeyBlockInfoMap key_block_infos;
+    const int                 layer_id    = layer_cache_buffer->getLayerId();
+    const size_t              slice_count = static_cast<size_t>(slice.count);
+    const size_t              slice_index = static_cast<size_t>(std::max(0, slice.index));
+
+    for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
+        auto block_infos = converter->convertIndexToBuffer(
+            layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
+        // sliceBlockForPeer 的前提：被切的 block 必须是单一 BlockInfo。planner 的 Step 1
+        // 已用「cp_slice 与 head 分片互斥」保证了这一点；这里再兜一次，不满足就跳过该 key，
+        // 让上层因键集不完整而失败，而不是切出错误的字节区间。
+        if (block_infos.size() != 1) {
+            RTP_LLM_LOG_WARNING("buildKeyBlockInfosSliced: expected 1 block part for cache_key %ld, got %zu; "
+                                "cp_slice must not be combined with head partitioning",
+                                cache_key,
+                                block_infos.size());
+            continue;
+        }
+        auto& block = block_infos[0];
+
+        // 分母必须与 CPSlotMapper::sliceBlockForPeer 一致。
+        size_t slice_bytes = 0;
+        if (slice.mode == CpBlockSliceMode::PAYLOAD_BYTES) {
+            if (k_block_payload_bytes == 0 || k_block_payload_bytes % slice_count != 0) {
+                RTP_LLM_LOG_WARNING("buildKeyBlockInfosSliced: payload %zu not divisible by slice count %zu",
+                                    k_block_payload_bytes,
+                                    slice_count);
+                continue;
+            }
+            slice_bytes = k_block_payload_bytes / slice_count;
+        } else {
+            if (block.size_bytes % slice_count != 0) {
+                RTP_LLM_LOG_WARNING("buildKeyBlockInfosSliced: block bytes %zu not divisible by slice count %zu",
+                                    block.size_bytes,
+                                    slice_count);
+                continue;
+            }
+            slice_bytes = block.size_bytes / slice_count;
+        }
+        const size_t slice_offset = slice_bytes * slice_index;
+        if (block.addr == nullptr || slice_offset + slice_bytes > block.size_bytes) {
+            RTP_LLM_LOG_WARNING("buildKeyBlockInfosSliced: slice [%zu,+%zu) out of block bytes %zu",
+                                slice_offset,
+                                slice_bytes,
+                                block.size_bytes);
+            continue;
+        }
+        block.addr       = static_cast<char*>(block.addr) + slice_offset;
+        block.size_bytes = slice_bytes;
+
+        transfer::KeyBlockInfo kbi;
+        kbi.cache_key              = cache_key;
+        kbi.blocks                 = std::move(block_infos);
+        key_block_infos[cache_key] = std::make_shared<const transfer::KeyBlockInfo>(std::move(kbi));
+    }
+    return key_block_infos;
+}
+
 }  // namespace rtp_llm

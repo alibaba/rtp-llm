@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
@@ -14,6 +16,44 @@ P2PConnectorSchedulerPrefill::P2PConnectorSchedulerPrefill(
     const kmonitor::MetricsReporterPtr&        metrics_reporter,
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
+
+std::shared_ptr<const PlanResult> P2PConnectorSchedulerPrefill::planFor(int decode_tp_size) {
+    {
+        std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+        auto                        it = plan_cache_.find(decode_tp_size);
+        if (it != plan_cache_.end()) {
+            return it->second;
+        }
+    }
+    // 与 decode 侧同一个 planner 函数、镜像的参数。decode 的 cp_size 由部署级同配开关推导。
+    const auto src_layout = ShardLayoutFactory::fromTopology(
+        *config_.topology, config_.parallelism_config, RoleType::PREFILL);
+    const auto dst_layout = ShardLayoutFactory::peerOf(src_layout,
+                                                      decode_tp_size,
+                                                      config_.parallelism_config.prefill_cp_config.kv_cache_sharded,
+                                                      RoleType::DECODE);
+    const auto tags   = ShardLayoutFactory::tagsOf(*config_.topology);
+    auto       result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags));
+
+    std::lock_guard<std::mutex> lock(plan_cache_mutex_);
+    auto [it, inserted] = plan_cache_.emplace(decode_tp_size, result);
+    (void)inserted;
+    return it->second;
+}
+
+P2PBroadcastClient::RankRoutes
+P2PConnectorSchedulerPrefill::buildPrefillRankRoutes(const TransferPlan& plan, size_t worker_num) const {
+    P2PBroadcastClient::RankRoutes rank_routes(worker_num);
+    for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
+        for (const auto* route : plan.forPrefillRank(static_cast<int>(worker_rank))) {
+            TransferRoutePB pb;
+            // peer_index 是 decode_transfer_servers 的下标，与 route->dst_rank 同一命名空间。
+            RouteCodec::encodeForPrefill(*route, route->dst_rank, &pb);
+            rank_routes[worker_rank].push_back(std::move(pb));
+        }
+    }
+    return rank_routes;
+}
 
 ErrorInfo
 P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&                            resource,
@@ -57,14 +97,47 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
 
     const auto broadcast_type = no_transfer ? P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER :
                                               P2PConnectorBroadcastType::HANDLE_READ;
-    auto result = tp_broadcast_client_->broadcast(request_id,
-                                                  layer_cache_buffers,
-                                                  decode_transfer_servers,
-                                                  unique_key,
-                                                  deadline_ms,
-                                                  broadcast_type,
-                                                  0,
-                                                  request_deadline_ms);
+
+    // 编排层：与 decode 侧用同一个 planner 算镜像 plan，逐 prefill worker 下发它自己的 route。
+    const size_t                   worker_num = config_.worker_grpc_addrs.size();
+    P2PBroadcastClient::RankRoutes rank_routes;
+    uint64_t                       plan_digest = 0;
+    if (!no_transfer) {
+        if (worker_num == 0) {
+            report_metric_func(false);
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty");
+        }
+        auto plan = planFor(static_cast<int>(decode_transfer_servers.size()));
+        if (!plan->ok()) {
+            RTP_LLM_LOG_WARNING("sendKVCache: transfer plan failed, unique_key=%s, error=%s",
+                                unique_key.c_str(),
+                                plan->error.ToString().c_str());
+            report_metric_func(false);
+            return plan->error;
+        }
+        plan_digest = plan->plan.digest();
+        rank_routes = buildPrefillRankRoutes(plan->plan, worker_num);
+    }
+
+    // broadcastPerRank 要求 buffer 数组与 worker 数等长；prefill 侧的 layer_blocks 不上线
+    // （worker 用自身投影），故只传等长空壳。
+    P2PBroadcastClient::RankLayerCacheBuffers rank_layer_cache_buffers(no_transfer ? 0 : worker_num);
+    auto result = no_transfer ? tp_broadcast_client_->broadcast(request_id,
+                                                               layer_cache_buffers,
+                                                               decode_transfer_servers,
+                                                               unique_key,
+                                                               deadline_ms,
+                                                               broadcast_type,
+                                                               request_deadline_ms) :
+                                tp_broadcast_client_->broadcastPerRank(request_id,
+                                                                      rank_layer_cache_buffers,
+                                                                      decode_transfer_servers,
+                                                                      unique_key,
+                                                                      deadline_ms,
+                                                                      broadcast_type,
+                                                                      request_deadline_ms,
+                                                                      rank_routes,
+                                                                      plan_digest);
     if (!result) {
         std::string error_msg = "sendKVCache: broadcast failed, request_id: " + std::to_string(request_id);
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
