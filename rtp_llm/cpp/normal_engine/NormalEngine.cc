@@ -746,12 +746,9 @@ absl::Status NormalEngine::pp_step() {
             mayAddFakeStream(streams);
         }
 
-        // When TP > 1, all first-stage TP ranks must enter process() so the
-        // stage-local tpSyncModelInputs broadcast does not deadlock. An idle
-        // batch returns from process() without sending a plan downstream.
-        if (streams.empty() && parallelism_config.tp_size <= 1) {
-            return absl::OkStatus();
-        }
+        // An empty scheduling result is a pipeline bubble. It must still enter
+        // process() so the empty plan advances through every stage and drains
+        // batches that are already in flight.
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
