@@ -729,39 +729,37 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     if (!kdaKtpDecodeEnabled(maga_init_params_.parallelism_config)) {
         return loadCacheAsyncForTp(decode_context, load_context);
     }
-    const int64_t configured_retries = maga_init_params_.pd_sep_config.rdma_connect_retry_times;
-    const size_t  max_attempts = configured_retries > 0 ? static_cast<size_t>(configured_retries) + 1 : 1;
-    ErrorInfo     status       = ErrorInfo::OkStatus();
-    for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
-        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_RESERVE);
-        if (status.ok()) {
+    auto status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_RESERVE);
+    if (status.ok()) {
+        const int64_t configured_retries = maga_init_params_.pd_sep_config.rdma_connect_retry_times;
+        const size_t  max_attempts = configured_retries > 0 ? static_cast<size_t>(configured_retries) + 1 : 1;
+        for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
             status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_LOAD);
+            if (status.ok()) {
+                break;
+            }
+            const bool connect_failure = status.code() == ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
+                                         || status.code() == ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED;
+            if (!connect_failure || attempt + 1 >= max_attempts) {
+                break;
+            }
+            RTP_LLM_LOG_WARNING("request [%s] KDA shadow load connect failed; retrying LOAD (%zu/%zu): %s",
+                                decode_context.request_key.c_str(),
+                                attempt + 1,
+                                max_attempts - 1,
+                                status.ToString().c_str());
         }
-        if (status.ok()) {
-            status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_COMMIT);
-        }
-        if (status.ok()) {
-            return status;
-        }
-
+    }
+    if (status.ok()) {
+        status = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_COMMIT);
+    }
+    if (!status.ok()) {
         auto rollback = loadCacheAsyncForTp(decode_context, load_context, KDA_SHADOW_ROLLBACK);
         if (!rollback.ok()) {
             RTP_LLM_LOG_ERROR("request [%s] KDA shadow rollback also failed: %s",
                               decode_context.request_key.c_str(),
                               rollback.ToString().c_str());
-            return status;
         }
-
-        const bool connect_failure = status.code() == ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
-                                     || status.code() == ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED;
-        if (!connect_failure || attempt + 1 >= max_attempts) {
-            return status;
-        }
-        RTP_LLM_LOG_WARNING("request [%s] KDA shadow load connect failed; retrying transaction (%zu/%zu): %s",
-                            decode_context.request_key.c_str(),
-                            attempt + 1,
-                            max_attempts - 1,
-                            status.ToString().c_str());
     }
     return status;
 }
@@ -1613,9 +1611,18 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
                                                request->kda_seq_len()};
                     auto load_status = loadCache(context);
                     if (!load_status.ok()) {
-                        KdaShadowCommand fail{KdaShadowCommandType::FAIL, key};
-                        fail.error = load_status.ToString();
-                        registry->apply(fail);
+                        const bool connect_failure =
+                            load_status.code() == ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
+                            || load_status.code() == ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED;
+                        // Leave a transient connection failure in LOADING so
+                        // the coordinator can safely reissue only the LOAD
+                        // phase for the same generation epoch.  Other failures
+                        // remain terminal and are rolled back by the caller.
+                        if (!connect_failure) {
+                            KdaShadowCommand fail{KdaShadowCommandType::FAIL, key};
+                            fail.error = load_status.ToString();
+                            registry->apply(fail);
+                        }
                         response->mutable_error_info()->set_error_code(transErrorCodeToRPC(load_status.code()));
                         response->mutable_error_info()->set_error_message(load_status.ToString());
                         response->set_done_time_us(currentTimeUs());
