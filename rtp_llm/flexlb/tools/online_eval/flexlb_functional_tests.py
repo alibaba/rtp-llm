@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from flexlb_ft.chaos_cases import CHAOS_CASES
 from flexlb_ft.context import CaseContext, CaseDef
+from flexlb_ft.grade import GRADES, VERDICT_LABELS, GradeReport, overall_verdict
 from flexlb_ft.harness import PROFILE_CAPS, PROFILES, EnvManager
 from flexlb_ft.smoke_cases import SMOKE_CASES
 
@@ -43,6 +44,17 @@ def main():
     parser.add_argument("--filter", default=None, help="substring filter on case name")
     parser.add_argument("--json", default=None, help="write JSON results to path")
     parser.add_argument("--list", action="store_true", help="list cases and exit")
+    parser.add_argument(
+        "--grade",
+        choices=list(GRADES),
+        default="normal",
+        help=(
+            "assertion grade: strict uses tight bounds (达到=优异), normal "
+            "standard bounds (达到=良好), loose floor bounds (最宽但仍能判不可用). "
+            "Exceeding the running grade's bound fails the case; the achieved "
+            "grade is recorded per case and rolled up into a suite verdict."
+        ),
+    )
     parser.add_argument(
         "--keep", action="store_true", help="keep env running after tests"
     )
@@ -87,6 +99,7 @@ def main():
         args.profile,
         run_root,
         log_fn=lambda m: print(f"  [{time.strftime('%H:%M:%S')}] {m}"),
+        grade=args.grade,
     )
 
     results = []
@@ -94,22 +107,35 @@ def main():
     failed_count = 0
 
     print(f"\n{'='*60}")
-    print(f" FlexLB Functional Tests — suite={args.suite} profile={args.profile}")
+    print(
+        f" FlexLB Functional Tests — suite={args.suite} "
+        f"profile={args.profile} grade={args.grade}"
+    )
     print(f" {len(cases)} cases, run_root={run_root}")
     print(f"{'='*60}\n")
+
+    graded_achieved: list[str] = []  # achieved grade per graded case (verdict roll-up)
 
     for i, case in enumerate(cases, 1):
         print(f"[{i}/{len(cases)}] {case.name} ... ", end="", flush=True)
         t0 = time.monotonic()
+        report: GradeReport | None = None
         try:
             # Fresh id range per case (dedup table in a reused master).
             CaseContext._case_seq += 1
             ctx.case_seq = CaseContext._case_seq
-            ok, detail = case.fn(ctx)
+            outcome = case.fn(ctx)
+            if len(outcome) == 3:
+                ok, detail, report = outcome
+            else:
+                ok, detail = outcome
         except Exception as e:
             ok, detail = False, f"EXCEPTION: {e}\n{traceback.format_exc()}"
         duration_ms = int((time.monotonic() - t0) * 1000)
         status = "PASS" if ok else "FAIL"
+        achieved = report.achieved if report is not None else None
+        if report is not None:
+            graded_achieved.append(report.achieved)
         results.append(
             {
                 "suite": case.suite,
@@ -118,17 +144,21 @@ def main():
                 "status": status,
                 "duration_ms": duration_ms,
                 "detail": detail if not ok else "",
+                **({"grade": report.to_dict()} if report is not None else {}),
             }
         )
+        grade_note = f" [{achieved}]" if achieved else ""
         if ok:
             passed_count += 1
-            print(f"PASS ({duration_ms}ms)")
+            print(f"PASS{grade_note} ({duration_ms}ms)")
         else:
             failed_count += 1
-            print(f"FAIL ({duration_ms}ms)")
+            print(f"FAIL{grade_note} ({duration_ms}ms)")
             if detail:
                 for line in str(detail).split("\n")[:5]:
                     print(f"    {line}")
+            if report is not None and report.results:
+                print(f"    grades: {report.summary()}")
 
     # Teardown
     if not args.keep:
@@ -138,6 +168,13 @@ def main():
     # Summary
     print(f"\n{'='*60}")
     print(f" Results: {passed_count} PASS / {failed_count} FAIL / {len(cases)} total")
+    verdict = overall_verdict(graded_achieved)
+    if verdict is not None:
+        print(
+            f" Overall grade: {verdict} ({VERDICT_LABELS[verdict]}) — "
+            f"run grade={args.grade}, graded cases={len(graded_achieved)} "
+            f"(all strict=优异 / all ≥normal=良好 / any beyond loose=不可用)"
+        )
     print(f"{'='*60}\n")
 
     if args.json:
