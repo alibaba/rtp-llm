@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 COMPILER_MODE = os.getenv("FLA_COMPILER_MODE") == "1"
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 
+# Reciprocal of ln(2); used by KDA chunk kernels for exp2-based decays.
+RCP_LN2 = 1.0 / 0.6931471805599453
+
 
 @lru_cache(maxsize=1)
 def check_environments():

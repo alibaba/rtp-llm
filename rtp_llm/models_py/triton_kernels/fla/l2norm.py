@@ -90,10 +90,20 @@ def l2norm_fwd(
     if D > BD:
         raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
 
-    # Not use this path since different batch will always go into compile， since T is different,
-    # and compile time is too long (70ms) compared to kernel execution time (under 1ms)
-    if D <= 512 and T <= 128:
-        NB = triton.cdiv(T, 2048)
+    if D <= 512:
+        # Match FLA 0.5.1's batched L2Norm reduction.  The former large-T
+        # fallback launched one row per CTA and changes a few BF16 round-to-
+        # nearest decisions.  Those one-ULP changes are observable after KDA
+        # recurrence and MoE routing.  Pin the two configurations selected by
+        # the sealed Golden's NB=1 (64/256 and decode) and NB>1 (8192) shapes
+        # instead of re-autotuning them under RTP's different Triton version.
+        NB = triton.cdiv(T, 2048 * 32)
+        if NB == 1:
+            BT = 8
+            num_warps = 2
+        else:
+            BT = 64
+            num_warps = 16
 
         def grid(meta):
             return (triton.cdiv(T, meta["BT"]),)
@@ -106,8 +116,8 @@ def l2norm_fwd(
             T=T,
             D=D,
             BD=BD,
-            BT=16,
-            num_warps=8,
+            BT=BT,
+            num_warps=num_warps,
             num_stages=3,
         )
     else:

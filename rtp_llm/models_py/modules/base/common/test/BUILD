@@ -10,3 +10,9 @@ py_test (
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "kvcache_store_test",
+    srcs = ["kvcache_store_test.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "L20D_DEV"},
+)

@@ -338,3 +338,13 @@ py_test(
     ],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "glm5_next_config_test",
+    srcs = ["glm5_next_config_test.py"],
+    deps = [
+        "//rtp_llm:async_model",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)

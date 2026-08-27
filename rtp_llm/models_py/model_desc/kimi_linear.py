@@ -25,8 +25,10 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     MlaAttention,
+    RMSNorm,
     RMSResNorm,
 )
+from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -73,6 +75,12 @@ class KimiLinearMetadata(object):
         return self.prefill_conv1d_meta
 
 
+def _linear_attn_tp_size(parallelism_config: ParallelismConfig) -> int:
+    # Context parallelism reuses the TP process group for sequence sharding,
+    # so linear-attention heads and their state cache remain unsharded.
+    return int(parallelism_config.get_attn_tp_size())
+
+
 class KimiLinearKDABase(nn.Module):
     """Base class for KDA (Kimi Delta Attention) prefill/decode.
 
@@ -98,11 +106,12 @@ class KimiLinearKDABase(nn.Module):
         assert (
             self.head_k_dim == self.head_v_dim
         ), "head_k_dim and head_v_dim must be the same now"
+        attn_tp_size = _linear_attn_tp_size(parallelism_config)
         self.local_num_k_heads: int = (
-            linear_attn_config.linear_num_key_heads // parallelism_config.tp_size
+            linear_attn_config.linear_num_key_heads // attn_tp_size
         )
         self.local_num_v_heads: int = (
-            linear_attn_config.linear_num_value_heads // parallelism_config.tp_size
+            linear_attn_config.linear_num_value_heads // attn_tp_size
         )
         self.linear_conv_kernel_dim: int = (
             self.linear_attn_config.linear_conv_kernel_dim
@@ -188,7 +197,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths_d,
+            prefix_lengths=attn_inputs.prefix_lengths,
             metadata=metadata,
         ).transpose(0, 1)
         return out
@@ -227,7 +236,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 dtype=self.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
@@ -288,7 +297,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             store_ssm_state_to_block_map(
                 h_for_store,
                 final_state,
-                attn_inputs.prefix_lengths_d,
+                attn_inputs.prefix_lengths,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
@@ -544,7 +553,8 @@ class KimiLinearKDA(nn.Module):
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         self.head_v_dim = linear_attn_config.linear_value_head_dim
         self.local_num_v_heads = (
-            linear_attn_config.linear_num_value_heads // parallelism_config.tp_size
+            linear_attn_config.linear_num_value_heads
+            // _linear_attn_tp_size(parallelism_config)
         )
 
         self.prefill_kda = KimiLinearKDAPrefill(
@@ -635,10 +645,12 @@ class KimiLinearDecoderLayer(nn.Module):
         config: ModelConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        global_weights: Dict[str, torch.Tensor],
         layer_idx: int,
         moe_config,
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
+        hw_kernel_config=None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -665,6 +677,8 @@ class KimiLinearDecoderLayer(nn.Module):
                 layer_idx,
                 config.layernorm_eps,
                 quant_config,
+                hw_kernel_config=hw_kernel_config,
+                global_weights=global_weights,
             )
 
         # FFN: Dense (layer 0) or MoE (layer 1+)
@@ -682,13 +696,43 @@ class KimiLinearDecoderLayer(nn.Module):
                 enable_cuda_graph=enable_cuda_graph,
             )
 
-        # RMSResNorm: fused residual add + layernorm
-        self.input_layernorm = RMSResNorm(
-            weights[W.pre_ln_gamma], eps=config.layernorm_eps
-        )
-        self.post_attention_layernorm = RMSResNorm(
-            weights[W.post_ln_gamma], eps=config.layernorm_eps
-        )
+        self.hc_enabled = config.hc_mult > 1
+        if self.hc_enabled:
+            self.input_layernorm = RMSNorm(
+                weights[W.pre_ln_gamma], eps=config.layernorm_eps
+            )
+            self.post_attention_layernorm = RMSNorm(
+                weights[W.post_ln_gamma], eps=config.layernorm_eps
+            )
+            hc_args = dict(
+                dim=config.hidden_size,
+                hc_mult=config.hc_mult,
+                hc_sinkhorn_iters=config.hc_sinkhorn_iters,
+                norm_eps=config.layernorm_eps,
+                hc_eps=config.hc_eps,
+                layer_id=layer_idx,
+            )
+            self.attn_hc = build_hc_unit(
+                weights[W.v4_hc_attn_fn],
+                weights[W.v4_hc_attn_base],
+                weights[W.v4_hc_attn_scale],
+                name="attn",
+                **hc_args,
+            )
+            self.ffn_hc = build_hc_unit(
+                weights[W.v4_hc_ffn_fn],
+                weights[W.v4_hc_ffn_base],
+                weights[W.v4_hc_ffn_scale],
+                name="ffn",
+                **hc_args,
+            )
+        else:
+            self.input_layernorm = RMSResNorm(
+                weights[W.pre_ln_gamma], eps=config.layernorm_eps
+            )
+            self.post_attention_layernorm = RMSResNorm(
+                weights[W.post_ln_gamma], eps=config.layernorm_eps
+            )
 
     def forward(
         self,
@@ -699,6 +743,15 @@ class KimiLinearDecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: KimiLinearMetadata = KimiLinearMetadata(),
     ) -> DecodeLayerOutput:
+        if self.hc_enabled:
+            return self._forward_hc(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                attention_inputs,
+                attn_meta,
+            )
+
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -718,13 +771,47 @@ class KimiLinearDecoderLayer(nn.Module):
                 kv_cache=kv_cache,
             )
 
-        # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-
-        # MLP (Dense or MoE)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states)
-
         return DecodeLayerOutput(hidden_states, residual)
+
+    def _forward_hc(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        attention_inputs: Optional[PyAttentionInputs],
+        attn_meta: KimiLinearMetadata,
+    ) -> DecodeLayerOutput:
+        residual = hidden_states
+        hidden_states, post, comb = self.attn_hc.pre(residual)
+        hidden_states = self.input_layernorm(hidden_states)
+
+        # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
+        if self.layer_type == HybridAttentionType.LINEAR:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                attention_inputs=attention_inputs,
+                attn_meta=attn_meta,
+            )
+        else:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+            )
+
+        hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
+        residual = hidden_states
+        hidden_states, post, comb = self.ffn_hc.pre(residual)
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
+        return DecodeLayerOutput(hidden_states, hidden_states)
 
 
 class KimiLinearModel(GptModelBase):
@@ -762,17 +849,27 @@ class KimiLinearModel(GptModelBase):
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
+                    weights.global_weights,
                     idx,
                     moe_config,
                     max_generate_batch_size,
                     enable_cuda_graph,
+                    py_hw_kernel_config,
                 )
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
-        )
+        self.hc_enabled = model_config.hc_mult > 1
+        if self.hc_enabled:
+            self.norm = RMSNorm(
+                weights.get_global_weight(W.final_ln_gamma),
+                eps=model_config.layernorm_eps,
+            )
+        else:
+            self.norm = RMSResNorm(
+                weights.get_global_weight(W.final_ln_gamma),
+                eps=model_config.layernorm_eps,
+            )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -794,7 +891,15 @@ class KimiLinearModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        residual = torch.zeros_like(hidden_states)
+        if self.hc_enabled:
+            hidden_states = (
+                hidden_states.unsqueeze(1)
+                .expand(-1, self.config.hc_mult, -1)
+                .contiguous()
+            )
+            residual = hidden_states
+        else:
+            residual = torch.zeros_like(hidden_states)
 
         for i, decoder_layer in enumerate(self.layers):
             select_block_map_for_layer(attention_inputs, i)
@@ -809,6 +914,10 @@ class KimiLinearModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.hc_enabled:
+            hidden_states = hidden_states.mean(dim=-2)
+            hidden_states = self.norm(hidden_states)
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

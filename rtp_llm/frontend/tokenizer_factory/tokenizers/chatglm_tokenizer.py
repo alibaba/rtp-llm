@@ -84,4 +84,4 @@ class ChatGLMV5Tokenizer(BaseTokenizer):
 register_tokenizer(["chatglm2", "chat_glm_2"], ChatGLMV2Tokenizer)
 register_tokenizer(["chatglm3", "chat_glm_3"], ChatGLMV3Tokenizer)
 register_tokenizer(["chatglm4", "chatglm4v"], ChatGLMV4Tokenizer)
-register_tokenizer(["glm_5", "glm_5_mtp"], ChatGLMV5Tokenizer)
+register_tokenizer(["glm_5", "glm_5_mtp", "glm5_next"], ChatGLMV5Tokenizer)

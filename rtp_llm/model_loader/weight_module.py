@@ -63,7 +63,9 @@ class WeightModule(ABC):
         if quant_config is None:
             return weight_info
 
-        if isinstance(weight_info, QuantWeight):
+        if isinstance(weight_info, QuantWeight) or getattr(
+            weight_info, "quantization_disabled", False
+        ):
             return weight_info
 
         if isinstance(weight_info, AtomicWeight):

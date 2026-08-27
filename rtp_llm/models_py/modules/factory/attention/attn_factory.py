@@ -23,6 +23,12 @@ PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
 
+def _requires_prefill_cp_support(
+    attn_inputs: PyAttentionInputs, use_decode_mla: bool
+) -> bool:
+    return bool(attn_inputs.is_prefill and not use_decode_mla)
+
+
 def get_mla_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -87,8 +93,10 @@ def get_mla_impl(
             )
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
+        if (
+            _requires_prefill_cp_support(attn_inputs, use_decode_mla)
+            and not use_fast_path
+            and not impl.support_parallelism_config(parallelism_config)
         ):
             continue
 

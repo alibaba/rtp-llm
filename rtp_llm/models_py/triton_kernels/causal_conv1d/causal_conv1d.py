@@ -542,7 +542,14 @@ def causal_conv1d_fn(
         # 2. conv_states serve as a cache with num cache lines can be larger than batch size
         # 3. mapping from sequence x[idx] to a cache line at index as specified via cache_indices[idx]
         # 4. computation can be skipped if cache_indices[idx] == pad_slot_id
-        assert dim == conv_states.shape[1] and width - 1 <= conv_states.shape[2]
+        assert dim == conv_states.shape[1], (
+            f"causal conv channel mismatch: x={tuple(x.shape)}, "
+            f"weight={tuple(weight.shape)}, conv_states={tuple(conv_states.shape)}"
+        )
+        assert width - 1 <= conv_states.shape[2], (
+            f"causal conv state too short: width={width}, "
+            f"conv_states={tuple(conv_states.shape)}"
+        )
         stride_istate_seq = conv_states.stride(0)
         stride_istate_dim = conv_states.stride(1)
         stride_istate_token = conv_states.stride(2)

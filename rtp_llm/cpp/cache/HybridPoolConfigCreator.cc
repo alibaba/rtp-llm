@@ -278,6 +278,10 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.layer_all_num      = config.layer_num;
     config.block_num          = 0;
     config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.kernel_seq_size_per_block =
+        kv_cache_config.kernel_seq_size_per_block > 0 ?
+            static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) :
+            config.seq_size_per_block;
     config.use_mla            = model_config.attn_config.use_mla;
     config.dtype              = dtype;
     config.linear_step        = 1;

@@ -13,6 +13,19 @@ from rtp_llm.ops.compute_ops import (
 )
 
 
+def _cache_store_host_i32(tensor: torch.Tensor, name: str) -> torch.Tensor:
+    """Normalize metadata before a cache-store background thread reads it."""
+    if tensor is None or not tensor.numel():
+        raise RuntimeError(f"cache-store {name} must be a non-empty tensor")
+    if tensor.dtype != torch.int32:
+        raise RuntimeError(
+            f"cache-store {name} must be int32, got {tensor.dtype}"
+        )
+    if tensor.device.type != "cpu":
+        tensor = tensor.cpu()
+    return tensor.contiguous()
+
+
 class WriteCacheStoreOp(nn.Module):
     def __init__(
         self,
@@ -106,6 +119,13 @@ def create_write_cache_store_impl(
     prefix_lengths = getattr(cache_store_inputs, "prefix_lengths_host", None)
     if prefix_lengths is None or not prefix_lengths.numel():
         prefix_lengths = attn_inputs.prefix_lengths
+
+    input_lengths = _cache_store_host_i32(input_lengths, "input_lengths")
+    prefix_lengths = _cache_store_host_i32(prefix_lengths, "prefix_lengths")
+    # Persist the normalized mirrors on the shared request metadata so all
+    # layer writers reuse them instead of repeating a device-to-host copy.
+    cache_store_inputs.input_lengths_host = input_lengths
+    cache_store_inputs.prefix_lengths_host = prefix_lengths
 
     has_multi_region = (
         kv_cache is not None

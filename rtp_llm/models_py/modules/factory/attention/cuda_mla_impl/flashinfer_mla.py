@@ -32,6 +32,12 @@ g_workspace_buffer = None
 warm_up_done = False
 
 
+def _reshape_rope_tensor(
+    tensor: torch.Tensor, num_heads: int, head_dim: int
+) -> torch.Tensor:
+    return tensor.view(tensor.shape[0], num_heads, head_dim)
+
+
 def warmup_flashinfer_python():
     global warm_up_done
     if warm_up_done:
@@ -207,11 +213,14 @@ class MlaFlashInferPrefillOp(object):
         self._qo_indptr_buf = None
         self._kv_indptr_buf = None
         global g_workspace_buffer
+        device = torch.device("cuda", torch.cuda.current_device())
         if g_workspace_buffer is None:
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_kv_b_w).device,
+                # Hybrid models may start with a linear-attention layer, so
+                # weights[0] is not guaranteed to contain an MLA projection.
+                device=device,
             )
 
         if self.use_cuda_graph:
@@ -219,7 +228,6 @@ class MlaFlashInferPrefillOp(object):
                 raise ValueError(
                     "max_batch_size must be positive for MLA prefill CUDA graph"
                 )
-            device = self.weights[0].get(W.mla_kv_b_w).device
             self._qo_indptr_buf = torch.empty(
                 max_batch_size + 1, dtype=torch.int32, device=device
             )
@@ -419,7 +427,7 @@ class MlaFlashInferPrefillOp(object):
             compressed_kv, k_pe, kv_cache
         )
 
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
+        k_pe = _reshape_rope_tensor(k_pe, 1, self.qk_rope_head_dim)
         self.kv_b_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
             W.mla_kv_b_w,
@@ -1076,7 +1084,9 @@ class MlaFlashInferDecodeOp(object):
         v_weight = self.weights[layer_id].get(W.mla_vc, None)
 
         q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        q_pe = q_pe.view(-1, self.num_heads, self.qk_rope_head_dim)
+        q_pe = _reshape_rope_tensor(
+            q_pe, self.num_heads, self.qk_rope_head_dim
+        )
 
         q_nope = torch.bmm(q_nope.transpose(0, 1), k_weight)
         q_nope = q_nope.transpose(0, 1)

@@ -27,6 +27,11 @@ def safe_exp(x):
     return exp(tl.where(x <= 0, x, float("-inf")))
 
 
+@triton.jit
+def softplus(x):
+    return tl.where(x < 20.0, tl.math.log(1 + tl.math.exp(x)), x)
+
+
 if not is_gather_supported:
 
     @triton.jit

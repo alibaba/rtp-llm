@@ -78,6 +78,12 @@ def _is_multi_token_decode(attn_inputs: PyAttentionInputs) -> bool:
     )
 
 
+def _fused_qk_rope_cat_cache_mla_enabled(rope_head_dim: int) -> bool:
+    # The fused Triton kernel requires a non-empty rotary dimension. NoPE MLA
+    # uses the existing unfused cache-write path instead.
+    return rope_head_dim > 0 and fuse_kernels_enabled()
+
+
 def _allocate_prefill_fused_kv(
     total_kv_len: int,
     width: int,
@@ -484,7 +490,9 @@ class SparseMlaImpl(MlaImplBase):
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
-        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
+        self._fuse_qk_rope_cat_cache_mla = (
+            _fused_qk_rope_cat_cache_mla_enabled(self.rope_head_dim)
+        )
         self._kv_cache_type = (
             "fp8_ds_mla"
             if attn_configs.kv_cache_dtype == KvCacheDataType.FP8

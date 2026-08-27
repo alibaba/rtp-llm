@@ -94,7 +94,7 @@ def strided_slice_copy_(
     T, H, R = src.shape
     assert dst.shape[0] == T and dst.shape[1] == H
     assert dst_col_offset + R <= dst.shape[2]
-    if T == 0:
+    if T == 0 or R == 0:
         return
 
     # The flattening (t, h) -> i = t*H + h must respect each tensor's strides.

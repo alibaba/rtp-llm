@@ -213,6 +213,44 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
     const auto& param = cache_store_inputs;
 
+    auto check_host_tensor = [](const torch::Tensor& tensor,
+                                const char*          name,
+                                torch::ScalarType    dtype,
+                                int64_t              min_numel) {
+        RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "cache-store %s must be defined", name);
+        RTP_LLM_CHECK_WITH_INFO(tensor.device().is_cpu(),
+                                "cache-store %s must be on CPU, got %s",
+                                name,
+                                tensor.device().str().c_str());
+        RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == dtype,
+                                "cache-store %s has unexpected dtype %s",
+                                name,
+                                c10::toString(tensor.scalar_type()));
+        RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "cache-store %s must be contiguous", name);
+        RTP_LLM_CHECK_WITH_INFO(tensor.numel() >= min_numel,
+                                "cache-store %s is too short: numel=%ld required=%ld",
+                                name,
+                                tensor.numel(),
+                                min_numel);
+    };
+
+    check_host_tensor(param.prefix_lengths_host,
+                      "prefix_lengths_host",
+                      torch::kInt32,
+                      static_cast<int64_t>(param.context_batch_size));
+    check_host_tensor(param.input_lengths_host,
+                      "input_lengths_host",
+                      torch::kInt32,
+                      static_cast<int64_t>(param.decoder_batch_size + param.context_batch_size));
+    check_host_tensor(param.request_id,
+                      "request_id",
+                      torch::kInt64,
+                      static_cast<int64_t>(param.context_batch_size));
+    check_host_tensor(param.request_pd_separation,
+                      "request_pd_separation",
+                      torch::kBool,
+                      static_cast<int64_t>(param.context_batch_size));
+
     RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "failed to get host_kv_cache_offset");
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;

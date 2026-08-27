@@ -337,12 +337,11 @@ class IndexerOp(nn.Module):
             return fused
 
         # Fallback: unfused 4-op chain (rope_q + rope_k + had_q + had_k)
-        # Extract position embedding part (exclude rope_head_dim from the end)
-        q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
-        k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
+        q_pe = q[:, :, : self.rope_head_dim]
+        k_pe = k[:, : self.rope_head_dim]
 
         # Apply RoPE (same as vllm indexer rope)
-        if self.cos_sin_cache is not None:
+        if self.rope_head_dim > 0 and self.cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
@@ -396,10 +395,14 @@ class IndexerOp(nn.Module):
             return fused
 
         # Fallback: unfused 4-op chain
-        q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
-        k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
+        q_pe = q[:, :, : self.rope_head_dim]
+        k_pe = k[:, : self.rope_head_dim]
 
-        if self.cos_sin_cache is not None and full_rope_pos_ids is not None:
+        if (
+            self.rope_head_dim > 0
+            and self.cos_sin_cache is not None
+            and full_rope_pos_ids is not None
+        ):
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
@@ -430,10 +433,9 @@ class IndexerOp(nn.Module):
         Returns:
             Rotated key tensor
         """
-        # Extract position embedding part (exclude rope_head_dim from the end)
-        k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
+        k_pe = k[:, : self.rope_head_dim]
 
-        if self.cos_sin_cache is not None:
+        if self.rope_head_dim > 0 and self.cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=k_pe.unsqueeze(1),
                 k=k_pe.unsqueeze(1),
@@ -577,19 +579,20 @@ class IndexerOp(nn.Module):
         Returns:
             (q_fp8, q_scale) same as quant_q_only output.
         """
+        if self.rope_head_dim == 0:
+            return self.quant_q_only(_rotate_activation(q))
+
         from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
             fused_q_rope_quant,
         )
 
-        # RoPE is applied to first (index_head_dim - rope_head_dim) dims
-        actual_rot_dim = self.index_head_dim - self.rope_head_dim
         return fused_q_rope_quant(
             q,
             positions,
             self.cos_sin_cache,
             self.index_n_heads,
             self.index_head_dim,
-            actual_rot_dim,
+            self.rope_head_dim,
             is_neox_style=self.is_neox_style,
         )
 
@@ -612,11 +615,16 @@ class IndexerOp(nn.Module):
                 q_scale: [num_tokens, index_n_heads, 1] float32
                 k_out: [num_tokens, index_head_dim] bf16
         """
+        if self.rope_head_dim == 0:
+            query = _rotate_activation(q)
+            key = _rotate_activation(k)
+            q_fp8, q_scale = self.quant_q_only(query)
+            return q_fp8, q_scale, key
+
         from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
             fused_qk_rope_quant,
         )
 
-        actual_rot_dim = self.index_head_dim - self.rope_head_dim
         return fused_qk_rope_quant(
             q,
             k,
@@ -624,7 +632,7 @@ class IndexerOp(nn.Module):
             self.cos_sin_cache,
             self.index_n_heads,
             self.index_head_dim,
-            actual_rot_dim,
+            self.rope_head_dim,
             is_neox_style=self.is_neox_style,
         )
 

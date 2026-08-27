@@ -411,6 +411,10 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
     EXPECT_EQ(config.linear_group_num, 1);
     ASSERT_EQ(config.cache_specs.size(), 2u);
     EXPECT_LT(config.cache_specs[0]->block_size_bytes(), config.cache_specs[1]->block_size_bytes());
+    EXPECT_EQ(config.kernel_seq_size_per_block, config.seq_size_per_block);
+    ASSERT_EQ(config.group_kv_block_stride_bytes.size(), 2u);
+    EXPECT_EQ(config.group_kv_block_stride_bytes[0], config.cache_specs[0]->block_size_bytes());
+    EXPECT_EQ(config.group_kv_block_stride_bytes[1], config.cache_specs[1]->block_size_bytes());
     EXPECT_EQ(config.group_block_nums.size(), 2u);
     EXPECT_EQ(config.group_region_names,
               std::vector<KVCacheRegionName>({KVCacheRegionName::DEFAULT, KVCacheRegionName::DEFAULT}));

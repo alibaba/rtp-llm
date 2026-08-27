@@ -5,6 +5,23 @@ py_library(
     visibility = ["//visibility:public"]
 )
 
+alias(
+    name = "autotune_cache",
+    actual = "//rtp_llm/models_py/triton_kernels/autotune_cache",
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "kimi_kda",
+    srcs = glob(["kimi_kda/*.py"]),
+    deps = [
+        ":autotune_cache",
+        ":common",
+        ":fla",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "causal_conv1d",
     srcs = glob(["causal_conv1d/*.py"]),
@@ -32,10 +49,12 @@ py_library(
 py_library(
     name = "triton_kernels",
     deps = [
-        ":fla",
+        ":autotune_cache",
         ":causal_conv1d",
-        ":moe",
         ":common",
+        ":fla",
+        ":kimi_kda",
+        ":moe",
         ":sparse_mla",
     ],
     visibility = ["//visibility:public"]

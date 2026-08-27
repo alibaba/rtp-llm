@@ -13,11 +13,31 @@ from rtp_llm.utils.model_weight import W
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
     from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
         fused_logits_head_gate,
     )
 else:
+    CudaFp8GEMMLinear = None  # type: ignore
     fused_logits_head_gate = None  # type: ignore
+
+
+def _project_with_optional_fp8(
+    projection: nn.Module,
+    bf16_input: torch.Tensor,
+    fp8_input: Optional[torch.Tensor],
+    input_scale: Optional[torch.Tensor],
+) -> torch.Tensor:
+    if (
+        fp8_input is not None
+        and input_scale is not None
+        and CudaFp8GEMMLinear is not None
+        and isinstance(projection, CudaFp8GEMMLinear)
+    ):
+        return projection(fp8_input, input_scales=input_scale)
+    return projection(bf16_input)
 
 
 class Indexer(nn.Module):
@@ -186,16 +206,10 @@ class Indexer(nn.Module):
 
         Returns (q_fp8, q_scale).
         """
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
+        q = _project_with_optional_fp8(self.wq_b, q_lora, q_c_fp8, q_c_scale)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
+        k = _project_with_optional_fp8(self.wk, x, x_fp8, x_scale)
         k = self.k_norm(k)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
@@ -217,16 +231,10 @@ class Indexer(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
+        q = _project_with_optional_fp8(self.wq_b, q_lora, q_c_fp8, q_c_scale)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
+        k = _project_with_optional_fp8(self.wk, x, x_fp8, x_scale)
         k = self.k_norm(k)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
@@ -258,16 +266,10 @@ class Indexer(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
+        q = _project_with_optional_fp8(self.wq_b, q_lora, q_c_fp8, q_c_scale)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
+        k = _project_with_optional_fp8(self.wk, x, x_fp8, x_scale)
         k = self.k_norm(k)
 
         if self._prefill_cp_enabled():

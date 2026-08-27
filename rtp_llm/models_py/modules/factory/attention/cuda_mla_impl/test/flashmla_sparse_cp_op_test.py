@@ -290,6 +290,46 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         self.assertNotIn("fused_kv", _GatherWorkspace.__dataclass_fields__)
 
+    def test_bf16_cache_uses_sparse_fwd(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+            SparseMlaFp8CPOp,
+        )
+
+        op = object.__new__(SparseMlaFp8CPOp)
+        op.kv_cache_sharded = False
+        op.kv_lora_rank = 8
+        op.scale = 0.125
+        op._convert_topk_indices_to_global = lambda _topk: torch.zeros(
+            (2, 1, 4), dtype=torch.int32, device=self.device
+        )
+
+        q = torch.empty((2, 4, 8), dtype=torch.bfloat16, device=self.device)
+        topk = torch.empty((2, 4), dtype=torch.int32, device=self.device)
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.empty(
+            (3, 16, 8), dtype=torch.bfloat16, device=self.device
+        )
+        expected = torch.empty_like(q)
+
+        def _sparse_fwd(q_arg, kv_arg, indices_arg, scale_arg, d_v):
+            self.assertIs(q_arg, q)
+            self.assertEqual(tuple(kv_arg.shape), (48, 1, 8))
+            self.assertEqual(tuple(indices_arg.shape), (2, 1, 4))
+            self.assertEqual(scale_arg, op.scale)
+            self.assertEqual(d_v, op.kv_lora_rank)
+            return expected, None, None
+
+        with patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.flash_mla_sparse_fwd",
+            side_effect=_sparse_fwd,
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.flash_mla_with_kvcache"
+        ) as paged_fwd:
+            actual = op._attend_with_kvcache(q, kv_cache, topk, layer_id=0)
+
+        self.assertIs(actual, expected)
+        paged_fwd.assert_not_called()
+
     def test_sharded_empty_q_rank_still_joins_kv_all_gather(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,

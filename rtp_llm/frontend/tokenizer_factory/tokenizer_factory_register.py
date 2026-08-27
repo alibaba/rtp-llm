@@ -110,6 +110,7 @@ def _register_builtin_lazy_tokenizers() -> None:
             "chatglm4",
             "chatglm4v",
             "glm_5",
+            "glm5_next",
         ],
         "rtp_llm.frontend.tokenizer_factory.tokenizers.chatglm_tokenizer",
     )

@@ -93,6 +93,15 @@ def _total_local_ids_are_identity(
     return bool(torch.all(padding_mask_cpu[global_padded] == 1).item())
 
 
+def _reshape_gathered_k_pe(
+    gathered_k_pe: torch.Tensor,
+    gathered_ckv: torch.Tensor,
+) -> torch.Tensor:
+    # Use the gathered compressed-KV row count instead of an inferred -1;
+    # inference is ambiguous when NoPE makes the final dimension zero.
+    return gathered_k_pe.reshape(gathered_ckv.size(0), gathered_k_pe.size(-1))
+
+
 def _copy_or_replace_graph_tensor(
     current: Optional[torch.Tensor],
     new_tensor: Optional[torch.Tensor],
@@ -791,7 +800,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
         gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP, role="mla_kpe")
-        gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
+        gathered_k_pe = _reshape_gathered_k_pe(gathered_k_pe, gathered_ckv)
 
         restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
         restored_k_pe = gathered_k_pe[self.kv_restore_unpad_indices]
@@ -932,9 +941,24 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         topk: torch.Tensor,
         layer_id: int,
     ) -> torch.Tensor:
-        """flash_mla_with_kvcache on FP8 paged cache (CP equivalent of non-CP baseline)."""
+        """Attend from the restored full cache using its native layout."""
         if self.kv_cache_sharded:
             return self._attend_gather(q0, kv_cache, topk)
+
+        if kv_cache.kv_cache_base.dtype != torch.uint8:
+            kv_cache_flat = kv_cache.kv_cache_base.view(
+                -1, 1, kv_cache.kv_cache_base.size(-1)
+            )
+            global_topk = self._convert_topk_indices_to_global(topk)
+            attn_out, _, _ = flash_mla_sparse_fwd(
+                q0,
+                kv_cache_flat,
+                global_topk,
+                self.scale,
+                d_v=self.kv_lora_rank,
+            )
+            return attn_out
+
         kv_cache_flat = _as_uint8(
             kv_cache.kv_cache_base.view(-1, 1, kv_cache.kv_cache_base.size(-1))
         )

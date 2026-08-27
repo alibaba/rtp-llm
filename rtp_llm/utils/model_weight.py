@@ -1185,6 +1185,24 @@ class W:
     linear_attn_alog = "linear_attn.A_log"
     linear_attn_out_w = "linear_attn.out_proj.weight"
     linear_attn_out_s = "linear_attn.out_proj.scale"
+    # KDA (Kimi Delta Attention) linear-attn weights, aligned with main's
+    # kimi_linear naming so a future rebase converges. K3 keeps the same q/k/v
+    # and forget-gate layout as kimi_linear; the output gate differs (see below).
+    linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
+    linear_attn_qkvg_fa_beta_w = "linear_attn.in_proj_qkvg_fa_beta.weight"
+    linear_attn_b_w = "linear_attn.b_proj.weight"
+    linear_attn_f_a_w = "linear_attn.f_a_proj.weight"
+    linear_attn_f_b_w = "linear_attn.f_b_proj.weight"
+    # Reserved for the kimi_linear low-rank output-gate variant so a future
+    # rebase converges. K3's own checkpoint uses the full-rank g_proj below, so
+    # no K3 weight-manifest entry references these two keys today; only the
+    # reference module (KimiDeltaAttentionReference) exercises the low-rank path.
+    linear_attn_g_a_w = "linear_attn.g_a_proj.weight"
+    linear_attn_g_b_w = "linear_attn.g_b_proj.weight"
+    linear_attn_dt_b_kda = "linear_attn.dt_bias_kda"
+    # K3-specific: KDA uses a single full-rank output gate (g_proj) instead of
+    # kimi_linear's low-rank g_a_proj/g_b_proj pair.
+    linear_attn_g_w = "linear_attn.g_proj.weight"
 
     # jina_bert
     q_ln_gamma = "self_attention_weights.q_layernorm.gamma"
