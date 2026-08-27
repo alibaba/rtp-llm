@@ -102,6 +102,7 @@ from .engine_ops import StreamHandle, StreamSnapshot
 from .harness import (
     AssertUtils,
     EnvSpec,
+    build_flexlb_config,
     default_perf,
     http_get_json,
     http_post_json,
@@ -251,66 +252,20 @@ def _all_engines_busy(ops, names: list[str]) -> bool:
 
 def _gate_config(
     queue_timeout_ms: int = 60_000,
-    max_outstanding: int = 5000,
+    max_outstanding: int = 5_000,
     stale_inflight_ms: int = 30_000,
 ) -> str:
-    """Single-document FLEXLB_CONFIG for the gate cases (chaos_cases.
-    chaos_flexlb_config template — verified bootable — with the two
-    admission knobs parameterised)."""
-    return json.dumps(
-        {
-            "schemaVersion": 2,
-            "scheduler": {
-                "type": "QUEUE",
-                "ordering": {"type": "PRIORITY"},
-                "decision": {
-                    "type": "FIXED_WINDOW",
-                    "maxRequests": 32,
-                    "maxCollectionWaitMs": 10,
-                    "maxPredictedExecutionMs": 550,
-                },
-                "capacity": {"maxOutstandingRequestsGlobal": max_outstanding},
-                "lifecycle": {
-                    "staleInflightTimeoutMs": stale_inflight_ms,
-                    "deliveredNotAcceptedTimeoutMs": 30_000,
-                    "maxDeliveredNotAcceptedRequestsGlobal": 200,
-                },
-                "queueTimeoutMs": queue_timeout_ms,
-            },
-            "dispatcher": {
-                "type": "BATCH",
-                "maxInflightBatchesPerPrefillWorker": 4,
-            },
-            "router": {
-                "availabilityHysteresisPercent": 0,
-                "roles": {
-                    "prefill": {
-                        "availability": {"maxPendingRequests": 100000},
-                        "selector": {
-                            "type": "ESTIMATED_TTFT",
-                            "candidateChoice": {
-                                "type": "RANDOM_WITHIN_TOLERANCE",
-                                "relativeTolerance": 0.1,
-                                "minimumToleranceMs": 20,
-                                "outlierRejection": {
-                                    "maxPendingVsAverageMultiplier": 1.5,
-                                    "maxWaitVsAverageMultiplier": 3.0,
-                                },
-                            },
-                        },
-                    },
-                    "decode": {"availability": {"maxEngineRequests": 132}},
-                },
-            },
-            "workerRegistry": {
-                "health": {
-                    "statusPollIntervalMs": 20,
-                    "statusRpcTimeoutMs": 1_000,
-                    "statusStaleAfterMs": 10_000,
-                }
-            },
-        },
-        separators=(",", ":"),
+    """FLEXLB_CONFIG for the gate cases: the legacy chaos axes (QUEUE +
+    PRIORITY + FIXED_WINDOW + BATCH) via the unified
+    harness.build_flexlb_config template, with the admission knobs
+    parameterised."""
+    return build_flexlb_config(
+        ordering="priority",
+        decision="fixed_window",
+        dispatcher="batch",
+        queue_timeout_ms=queue_timeout_ms,
+        max_outstanding=max_outstanding,
+        stale_inflight_ms=stale_inflight_ms,
     )
 
 

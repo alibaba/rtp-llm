@@ -57,7 +57,14 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from .context import CaseContext, CaseDef, rid_base
-from .harness import AssertUtils, EnvSpec, default_perf, http_get_status, wait_for
+from .harness import (
+    AssertUtils,
+    EnvSpec,
+    build_flexlb_config,
+    default_perf,
+    http_get_status,
+    wait_for,
+)
 
 CHAOS_CASES: list[CaseDef] = []
 
@@ -100,64 +107,20 @@ def chaos_flexlb_config(
     max_inflight_batches: int = 4,
     status_rpc_ms: int = 1_000,
 ) -> str:
-    """Strict single-document FLEXLB_CONFIG (flexlb_behavior_test.sh template).
+    """Chaos-environment FLEXLB_CONFIG (QUEUE + PRIORITY + FIXED_WINDOW +
+    BATCH — the legacy chaos axes), generated through the unified
+    harness.build_flexlb_config template.
 
     Shorter staleInflightTimeoutMs (30s vs the na130 default 300s) so the TTL
     cleanup cases finish within their 90s caps.
     """
-    return json.dumps(
-        {
-            "schemaVersion": 2,
-            "scheduler": {
-                "type": "QUEUE",
-                "ordering": {"type": "PRIORITY"},
-                "decision": {
-                    "type": "FIXED_WINDOW",
-                    "maxRequests": 32,
-                    "maxCollectionWaitMs": 10,
-                    "maxPredictedExecutionMs": 550,
-                },
-                "capacity": {"maxOutstandingRequestsGlobal": 5000},
-                "lifecycle": {
-                    "staleInflightTimeoutMs": stale_inflight_ms,
-                    "deliveredNotAcceptedTimeoutMs": 30_000,
-                    "maxDeliveredNotAcceptedRequestsGlobal": 200,
-                },
-            },
-            "dispatcher": {
-                "type": "BATCH",
-                "maxInflightBatchesPerPrefillWorker": max_inflight_batches,
-            },
-            "router": {
-                "availabilityHysteresisPercent": 0,
-                "roles": {
-                    "prefill": {
-                        "availability": {"maxPendingRequests": 100000},
-                        "selector": {
-                            "type": "ESTIMATED_TTFT",
-                            "candidateChoice": {
-                                "type": "RANDOM_WITHIN_TOLERANCE",
-                                "relativeTolerance": 0.1,
-                                "minimumToleranceMs": 20,
-                                "outlierRejection": {
-                                    "maxPendingVsAverageMultiplier": 1.5,
-                                    "maxWaitVsAverageMultiplier": 3.0,
-                                },
-                            },
-                        },
-                    },
-                    "decode": {"availability": {"maxEngineRequests": 132}},
-                },
-            },
-            "workerRegistry": {
-                "health": {
-                    "statusPollIntervalMs": 20,
-                    "statusRpcTimeoutMs": status_rpc_ms,
-                    "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
-                }
-            },
-        },
-        separators=(",", ":"),
+    return build_flexlb_config(
+        ordering="priority",
+        decision="fixed_window",
+        dispatcher="batch",
+        stale_inflight_ms=stale_inflight_ms,
+        max_inflight_batches=max_inflight_batches,
+        status_rpc_ms=status_rpc_ms,
     )
 
 
@@ -188,7 +151,9 @@ def ttl_spec(ctx: CaseContext) -> EnvSpec:
 
 
 def quota_spec(ctx: CaseContext) -> EnvSpec:
-    """Quota-block env (S3): 1P+1D, maxInflightBatches=1 (via env override)."""
+    """Quota-block env (S3): 1P+1D, maxInflightBatches=1 via FLEXLB_CONFIG
+    (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env var
+    FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer)."""
     return EnvSpec(
         label=f"chaos_quota_{ctx.mode}",
         n_prefill=1,
@@ -196,10 +161,7 @@ def quota_spec(ctx: CaseContext) -> EnvSpec:
         perf=default_perf(),
         master_mode=ctx.mode,
         discovery="discovery_file",
-        master_env={
-            "FLEXLB_CONFIG": chaos_flexlb_config(max_inflight_batches=1),
-            "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES": "1",
-        },
+        master_env={"FLEXLB_CONFIG": chaos_flexlb_config(max_inflight_batches=1)},
     )
 
 

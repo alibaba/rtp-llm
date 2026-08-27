@@ -500,20 +500,111 @@ class EnvSpec:
         )
 
 
-MODE_STRATEGY = {
-    "batch": {
-        "LOAD_BALANCE_STRATEGY": "COST_BASED_PREFILL",
-        "DEFAULT_SCHEDULE_MODE": "BATCH",
-    },
-    "direct": {
-        "LOAD_BALANCE_STRATEGY": "SHORTEST_TTFT",
-        "DEFAULT_SCHEDULE_MODE": "DIRECT",
-    },
-    "queue": {
-        "LOAD_BALANCE_STRATEGY": "SHORTEST_TTFT",
-        "DEFAULT_SCHEDULE_MODE": "QUEUE",
-    },
-}
+def build_flexlb_config(
+    *,
+    ordering: str = "fifo",  # fifo | priority
+    decision: str = "fixed_window",  # fixed_window | single
+    dispatcher: str = "batch",  # batch | non_batch
+    # scheduler.decision (FIXED_WINDOW only; ignored for SINGLE)
+    max_requests: int = 32,
+    max_collection_wait_ms: int = 10,
+    max_predicted_execution_ms: int = 550,
+    # scheduler knobs (None → omit the key, keep the Java default)
+    queue_timeout_ms: Optional[int] = None,
+    max_outstanding: int = 5_000,
+    stale_inflight_ms: int = 30_000,
+    delivered_not_accepted_timeout_ms: int = 30_000,
+    max_delivered_not_accepted: int = 200,
+    # dispatcher knobs
+    max_inflight_batches: int = 4,  # BATCH
+    enqueue_rpc_timeout_ms: Optional[int] = None,  # BATCH; None → Java default 5000
+    max_inflight_requests_per_worker: Optional[
+        int
+    ] = None,  # NON_BATCH; None → unlimited
+    # workerRegistry.health
+    status_rpc_ms: int = 1_000,
+) -> str:
+    """Unified strict schema-v2 FLEXLB_CONFIG generator.
+
+    One template for every environment the framework boots: the chaos
+    suites (chaos_cases.chaos_flexlb_config) and the admission-gate cases
+    (injection_gate_cases._gate_config) both delegate here.  The router uses
+    the Java-default FORMULA execution-time estimator (omitted): the online
+    LEARNING estimator only trains from completed EnqueueBatch groups, so a
+    stable prediction cap for FIXED_WINDOW + NON_BATCH requires FORMULA.
+    """
+    if decision == "single":
+        decision_cfg: dict = {"type": "SINGLE"}
+    else:
+        decision_cfg = {
+            "type": "FIXED_WINDOW",
+            "maxRequests": max_requests,
+            "maxCollectionWaitMs": max_collection_wait_ms,
+            "maxPredictedExecutionMs": max_predicted_execution_ms,
+        }
+    if dispatcher == "batch":
+        dispatcher_cfg: dict = {
+            "type": "BATCH",
+            "maxInflightBatchesPerPrefillWorker": max_inflight_batches,
+        }
+        if enqueue_rpc_timeout_ms is not None:
+            dispatcher_cfg["enqueueRpcTimeoutMs"] = enqueue_rpc_timeout_ms
+    else:
+        dispatcher_cfg = {"type": "NON_BATCH"}
+        if max_inflight_requests_per_worker is not None:
+            dispatcher_cfg["maxInflightRequestsPerPrefillWorker"] = (
+                max_inflight_requests_per_worker
+            )
+    scheduler_cfg: dict = {
+        "type": "QUEUE",
+        "ordering": {"type": ordering.upper()},
+        "decision": decision_cfg,
+        "capacity": {"maxOutstandingRequestsGlobal": max_outstanding},
+        "lifecycle": {
+            "staleInflightTimeoutMs": stale_inflight_ms,
+            "deliveredNotAcceptedTimeoutMs": delivered_not_accepted_timeout_ms,
+            "maxDeliveredNotAcceptedRequestsGlobal": max_delivered_not_accepted,
+        },
+    }
+    if queue_timeout_ms is not None:
+        scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
+    return json.dumps(
+        {
+            "schemaVersion": 2,
+            "scheduler": scheduler_cfg,
+            "dispatcher": dispatcher_cfg,
+            "router": {
+                "availabilityHysteresisPercent": 0,
+                "roles": {
+                    "prefill": {
+                        "availability": {"maxPendingRequests": 100000},
+                        "selector": {
+                            "type": "ESTIMATED_TTFT",
+                            "candidateChoice": {
+                                "type": "RANDOM_WITHIN_TOLERANCE",
+                                "relativeTolerance": 0.1,
+                                "minimumToleranceMs": 20,
+                                "outlierRejection": {
+                                    "maxPendingVsAverageMultiplier": 1.5,
+                                    "maxWaitVsAverageMultiplier": 3.0,
+                                },
+                            },
+                        },
+                    },
+                    "decode": {"availability": {"maxEngineRequests": 132}},
+                },
+            },
+            "workerRegistry": {
+                "health": {
+                    "statusPollIntervalMs": 20,
+                    "statusRpcTimeoutMs": status_rpc_ms,
+                    "statusStaleAfterMs": max(10_000, status_rpc_ms * 2),
+                }
+            },
+        },
+        separators=(",", ":"),
+    )
+
 
 _CONFIG_FILE = Path(__file__).resolve().parent / "na130_flexlb_config.json"
 DEFAULT_FLEXLB_CONFIG = (
@@ -522,25 +613,20 @@ DEFAULT_FLEXLB_CONFIG = (
     else json.dumps({"schemaVersion": 2})
 )
 
+# Master env that is actually consumed by the v2 code:
+#   FLEXLB_CONFIG           — ConfigService (strict schema-v2 document)
+#   HIPPO_ROLE              — flexlb-sync (zookeeper elect / LB status)
+#   OTEL_TRACE_SKIP_PATTERN — flexlb-api application.yml (spring tracing)
+#   OTEL_EXPORTER_OTLP_ENDPOINT — OpenTelemetry SDK exporter ("none" disables)
+# Every legacy v1 var previously exported here (DECODE_LOAD_BALANCE_STRATEGY,
+# FLEXLB_BATCH_*, MAX_QUEUE_SIZE, COST_*, STRATEGY_CONFIGS, HYSTERESIS_BIAS_PERCENT,
+# FLEXLB_EXPECT_FETCH_RESPONSE — client-only, see LOAD_CLIENT_ENV_VARS) had zero
+# consumers in the v2 Java modules and was removed; likewise the MODE_STRATEGY
+# map (LOAD_BALANCE_STRATEGY / DEFAULT_SCHEDULE_MODE).
 BASE_MASTER_ENV = {
     "FLEXLB_CONFIG": DEFAULT_FLEXLB_CONFIG,
-    "DECODE_LOAD_BALANCE_STRATEGY": "COST_BASED_DECODE",
-    "DECODE_CONCURRENCY_LIMIT": "132",
-    "FLEXLB_BATCH_ALGORITHM": "fixed_window",
-    "FLEXLB_BATCH_FIXED_WAIT_MS": "10",
-    "FLEXLB_BATCH_PREDICT_THRESHOLD_MS": "550",
-    "FLEXLB_BATCH_SIZE_MAX": "32",
-    "FLEXLB_BATCH_MIN_SIZE": "1",
-    "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES": "4",
-    "HYSTERESIS_BIAS_PERCENT": "0",
-    "MAX_QUEUE_SIZE": "5000",
-    "PREFILL_QUEUE_SIZE_THRESHOLD": "100000",
-    "COST_SLO_MS": "30000",
-    "COST_HOTSPOT_MULTIPLIER": "1.5",
-    "STRATEGY_CONFIGS": "{}",
     "OTEL_TRACE_SKIP_PATTERN": ".*",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
-    "FLEXLB_EXPECT_FETCH_RESPONSE": "true",
 }
 
 
@@ -777,8 +863,6 @@ class EnvManager:
     def _master_env(self, env: FlexEnv) -> dict:
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
-        if spec.master_mode in MODE_STRATEGY:
-            menv.update(MODE_STRATEGY[spec.master_mode])
         menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
         if spec.discovery == "file":
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
