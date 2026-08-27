@@ -28,8 +28,8 @@ def env_default(name: str, fallback: str | None = None) -> str | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Start Kimi K3 Prefill and Decode smoke roles concurrently on two "
-            "SSH hosts, stream both logs, and return a combined exit status."
+            "Start the Kimi K3 Decode smoke role first, wait for readiness, then "
+            "start Prefill on the other SSH host and return a combined exit status."
         )
     )
     parser.add_argument("--prefill-ssh-target", default=env_default("PREFILL_SSH_TARGET"))
@@ -120,6 +120,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=int(env_default("SMOKE_CONTROLLER_TIMEOUT_S", "32400")),
     )
+    parser.add_argument(
+        "--prefill-start-delay-s",
+        type=float,
+        default=float(env_default("SMOKE_PREFILL_START_DELAY_S", "15")),
+        help="start Decode first, then wait this many seconds before checking readiness",
+    )
+    parser.add_argument(
+        "--decode-ready-timeout-s",
+        type=int,
+        default=int(env_default("SMOKE_STARTUP_TIMEOUT_S", "14400")),
+        help="wait at most this many seconds for Decode /health before starting Prefill",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -149,6 +161,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--result-endpoint must have host:port form")
     if args.overall_timeout <= 0:
         parser.error("--overall-timeout must be positive")
+    if args.prefill_start_delay_s < 0:
+        parser.error("--prefill-start-delay-s must be non-negative")
+    if args.decode_ready_timeout_s <= 0:
+        parser.error("--decode-ready-timeout-s must be positive")
     if not args.remote_control_root.startswith("/"):
         parser.error("--remote-control-root must be an absolute path")
     return args
@@ -165,6 +181,9 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_IDENTITY_MAX_TOKENS",
         "SMOKE_SINGLE_EXACT_MAX_TOKENS",
         "SMOKE_MTP_CHUNK_MAX_TOKENS",
+        "SMOKE_RDMA_PREWARM_ATTEMPTS",
+        "SMOKE_RDMA_PREWARM_BACKOFF_S",
+        "SMOKE_RDMA_PREWARM_SETTLE_S",
         "SMOKE_EXPECTED_LAYERS",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",
@@ -447,22 +466,49 @@ def stop_detached_role(args: argparse.Namespace, role: str) -> None:
         pass
 
 
+def wait_for_decode_ready(args: argparse.Namespace) -> None:
+    decode_port = args.decode_endpoint.rsplit(":", 1)[1]
+    deadline = time.monotonic() + args.decode_ready_timeout_s
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            result = run_short_ssh(
+                args,
+                "decode",
+                (
+                    "curl -fsS --max-time 2 "
+                    f"http://127.0.0.1:{decode_port}/health >/dev/null"
+                ),
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last_error = str(exc)
+        else:
+            if result.returncode == 0:
+                print("Decode /health is ready; starting Prefill", flush=True)
+                return
+            last_error = result.stderr.strip() or f"curl rc={result.returncode}"
+        time.sleep(2)
+    raise TimeoutError(
+        "Decode did not become ready before Prefill launch "
+        f"({args.decode_ready_timeout_s}s): {last_error}"
+    )
+
+
 def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
     roles = ("decode", "prefill")
-    launches: dict[str, subprocess.Popen[str]] = {}
+    launch_errors = []
     for role in roles:
         command = build_short_ssh_command(
             args, role, build_detached_remote_command(args, role)
         )
-        launches[role] = subprocess.Popen(
+        process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             start_new_session=True,
         )
-    launch_errors = []
-    for role, process in launches.items():
         try:
             output, _ = process.communicate(timeout=60)
         except subprocess.TimeoutExpired:
@@ -472,6 +518,20 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
             launch_errors.append(
                 f"{role} detached launch rc={process.returncode}: {output.strip()}"
             )
+            break
+        if role == "decode":
+            if args.prefill_start_delay_s:
+                print(
+                    f"Decode launch accepted; waiting {args.prefill_start_delay_s:g}s "
+                    "before readiness check",
+                    flush=True,
+                )
+                time.sleep(args.prefill_start_delay_s)
+            try:
+                wait_for_decode_ready(args)
+            except (OSError, TimeoutError) as exc:
+                launch_errors.append(f"Decode readiness failed: {exc}")
+                break
     if launch_errors:
         for role in roles:
             stop_detached_role(args, role)
@@ -584,7 +644,8 @@ def main() -> int:
     run_dir = args.artifact_root / args.run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     print(
-        f"starting Decode and Prefill concurrently; run_id={args.run_id} "
+        f"starting Decode before Prefill; prefill_start_delay_s="
+        f"{args.prefill_start_delay_s:g}; run_id={args.run_id} "
         f"suite={args.suite} controller_artifacts={run_dir} "
         f"remote_detached={args.remote_detached}"
     )
@@ -597,9 +658,12 @@ def main() -> int:
     started_at = time.monotonic()
     controller_error: BaseException | None = None
     try:
-        # Launch back-to-back without waiting for either model to load. The role
-        # scripts perform model/result-channel readiness handshakes themselves.
+        # HTTP readiness is only the launch-order gate. The Prefill role runs a
+        # batch-sized RDMA prewarm barrier before the formal accuracy suite.
         roles["decode"].start()
+        if args.prefill_start_delay_s:
+            time.sleep(args.prefill_start_delay_s)
+        wait_for_decode_ready(args)
         roles["prefill"].start()
         while True:
             statuses = {role: remote.poll() for role, remote in roles.items()}

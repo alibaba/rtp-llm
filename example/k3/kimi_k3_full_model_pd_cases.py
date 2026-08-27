@@ -51,6 +51,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--identity-max-tokens", type=int, default=256)
     parser.add_argument("--single-exact-max-tokens", type=int, default=128)
     parser.add_argument("--mtp-chunk-max-tokens", type=int, default=128)
+    parser.add_argument(
+        "--rdma-prewarm-attempts",
+        type=int,
+        default=3,
+        help=(
+            "run this many bounded concurrent RDMA prewarm attempts before the "
+            "formal all-suite cases; zero disables prewarm"
+        ),
+    )
+    parser.add_argument("--rdma-prewarm-backoff-s", type=float, default=5.0)
+    parser.add_argument("--rdma-prewarm-settle-s", type=float, default=2.0)
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
     if args.batch_size < 4:
@@ -66,6 +77,11 @@ def parse_args() -> argparse.Namespace:
     ):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
+    if args.rdma_prewarm_attempts < 0:
+        parser.error("--rdma-prewarm-attempts must be non-negative")
+    for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
+        if getattr(args, key) < 0:
+            parser.error(f"--{key.replace('_', '-')} must be non-negative")
     return args
 
 
@@ -121,6 +137,7 @@ class Runner:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.records: list[dict[str, Any]] = []
         self.stages: list[dict[str, Any]] = []
+        self.rdma_prewarm_attempts: list[dict[str, Any]] = []
         self.started_at = time.time()
 
     def save(self, passed: bool, error: str | None = None) -> None:
@@ -136,6 +153,11 @@ class Runner:
             "identity_max_tokens": self.args.identity_max_tokens,
             "single_exact_max_tokens": self.args.single_exact_max_tokens,
             "mtp_chunk_max_tokens": self.args.mtp_chunk_max_tokens,
+            "rdma_prewarm": {
+                "enabled": self.args.rdma_prewarm_attempts > 0,
+                "target_logical_connections_per_rank": self.args.batch_size,
+                "attempts": self.rdma_prewarm_attempts,
+            },
             "elapsed_s": round(time.time() - self.started_at, 3),
             "summary": {
                 "case_count": len(self.records),
@@ -320,16 +342,82 @@ class Runner:
             "output_ids": output_ids,
         }
 
-    def run_stage(self, name: str, cases: list[Case], concurrent: bool = False) -> None:
-        self.health(name)
-        started = time.time()
+    def request_cases(self, cases: list[Case], concurrent: bool) -> list[dict[str, Any]]:
         if concurrent:
             barrier = threading.Barrier(len(cases))
             with ThreadPoolExecutor(max_workers=len(cases)) as pool:
                 futures = [pool.submit(self.request, case, barrier) for case in cases]
-                records = [future.result() for future in futures]
-        else:
-            records = [self.request(case) for case in cases]
+                return [future.result() for future in futures]
+        return [self.request(case) for case in cases]
+
+    def prewarm_rdma_pool(self) -> None:
+        if self.args.rdma_prewarm_attempts == 0:
+            return
+
+        for attempt in range(1, self.args.rdma_prewarm_attempts + 1):
+            self.health(f"rdma_prewarm_{attempt}")
+            cases = [
+                Case(
+                    f"rdma_prewarm_{attempt}_{idx}",
+                    make_cache_prompt(
+                        self.args.namespace,
+                        f"rdma-prewarm-{attempt}-{idx}",
+                        80 + idx,
+                        repeats=8,
+                    ),
+                    numbered_answer_pattern((80 + idx) ** 2),
+                    "miss",
+                    max_tokens=max(self.args.max_tokens, 128),
+                )
+                for idx in range(self.args.batch_size)
+            ]
+            started = time.time()
+            try:
+                records = self.request_cases(cases, concurrent=True)
+            except Exception as exc:
+                elapsed_s = round(time.time() - started, 3)
+                error = f"{type(exc).__name__}: {exc}"
+                self.rdma_prewarm_attempts.append(
+                    {
+                        "attempt": attempt,
+                        "passed": False,
+                        "elapsed_s": elapsed_s,
+                        "error": error,
+                    }
+                )
+                print(
+                    f"rdma_prewarm attempt={attempt} passed=false "
+                    f"elapsed_s={elapsed_s} error={error}"
+                )
+                if attempt == self.args.rdma_prewarm_attempts:
+                    raise SmokeFailure(
+                        f"RDMA prewarm failed after {attempt} attempts: {exc}"
+                    ) from exc
+                time.sleep(self.args.rdma_prewarm_backoff_s * attempt)
+                continue
+
+            elapsed_s = round(time.time() - started, 3)
+            self.rdma_prewarm_attempts.append(
+                {
+                    "attempt": attempt,
+                    "passed": True,
+                    "elapsed_s": elapsed_s,
+                    "case_names": [record["name"] for record in records],
+                    "input_lengths": [record["input_len"] for record in records],
+                }
+            )
+            print(
+                f"rdma_prewarm attempt={attempt} passed=true "
+                f"logical_connections_per_rank={len(records)} elapsed_s={elapsed_s}"
+            )
+            if self.args.rdma_prewarm_settle_s:
+                time.sleep(self.args.rdma_prewarm_settle_s)
+            return
+
+    def run_stage(self, name: str, cases: list[Case], concurrent: bool = False) -> None:
+        self.health(name)
+        started = time.time()
+        records = self.request_cases(cases, concurrent)
         self.records.extend(records)
         self.stages.append(
             {
@@ -359,6 +447,7 @@ class Runner:
         )
 
     def run_all(self) -> None:
+        self.prewarm_rdma_pool()
         self.run_stage(
             "identity_miss",
             [
