@@ -24,6 +24,12 @@ from flexlb_ft.smoke_cases import SMOKE_CASES
 
 ALL_CASES: list[CaseDef] = SMOKE_CASES + CHAOS_CASES
 
+# Task #51 (append-only registration): cross-process injection coverage
+# (chaos suite) + admission gates (smoke suite). See flexlb_ft/injection_gate_cases.py.
+from flexlb_ft.injection_gate_cases import INJECTION_GATE_CASES  # noqa: E402
+
+ALL_CASES = ALL_CASES + INJECTION_GATE_CASES
+
 
 def main():
     parser = argparse.ArgumentParser(description="FlexLB functional test runner")
