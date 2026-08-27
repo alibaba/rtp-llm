@@ -37,6 +37,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],

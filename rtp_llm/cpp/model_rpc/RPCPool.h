@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -63,9 +64,39 @@ public:
         }
     }
 
-    void removeConnection(std::string peer) {
+    absl::StatusOr<Connection<T>> getReadyConnection(std::string peer, std::chrono::milliseconds timeout) {
+        auto connection_status = getConnection(peer);
+        if (!connection_status.ok()) {
+            return connection_status.status();
+        }
+
+        auto connection = connection_status.value();
+        auto begin_time = std::chrono::steady_clock::now();
+        auto state      = connection.channel->GetState(false);
+        if (!connection.channel->WaitForConnected(std::chrono::system_clock::now() + timeout)) {
+            auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin_time)
+                    .count();
+            auto final_state = connection.channel->GetState(false);
+            RTP_LLM_LOG_WARNING(
+                "grpc channel not ready, peer [%s], channel [%p], state [%d], final state [%d], elapsed [%ld]ms",
+                peer.c_str(),
+                static_cast<void*>(connection.channel.get()),
+                static_cast<int>(state),
+                static_cast<int>(final_state),
+                elapsed_ms);
+            removeConnection(peer, connection.channel);
+            return absl::UnavailableError("grpc channel for " + peer + " is not ready");
+        }
+        return connection;
+    }
+
+    void removeConnection(const std::string& peer, const std::shared_ptr<grpc::Channel>& expected_channel) {
         std::lock_guard<std::mutex> guard(mutex_);
-        connection_pool_.erase(peer);
+        auto                        iter = connection_pool_.find(peer);
+        if (iter != connection_pool_.end() && iter->second.channel == expected_channel) {
+            connection_pool_.erase(iter);
+        }
     }
 
     // TODO(xinfei.sxf) add watch for grpc channel state changed to closed

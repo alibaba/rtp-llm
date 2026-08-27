@@ -155,3 +155,14 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "rpc_pool_test",
+    srcs = ["RPCPoolTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

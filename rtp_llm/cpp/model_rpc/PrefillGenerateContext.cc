@@ -128,8 +128,8 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
 }
 
 void PrefillGenerateContext::closeGrpcConnection() {
-    if (!decode_addr.empty()) {
-        resource->rpc_pool.removeConnection(decode_addr);
+    if (!decode_addr.empty() && grpc_connection.channel) {
+        resource->rpc_pool.removeConnection(decode_addr, grpc_connection.channel);
     }
 }
 
@@ -187,11 +187,9 @@ bool PrefillGenerateContext::isPriorityPreempted() const {
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
     std::lock_guard<std::mutex> lock(terminal_transition_mu_);
-    auto expected = PrefillTerminalCause::ACTIVE;
-    if (terminal_cause_.compare_exchange_strong(expected,
-                                                PrefillTerminalCause::OTHER,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+    auto                        expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(
+            expected, PrefillTerminalCause::OTHER, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return true;
     }
     return expected == PrefillTerminalCause::OTHER;
@@ -234,9 +232,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
-    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
-                                error_info.ToString(),
-                                serialized_details);
+    error_status =
+        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
 
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
@@ -258,9 +255,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     }
 
     if (meta) {
-        meta->markPriorityPreemptionCanceled(request_id,
-                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request");
+        meta->markPriorityPreemptionCanceled(
+            request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "preempted by a higher-priority request");
     }
     priority_finalized_ = true;
     return true;
@@ -309,8 +305,7 @@ void PrefillGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request =
-        loading_cache_requests ? static_cast<int64_t>(loading_cache_requests->load()) : 0;
+    collector.loading_cache_request = loading_cache_requests ? static_cast<int64_t>(loading_cache_requests->load()) : 0;
     collector.get_rpc_connection_rt_us              = stat_info.get_rpc_connection_rt_us;
     collector.remote_allocate_resource_rt_us        = stat_info.remote_allocate_resource_rt_us;
     collector.multimodal_process_rt_us              = stat_info.multimodal_process_rt_us;

@@ -27,6 +27,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr auto kDecodeChannelReadyTimeout = std::chrono::seconds(15);
+
 bool envValueIsTrue(const char* value) {
     return value != nullptr
            && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
@@ -246,10 +248,11 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         return;
     }
     auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
-    auto connect_status = resource_.rpc_pool.getConnection(decode_addr);
+    auto connect_status = resource_.rpc_pool.getReadyConnection(decode_addr, kDecodeChannelReadyTimeout);
     if (!connect_status.ok()) {
         prefill_context.error_info = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
-                                               "get grpc connection for decode addr " + decode_addr + " failed");
+                                               "get ready grpc connection for decode addr " + decode_addr
+                                                   + " failed: " + connect_status.status().ToString());
         prefill_context.error_status =
             serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
         prefill_context.decode_addr = decode_addr;
