@@ -618,6 +618,33 @@ class DeepSeekV4Model(GptModelBase):
         self._is_decode_role = bool(init_resource.is_decode_role)
         self._max_context_batch_size = init_resource.max_context_batch_size
         self._v4_args.is_decode_role = self._is_decode_role
+
+        # CP repurposes the physical TP group for sequence parallelism, so
+        # ``V4Args.tp_size`` is the attention-facing size (1 under CP) while
+        # DSV4 MoE still needs the physical group topology.  Thread that
+        # topology separately to the routed-MoE strategy.
+        physical_tp_size = int(getattr(self.parallelism_config, "tp_size", 1) or 1)
+        physical_tp_rank = int(getattr(self.parallelism_config, "tp_rank", 0) or 0)
+        cp_config = getattr(self.parallelism_config, "prefill_cp_config", None)
+        try:
+            cp_enabled = bool(
+                cp_config is not None
+                and cp_config.is_enabled()
+                and not self._is_decode_role
+            )
+        except Exception:
+            cp_enabled = False
+        self._v4_args.moe_tp_size = physical_tp_size
+        self._v4_args.moe_tp_rank = physical_tp_rank
+        self._v4_args.moe_cp_enabled = cp_enabled
+        self._v4_args.moe_cp_size = physical_tp_size if cp_enabled else 1
+        logging.info(
+            "[DeepSeekV4Model] MoE physical topology: tp=%d rank=%d cp_enabled=%s cp_size=%d",
+            self._v4_args.moe_tp_size,
+            self._v4_args.moe_tp_rank,
+            self._v4_args.moe_cp_enabled,
+            self._v4_args.moe_cp_size,
+        )
         runtime_resolved_max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
             max_seq_len=int(self._v4_args.max_seq_len),
             current_max_tokens_per_rank=int(self._v4_args.max_tokens_per_rank),

@@ -73,6 +73,10 @@ class Block(nn.Module):
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         fp8_kv_cache: bool = False,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        cp_size: int = 1,
+        cp_enabled: bool = False,
     ):
         super().__init__()
         self.layer_id = layer_id
@@ -125,6 +129,10 @@ class Block(nn.Module):
             tp_size=tp_size,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            cp_size=cp_size,
+            cp_enabled=cp_enabled,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

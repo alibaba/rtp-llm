@@ -164,6 +164,10 @@ class MoE(nn.Module):
         is_decode_role: bool = False,
         strategy: Optional[str] = None,
         tp_size: int = 1,
+        moe_tp_size: int = 1,
+        moe_tp_rank: int = 0,
+        cp_size: int = 1,
+        cp_enabled: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -224,6 +228,10 @@ class MoE(nn.Module):
             local_expert_end=self.local_expert_end,
             max_tokens_per_rank=max_tokens_per_rank,
             tp_size=tp_size,
+            moe_tp_size=moe_tp_size,
+            moe_tp_rank=moe_tp_rank,
+            cp_size=cp_size,
+            cp_enabled=cp_enabled,
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)

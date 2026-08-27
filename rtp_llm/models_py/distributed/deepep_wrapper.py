@@ -70,7 +70,7 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.utils.arch import is_sm10x
+from rtp_llm.models_py.utils.arch import is_sm10x, is_sm12x
 from rtp_llm.ops import SpeculativeType
 
 __all__ = [
@@ -307,6 +307,14 @@ class DeepEPWrapper:
         Returns:
             True if DeepEP is supported, False otherwise
         """
+        # The CUDA 13 lock now contains a DeepEP wheel, but that wheel does
+        # not contain SM120-compatible device code.  Importing it succeeds and
+        # would otherwise make startup attempt buffer initialization, which
+        # fails later with "PTX was compiled with an unsupported toolchain".
+        # DSV4 has a dedicated SM120 collective EP fallback, so keep DeepEP
+        # disabled on SM12x until a compatible wheel is shipped.
+        if is_sm12x():
+            return False
         try:
             import deep_ep
 

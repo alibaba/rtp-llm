@@ -208,6 +208,16 @@ py_test(
 )
 
 py_test(
+    name = "test_moe_communication",
+    srcs = ["test_moe_communication.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_indexer_topk_backend",
     srcs = ["test_indexer_topk_backend.py"],
     deps = [

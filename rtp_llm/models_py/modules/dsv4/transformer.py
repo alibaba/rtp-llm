@@ -87,6 +87,13 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # Physical topology used by the routed MoE.  Under prefill CP the
+    # attention-facing ``tp_size`` above is deliberately set to 1, while the
+    # MoE still needs to address the physical TP/CP group.
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    moe_cp_size: int = 1
+    moe_cp_enabled: bool = False
     is_decode_role: bool = False
     # KV-cache dtype switch.  True selects ``AttentionFP8`` (paged 584B
     # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
@@ -150,6 +157,10 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
+        moe_tp_size=args.moe_tp_size,
+        moe_tp_rank=args.moe_tp_rank,
+        cp_size=args.moe_cp_size,
+        cp_enabled=args.moe_cp_enabled,
         fp8_kv_cache=args.fp8_kv_cache,
     )
 
