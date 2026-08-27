@@ -396,8 +396,22 @@ public final class JavaLoadClient {
         String newSourceRid = req.sourceRid + loopSuffix;
         String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
         long newRequestId = stableRequestId(newSourceRid);
+        // REPLAY_UNIQUE_PREFIX (default on): without re-salting, every loop
+        // round presents byte-identical block_cache_keys, so cache affinity
+        // routes each rid to the SAME prefill engine round after round and
+        // the P-side load collapses onto a handful of engines (Gini ~0.56).
+        // Re-salting only keys[0] keeps the shared suffix blocks (cross-
+        // request prefix reuse) while giving every round a unique routing
+        // prefix. The source list is shared across rounds, so it is copied
+        // here and never mutated in place.
+        List<Long> blockKeys = req.blockKeys;
+        if (config.replayUniquePrefix && !blockKeys.isEmpty()) {
+            List<Long> salted = new ArrayList<>(blockKeys);
+            salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
+            blockKeys = salted;
+        }
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
-                req.inputLen, req.outputLen, req.blockKeys, req.tokenIds, req.priority);
+                req.inputLen, req.outputLen, blockKeys, req.tokenIds, req.priority);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
@@ -1028,6 +1042,17 @@ public final class JavaLoadClient {
         return Hashing.murmur3_128()
                 .hashString(value, StandardCharsets.UTF_8)
                 .asLong() & 0x7FFF_FFFF_FFFF_FFFFL;
+    }
+
+    // Package-visible for loop-mode unique-prefix assertions in tests.
+    // Deterministic per-round salt: the same (key, loop) pair always maps to
+    // the same value, different loops map to different values.
+    static long roundSaltedKey(long blockKey, int loopIdx) {
+        return Hashing.murmur3_128().newHasher()
+                .putLong(blockKey)
+                .putInt(loopIdx)
+                .hash()
+                .asLong();
     }
 
     private static long toSignedInt64(BigInteger value) {
@@ -1722,6 +1747,11 @@ public final class JavaLoadClient {
         final String sendMode;
         /** Total target QPS across all shards; required > 0 in uniform mode. */
         final double sendModeQps;
+        /**
+         * REPLAY_UNIQUE_PREFIX: re-salt blockKeys[0] per loop round so every
+         * replay round presents a fresh cache-affinity prefix (default on).
+         */
+        final boolean replayUniquePrefix;
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
@@ -1740,7 +1770,8 @@ public final class JavaLoadClient {
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
                     skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0);
+                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0,
+                    true);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
@@ -1762,7 +1793,7 @@ public final class JavaLoadClient {
                     skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    0, "replay", 0.0);
+                    0, "replay", 0.0, true);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
@@ -1776,7 +1807,8 @@ public final class JavaLoadClient {
                boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority, int forcePriority, String sendMode, double sendModeQps) {
+               int priority, int forcePriority, String sendMode, double sendModeQps,
+               boolean replayUniquePrefix) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -1814,6 +1846,7 @@ public final class JavaLoadClient {
             this.forcePriority = forcePriority;
             this.sendMode = sendMode;
             this.sendModeQps = sendModeQps;
+            this.replayUniquePrefix = replayUniquePrefix;
             if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
                 throw new IllegalArgumentException(
                         "SEND_MODE must be 'replay' or 'uniform', got '" + sendMode + "'");
@@ -1880,7 +1913,8 @@ public final class JavaLoadClient {
                     envInt("PRIORITY", 0),
                     envInt("FORCE_PRIORITY", 0),
                     env("SEND_MODE", "replay"),
-                    envDouble("SEND_MODE_QPS", 0.0)
+                    envDouble("SEND_MODE_QPS", 0.0),
+                    envBool("REPLAY_UNIQUE_PREFIX", true)
             );
         }
 
@@ -1922,6 +1956,7 @@ public final class JavaLoadClient {
             System.out.println("  FORCE_PRIORITY=" + forcePriority);
             System.out.println("  SEND_MODE=" + sendMode);
             System.out.println("  SEND_MODE_QPS=" + sendModeQps);
+            System.out.println("  REPLAY_UNIQUE_PREFIX=" + replayUniquePrefix);
             System.out.println("=====================================");
         }
 

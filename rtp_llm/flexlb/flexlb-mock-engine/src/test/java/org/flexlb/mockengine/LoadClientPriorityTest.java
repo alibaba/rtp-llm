@@ -111,7 +111,7 @@ class LoadClientPriorityTest {
                 120_000L, 500.0, "skip", false, false, 1, 1, 0L, 120, true,
                 "engine_service", "", false,
                 false, 10, 1000, 0, 0, "", false, "", true,
-                40, 50, "replay", 0.0);
+                40, 50, "replay", 0.0, true);
         JavaLoadClient client = new JavaLoadClient(config);
 
         ObjectNode withField = MAPPER.createObjectNode()
