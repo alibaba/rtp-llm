@@ -500,6 +500,58 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void calibrateZeroBatchIdRemovesSingleMemberRealBatch() {
+        // An engine built on proto3 reports the unset batch_id default 0.
+        // It must settle through request-id reconciliation exactly like the
+        // -1 priority-cancel sentinel instead of leaking the batch slot into
+        // the phantom finishedByBatch[0] bucket until TTL eviction.
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 700L, 100, List.of(createBatchItem(101L, 500, 200)));
+
+        calibrate(Map.of("101", priorityCanceledTask(101L, 0L)), Map.of());
+
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
+    void calibrateZeroBatchIdRepacksOnlyMatchingMember() {
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 700L, 100, List.of(
+                createBatchItem(101L, 500, 200),
+                createBatchItem(102L, 300, 100)));
+
+        calibrate(Map.of("101", priorityCanceledTask(101L, 0L)), Map.of());
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount(),
+                "zero batch id must retire only the matching member");
+
+        TaskInfo survivingSuccess = new TaskInfo();
+        survivingSuccess.setRequestId(102L);
+        survivingSuccess.setBatchId(700L);
+        survivingSuccess.setErrorCode(0);
+        calibrate(Map.of("102", survivingSuccess), Map.of());
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "the surviving member must remain associated with the original batch");
+    }
+
+    @Test
+    void calibrateZeroBatchIdWithoutOwnerBatchIsNoOp() {
+        BatchItem item = createBatchItem(1L, 500, 200);
+        TestCapacityAdmission.registerQueueBatchLifecycle(endpoint, 1L, 100, List.of(item));
+
+        Map<String, TaskInfo> finished = new HashMap<>();
+        TaskInfo orphanTask = new TaskInfo();
+        orphanTask.setRequestId(999L); // non-colliding: no live batch owns it
+        orphanTask.setBatchId(0);
+        orphanTask.setErrorCode(0);
+        finished.put("999", orphanTask);
+
+        // should not throw, just log a warning for missing non-batch inflight
+        calibrate(finished, Map.of());
+        assertEquals(1, endpoint.getInflightBatchCount());
+    }
+
+    @Test
     void directRequestIdMatchingQueueBatchIdDoesNotOverwriteEitherLifecycle() {
         // DIRECT request 101 and QUEUE batch 101 live in different ledgers.
         // Completing the DIRECT request must not erase QUEUE member 201.

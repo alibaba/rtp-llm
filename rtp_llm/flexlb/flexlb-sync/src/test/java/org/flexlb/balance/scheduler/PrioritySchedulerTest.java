@@ -2350,6 +2350,66 @@ class PrioritySchedulerTest {
                 "a retry scheduled before typed CANCELED must become a no-op");
     }
 
+    @Test
+    void uncertainBatchDelivery_zeroBatchIdTypedCanceledIsStaleForBatchEnqueueClaim()
+            throws Exception {
+        // Locks the generation-mismatch branch for a BATCH_ENQUEUE claim (the
+        // existing fence tests use ROUTE_DECISION items, which bypass the
+        // task-vs-entry batchId comparison entirely). An engine whose proto3
+        // message never set batch_id reports 0, which can never match the
+        // positive Snowflake id in the entry snapshot: the typed CANCELED
+        // terminal must be discarded as stale and left to the bounded
+        // cancel-retry/quarantine chain instead of settling immediately.
+        AtomicInteger cancelCalls = new AtomicInteger();
+        CountDownLatch reconciliationStarted = new CountDownLatch(1);
+        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenAnswer(inv -> {
+            cancelCalls.incrementAndGet();
+            reconciliationStarted.countDown();
+            return CompletableFuture.completedFuture(
+                    EngineCancelChannel.CancelOutcome.accepted());
+        });
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
+                });
+
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        BatchItem item = reconciliationItem(310, endpoint);
+        assertTrue(scheduler.registerInflight(item));
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
+        long deadline = System.currentTimeMillis() + 1_000;
+        while (sentBatches.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(1);
+        }
+        long batchId = sentBatches.getLast().getBatchId();
+        assertTrue(reconciliationStarted.await(1, TimeUnit.SECONDS),
+                "the uncertain EnqueueBatch callback must install its resource fence first");
+        assertEquals(DeliveryClaimKind.BATCH_ENQUEUE,
+                scheduler.getRequestState(310, batchId).deliveryClaimKind(),
+                "the mismatch branch under test is only reachable from a batch-enqueue claim");
+
+        scheduler.onWorkerStatusUpdate(prefillFinished(
+                310, 0, 8429, PriorityPreemptionProgress.CANCELED));
+        assertFalse(item.future().isDone(),
+                "a zero batch_id typed CANCELED is a stale generation and must not settle");
+        assertEquals(1, scheduler.getInflightSize());
+        assertEquals(1, endpoint.getInflightBatchCount());
+
+        scheduler.onWorkerStatusUpdate(prefillFinished(
+                310, batchId, 8429, PriorityPreemptionProgress.CANCELED));
+        Response response = item.future().get(1, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, endpoint.getInflightBatchCount());
+
+        int callsAtTerminal = cancelCalls.get();
+        Thread.sleep(250);
+        assertEquals(callsAtTerminal, cancelCalls.get(),
+                "a retry scheduled before typed CANCELED must become a no-op");
+    }
+
     // ==================== P0-3: close/delivery race (PR-D) ====================
 
     @Test

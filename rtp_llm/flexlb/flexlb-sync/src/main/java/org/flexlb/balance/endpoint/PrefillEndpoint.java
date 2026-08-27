@@ -853,7 +853,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 }
                 FinishedObservation observation = FinishedObservation.from(task);
                 long batchId = task.getBatchId();
-                if (batchId < 0) {
+                if (batchId <= 0) {
+                    // proto3 serializes an unset batch_id as 0 while the
+                    // priority-cancel terminal contract uses the -1 sentinel.
+                    // Neither is a usable ledger key: routing both through
+                    // request-id reconciliation prevents a phantom
+                    // finishedByBatch[0] bucket from leaking the owning batch
+                    // slot until TTL eviction.
+                    logger.warn("Prefill calibrate: finished task reported non-positive "
+                                    + "batchId={} reqId={}; reconciling without batch id",
+                            batchId, observation.requestId());
                     reconcileFinishedWithoutBatchId(observation, statusMs);
                     continue;
                 }
@@ -885,8 +894,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     activeRequestsOutsideRequestLedger.add(task.getRequestId());
                 }
                 long batchId = task.getBatchId();
-                if (batchId >= 0) {
+                if (batchId > 0) {
                     activeByBatch.computeIfAbsent(batchId, ignored -> new ArrayList<>()).add(task);
+                } else {
+                    // Symmetric with finished settlement: a proto3-unset 0 and
+                    // the -1 cancel sentinel carry no batch key, so the running
+                    // observation cannot anchor batch progress. The request is
+                    // still classified as engine-active above.
+                    logger.warn("Prefill calibrate: running task reported non-positive "
+                                    + "batchId={} reqId={}; skipping batch progress anchoring",
+                            batchId, task.getRequestId());
                 }
             }
         }
@@ -1066,11 +1083,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * <p>Individually delivered requests were already reconciled through the
      * request ledger. Production priority-cancel terminals may report
      * {@code batch_id=-1} even though the Master committed the request as a member
-     * of a real batch. In that case scan the live ledger for the unique owning
-     * batch and remove only the matching member. The member is revalidated inside
-     * the map compute, so a concurrent release/repack/TTL eviction is an idempotent
-     * no-op rather than a counter double-decrement. No reverse index is retained,
-     * keeping every existing ledger mutation path consistent automatically.
+     * of a real batch, and a proto3 Engine that never set the field reports the
+     * unset default {@code 0}. In both cases scan the live ledger for the unique
+     * owning batch and remove only the matching member; the reconciliation is
+     * driven purely by request id and is independent of the reported id value.
+     * The member is revalidated inside the map compute, so a concurrent
+     * release/repack/TTL eviction is an idempotent no-op rather than a counter
+     * double-decrement. No reverse index is retained, keeping every existing
+     * ledger mutation path consistent automatically.
      */
     private void reconcileFinishedWithoutBatchId(FinishedObservation observation, long statusMs) {
         long requestId = observation.requestId();

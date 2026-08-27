@@ -328,6 +328,47 @@ class ExternalFutureCancellationTest {
     }
 
     @Test
+    void acceptedCancelDiscardsZeroBatchIdPrefillTerminalUntilGenerationMatches()
+            throws Exception {
+        // Locks the generation-mismatch branch of the accepted-cancellation
+        // reducer for a BATCH_ENQUEUE claim: an engine whose proto3 message
+        // never set batch_id reports 0, which can never match the positive
+        // Snowflake id in the entry snapshot. The typed CANCELED terminal must
+        // be discarded as stale (left to the cancel-retry/quarantine chain)
+        // instead of settling the accepted cancellation early.
+        long requestId = 10_145L;
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
+        deliverAdmitted(List.of(item), new DecisionGroupMetadata("test", 0));
+        long batchId = batchDispatcher.batchId;
+        assertEquals(DeliveryClaimKind.BATCH_ENQUEUE,
+                scheduler.getRequestState(requestId, batchId).deliveryClaimKind(),
+                "the generation-mismatch branch under test requires a batch-enqueue claim");
+
+        RequestLifecycleSnapshot pending = scheduler.cancelRequest(
+                requestId, batchId, CancelReason.CLIENT_CANCELLED);
+        assertEquals(RequestLifecycleState.CANCEL_REQUESTED, pending.state());
+        verify(cancelChannel).cancel(any(), eq(requestId), anyLong());
+        cancelResult.complete(EngineCancelChannel.CancelOutcome.accepted());
+
+        scheduler.onWorkerStatusUpdate(prefillTypedCanceled(requestId, 0));
+        assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
+                scheduler.getRequestState(requestId, batchId).state(),
+                "a zero batch_id terminal must be discarded as a stale generation");
+        assertEquals(1, scheduler.getInflightSize());
+        assertEquals(1, prefillEndpoint.getInflightBatchCount(),
+                "the stale terminal must not release the protected batch member");
+        assertTrue(decodeEndpoint.reservedView().containsKey(requestId));
+
+        scheduler.onWorkerStatusUpdate(prefillTypedCanceled(requestId, batchId));
+        assertEquals(8504, item.future().get(1, TimeUnit.SECONDS).getCode());
+        assertEquals(RequestLifecycleState.CANCELLED,
+                scheduler.getRequestState(requestId, batchId).state());
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, prefillEndpoint.getInflightBatchCount());
+        assertFalse(decodeEndpoint.reservedView().containsKey(requestId));
+    }
+
+    @Test
     void batchCancelDoesNotClaimAcceptanceWhenSettlementWinsProtectionRace()
             throws Exception {
         long requestId = 10_109L;
@@ -1018,6 +1059,20 @@ class ExternalFutureCancellationTest {
         task.setRequestId(requestId);
         task.setBatchId(batchId);
         task.setErrorCode(errorCode);
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setFinishedTaskInfo(Map.of(Long.toString(requestId), task));
+        response.setRunningTaskInfo(Map.of());
+        return response;
+    }
+
+    private static WorkerStatusResponse prefillTypedCanceled(long requestId, long batchId) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setBatchId(batchId);
+        task.setErrorCode(8429);
+        task.setPriorityPreemptionProgress(
+                org.flexlb.enums.PriorityPreemptionProgress.CANCELED);
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(Map.of(Long.toString(requestId), task));
