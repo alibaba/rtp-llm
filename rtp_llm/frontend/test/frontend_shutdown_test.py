@@ -58,12 +58,13 @@ class HangingFrontendServer(FakeFrontendServer):
 
 
 class FakeGrpcClient:
-    def __init__(self):
+    def __init__(self, response=None):
         self.calls = []
+        self.response = response or {"status": "ok"}
 
     async def post_request(self, endpoint, payload):
         self.calls.append((endpoint, payload))
-        return {"status": "ok"}
+        return self.response
 
 
 class FrontendShutdownManagerTest(unittest.TestCase):
@@ -153,6 +154,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("get", "/worker_status", None),
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
+            ("post", "/dump_torch_allocator", {}),
             ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
@@ -186,6 +188,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             ("get", "/worker_status", None),
             ("post", "/set_log_level", {"log_level": "DEBUG"}),
             ("post", "/start_profile", {}),
+            ("post", "/dump_torch_allocator", {}),
             ("post", "/update_eplb_config", {"mode": "NONE"}),
             ("post", "/update_scheduler_info", {}),
             ("post", "/tokenizer/encode", {"prompt": "hello"}),
@@ -200,6 +203,39 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             self.assertEqual(response.headers.get("retry-after"), "1", path)
 
         self.assertEqual(app_owner.grpc_client.calls, [])
+
+    def test_dump_torch_allocator_forwards_to_backend(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = FakeGrpcClient()
+
+        response = TestClient(app_owner.create_app()).post(
+            "/dump_torch_allocator", json={}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+        self.assertEqual(app_owner.grpc_client.calls, [("dump_torch_allocator", {})])
+
+    def test_dump_torch_allocator_returns_backend_failure(self):
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = FakeGrpcClient(
+            {"status": "error", "backends": [], "errors": ["dump failed"]}
+        )
+
+        response = TestClient(app_owner.create_app()).post(
+            "/dump_torch_allocator", json={}
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["errors"], ["dump failed"])
 
     def test_streaming_request_is_counted_until_body_iterator_finishes(self):
         manager = FrontendShutdownManager()

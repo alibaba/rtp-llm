@@ -606,7 +606,8 @@ absl::Status NormalEngine::step() {
         return status;
     } catch (const std::exception& exception) {
         if (isTorchCudaOom(exception)) {
-            dumpTorchCudaOomDiagnostics("normal_engine_step", exception);
+            RTP_LLM_LOG_ERROR("[Torch CUDA OOM] engine step failed due to CUDA OOM: %s", exception.what());
+            dumpTorchCudaOomDiagnostics(parallelism_config.local_rank);
         }
         throw;  // Preserve the original c10 exception object and its creation-site backtrace.
     }

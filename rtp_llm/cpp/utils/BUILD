@@ -50,7 +50,13 @@ cc_library(
     srcs = ["TorchCudaOom.cc"],
     deps = [
         ":core_utils",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     visibility = ["//visibility:public"],
 )

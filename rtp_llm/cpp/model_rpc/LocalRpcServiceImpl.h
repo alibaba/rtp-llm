@@ -100,6 +100,18 @@ public:
         return local_server_->StartProfileInternal(context, request, response);
     }
 
+    ::grpc::Status DumpTorchAllocator(::grpc::ServerContext*        context,
+                                      const EmptyPB*                request,
+                                      TorchAllocatorDumpResponsePB* response) override {
+        return local_server_->DumpTorchAllocator(context, request, response);
+    }
+
+    ::grpc::Status DumpTorchAllocatorInternal(::grpc::ServerContext*      context,
+                                              const EmptyPB*              request,
+                                              TorchAllocatorDumpResultPB* response) override {
+        return local_server_->DumpTorchAllocatorInternal(context, request, response);
+    }
+
     ::grpc::Status
     CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
         return local_server_->CheckHealth(context, request, response);

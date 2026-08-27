@@ -171,6 +171,54 @@ class GrpcClientWrapper:
             logging.error(f"Start profile failed: {e}")
             return {"error": f"Failed to start profile: {str(e)}"}
 
+    async def dump_torch_allocator(self) -> Dict[str, Any]:
+        """Trigger one allocator dump in every backend process across DP/TP."""
+
+        async def send_to_address(address: str):
+            await self._ensure_dp_connection(address)
+            return await self._dp_stubs[address].DumpTorchAllocator(
+                pb2.EmptyPB(), timeout=90
+            )
+
+        addresses = self.dp_addresses
+        responses = await asyncio.gather(
+            *(send_to_address(address) for address in addresses),
+            return_exceptions=True,
+        )
+
+        backends = []
+        errors = []
+        for address, response in zip(addresses, responses):
+            if isinstance(response, Exception):
+                errors.append(f"{address}: {response}")
+                continue
+            if not response.results:
+                errors.append(f"{address}: backend returned no allocator dump results")
+                continue
+            for result in response.results:
+                result_dict = {
+                    "world_rank": result.world_rank,
+                    "dp_rank": result.dp_rank,
+                    "tp_rank": result.tp_rank,
+                    "local_rank": result.local_rank,
+                    "pid": result.pid,
+                    "success": result.success,
+                    "file_path": result.file_path,
+                    "error": result.error,
+                    "dp_address": address,
+                }
+                backends.append(result_dict)
+                if not result.success:
+                    errors.append(
+                        f"{address}/world_rank={result.world_rank}: {result.error}"
+                    )
+
+        return {
+            "status": "ok" if not errors else "error",
+            "backends": backends,
+            "errors": errors,
+        }
+
     async def update_eplb_config(self, req: Any) -> Dict[str, Any]:
         """Update EPLB config - this would need to be implemented based on your requirements"""
         try:
@@ -234,6 +282,8 @@ class GrpcClientWrapper:
                 return await self.set_log_level(req)
             elif uri == "start_profile":
                 return await self.start_profile(req)
+            elif uri == "dump_torch_allocator":
+                return await self.dump_torch_allocator()
             elif uri == "update_eplb_config":
                 return await self.update_eplb_config(req)
             elif uri == "update_scheduler_info":

@@ -21,8 +21,9 @@ import torch
 
 _LOG = logging.getLogger(__name__)
 _lock = threading.Lock()
+_dump_lock = threading.Lock()
 _installed = False
-_oom_fired = False
+_dump_counter = 0
 
 _RECORD_ENV = "RTP_OOM_RECORD"
 _LOG_DIR_ENV = "LOG_PATH"
@@ -50,12 +51,10 @@ def _out_dir() -> Path:
     return path
 
 
-def _suffix(tag: str, device: int) -> str:
+def _suffix(device: int, dump_id: int) -> str:
     world_rank = os.environ.get("WORLD_RANK", os.environ.get("RANK", "0"))
     server_id = os.environ.get("FRONTEND_SERVER_ID", "0")
-    return (
-        f"{tag}_r{world_rank}_s{server_id}_d{device}_pid{os.getpid()}_t{time.time_ns()}"
-    )
+    return f"r{world_rank}_s{server_id}_d{device}_pid{os.getpid()}_n{dump_id:06d}"
 
 
 def _human_bytes(value: Optional[int]) -> str:
@@ -182,7 +181,7 @@ def _write_allocator_blocks(output: TextIO, snapshot: Dict[str, Any]) -> None:
 
 
 def install_oom_dump() -> None:
-    """Optionally record allocation history and attach the Torch OOM observer."""
+    """Optionally enable allocation history once for later diagnostics."""
     if not _enabled():
         return
 
@@ -196,7 +195,6 @@ def install_oom_dump() -> None:
             stacks="all",
             max_entries=_MAX_TRACE_ENTRIES,
         )
-        torch._C._cuda_attach_out_of_memory_observer(_oom_observer)  # type: ignore[attr-defined]
         _installed = True
 
     _LOG.info(
@@ -208,44 +206,72 @@ def install_oom_dump() -> None:
 
 
 def dump_oom_diagnostics(
-    tag: str = "oom",
     device: Optional[int] = None,
     alloc_size: int = 0,
     device_total: Optional[int] = None,
     device_free: Optional[int] = None,
     exception: Optional[str] = None,
     cpp_backtrace: Optional[str] = None,
-) -> None:
-    """Write allocator state once without masking the OOM being diagnosed."""
-    global _oom_fired
-    with _lock:
-        if _oom_fired:
-            return
-        _oom_fired = True
+) -> Optional[str]:
+    """Write allocator state without letting diagnostic failures escape."""
+    global _dump_counter
+    _dump_lock.acquire()
+    dump_id = _dump_counter
+    _dump_counter += 1
 
     try:
         if device is None:
             device = torch.cuda.current_device()
 
-        if device_total is None or device_free is None:
+        devices = list(range(torch.cuda.device_count()))
+        if device not in devices:
+            devices.append(device)
+
+        memory_by_device: Dict[int, tuple[Optional[int], Optional[int]]] = {}
+        stats_by_device: Dict[int, Dict[str, Any]] = {}
+        summary_by_device: Dict[int, str] = {}
+        for current_device in devices:
+            current_free = device_free if current_device == device else None
+            current_total = device_total if current_device == device else None
             try:
-                current_free, current_total = torch.cuda.mem_get_info(device)
-                device_free = current_free if device_free is None else device_free
-                device_total = current_total if device_total is None else device_total
+                queried_free, queried_total = torch.cuda.mem_get_info(current_device)
+                current_free = queried_free if current_free is None else current_free
+                current_total = (
+                    queried_total if current_total is None else current_total
+                )
             except Exception as error:  # noqa: BLE001 - diagnostics are best effort
-                _LOG.exception("[OOM_DUMP] failed to read device memory: %s", error)
+                _LOG.exception(
+                    "[OOM_DUMP] failed to read device=%d memory: %s",
+                    current_device,
+                    error,
+                )
+            memory_by_device[current_device] = (current_free, current_total)
 
-        try:
-            stats = torch.cuda.memory_stats(device=device)
-        except Exception as error:  # noqa: BLE001
-            _LOG.exception("[OOM_DUMP] failed to read allocator stats: %s", error)
-            stats = {}
+            try:
+                stats_by_device[current_device] = torch.cuda.memory_stats(
+                    device=current_device
+                )
+            except Exception as error:  # noqa: BLE001
+                _LOG.exception(
+                    "[OOM_DUMP] failed to read device=%d allocator stats: %s",
+                    current_device,
+                    error,
+                )
+                stats_by_device[current_device] = {}
 
-        try:
-            summary = torch.cuda.memory_summary(device=device, abbreviated=False)
-        except Exception as error:  # noqa: BLE001
-            _LOG.exception("[OOM_DUMP] failed to render allocator summary: %s", error)
-            summary = f"<failed to render torch.cuda.memory_summary: {error}>"
+            try:
+                summary_by_device[current_device] = torch.cuda.memory_summary(
+                    device=current_device, abbreviated=False
+                )
+            except Exception as error:  # noqa: BLE001
+                _LOG.exception(
+                    "[OOM_DUMP] failed to render device=%d allocator summary: %s",
+                    current_device,
+                    error,
+                )
+                summary_by_device[current_device] = (
+                    f"<failed to render torch.cuda.memory_summary: {error}>"
+                )
 
         allocator_snapshot: Optional[Dict[str, Any]] = None
         snapshot_error: Optional[str] = None
@@ -255,7 +281,7 @@ def dump_oom_diagnostics(
             snapshot_error = str(error)
             _LOG.exception("[OOM_DUMP] failed to collect allocator blocks: %s", error)
 
-        suffix = _suffix(tag, device)
+        suffix = _suffix(device, dump_id)
         output_dir = _out_dir()
         snapshot_path = output_dir / f"oom_allocator_snapshot_{suffix}.pickle"
         snapshot_value = "disabled; set RTP_OOM_RECORD=1 before startup"
@@ -275,8 +301,9 @@ def dump_oom_diagnostics(
             output.write("=" * 120 + "\n")
             output.write("RTP-LLM TORCH CUDA OOM DIAGNOSTICS\n")
             output.write("=" * 120 + "\n")
-            output.write(f"tag={tag}\n")
-            output.write(f"device={device}\n")
+            output.write(f"dump_id={dump_id}\n")
+            output.write(f"primary_device={device}\n")
+            output.write(f"logical_devices={devices}\n")
             output.write(
                 f"world_rank={os.environ.get('WORLD_RANK', os.environ.get('RANK', '0'))}\n"
             )
@@ -290,23 +317,35 @@ def dump_oom_diagnostics(
             output.write(f"{exception or '<not provided>'}\n")
             output.write("\n[ORIGINAL C++ BACKTRACE]\n")
             output.write(f"{cpp_backtrace or '<not provided>'}\n")
-            output.write("\n[CUDA DEVICE MEMORY]\n")
+            output.write("\n[CUDA DEVICE MEMORY - ALL LOGICAL DEVICES]\n")
+            output.write(f"failed_alloc_device={device}\n")
             output.write(
                 f"failed_alloc_bytes={alloc_size} ({_human_bytes(alloc_size)})\n"
             )
-            output.write(
-                f"device_total_bytes={device_total} ({_human_bytes(device_total)})\n"
-            )
-            output.write(
-                f"device_free_bytes={device_free} ({_human_bytes(device_free)})\n"
-            )
-            output.write("\n[TORCH ALLOCATOR STATS - ALL KEYS]\n")
-            for name in sorted(stats):
-                value = int(stats[name])
-                human = f" ({_human_bytes(value)})" if "bytes" in name else ""
-                output.write(f"{name}={value}{human}\n")
-            output.write("\n[TORCH MEMORY SUMMARY]\n")
-            output.write(f"{summary}\n")
+            for current_device in devices:
+                current_free, current_total = memory_by_device[current_device]
+                current_used = (
+                    None
+                    if current_free is None or current_total is None
+                    else current_total - current_free
+                )
+                output.write(
+                    f"DEVICE[{current_device}] used_bytes={current_used} ({_human_bytes(current_used)}) "
+                    f"free_bytes={current_free} ({_human_bytes(current_free)}) "
+                    f"total_bytes={current_total} ({_human_bytes(current_total)})\n"
+                )
+            output.write("\n[TORCH ALLOCATOR STATS - ALL KEYS, ALL LOGICAL DEVICES]\n")
+            for current_device in devices:
+                output.write(f"\nDEVICE[{current_device}]\n")
+                for name in sorted(stats_by_device[current_device]):
+                    value = int(stats_by_device[current_device][name])
+                    human = f" ({_human_bytes(value)})" if "bytes" in name else ""
+                    output.write(f"{name}={value}{human}\n")
+            output.write("\n[TORCH MEMORY SUMMARY - ALL LOGICAL DEVICES]\n")
+            for current_device in devices:
+                output.write(
+                    f"\nDEVICE[{current_device}]\n{summary_by_device[current_device]}\n"
+                )
             output.write(
                 "\n[TORCH ALLOCATOR SEGMENTS AND BLOCKS - FULL, NOT TRUNCATED]\n"
             )
@@ -323,10 +362,10 @@ def dump_oom_diagnostics(
 
         segment_count, block_count = _snapshot_counts(allocator_snapshot)
         _LOG.error(
-            "[OOM_DUMP] tag=%s device=%d pid=%d exception=%s file=%s snapshot=%s "
+            "[OOM_DUMP] id=%d device=%d pid=%d exception=%s file=%s snapshot=%s "
             "allocator_segments=%d allocator_blocks=%d\n"
             "[OOM_DUMP] torch allocator summary:\n%s",
-            tag,
+            dump_id,
             device,
             os.getpid(),
             exception or "<not provided>",
@@ -334,21 +373,11 @@ def dump_oom_diagnostics(
             snapshot_value,
             segment_count,
             block_count,
-            summary,
+            summary_by_device[device],
         )
+        return str(output_path)
     except Exception as error:  # noqa: BLE001
-        _LOG.exception(
-            "[OOM_DUMP] diagnostic collection failed for tag=%s: %s", tag, error
-        )
-
-
-def _oom_observer(
-    device: int, alloc_size: int, device_total: int, device_free: int
-) -> None:
-    dump_oom_diagnostics(
-        tag="torch_allocator_oom",
-        device=device,
-        alloc_size=alloc_size,
-        device_total=device_total,
-        device_free=device_free,
-    )
+        _LOG.exception("[OOM_DUMP] diagnostic collection failed: %s", error)
+        return None
+    finally:
+        _dump_lock.release()

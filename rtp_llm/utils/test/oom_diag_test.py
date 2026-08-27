@@ -2,6 +2,8 @@ import os
 import pickle
 import shutil
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -12,7 +14,7 @@ from rtp_llm.utils import oom_diag
 
 def _reset_module_state() -> None:
     oom_diag._installed = False
-    oom_diag._oom_fired = False
+    oom_diag._dump_counter = 0
 
 
 def _sample_snapshot() -> dict:
@@ -113,13 +115,10 @@ class OomDiagUnitTest(unittest.TestCase):
         record.assert_not_called()
         self.assertFalse(oom_diag._installed)
 
-    def test_install_enables_history_and_observer_once(self) -> None:
+    def test_install_enables_history_once(self) -> None:
         os.environ[oom_diag._RECORD_ENV] = "1"
         with (
             mock.patch.object(torch.cuda.memory, "_record_memory_history") as record,
-            mock.patch.object(
-                torch._C, "_cuda_attach_out_of_memory_observer"
-            ) as attach,
             mock.patch.object(torch.cuda, "current_device", return_value=3),
         ):
             oom_diag.install_oom_dump()
@@ -131,7 +130,6 @@ class OomDiagUnitTest(unittest.TestCase):
             stacks="all",
             max_entries=oom_diag._MAX_TRACE_ENTRIES,
         )
-        attach.assert_called_once_with(oom_diag._oom_observer)
 
     def test_dump_directory_follows_service_log_path(self) -> None:
         service_log_dir = os.path.join(self.tmp, "service_logs")
@@ -149,6 +147,7 @@ class OomDiagUnitTest(unittest.TestCase):
         }
         with (
             mock.patch.object(torch.cuda, "current_device", return_value=2),
+            mock.patch.object(torch.cuda, "device_count", return_value=3),
             mock.patch.object(
                 torch.cuda, "mem_get_info", return_value=(1024**3, 8 * 1024**3)
             ),
@@ -162,20 +161,24 @@ class OomDiagUnitTest(unittest.TestCase):
             self.assertLogs(oom_diag._LOG, level="ERROR") as logs,
         ):
             oom_diag.dump_oom_diagnostics(
-                tag="normal_engine_step",
                 alloc_size=256 * 1024**2,
                 exception="CUDA out of memory; original stack marker",
                 cpp_backtrace="CUDAGraph.cpp:208 original backtrace marker",
             )
 
-        files = list(oom_diag._out_dir().glob("oom_allocator_normal_engine_step_*.log"))
+        files = list(oom_diag._out_dir().glob("oom_allocator_*.log"))
         self.assertEqual(len(files), 1)
         text = files[0].read_text(encoding="utf-8")
         self.assertIn("CUDA out of memory; original stack marker", text)
         self.assertIn("CUDAGraph.cpp:208 original backtrace marker", text)
         self.assertIn("failed_alloc_bytes=268435456 (256.00 MiB)", text)
+        self.assertIn("logical_devices=[0, 1, 2]", text)
+        self.assertIn("DEVICE[0]", text)
+        self.assertIn("DEVICE[1]", text)
+        self.assertIn("DEVICE[2]", text)
         self.assertIn("allocated_bytes.all.current=3221225472 (3.00 GiB)", text)
-        self.assertIn("[TORCH MEMORY SUMMARY]\nFULL ALLOCATOR TABLE", text)
+        self.assertIn("[TORCH MEMORY SUMMARY - ALL LOGICAL DEVICES]", text)
+        self.assertEqual(text.count("FULL ALLOCATOR TABLE"), 3)
         self.assertIn(
             "[TORCH ALLOCATOR SEGMENTS AND BLOCKS - FULL, NOT TRUNCATED]", text
         )
@@ -248,7 +251,7 @@ class OomDiagUnitTest(unittest.TestCase):
             self._assert_dump_failure_preserves_original_exception()
         self.assertIn("dump file open failed", "\n".join(logs.output))
 
-    def test_dump_is_one_shot(self) -> None:
+    def test_repeated_dumps_use_incrementing_ids(self) -> None:
         with (
             mock.patch.object(torch.cuda, "current_device", return_value=0),
             mock.patch.object(torch.cuda, "mem_get_info", return_value=(1, 2)),
@@ -258,17 +261,60 @@ class OomDiagUnitTest(unittest.TestCase):
                 torch.cuda.memory, "_snapshot", return_value={"segments": []}
             ),
         ):
-            oom_diag.dump_oom_diagnostics(tag="first")
-            oom_diag.dump_oom_diagnostics(tag="second")
+            first = oom_diag.dump_oom_diagnostics()
+            second = oom_diag.dump_oom_diagnostics()
 
-        self.assertEqual(len(list(oom_diag._out_dir().glob("oom_allocator_*.log"))), 1)
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.endswith("_n000000.log"))
+        self.assertTrue(second.endswith("_n000001.log"))
+        self.assertEqual(len(list(oom_diag._out_dir().glob("oom_allocator_*.log"))), 2)
+
+    def test_concurrent_dumps_are_serialized(self) -> None:
+        active = 0
+        max_active = 0
+        guard = threading.Lock()
+        start = threading.Barrier(3)
+
+        def snapshot():
+            nonlocal active, max_active
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.05)
+            with guard:
+                active -= 1
+            return {"segments": []}
+
+        def dump():
+            start.wait()
+            oom_diag.dump_oom_diagnostics()
+
+        with (
+            mock.patch.object(torch.cuda, "current_device", return_value=0),
+            mock.patch.object(torch.cuda, "mem_get_info", return_value=(1, 2)),
+            mock.patch.object(torch.cuda, "memory_stats", return_value={}),
+            mock.patch.object(torch.cuda, "memory_summary", return_value="summary"),
+            mock.patch.object(torch.cuda.memory, "_snapshot", side_effect=snapshot),
+        ):
+            threads = [threading.Thread(target=dump) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            start.wait()
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(max_active, 1)
+        self.assertEqual(len(list(oom_diag._out_dir().glob("oom_allocator_*.log"))), 2)
 
     def test_suffix_is_process_safe(self) -> None:
-        suffix = oom_diag._suffix("test", 7)
-        self.assertIn("_r", suffix)
+        suffix = oom_diag._suffix(7, 12)
+        self.assertTrue(suffix.startswith("r"))
         self.assertIn("_s", suffix)
         self.assertIn("_d7_", suffix)
         self.assertIn(f"_pid{os.getpid()}_", suffix)
+        self.assertTrue(suffix.endswith("_n000012"))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -295,23 +341,26 @@ class OomDiagCudaTest(unittest.TestCase):
         _reset_module_state()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_observer_writes_text_and_memory_viz_snapshot(self) -> None:
+    def test_dump_writes_text_and_memory_viz_snapshot(self) -> None:
         oom_diag.install_oom_dump()
         tensor = torch.zeros(8192, dtype=torch.float32, device="cuda")
         try:
-            oom_diag._oom_observer(0, 4096, 80 * 1024**3, 1024)
+            oom_diag.dump_oom_diagnostics(
+                device=0,
+                alloc_size=4096,
+                device_total=80 * 1024**3,
+                device_free=1024,
+            )
         finally:
             del tensor
             torch.cuda.empty_cache()
 
-        markers = list(
-            oom_diag._out_dir().glob("oom_allocator_torch_allocator_oom_*.log")
-        )
+        markers = list(oom_diag._out_dir().glob("oom_allocator_*.log"))
         snapshots = list(oom_diag._out_dir().glob("oom_allocator_snapshot_*.pickle"))
         self.assertEqual(len(markers), 1)
         self.assertEqual(len(snapshots), 1)
         marker_text = markers[0].read_text(encoding="utf-8")
-        self.assertIn("[TORCH MEMORY SUMMARY]", marker_text)
+        self.assertIn("[TORCH MEMORY SUMMARY - ALL LOGICAL DEVICES]", marker_text)
         self.assertIn(
             "[TORCH ALLOCATOR SEGMENTS AND BLOCKS - FULL, NOT TRUNCATED]", marker_text
         )

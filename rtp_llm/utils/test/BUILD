@@ -143,6 +143,17 @@ py_test(
 )
 
 py_test(
+    name = "grpc_client_wrapper_test",
+    srcs = ["grpc_client_wrapper_test.py"],
+    deps = [
+        ":grpcio",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/metrics",
+    ],
+)
+
+py_test(
     name = "oom_diag_test",
     srcs = [
         "oom_diag_test.py",
