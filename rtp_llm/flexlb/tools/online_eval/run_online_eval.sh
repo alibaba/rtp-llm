@@ -94,10 +94,14 @@ GRADIENT="${GRADIENT:-0}"
 GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
 GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
-# FORCE_PRIORITY > 0 pins every replayed request to one Auto-TPM QoS level,
-# overriding both the per-record trace priority and the PRIORITY env default
-# (single-QoS runs: priority-based preemption finds no victim).
-FORCE_PRIORITY="${FORCE_PRIORITY:-0}"
+# FORCE_PRIORITY pins every replayed request to one Auto-TPM QoS level,
+# overriding both the per-record trace priority and the PRIORITY env default.
+# Defaults to 50 (single-QoS baseline runs): all requests share one priority,
+# so priority-based preemption finds no victim and behaves as if disabled
+# (the scheduler.ordering.preemption config block may stay — behaviour is
+# equivalent under a uniform priority). Multi-priority experiments opt out
+# explicitly with FORCE_PRIORITY=0 so per-record trace priority wins.
+FORCE_PRIORITY="${FORCE_PRIORITY:-50}"
 LOOP="${LOOP:-0}"
 # Send mode is a pure pass-through (single env-var layer): empty SEND_MODE
 # means JavaLoadClient's built-in default (replay), identical to before.
@@ -1169,7 +1173,8 @@ start_secondary_pollers
 # comes from the trace records only, and records without one stay unset on
 # the wire (no default 50); the lib blanks ambient PRIORITY for us.
 # FORCE_PRIORITY (single-QoS pin, overrides trace priority) IS passed
-# explicitly — it is 0/unset by default so per-record priority still wins.
+# explicitly — it defaults to 50, so unattended runs replay every request
+# at one uniform priority; multi-priority experiments pass 0 to opt out.
 # M9: archive the JavaLoadClient env effective values at the client launch
 # point. Receives the exact KEY=VALUE argv launch_java_load_client forwards
 # (PRIORITY is recorded empty — this script deliberately never passes it);

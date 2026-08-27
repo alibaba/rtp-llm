@@ -797,8 +797,26 @@ inflight_ts = [
 
 # master-side queue depth + inflight age from the G3 prometheus timeline
 # (needs FLEXLB_MONITOR_MODE=all; per-priority label variants summed).
-age_pts = prom_ts_extract("flexlb_app_flexlb_inflight_max_age_ms", agg="max")
+# ad2d6224+: INFLIGHT_MAX_AGE_MS carries {role, engineIp} tags —
+# role=SCHEDULER + engineIp="scheduler" marks the scheduler's own ledger,
+# PREFILL/DECODE + real engineIp the per-worker ledgers. Keep age_ms as the
+# cluster-wide max (back-compat) and add one max-across-engines series per
+# role so the report can draw a line per ledger.
+AGE_BASE = "flexlb_app_flexlb_inflight_max_age_ms"
+age_pts = prom_ts_extract(AGE_BASE, agg="max")
 inflight_age_ts = [{"t": t, "age_ms": int(round(v))} for t, v in rel_axis(age_pts)]
+age_role_engine = prom_ts_extract_role_engine(AGE_BASE)
+inflight_age_by_role = {}
+for role, engines in age_role_engine.items():
+    by_ts = {}
+    for pts in engines.values():
+        for ts, v in pts:
+            by_ts[ts] = max(by_ts.get(ts, 0.0), float(v))
+    rows = rel_axis(sorted(by_ts.items()))
+    if rows:
+        inflight_age_by_role[role.lower()] = [
+            {"t": t, "age_ms": int(round(v))} for t, v in rows
+        ]
 
 # KV cache: used / available are per-engine gauges (engineIp labels) summed
 # cluster-wide; capacity = used_sum + available_sum. The total gauge is NOT
@@ -1035,6 +1053,7 @@ out = {
     "process_ts": process_ts,
     "inflight_ts": inflight_ts,
     "inflight_age_ts": inflight_age_ts,
+    "inflight_age_by_role": inflight_age_by_role,
     "kv_ts": kv_ts,
     "batcher_ts": batcher_ts,
     "batcher_ts_by_role": batcher_ts_by_role,

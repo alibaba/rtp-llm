@@ -388,6 +388,7 @@ def main():
     process_ts = agg.get("process_ts") or []
     inflight_ts = agg.get("inflight_ts") or []
     inflight_age = agg.get("inflight_age_ts") or []
+    inflight_age_by_role = agg.get("inflight_age_by_role") or {}
     kv_ts = agg.get("kv_ts") or []
     batcher_ts = agg.get("batcher_ts") or []
     batcher_ts_by_role = agg.get("batcher_ts_by_role") or []
@@ -510,7 +511,8 @@ def main():
             num_arr([(stage_lat.get(s) or {}).get("p95", 0) for s in STAGE_KEYS]),
         )
 
-    # 队列时序（5s 粒度，集群总量口径——不再除以引擎数）
+    # 队列时序（5s 粒度，avg/engine 口径：集群总量 ÷ 引擎数，
+    # engine_dist.engine_count 优先）
     TQ = p_run_req = p_run_batch = p_wait = None
     d_run_req = d_wait = avg_batch = heap_used = None
     q_step = 5
@@ -519,23 +521,50 @@ def main():
         TQ = const("TQ", str_arr(sparse_cats(tq_vals)))
         p_run_req = const(
             "pRunReq",
-            num_arr([q.get("prefill_running_reqs", 0) or 0 for q in queue_ts]),
+            num_arr(
+                [
+                    round(
+                        (q.get("prefill_running_reqs", 0) or 0) / max(1, p_engines), 2
+                    )
+                    for q in queue_ts
+                ]
+            ),
         )
         p_run_batch = const(
             "pRunBatch",
-            num_arr([q.get("prefill_running", 0) or 0 for q in queue_ts]),
+            num_arr(
+                [
+                    round((q.get("prefill_running", 0) or 0) / max(1, p_engines), 2)
+                    for q in queue_ts
+                ]
+            ),
         )
         p_wait = const(
             "pWait",
-            num_arr([q.get("prefill_waiting", 0) or 0 for q in queue_ts]),
+            num_arr(
+                [
+                    round((q.get("prefill_waiting", 0) or 0) / max(1, p_engines), 2)
+                    for q in queue_ts
+                ]
+            ),
         )
         d_run_req = const(
             "dRunReq",
-            num_arr([q.get("decode_running", 0) or 0 for q in queue_ts]),
+            num_arr(
+                [
+                    round((q.get("decode_running", 0) or 0) / max(1, d_engines), 2)
+                    for q in queue_ts
+                ]
+            ),
         )
         d_wait = const(
             "dWait",
-            num_arr([q.get("decode_waiting", 0) or 0 for q in queue_ts]),
+            num_arr(
+                [
+                    round((q.get("decode_waiting", 0) or 0) / max(1, d_engines), 2)
+                    for q in queue_ts
+                ]
+            ),
         )
         avg_batch = const(
             "avgBatch", num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts])
@@ -1023,16 +1052,16 @@ def main():
         lines.extend(emit_grid(latency_containers))
         lines.append("")
 
-    # 2. 队列（集群总量 + 容量参照线）
+    # 2. 队列（avg/engine：集群总量 ÷ 引擎数，engine_dist.engine_count 优先）
     if queue_ts:
         q_cap = "x = 压测时间（s，" + str(q_step) + "s 采样）"
         queue_containers = [
             emit_container(
-                "Prefill 队列（集群总量）",
+                "Prefill 队列（avg/engine）",
                 q_cap
-                + "；y = 请求数 / 批数（集群总量）；容量线 = prefill 并发批容量（"
+                + "；y = 请求数 / 批数（avg/engine = 集群总量 ÷ "
                 + num(p_engines)
-                + " 引擎 × 并发 1）",
+                + " 引擎）",
                 emit_chart(
                     "LineChart",
                     TQ,
@@ -1041,18 +1070,15 @@ def main():
                         ("rr", "running 请求数", p_run_req, "success"),
                         ("rb", "running 批数", p_run_batch, "info"),
                         ("w", "waiting 请求数", p_wait, "neutral"),
-                        (
-                            "cap",
-                            "并发批容量",
-                            const("pBatchCap", num_arr([p_engines] * len(queue_ts))),
-                            "danger",
-                        ),
                     ],
                 ),
             ),
             emit_container(
-                "Decode 队列（集群总量）",
-                q_cap + "；y = 请求数（集群总量）",
+                "Decode 队列（avg/engine）",
+                q_cap
+                + "；y = 请求数（avg/engine = 集群总量 ÷ "
+                + num(d_engines)
+                + " 引擎）",
                 emit_chart(
                     "LineChart",
                     TQ,
@@ -1080,8 +1106,8 @@ def main():
             )
         )
         # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）。
-        # 新口径（batcher_ts_by_role）：per-engine batcher 队列按 role 拆分
-        # （prefill ÷ prefill 引擎数 + 容量线 128；decode ÷ decode 引擎数）；
+        # 新口径（batcher_ts_by_role）：per-engine batcher 队列按 role 拆分；
+        # 只画 prefill avg/engine + 128 容量线（decode 侧队列语义不同，不画）；
         # prefill 另给跨引擎分位与 top-5 引擎序列（决策时点深度的
         # 1s 采样近似）。旧口径（仅 batcher_ts，P+D 合计）退化画集群总量。
         if batcher_ts_by_role:
@@ -1093,27 +1119,16 @@ def main():
                 "batcherPrefillAvg",
                 num_arr(
                     [
-                        round((r.get("prefill", 0) or 0) / p_engines, 2)
-                        for r in batcher_ts_by_role
-                    ]
-                ),
-            )
-            d_bq_avg = const(
-                "batcherDecodeAvg",
-                num_arr(
-                    [
-                        round((r.get("decode", 0) or 0) / d_engines, 2)
+                        round((r.get("prefill", 0) or 0) / max(1, p_engines), 2)
                         for r in batcher_ts_by_role
                     ]
                 ),
             )
             queue_containers.append(
                 emit_container(
-                    "master 队列深度：batcher by role（avg/engine）",
+                    "master 队列深度：batcher prefill（avg/engine）",
                     "x = 压测时间（s，1s 采样）；y = 队列深度 / 引擎（prefill 集群总量 ÷ "
                     + num(p_engines)
-                    + "、decode 集群总量 ÷ "
-                    + num(d_engines)
                     + "）；容量线 = maxWaitingRequestsPerPrefillWorker 128（prefill 口径）",
                     emit_chart(
                         "LineChart",
@@ -1121,7 +1136,6 @@ def main():
                         230,
                         [
                             ("pq", "prefill（avg/engine）", p_bq_avg, "info"),
-                            ("dq", "decode（avg/engine）", d_bq_avg, "warning"),
                             (
                                 "cap",
                                 "容量 128",
@@ -1575,7 +1589,7 @@ def main():
         lines.append("")
 
     # 4. In-flight（master scheduler + P/D 引擎侧，master G4 快照）
-    if inflight_ts or inflight_age:
+    if inflight_ts or inflight_age or inflight_age_by_role:
         inf_containers = []
         if inflight_ts:
             IFT = const(
@@ -1609,23 +1623,96 @@ def main():
                     ),
                 )
             )
-        if inflight_age:
-            IAT = const(
-                "IAT", str_arr(sparse_cats([r.get("t", 0) for r in inflight_age]))
-            )
-            inf_age = const(
-                "infAge", num_arr([r.get("age_ms", 0) or 0 for r in inflight_age])
-            )
-            age_max = max((r.get("age_ms", 0) or 0) for r in inflight_age)
+        if inflight_age or inflight_age_by_role:
+            age_series = []
+            if inflight_age_by_role:
+                # ad2d6224+: INFLIGHT_MAX_AGE_MS 按 role 拆（scheduler ledger /
+                # prefill、decode per-worker ledger，各 role 跨引擎取 max）。
+                # 各 role 时间轴同源（1s prom 采样），缺失点填 0（与 ledger
+                # 空闲时上报 0 的语义一致）。
+                t_grid = sorted(
+                    {
+                        row.get("t", 0)
+                        for rows in inflight_age_by_role.values()
+                        for row in rows
+                    }
+                )
+                IAT = const("IAT", str_arr(sparse_cats(t_grid)))
+                age_role_known = (
+                    ("scheduler", "scheduler ledger", "danger"),
+                    ("prefill", "prefill 引擎（max）", "info"),
+                    ("decode", "decode 引擎（max）", "success"),
+                )
+                role_maps = {
+                    role: {row.get("t", 0): row.get("age_ms", 0) or 0 for row in rows}
+                    for role, rows in inflight_age_by_role.items()
+                }
+                for key, label, color in age_role_known:
+                    if key not in role_maps:
+                        continue
+                    age_series.append(
+                        (
+                            key,
+                            label,
+                            const(
+                                "age" + key.capitalize(),
+                                num_arr(
+                                    [round(role_maps[key].get(t, 0), 1) for t in t_grid]
+                                ),
+                            ),
+                            color,
+                        )
+                    )
+                other_roles = sorted(
+                    r for r in role_maps if r not in {k for k, _, _ in age_role_known}
+                )
+                for key in other_roles:
+                    age_series.append(
+                        (
+                            key,
+                            key + "（max）",
+                            const(
+                                "age" + key.capitalize(),
+                                num_arr(
+                                    [round(role_maps[key].get(t, 0), 1) for t in t_grid]
+                                ),
+                            ),
+                            "neutral",
+                        )
+                    )
+                age_max = max(
+                    (
+                        row.get("age_ms", 0) or 0
+                        for rows in inflight_age_by_role.values()
+                        for row in rows
+                    )
+                )
+                age_caption = (
+                    "x = 压测时间（s，1s 采样）；y = in-flight 最大 age（ms，按 role 拆分："
+                    "scheduler ledger vs prefill / decode per-worker ledger）"
+                )
+            else:
+                IAT = const(
+                    "IAT", str_arr(sparse_cats([r.get("t", 0) for r in inflight_age]))
+                )
+                inf_age = const(
+                    "infAge", num_arr([r.get("age_ms", 0) or 0 for r in inflight_age])
+                )
+                age_series = [("age", "max age（ms）", inf_age, "danger")]
+                age_max = max((r.get("age_ms", 0) or 0) for r in inflight_age)
+                age_caption = (
+                    "x = 压测时间（s，1s 采样）；y = in-flight 请求最大 age（ms，"
+                    "集群 max，未按 role 拆分——旧 aggregate 无 role 维度）"
+                )
             inf_containers.append(
                 emit_container(
-                    "In-flight 最长滞留时间",
-                    "x = 压测时间（s，1s 采样）；y = in-flight 请求最大 age（ms）",
+                    "In-flight 最长滞留时间（按 role）",
+                    age_caption,
                     emit_chart(
                         "LineChart",
                         IAT,
                         230,
-                        [("age", "max age（ms）", inf_age, "danger")],
+                        age_series,
                         suffix=" ms",
                         domain="[0, " + num(nice_max(age_max * 1.15)) + "]",
                     ),
@@ -1645,19 +1732,33 @@ def main():
             "kvUsedTokens",
             num_arr([r.get("used_tokens", 0) or 0 for r in kv_ts]),
         )
+        kv_cap_vals = [r.get("capacity_tokens", 0) or 0 for r in kv_ts]
+        kv_cap_max = max(kv_cap_vals) if kv_cap_vals else 0
         kv_used_pct = const(
             "kvUsedPct", num_arr([r.get("used_pct", 0) or 0 for r in kv_ts])
         )
+        kv_used_lines = [("used", "KV 已用 tokens", kv_used_tok, "info")]
+        if kv_cap_max > 0:
+            # 总容量参考线（used+available 之和，有限容量才画；旧 aggregate
+            # 无 capacity_tokens 字段则不画）
+            kv_used_lines.append(
+                (
+                    "cap",
+                    "集群总容量",
+                    const("kvCapTokens", num_arr(kv_cap_vals)),
+                    "danger",
+                )
+            )
         kv_containers.append(
             emit_container(
                 "KV cache 已用（集群总量）",
-                "x = 压测时间（s，1s 采样）；y = 已用 KV tokens（集群总量）",
-                emit_chart(
-                    "LineChart",
-                    KVT,
-                    230,
-                    [("used", "KV 已用 tokens", kv_used_tok, "info")],
+                "x = 压测时间（s，1s 采样）；y = 已用 KV tokens（集群总量）"
+                + (
+                    "；参考线 = 集群总容量（used + available 之和）"
+                    if kv_cap_max > 0
+                    else "（aggregate 无 capacity_tokens，不画容量线）"
                 ),
+                emit_chart("LineChart", KVT, 230, kv_used_lines),
             )
         )
         kv_containers.append(
