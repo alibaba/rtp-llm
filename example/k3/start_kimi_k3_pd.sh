@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Start one side of the validated Kimi K3 PD topology. Both roles are
-# TP8 / DP1 / EP8 and use all eight GPUs on their respective hosts.
+# Start one side of a Kimi K3 PD topology. Prefill remains TP8 / DP1 / EP8.
+# Decode defaults to the validated TP8 / DP1 / EP8 baseline and can opt into
+# TP1 / DP8 / EP8 / KTP8 or TP1 / DP16 / EP16 / KTP16 topology.
 #
 # The script incrementally builds its Bazel launcher with CUDA13/SM10x.  It
 # does not install or replace a system rtp-llm wheel.
@@ -77,6 +78,9 @@ Role-specific high-performance paths:
                                          for Decode
   DECODE_CAPTURE_CONFIG                  Decode only; defaults to 1
   ENABLE_CUDA_GRAPH_DEBUG_MODE           defaults to 0
+  KIMI_K3_DECODE_TOPOLOGY                Decode only; tp8_ep8 (default),
+                                         dp8_ep8_tp1_ktp8, or
+                                         dp16_ep16_tp1_ktp16
 
 Runtime, build and diagnostics:
   RUN_ROOT                              defaults below TMPDIR
@@ -125,6 +129,12 @@ case "${role}" in
         ;;
 esac
 
+case "${KIMI_K3_MLA_CACHE_TP:-0}" in
+    0) unset KIMI_K3_MLA_CACHE_TP ;;
+    1) die "KIMI_K3_MLA_CACHE_TP=1 selects the retired 576/TP ABI; MLA is replicated at width 576" ;;
+    *) die "KIMI_K3_MLA_CACHE_TP must be unset or 0" ;;
+esac
+
 if [[ "${role}" == "PREFILL" ]]; then
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD:-1}"
     [[ "${KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD}" == "0" \
@@ -166,9 +176,13 @@ prefill_port="$(endpoint_port "${PREFILL_ENDPOINT}")"
 decode_port="$(endpoint_port "${DECODE_ENDPOINT}")"
 prefill_host="${PREFILL_ENDPOINT%:*}"
 decode_host="${DECODE_ENDPOINT%:*}"
-decode_topology="tp8_ep8"
-[[ "${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}" == "tp8_ep8" ]] \
-    || die "only TP8/DP1/EP8 Decode is supported"
+decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}"
+case "${decode_topology}" in
+    tp8_ep8 | dp8_ep8_tp1_ktp8 | dp16_ep16_tp1_ktp16) ;;
+    *)
+        die "unsupported KIMI_K3_DECODE_TOPOLOGY=${decode_topology}"
+        ;;
+esac
 cache_store_rdma_mode="${CACHE_STORE_RDMA_MODE:-0}"
 [[ "${cache_store_rdma_mode}" == "0" || "${cache_store_rdma_mode}" == "1" ]] \
     || die "CACHE_STORE_RDMA_MODE must be 0 or 1"
@@ -263,7 +277,13 @@ if [[ "${role}" == "PREFILL" ]]; then
     default_mega_moe_tokens=8192
 else
     enable_cuda_graph="${ENABLE_CUDA_GRAPH:-1}"
-    decode_capture_config="${DECODE_CAPTURE_CONFIG:-1}"
+    if [[ "${enable_cuda_graph}" == "1" ]]; then
+        decode_capture_config="${DECODE_CAPTURE_CONFIG:-1}"
+    else
+        # Decode KTP phase one forbids CUDA Graph.  Do not leak the generic
+        # batch-1 capture default into an explicitly graph-disabled launch.
+        decode_capture_config=
+    fi
     prefill_capture_config=
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     unset KIMI_K3_PREFILL_CHUNK_TOKENS
@@ -319,14 +339,54 @@ if [[ "${role}" == "PREFILL" ]]; then
     remote_port="${decode_port}"
     tp_size=8
     dp_size=1
+    ep_size=8
+    ktp_size=1
+    world_size=8
+    local_world_size=8
+    export KIMI_K3_DECODE_KTP=0
 else
     local_endpoint="${DECODE_ENDPOINT}"
     remote_endpoint="${PREFILL_ENDPOINT}"
     start_port="${decode_port}"
     remote_port="${prefill_port}"
-    tp_size=8
-    dp_size=1
+    case "${decode_topology}" in
+        tp8_ep8)
+            tp_size=8
+            dp_size=1
+            ep_size=8
+            ktp_size=1
+            world_size=8
+            local_world_size=8
+            export KIMI_K3_DECODE_KTP=0
+            ;;
+        dp8_ep8_tp1_ktp8)
+            tp_size=1
+            dp_size=8
+            ep_size=8
+            ktp_size=8
+            world_size=8
+            local_world_size=8
+            export KIMI_K3_DECODE_KTP=1
+            ;;
+        dp16_ep16_tp1_ktp16)
+            tp_size=1
+            dp_size=16
+            ep_size=16
+            ktp_size=16
+            world_size=16
+            local_world_size="${LOCAL_WORLD_SIZE:-8}"
+            [[ "${local_world_size}" == "8" ]] || die "DP16 Decode requires LOCAL_WORLD_SIZE=8"
+            world_rank="${WORLD_RANK:-}"
+            [[ "${world_rank}" == "0" || "${world_rank}" == "8" ]] \
+                || die "DP16 Decode requires WORLD_RANK=0 on node 0 or WORLD_RANK=8 on node 1"
+            [[ -n "${GANG_CONFIG_STRING:-}" ]] \
+                || die "DP16 Decode requires GANG_CONFIG_STRING for the two Decode nodes"
+            export KIMI_K3_DECODE_KTP=1
+            ;;
+    esac
 fi
+
+world_rank="${world_rank:-${WORLD_RANK:-0}}"
 
 model_service_config="$(
     printf '{"service_id":"%s","role_endpoints":[{"group":"default",' \
@@ -432,7 +492,8 @@ echo "  local endpoint:  ${local_endpoint}"
 echo "  remote endpoint: ${remote_endpoint}"
 echo "  PD no-proxy:      ${pd_no_proxy_hosts}"
 echo "  checkpoint:      ${CHECKPOINT_PATH}"
-echo "  topology:        TP${tp_size}/DP${dp_size}/EP8"
+echo "  topology:        TP${tp_size}/DP${dp_size}/EP${ep_size}/KTP${ktp_size} world=${world_size}/local=${local_world_size}"
+echo "  Prefill MLA:     width=576 replicated on every TP rank"
 if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"
     echo "  decode MLA:      ${RTP_MLA_DECODE_KERNEL}"
@@ -468,10 +529,12 @@ echo "  logs:            ${LOG_PATH}"
 server_args=(
     --role_type "${role}"
     --tp_size "${tp_size}"
+    --ktp_size "${ktp_size}"
     --dp_size "${dp_size}"
-    --ep_size 8
-    --world_size 8
-    --local_world_size 8
+    --ep_size "${ep_size}"
+    --world_size "${world_size}"
+    --local_world_size "${local_world_size}"
+    --world_rank "${world_rank}"
     --remote_server_port "${remote_port}"
     --max_seq_len "${max_seq_len}"
     --max_context_batch_size "${max_context_batch_size}"
@@ -501,6 +564,10 @@ server_args=(
     --ft_core_dump_on_exception "${FT_CORE_DUMP_ON_EXCEPTION:-0}"
     --shutdown_timeout 5
 )
+
+if [[ -n "${GANG_CONFIG_STRING:-}" ]]; then
+    server_args+=(--gang_config_string "${GANG_CONFIG_STRING}")
+fi
 
 if [[ -n "${max_batch_tokens_size}" ]]; then
     [[ "${max_batch_tokens_size}" =~ ^[1-9][0-9]*$ ]] \

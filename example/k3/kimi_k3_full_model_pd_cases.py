@@ -173,6 +173,11 @@ class Runner:
             "top_p": 0.95,
             "seed": 0,
             "stream": False,
+            # The suite has a deliberately small output budget and validates
+            # exact final-answer text.  K3 otherwise defaults to max-effort
+            # thinking, which can consume all 32 tokens in reasoning_content
+            # and produce no final content even though PD Decode succeeded.
+            "enable_thinking": False,
             "debug_info": True,
         }
         request = urllib.request.Request(

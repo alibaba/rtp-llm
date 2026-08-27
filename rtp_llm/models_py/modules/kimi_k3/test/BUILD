@@ -1,0 +1,13 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "test_decode_ktp_layout",
+    srcs = ["test_decode_ktp_layout.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "test_decode_ktp_cache_model",
+    srcs = ["test_decode_ktp_cache_model.py"],
+    deps = ["//rtp_llm:testlib"],
+)

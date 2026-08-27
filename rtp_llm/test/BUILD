@@ -14,6 +14,13 @@ py_test(
 )
 
 py_test(
+    name = "request_extractor_test",
+    srcs = ["request_extractor_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",

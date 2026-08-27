@@ -119,6 +119,33 @@ TEST_F(GenerateStreamTest, testInitialReuseLengthMustBeLessThanSeqLength) {
     EXPECT_THROW(stream->setInitialReuseLength(stream->seqLength()), RTPException);
 }
 
+TEST_F(GenerateStreamTest, testGenerationEpochIsStableAcrossSchedulerAdmissionAndLatencyReset) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    // Query conversion assigns begin_time_us in production. Set a known value
+    // here so the test proves the cache identity contract independently of
+    // wall-clock timing.
+    constexpr int64_t kRequestBeginUs = 1234567;
+    stream->generate_input_->begin_time_us = kRequestBeginUs;
+    ASSERT_EQ(stream->generationEpoch(), static_cast<uint64_t>(kRequestBeginUs));
+
+    // Before admission schedulerEnqueueTimeUs() falls back to enqueueTime().
+    ASSERT_EQ(stream->schedulerEnqueueTimeUs(), kRequestBeginUs);
+
+    // Scheduler admission changes the scheduling timestamp but must not change
+    // the generation epoch used by the distributed KDA shadow registry.
+    stream->recordSchedulerEnqueueTime(kRequestBeginUs + 100);
+    ASSERT_EQ(stream->schedulerEnqueueTimeUs(), kRequestBeginUs + 100);
+    ASSERT_EQ(stream->generationEpoch(), static_cast<uint64_t>(kRequestBeginUs));
+
+    // Decode resets latency accounting immediately before enqueue. The request
+    // identity must remain the same across that transition too.
+    stream->resetBeginTime(kRequestBeginUs + 200);
+    ASSERT_EQ(stream->schedulerEnqueueTimeUs(), kRequestBeginUs);
+    ASSERT_EQ(stream->generationEpoch(), static_cast<uint64_t>(kRequestBeginUs));
+}
+
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
 // captured epoch N must not clear state that step N+1 already published
 // under epoch N+1.

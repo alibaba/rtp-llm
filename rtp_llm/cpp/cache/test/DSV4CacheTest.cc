@@ -411,6 +411,64 @@ TEST(HybridPoolConfigCreatorTest, KimiKdaPoolUsesExplicitBlockCount) {
     EXPECT_EQ(config.group_block_nums[1], 17u);
 }
 
+TEST(MLAKVCacheSpecTest, KimiPrefillReplicatesFullMlaCacheOnEveryTpRank) {
+    AttentionConfigs attn;
+    attn.kv_lora_rank     = 512;
+    attn.rope_head_dim    = 64;
+    attn.tokens_per_block = 64;
+    ParallelismConfig pc;
+    pc.tp_size   = 8;
+    pc.tp_rank   = 0;
+    pc.role_type = RoleType::PREFILL;
+    MLAKVCacheSpec prefill(attn, pc);
+    EXPECT_EQ(prefill.kv_lora_rank, 512u);
+    EXPECT_EQ(prefill.rope_head_dim, 64u);
+    EXPECT_EQ(prefill.block_size(), 64u * 576u);
+
+    pc.tp_rank = 7;
+    MLAKVCacheSpec prefill_rank7(attn, pc);
+    EXPECT_EQ(prefill_rank7.kv_lora_rank, 512u);
+    EXPECT_EQ(prefill_rank7.rope_head_dim, 64u);
+    EXPECT_EQ(prefill_rank7.block_size(), prefill.block_size());
+
+    pc.role_type = RoleType::DECODE;
+    MLAKVCacheSpec decode(attn, pc);
+    EXPECT_EQ(decode.kv_lora_rank, 512u);
+    EXPECT_EQ(decode.rope_head_dim, 64u);
+
+}
+
+TEST(LinearKVCacheSpecTest, KdaUsesIndependentKtpShardShape) {
+    AttentionConfigs attn;
+    attn.tokens_per_block = 1;
+    LinearAttentionConfig linear;
+    linear.linear_conv_kernel_dim = 4;
+    linear.linear_key_head_dim = 128;
+    linear.linear_value_head_dim = 128;
+    linear.linear_num_key_heads = 64;
+    linear.linear_num_value_heads = 64;
+
+    ParallelismConfig decode;
+    decode.tp_size = 1;
+    decode.ktp_size = 8;
+    decode.role_type = RoleType::DECODE;
+    LinearKVCacheSpec ktp_spec(attn, decode, linear);
+    EXPECT_EQ(ktp_spec.local_num_k_heads, 8u);
+    EXPECT_EQ(ktp_spec.local_num_v_heads, 8u);
+
+    decode.ktp_size = 16;
+    LinearKVCacheSpec ktp16_spec(attn, decode, linear);
+    EXPECT_EQ(ktp16_spec.local_num_k_heads, 4u);
+    EXPECT_EQ(ktp16_spec.local_num_v_heads, 4u);
+
+    ParallelismConfig baseline;
+    baseline.tp_size = 8;
+    LinearKVCacheSpec tp_spec(attn, baseline, linear);
+    EXPECT_EQ(tp_spec.local_num_k_heads, ktp_spec.local_num_k_heads);
+    EXPECT_EQ(tp_spec.local_num_v_heads, ktp_spec.local_num_v_heads);
+    EXPECT_EQ(tp_spec.block_size_bytes(), ktp_spec.block_size_bytes());
+}
+
 TEST(HybridPoolConfigCreatorTest, HybridAttentionWithoutIndependentPoolKeepsSharedHybridConfig) {
     ParallelismConfig pc;
     auto              config =

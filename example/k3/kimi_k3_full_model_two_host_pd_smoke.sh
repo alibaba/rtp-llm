@@ -99,6 +99,10 @@ Important optional variables:
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
+  KIMI_K3_DECODE_TOPOLOGY   tp8_ep8 (default) validates the legacy baseline;
+                            dp8_ep8_tp1_ktp8 validates Decode TP1/DP8/EP8/KTP8
+                            with a replicated full-width 576 MLA cache on every
+                            Prefill TP rank; KTP partitions only KDA heads
   RTP_LLM_SERVER_BINARY     use an existing Bazel launcher
   RTP_LLM_SKIP_BUILD=1      skip the CUDA13/SM10x build in the launcher
 EOF
@@ -122,6 +126,23 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-/ssd/2/kimi-k3}"
 SMOKE_RUN_ID="${SMOKE_RUN_ID:-manual}"
 [[ "${SMOKE_RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]] \
     || die "SMOKE_RUN_ID may contain only letters, digits, dot, underscore and dash"
+decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}"
+case "${decode_topology}" in
+    tp8_ep8 | dp8_ep8_tp1_ktp8) ;;
+    *) die "KIMI_K3_DECODE_TOPOLOGY must be tp8_ep8 or dp8_ep8_tp1_ktp8" ;;
+esac
+smoke_prefill_kv_cache_mem_mb="${SMOKE_PREFILL_KV_CACHE_MEM_MB:-43000}"
+if [[ "${decode_topology}" == "dp8_ep8_tp1_ktp8" ]]; then
+    default_decode_kv_cache_mem_mb=8192
+else
+    default_decode_kv_cache_mem_mb=44000
+fi
+smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-${default_decode_kv_cache_mem_mb}}"
+for value_name in smoke_prefill_kv_cache_mem_mb smoke_decode_kv_cache_mem_mb; do
+    value="${!value_name}"
+    [[ "${value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${value_name} must be a positive integer"
+done
 
 endpoint_port() {
     local endpoint="$1"
@@ -302,6 +323,26 @@ wait_for_health() {
     die "timed out waiting for health at ${host}:${port}"
 }
 
+wait_for_backend_ranks() {
+    local backend_log="${role_dir}/runtime/logs/${role}/main_0.log"
+    local expected_ranks=8
+    local deadline=$((SECONDS + startup_timeout))
+    while ((SECONDS < deadline)); do
+        if [[ -n "${service_pid}" ]] && ! kill -0 "${service_pid}" 2>/dev/null; then
+            tail -200 "${service_log}" >&2 || true
+            [[ -f "${backend_log}" ]] && tail -200 "${backend_log}" >&2 || true
+            die "${role} service exited before all backend ranks were ready"
+        fi
+        if [[ -f "${backend_log}" ]] \
+            && grep -Fq "All ${expected_ranks} ranks started successfully" "${backend_log}"; then
+            return 0
+        fi
+        sleep 2
+    done
+    [[ -f "${backend_log}" ]] && tail -200 "${backend_log}" >&2 || true
+    die "timed out waiting for all ${expected_ranks} ${role} backend ranks"
+}
+
 wait_for_result_listener() {
     local deadline=$((SECONDS + startup_timeout))
     while ((SECONDS < deadline)); do
@@ -340,6 +381,36 @@ verify_rdma_log() {
     fi
 }
 
+verify_decode_cuda_graph_capture_log() {
+    [[ "${role}" == "decode" ]] || return 0
+    local evidence_file="${role_dir}/cuda-graph-evidence.txt"
+    local search_paths=(
+        "${service_log}"
+        "${role_dir}/runtime/logs/decode"
+        "${role_dir}/runtime/work/decode/logs"
+    )
+    : >"${evidence_file}"
+    grep -RhsF "CUDA graph capture is enabled" "${search_paths[@]}" \
+        >>"${evidence_file}" 2>/dev/null \
+        || die "Decode log has no positive CUDA Graph enablement evidence"
+    grep -RhsF "capture success for batch size: 4" "${search_paths[@]}" \
+        >>"${evidence_file}" 2>/dev/null \
+        || die "Decode log has no successful batch-size-4 graph capture evidence"
+}
+
+verify_decode_cuda_graph_replay_log() {
+    [[ "${role}" == "decode" ]] || return 0
+    local evidence_file="${role_dir}/cuda-graph-evidence.txt"
+    local search_paths=(
+        "${service_log}"
+        "${role_dir}/runtime/logs/decode"
+        "${role_dir}/runtime/work/decode/logs"
+    )
+    grep -RhsF "replay end check for batch size 4" "${search_paths[@]}" \
+        >>"${evidence_file}" 2>/dev/null \
+        || die "Decode log has no successful graph replay check evidence"
+}
+
 verify_role_environment() {
     local env_file="${role_dir}/service.env"
     # Never dump the full process environment: it can contain unrelated
@@ -352,7 +423,10 @@ verify_role_environment() {
         "${smoke_kernel_block_size}" \
         "${smoke_chunk_tokens}" \
         "${smoke_linear_step}" \
-        "${smoke_chunkwise_rdma}" <<'PY'
+        "${smoke_chunkwise_rdma}" \
+        "${smoke_prefill_kv_cache_mem_mb}" \
+        "${smoke_decode_kv_cache_mem_mb}" \
+        "${decode_topology}" <<'PY'
 import pathlib
 import sys
 
@@ -365,6 +439,9 @@ import sys
     chunk_tokens,
     linear_step,
     chunkwise_rdma,
+    prefill_kv_cache_mem_mb,
+    decode_kv_cache_mem_mb,
+    decode_topology,
 ) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 env = {}
@@ -393,10 +470,15 @@ expected = {
     "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
     "DEEPGEMM_JIT_COMPILER": "auto",
 }
-absent = ["CUDA_LAUNCH_BLOCKING"]
+absent = ["CUDA_LAUNCH_BLOCKING", "SP_TYPE"]
+expected["KIMI_K3_DECODE_TOPOLOGY"] = decode_topology
+expected["KIMI_K3_DECODE_KTP"] = (
+    "1" if role == "decode" and decode_topology == "dp8_ep8_tp1_ktp8" else "0"
+)
+absent.append("KIMI_K3_MLA_CACHE_TP")
 if role == "prefill":
     expected.update({
-        "KV_CACHE_MEM_MB": "43000",
+        "KV_CACHE_MEM_MB": prefill_kv_cache_mem_mb,
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "8192",
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1",
         "KIMI_K3_PREFILL_CHUNK_TOKENS": chunk_tokens,
@@ -405,12 +487,24 @@ if role == "prefill":
     absent.extend(["RTP_MLA_DECODE_KERNEL", "DECODE_CAPTURE_CONFIG"])
 else:
     expected.update({
-        "KV_CACHE_MEM_MB": "44000",
+        "KV_CACHE_MEM_MB": decode_kv_cache_mem_mb,
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "1",
-        "ENABLE_CUDA_GRAPH": "1",
-        "DECODE_CAPTURE_CONFIG": "1,2,3,4",
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
     })
+    if decode_topology == "dp8_ep8_tp1_ktp8":
+        expected.update({
+            "ENABLE_CUDA_GRAPH": "1",
+            # One capture key is mandatory: every KTP rank must replay the
+            # same collective shapes even when its live DP-local BS differs.
+            "DECODE_CAPTURE_CONFIG": "4",
+            "KIMI_K3_KTP_LOCAL_BS_BUCKET": "4",
+        })
+    else:
+        expected.update({
+            "ENABLE_CUDA_GRAPH": "1",
+            "DECODE_CAPTURE_CONFIG": "1,2,3,4",
+        })
+        absent.append("KIMI_K3_KTP_LOCAL_BS_BUCKET")
     absent.extend([
         "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD",
         "KIMI_K3_PREFILL_CHUNK_TOKENS",
@@ -423,7 +517,28 @@ for key in absent:
     if key in env:
         raise SystemExit(f"{key} must be absent for {role}")
 
+cmdline = pathlib.Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+cmdline = [value.decode(errors="replace") for value in cmdline if value]
+
+def option(name):
+    try:
+        return cmdline[cmdline.index(name) + 1]
+    except (ValueError, IndexError):
+        raise SystemExit(f"missing {name} in service command line: {cmdline}")
+
+if role == "prefill":
+    expected_parallel = {"--tp_size": "8", "--dp_size": "1", "--ep_size": "8", "--ktp_size": "1"}
+elif decode_topology == "dp8_ep8_tp1_ktp8":
+    expected_parallel = {"--tp_size": "1", "--dp_size": "8", "--ep_size": "8", "--ktp_size": "8"}
+else:
+    expected_parallel = {"--tp_size": "8", "--dp_size": "1", "--ep_size": "8", "--ktp_size": "1"}
+for name, value in expected_parallel.items():
+    actual = option(name)
+    if actual != value:
+        raise SystemExit(f"{name}={actual!r}; expected {value!r}")
+
 lines = [f"{key}={env[key]}" for key in sorted(expected)]
+lines.extend(f"ARGV_{key[2:].upper()}={value}" for key, value in sorted(expected_parallel.items()))
 lines.extend(f"{key}=<unset>" for key in sorted(absent))
 pathlib.Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
@@ -439,6 +554,8 @@ apply_validated_common_profile() {
     export CHECKPOINT_PATH="${checkpoint_real}"
     export TOKENIZER_PATH="${checkpoint_real}"
     export PREFILL_ENDPOINT DECODE_ENDPOINT
+    export KIMI_K3_DECODE_TOPOLOGY="${decode_topology}"
+    unset KIMI_K3_MLA_CACHE_TP
     export LOAD_METHOD=fastsafetensors
     export MAX_SEQ_LEN=1048577
     export MAX_BATCH_TOKENS_SIZE=1048576
@@ -457,6 +574,9 @@ apply_validated_common_profile() {
     export ENABLE_CUDA_GRAPH_DEBUG_MODE=0
     export FLASHINFER_CUDA_ARCH_LIST=10.3a
     export DEEPGEMM_JIT_COMPILER=auto
+    # This acceptance run isolates Decode CUDA Graph. MTP/Eagle3 is a separate
+    # follow-up matrix and must not leak in from the caller's environment.
+    unset SP_TYPE
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
     # the externally visible run ID is descriptive and long.
@@ -469,7 +589,7 @@ apply_validated_common_profile() {
 }
 
 apply_validated_prefill_profile() {
-    export KV_CACHE_MEM_MB=43000
+    export KV_CACHE_MEM_MB="${smoke_prefill_kv_cache_mem_mb}"
     export MEGA_MOE_MAX_TOKENS_PER_RANK=8192
     export KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1
     export KIMI_K3_PREFILL_CHUNK_TOKENS="${smoke_chunk_tokens}"
@@ -478,14 +598,21 @@ apply_validated_prefill_profile() {
 }
 
 apply_validated_decode_profile() {
-    # Leave headroom for CUDA graph capture with the current CUDA13 runtime.
-    export KV_CACHE_MEM_MB=44000
+    export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
     export MEGA_MOE_MAX_TOKENS_PER_RANK=1
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
-    export ENABLE_CUDA_GRAPH=1
-    # The smoke issues four concurrent requests. Capture every possible
-    # coalesced Decode batch size instead of aborting above batch size one.
-    export DECODE_CAPTURE_CONFIG=1,2,3,4
+    if [[ "${decode_topology}" == "dp8_ep8_tp1_ktp8" ]]; then
+        # All DP workers capture the same local-BS=4 KTP collective schedule;
+        # smaller live batches replay this graph with framework dummy rows.
+        export ENABLE_CUDA_GRAPH=1
+        export DECODE_CAPTURE_CONFIG=4
+        export KIMI_K3_KTP_LOCAL_BS_BUCKET=4
+    else
+        # Leave headroom for CUDA graph capture with the validated TP8 baseline.
+        export ENABLE_CUDA_GRAPH=1
+        export DECODE_CAPTURE_CONFIG=1,2,3,4
+        unset KIMI_K3_KTP_LOCAL_BS_BUCKET
+    fi
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
 }
 
@@ -499,6 +626,7 @@ fi
 echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
+echo "[${role}] decode_topology=${decode_topology} prefill_mla_width=576 replicated=1"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
 service_pid=$!
@@ -508,9 +636,11 @@ printf '%s\n' "${service_pid}" >"${role_dir}/service.pid"
 local_port="${prefill_port}"
 [[ "${role}" == "prefill" ]] || local_port="${decode_port}"
 wait_for_health 127.0.0.1 "${local_port}"
+wait_for_backend_ranks
 verify_fastsafetensors_log
 verify_rdma_log
 verify_role_environment
+verify_decode_cuda_graph_capture_log
 
 if [[ "${role}" == "decode" ]]; then
     # One-shot result endpoint. It accepts only the matching run ID and writes
@@ -574,6 +704,7 @@ PY
     [[ -f "${result_file}" ]] || die "timed out waiting for Prefill result"
     verdict="$(tr -d '[:space:]' <"${result_file}")"
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
+    verify_decode_cuda_graph_replay_log
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     exit 0
 fi

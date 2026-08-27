@@ -293,6 +293,44 @@ class ModelRpcClientTest(TestCase):
             input_pb.multimodal_inputs[0].HasField("multimodal_tensor")
         )
 
+    def test_trans_input_preserves_explicit_mla_cache_owner_rank_zero(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(mla_cache_owner_rank=0),
+                request_id=123,
+                mm_inputs=[],
+            )
+        )
+
+        self.assertTrue(input_pb.generate_config.HasField("mla_cache_owner_rank"))
+        self.assertEqual(input_pb.generate_config.mla_cache_owner_rank.value, 0)
+
+    def test_trans_input_preserves_explicit_mla_cache_owner_rank_nonzero(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(mla_cache_owner_rank=7),
+                request_id=123,
+                mm_inputs=[],
+            )
+        )
+
+        self.assertTrue(input_pb.generate_config.HasField("mla_cache_owner_rank"))
+        self.assertEqual(input_pb.generate_config.mla_cache_owner_rank.value, 7)
+
+    def test_trans_input_omits_unspecified_mla_cache_owner_rank(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(),
+                request_id=123,
+                mm_inputs=[],
+            )
+        )
+
+        self.assertFalse(input_pb.generate_config.HasField("mla_cache_owner_rank"))
+
 
 if __name__ == "__main__":
     setup_logging()

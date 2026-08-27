@@ -5,6 +5,16 @@ load("//bazel:device_defs.bzl",
 
 cc_test = cc_test_wrapper
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+    "//conditions:default": [],
+})
+
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -33,7 +43,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
     "@havenask//aios/autil:zlib",
-] + torch_deps() + device_impl_target()
+] + torch_deps() + cuda13_torch_link_deps + device_impl_target()
 
 # cc_test(
 #     name = "model_rpc_server_test",
@@ -90,4 +100,15 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+cc_test(
+    name = "k3_pd_topology_test",
+    srcs = ["K3PdTopologyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:k3_pd_topology",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
 )
