@@ -281,8 +281,12 @@ void LogitsProcessorFactory::init(const std::string&           ckpt_path,
     }
 
     XGrammarBackendOptions options;
-    options.any_whitespace       = !grammar_config.constrained_json_disable_any_whitespace;
-    options.max_compiler_threads = std::max(1, grammar_config.num_workers);
+    options.any_whitespace = !grammar_config.constrained_json_disable_any_whitespace;
+    // The fanout is derived from the rank's CPU budget on the Python side. A non-positive value means that
+    // never ran, in which case the option's own fallback is a far better guess than a single thread.
+    if (grammar_config.num_workers > 0) {
+        options.max_compiler_threads = grammar_config.num_workers;
+    }
     options.compile_timeout_ms   = grammar_config.compile_timeout_ms;
     options.compile_concurrency  = grammar_config.compile_concurrency;
     options.compile_queue_size   = grammar_config.compile_queue_size;

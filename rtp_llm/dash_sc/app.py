@@ -17,6 +17,7 @@ import time
 import traceback
 from typing import Any, List, Optional
 
+from rtp_llm.config.engine_config import derive_grammar_compile_threads
 from rtp_llm.config.grammar_tokenizer_info import (
     build_model_grammar_tokenizer_info_json,
 )
@@ -612,6 +613,11 @@ class DashScApp:
                     ),
                 )
                 grammar_config = self.py_env_configs.grammar_config
+                # Idempotent: building the backend visitor above already resolved this as a
+                # side effect, but the sandbox is the consumer here, so do not depend on that.
+                derive_grammar_compile_threads(
+                    grammar_config, self.py_env_configs.parallelism_config
+                )
                 grammar_validator = None
                 if (
                     model_config.task_type == TaskType.LANGUAGE_MODEL
