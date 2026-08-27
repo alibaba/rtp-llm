@@ -10,7 +10,6 @@
   "decode": {
     "scale": 1.0,
     "per_token_ms": 45.0,
-    "max_pending_requests": 264,
     "step_ms_by_batch": [
       [1, 1.0],
       [2, 1.0],

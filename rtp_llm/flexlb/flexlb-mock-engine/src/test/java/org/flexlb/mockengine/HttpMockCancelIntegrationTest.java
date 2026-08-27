@@ -334,12 +334,13 @@ class HttpMockCancelIntegrationTest {
     // ──────────── Setup helpers ────────────
 
     /**
-     * One gated decode engine (decodeMaxConcurrency=1, pending queue cap 4)
-     * behind a real MockControlServer on an ephemeral port. Long decode step
-     * (10s × 0.1 sleep_scale = 1s) keeps requests in flight during asserts.
+     * One gated decode engine (decodeMaxConcurrency=1, unbounded pending
+     * queue — the hard gate is unconditional) behind a real MockControlServer
+     * on an ephemeral port. Long decode step (10s × 0.1 sleep_scale = 1s)
+     * keeps requests in flight during asserts.
      */
     private void startGatedDecodeCluster(boolean reportQueuedAsKvAllocated) throws Exception {
-        MockPerformanceModel model = model(10_000.0, 4, reportQueuedAsKvAllocated);
+        MockPerformanceModel model = model(10_000.0, reportQueuedAsKvAllocated);
         int prefillPort = BASE_PORT + nextPortOffset++;
         prefillService = new JavaMockEngineCluster.FastRpcService(
                 "prefill-0", "127.0.0.1", "prefill",
@@ -385,16 +386,13 @@ class HttpMockCancelIntegrationTest {
         return new DecodeEndpoint(status);
     }
 
-    private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests,
+    private MockPerformanceModel model(double decodeStepMs,
                                        boolean reportQueuedAsKvAllocated) throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
         decodeConfig.put("scale", 1.0);
         decodeConfig.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
         if (reportQueuedAsKvAllocated) {
             decodeConfig.put("report_queued_as_kv_allocated", true);
         }

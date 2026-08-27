@@ -48,7 +48,6 @@
         256,
         1.0
       ]
-    ],
-    "max_pending_requests": 4
+    ]
   }
 }

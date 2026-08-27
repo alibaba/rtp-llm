@@ -51,7 +51,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  *       transiently pushing activeDecodeRequests to cap+1.
  *       {@link #activeDecodeRequestsNeverExceedsCapUnderCancelStorm} samples
  *       the counter continuously under a schedule/cancel/completion storm and
- *       asserts it never exceeds decodeMaxConcurrency in gated mode.</li>
+ *       asserts it never exceeds decodeMaxConcurrency (the hard gate is
+ *       always on).</li>
  * </ol>
  */
 class DecodeCancelRaceTest {
@@ -108,7 +109,7 @@ class DecodeCancelRaceTest {
     void cancelInAdmissionWindowNeverLeaksCounters() throws Exception {
         // decode step 50 × sleep_scale 0.1 = 5 ms — fast completions so the
         // stress loop and the final quiescence stay quick.
-        MockPerformanceModel model = model(50.0, null);
+        MockPerformanceModel model = model(50.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 132);
 
         int iterations = 300;
@@ -148,17 +149,16 @@ class DecodeCancelRaceTest {
     // ──────────── Test 2: P1-2 — cap never exceeded, even transiently ────────────
 
     /**
-     * Gated mode (decode.max_pending_requests = 0 → hard gate + unbounded
-     * queue) with a tiny cap. A dedicated sampler thread continuously reads
-     * activeDecodeRequests while schedule / cancel / completion drains race;
-     * the pre-fix code allowed a transient cap+1 here because cancel released
-     * the slot outside the lock before draining.
+     * Unconditional hard gate with a tiny cap. A dedicated sampler thread
+     * continuously reads activeDecodeRequests while schedule / cancel /
+     * completion drains race; the pre-fix code allowed a transient cap+1 here
+     * because cancel released the slot outside the lock before draining.
      */
     @Test
     void activeDecodeRequestsNeverExceedsCapUnderCancelStorm() throws Exception {
         // decode step 100 × sleep_scale 0.1 = 10 ms — completions fire while
         // the storm is still running, exercising the completion drain too.
-        MockPerformanceModel model = model(100.0, 0);
+        MockPerformanceModel model = model(100.0);
         int cap = 4;
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, cap);
 
@@ -242,20 +242,16 @@ class DecodeCancelRaceTest {
     }
 
     /**
-     * Builds a performance model with a single-point decode curve and an
-     * optional {@code decode.max_pending_requests} opt-in (null = absent =
-     * legacy soft accounting).
+     * Builds a performance model with a single-point decode curve. The decode
+     * hard concurrency gate is unconditional (no opt-in key exists anymore).
      */
-    private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests)
+    private MockPerformanceModel model(double decodeStepMs)
             throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
         decodeConfig.put("scale", 1.0);
         decodeConfig.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
         MAPPER.writeValue(performance.toFile(), Map.of(
                 "block_size", 1024,
                 "sleep_scale", 0.1,

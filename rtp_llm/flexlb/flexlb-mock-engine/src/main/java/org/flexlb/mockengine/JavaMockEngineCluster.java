@@ -533,17 +533,16 @@ public final class JavaMockEngineCluster {
         // adjusted at drain time. Feeds java_mock_stats prefill_running_reqs.
         private final AtomicInteger activePrefillRequests = new AtomicInteger();
         private final AtomicInteger activeDecodeRequests = new AtomicInteger();
-        // ── Decode wait queue + opt-in hard concurrency gate (change 1) ──
+        // ── Decode wait queue + unconditional hard concurrency gate ──
         // Pending decode requests waiting for a concurrency slot. Drained by the
         // decode completion callback after a running request finishes.
-        // The gate is opt-in via performance JSON decode.max_pending_requests
-        // (see MockPerformanceModel#decodeMaxPendingRequests): when the key is
-        // absent, decodeMaxConcurrency stays a soft accounting/reporting value
-        // (legacy behavior — no queueing, no rejection). When configured,
-        // decodeMaxConcurrency becomes a real hard gate: activeDecodeRequests is
-        // reserved under decodeQueueLock at admission/drain time so it can never
-        // exceed the cap, and a completion hands its freed slot to one queued
-        // request atomically (no lost slot, no over-admission).
+        // decodeMaxConcurrency is an UNCONDITIONAL hard gate (production
+        // semantics: running is capped and excess requests park in an unbounded
+        // engine-side waiting queue, mirroring waiting_streams_). The slot is
+        // reserved under decodeQueueLock at admission/drain time so
+        // activeDecodeRequests can never exceed the cap, and a completion hands
+        // its freed slot to one queued request atomically (no lost slot, no
+        // over-admission).
         private final ArrayDeque<DecodePendingTask> decodePendingQueue = new ArrayDeque<>();
         private final Object decodeQueueLock = new Object();
         // ── Prefill batch-level wait queue (change 2) ──
@@ -1590,15 +1589,14 @@ public final class JavaMockEngineCluster {
         /**
          * Admission point for a decode request. Returns true if the request was
          * accepted (scheduled immediately, queued behind the concurrency gate,
-         * already scheduled previously, or already cancelled); false if rejected
-         * due to pending-queue backpressure (RESOURCE_EXHAUSTED) so the caller
-         * can degrade.
+         * already scheduled previously, or already cancelled); false only while
+         * a shutdown drain is in progress so the caller can degrade.
          *
-         * <p>The hard concurrency gate + pending queue are opt-in via performance
-         * JSON {@code decode.max_pending_requests} (null = legacy soft accounting:
-         * every request is admitted immediately and decodeMaxConcurrency only
-         * feeds availableConcurrency reporting; 0 = gate with unbounded queue;
-         * N &gt; 0 = gate with the queue capped at N, overflow rejected).
+         * <p>The hard concurrency gate is UNCONDITIONAL (production semantics:
+         * decodeMaxConcurrency caps running requests; once full, new requests
+         * park in the unbounded decodePendingQueue — the engine-side analogue
+         * of waiting_streams_ — and drain as completions free slots; nothing is
+         * ever rejected on the decode side for queue pressure).
          *
          * <p>The putIfAbsent guard (ConcurrentDoubleSchedulingTest) is preserved
          * to prevent double-scheduling the same requestId. It runs INSIDE
@@ -1620,7 +1618,6 @@ public final class JavaMockEngineCluster {
             if (shuttingDown) {
                 return false;
             }
-            Integer pendingCap = performance.decodeMaxPendingRequests();
             synchronized (decodeQueueLock) {
                 // Cancel raced ahead of scheduling: bail out before claiming
                 // anything. The cancel path has already surfaced the CANCELLED
@@ -1636,13 +1633,11 @@ public final class JavaMockEngineCluster {
                 if (existing != null) {
                     return true; // already accepted/scheduled on this engine
                 }
-                if (pendingCap == null || activeDecodeRequests.get() < decodeMaxConcurrency) {
-                    // Legacy mode (pendingCap == null) always admits immediately:
-                    // activeDecodeRequests is soft accounting and may exceed
-                    // decodeMaxConcurrency. Gated mode reserves the free slot now
-                    // (under the lock) so a concurrent completion-callback drain
-                    // cannot admit another request into the same slot. runDecode
-                    // does the actual scheduling outside the lock;
+                if (activeDecodeRequests.get() < decodeMaxConcurrency) {
+                    // A slot is free — admit immediately. The slot is reserved
+                    // here (under the lock) so a concurrent completion-callback
+                    // drain cannot admit another request into the same slot.
+                    // runDecode does the actual scheduling outside the lock;
                     // activeDecodeRequests is already accounted here.
                     // pendingRequests is incremented here to match the
                     // unconditional decrement in the completion callback
@@ -1658,9 +1653,11 @@ public final class JavaMockEngineCluster {
                     if (performance.reportQueuedAsKvAllocated()) {
                         activeKvTokens.addAndGet(shape.inputLen());
                     }
-                } else if (pendingCap <= 0 || decodePendingQueue.size() < pendingCap) {
-                    // Concurrency gate hit — park the request in the pending queue.
-                    // It will be drained when a running request completes.
+                } else {
+                    // Concurrency gate hit — park the request in the unbounded
+                    // pending queue (production waiting_streams_ semantics:
+                    // engine waits, never rejects). It will be drained when a
+                    // running request completes.
                     // Opt-in accepted-layer window (C1): when
                     // decode.report_queued_as_kv_allocated is enabled, the parked
                     // request is reported as KV_ALLOCATED (KV reserved, not
@@ -1684,12 +1681,6 @@ public final class JavaMockEngineCluster {
                             batchId >= 0 ? "enqueue_batch" : "generate_stream");
                     lastEnqueueTime.set(System.nanoTime());
                     return true; // queued (accepted, will run when a slot frees)
-                } else {
-                    // Backpressure: pending queue full — reject so the caller
-                    // (master / prefill hand-off) perceives decode overload.
-                    // Undo the runningTasks claim made by putIfAbsent above.
-                    runningTasks.remove(requestId);
-                    return false;
                 }
             }
             // Admitted immediately — record lifecycle and run (outside the lock so

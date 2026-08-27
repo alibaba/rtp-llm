@@ -60,9 +60,11 @@ JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
 # coarse cadence.
 JAVA_MOCK_STATS_INTERVAL_MS="${JAVA_MOCK_STATS_INTERVAL_MS:-1000}"
 # Passed straight to --decode-max-concurrency (single env, no renaming).
-# Default matches the mock engine's DEFAULT_DECODE_MAX_CONCURRENCY (132);
-# lower it to trip the opt-in hard admission gate (decode.max_pending_requests)
-# so the engine queues requests into the KV_ALLOCATED/accepted layer.
+# Default matches the mock engine's DEFAULT_DECODE_MAX_CONCURRENCY (132).
+# The hard admission gate is unconditional (production semantics): once the
+# cap is reached, excess decode requests park in the engine-side waiting
+# queue (reported as decode_waiting; with report_queued_as_kv_allocated they
+# surface in the KV_ALLOCATED/accepted layer).
 JAVA_MOCK_DECODE_MAX_CONCURRENCY="${JAVA_MOCK_DECODE_MAX_CONCURRENCY:-132}"
 JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-32g}"
 JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"

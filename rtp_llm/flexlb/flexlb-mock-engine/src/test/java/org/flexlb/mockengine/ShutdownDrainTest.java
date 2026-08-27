@@ -295,11 +295,9 @@ class ShutdownDrainTest {
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
                 "prefill", Map.of("scale", 1.0),
-                // decode.max_pending_requests=0 opts IN to the hard concurrency
-                // gate with an unbounded queue (v3 semantics: absent = legacy soft
-                // accounting, which never builds the queued backlog these tests
-                // drain).
-                "decode", Map.of("scale", 1.0, "max_pending_requests", 0,
+                // The decode hard concurrency gate is unconditional, so these
+                // drain tests always exercise the queued-backlog + drain path.
+                "decode", Map.of("scale", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, formula);
         return MockPerformanceModel.load(performance.toString(), master.toString());

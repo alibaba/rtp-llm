@@ -61,24 +61,14 @@ final class MockPerformanceModel {
     // When non-null, decodeMs uses outputLen * perTokenMs instead of the
     // step_ms_by_batch curve. Null signals "absent in JSON → use curve fallback".
     private final Double perTokenMs;
-    // Opt-in decode hard admission gate + pending queue, JSON
-    // "decode.max_pending_requests". Null signals "absent in JSON → legacy
-    // behavior": decodeMaxConcurrency stays a soft accounting/reporting value,
-    // requests are never queued nor rejected on the decode side. When present,
-    // decodeMaxConcurrency becomes a hard admission gate with a pending queue:
-    // 0 = unbounded queue (mirrors prefill.max_waiting_batches semantics),
-    // N > 0 = queue capped at N requests, overflow rejected (backpressure).
-    // Kept independent of the fault-injection queue_depth_limit, which retains
-    // its original request-level RPC-entry gate semantics only.
-    private final Integer decodeMaxPendingRequests;
     // Opt-in accepted-layer visibility window, JSON
     // "decode.report_queued_as_kv_allocated" (default false = current
     // behavior, zero change). When true, decode requests parked in the
     // pending queue (admitted, not yet running) are reported in WorkerStatus
     // as TASK_PHASE_KV_ALLOCATED instead of TASK_PHASE_RUNNING — mirroring a
     // real engine where KV_ALLOCATED is exactly "KV reserved, not running
-    // yet". Combined with decode.max_pending_requests this lets tests build
-    // a stable accepted-layer backlog for Phase 5 (8429) eviction.
+    // yet". The decode hard concurrency gate (park overflow in the engine-side
+    // waiting queue) is unconditional and needs no switch.
     private final boolean reportQueuedAsKvAllocated;
     private volatile double jitterPct;
     private volatile double cacheAdmissionRate;
@@ -99,7 +89,6 @@ final class MockPerformanceModel {
                                  List<DecodePoint> decodePoints,
                                  double decodeScale,
                                  Double perTokenMs,
-                                 Integer decodeMaxPendingRequests,
                                  boolean reportQueuedAsKvAllocated,
                                  double jitterPct,
                                  double cacheAdmissionRate) {
@@ -114,7 +103,6 @@ final class MockPerformanceModel {
         this.decodePoints = decodePoints;
         this.decodeScale = decodeScale;
         this.perTokenMs = perTokenMs;
-        this.decodeMaxPendingRequests = decodeMaxPendingRequests;
         this.reportQueuedAsKvAllocated = reportQueuedAsKvAllocated;
         this.jitterPct = jitterPct;
         this.cacheAdmissionRate = cacheAdmissionRate;
@@ -137,8 +125,6 @@ final class MockPerformanceModel {
 
         JsonNode decode = performance.path("decode");
         Double perTokenMs = decode.has("per_token_ms") ? decode.get("per_token_ms").asDouble() : null;
-        Integer decodeMaxPendingRequests = decode.has("max_pending_requests")
-                ? decode.get("max_pending_requests").asInt() : null;
         boolean reportQueuedAsKvAllocated =
                 decode.path("report_queued_as_kv_allocated").asBoolean(false);
         List<DecodePoint> points = new ArrayList<>();
@@ -157,7 +143,7 @@ final class MockPerformanceModel {
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
                 prefillMinMs, maxWaitingPrefillBatches, directBatchSizeMax, formula, List.copyOf(points),
-                decode.path("scale").asDouble(1.0), perTokenMs, decodeMaxPendingRequests,
+                decode.path("scale").asDouble(1.0), perTokenMs,
                 reportQueuedAsKvAllocated, jitterPct, cacheAdmissionRate);
     }
 
@@ -265,16 +251,6 @@ final class MockPerformanceModel {
      */
     int directBatchSizeMax() {
         return directBatchSizeMax;
-    }
-
-    /**
-     * Opt-in decode hard admission gate + pending-queue cap (JSON
-     * "decode.max_pending_requests"). Null = key absent = legacy soft
-     * accounting (no gate, no queue, no rejection); 0 = gate on with an
-     * unbounded queue; N &gt; 0 = gate on with the queue capped at N.
-     */
-    Integer decodeMaxPendingRequests() {
-        return decodeMaxPendingRequests;
     }
 
     /**

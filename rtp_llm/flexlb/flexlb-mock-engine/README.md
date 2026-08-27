@@ -255,7 +255,7 @@ End-to-end QoS priority, from trace to engine tombstone:
   **8429 (`PRIORITY_PREEMPTED_ERROR_CODE`, "preempted by higher-priority
   request")** — an idempotent tombstone that masters can re-observe safely
   after restarts. The cancelled entry preserves the ACTUAL phase the request
-  was cancelled in (a queued opt-in decode request surfaces
+  was cancelled in (a queued decode request surfaces
   `TASK_PHASE_KV_ALLOCATED`, a queued prefill `TASK_PHASE_RECEIVED`;
   `RUNNING` remains the fallback).
 - **P→D ownership tables**: each prefill engine tracks its downstream decode
@@ -263,32 +263,33 @@ End-to-end QoS priority, from trace to engine tombstone:
   upstream prefill owner (`upstreamPrefillOwners`), so cancel/finish on
   either side can release the counterpart's inflight entry exactly once.
 
-### Decode hard-admission gate (opt-in)
+### Decode hard-admission gate (unconditional)
 
-Performance JSON `decode.max_pending_requests`:
+`decodeMaxConcurrency` (default 132, overridable via
+`--decode-max-concurrency`) is an **unconditional hard admission gate** with
+an **unbounded engine-side pending queue** — production `waiting_streams_`
+semantics: once all running slots are taken, new decode requests park in
+`decodePendingQueue` (surfaced as `decode_waiting` in `java_mock_stats`)
+and drain one-for-one as completions free slots. Nothing is ever rejected
+on the decode side for queue pressure. Historically this was opt-in via
+performance JSON `decode.max_pending_requests`; that key no longer exists —
+the hard gate is the default and only behavior.
 
-- **absent / null** (default): legacy soft accounting — no gate, no pending
-  queue, no rejection;
-- `0`: gate on with an unbounded queue;
-- `N > 0`: gate on with the pending queue capped at N (excess requests are
-  rejected with backpressure instead of queuing unbounded).
-
-Companion flag `decode.report_queued_as_kv_allocated` (default false): when
-the gate is on, queued decode requests are reported as
+Companion flag `decode.report_queued_as_kv_allocated` (default false):
+when enabled, queued decode requests are reported as
 `TASK_PHASE_KV_ALLOCATED` in WorkerStatus (KV-fidelity semantics for the
 accepted layer), so a master observing KV_ALLOCATED sees what a production
 engine would have admitted.
 
-**Note — the v2 default pending cap does NOT apply here (IMPORTANT)**: the
-v2 baseline text above ("Decode pending-queue capacity": when
+**Note — the pending queue is unbounded (differs from v2's default cap)**:
+the v2 baseline text above ("Decode pending-queue capacity": when
 `queue_depth_limit` is not set, "the effective decode pending cap defaults to
-`max(256, decode_max_concurrency × 2)`") describes the `feat/flexlb_mock_engine_v2`
-behavior. On this branch that default does not hold: with
-`decode.max_pending_requests` absent/null there is **no gate, no pending
-queue and no rejection at all** (legacy soft accounting) — the hard gate is
-strictly opt-in via the performance JSON, exactly as listed above. The only
-queue bound without the opt-in gate is the request-level fault-injection
-`queue_depth_limit`, which stays disabled until explicitly injected.
+`max(256, decode_max_concurrency × 2)`") describes the
+`feat/flexlb_mock_engine_v2` behavior. This branch deliberately keeps the
+pending queue **unbounded** (a production engine's `waiting_streams_` has
+no engine-side queue cap either — backpressure is the scheduler's job).
+The only queue bound is the request-level fault-injection `queue_depth_limit`,
+which stays disabled until explicitly injected.
 
 ### Prefill waiting-queue cap — semantic difference (IMPORTANT)
 
@@ -326,7 +327,7 @@ Representative additions beyond the v2 baseline suite (full list under
 - `AutoTpmE2EHarness` — E2E harness for the auto-tpm scenarios
 - `PriorityLatencyE2ETest` — priority-driven latency differentiation E2E
 - `MockEngineCancelChannelTest` — in-process cancel channel contract
-- `DecodePendingCapOptInTest` — opt-in decode hard gate semantics
+- `DecodePendingQueueHardGateTest` — unconditional decode hard gate semantics
 - `KvAllocatedReportOptInTest` — queued-as-KV_ALLOCATED reporting
 - `LoadClientPriorityTest` — PRIORITY env vs trace-record priority, wire
   propagation, priority_stats

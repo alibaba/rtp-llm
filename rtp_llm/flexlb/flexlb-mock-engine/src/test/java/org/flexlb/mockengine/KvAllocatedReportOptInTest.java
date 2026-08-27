@@ -80,7 +80,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void defaultOffKeepsQueuedTasksReportedAsRunning() throws Exception {
-        MockPerformanceModel model = model(10_000.0, 3, false);
+        MockPerformanceModel model = model(10_000.0, false);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         // 1 running + 2 queued behind the concurrency gate.
@@ -115,7 +115,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInReportsQueuedAsKvAllocatedAndFlipsBackWhenRunning() throws Exception {
-        MockPerformanceModel model = model(10_000.0, 3, true);
+        MockPerformanceModel model = model(10_000.0, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         for (long rid = 1; rid <= 3; rid++) {
@@ -151,7 +151,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInCancelOfQueuedRequestReportsKvAllocatedPhase() throws Exception {
-        MockPerformanceModel model = model(10_000.0, 3, true);
+        MockPerformanceModel model = model(10_000.0, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 8), -1, null));
@@ -206,16 +206,13 @@ class KvAllocatedReportOptInTest {
         return service;
     }
 
-    private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests,
+    private MockPerformanceModel model(double decodeStepMs,
                                        boolean reportQueuedAsKvAllocated) throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
         decodeConfig.put("scale", 1.0);
         decodeConfig.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
         if (reportQueuedAsKvAllocated) {
             decodeConfig.put("report_queued_as_kv_allocated", true);
         }
