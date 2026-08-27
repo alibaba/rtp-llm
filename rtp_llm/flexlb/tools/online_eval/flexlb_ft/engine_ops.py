@@ -228,12 +228,19 @@ class EngineOps:
     def master_target(self) -> str:
         return f"{self.master_ip}:{self.master_http_port + 2}"
 
-    def schedule(self, request_id: int, **kwargs):
+    def schedule(self, request_id: int, timeout_s: float = 30.0, **kwargs):
+        """Schedule RPC against the master.
+
+        ``timeout_s`` is the *client-side gRPC deadline* — the v2 QUEUE
+        scheduler parks capacity-blocked requests (a wait condition, see
+        FixedWindowBatcherAlgorithm), so callers probing for parking pass a
+        short deadline and expect DEADLINE_EXCEEDED.
+        """
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             self._channel(self.master_target())
         )
         req = self.build_schedule_request(request_id, **kwargs)
-        return stub.Schedule(req, timeout=30.0)
+        return stub.Schedule(req, timeout=timeout_s)
 
     def role_addr(self, response, role: str) -> str:
         """Address of the first server_status entry whose role matches.
@@ -276,6 +283,8 @@ class EngineOps:
             )
         else:
             if input_pb is None:
+                # Default-shape fallback: callers that scheduled with a
+                # non-default shape MUST pass input_pb (see run_one_request).
                 input_pb = self.build_generate_input(request_id)
             self._copy_role_addrs(input_pb, response)
             call = stub.GenerateStreamCall(input_pb, timeout=60.0)
@@ -309,15 +318,24 @@ class EngineOps:
 
     # -- recovery -----------------------------------------------------------
 
-    def verify_recovery(self) -> tuple[bool, str]:
+    def verify_recovery(self, output_len: int = 2) -> tuple[bool, str]:
         """Schedule a fresh request and confirm it completes normally."""
         rid = self.next_request_id()
+        block_keys = [rid * 100 + 1]
         try:
-            response = self.schedule(rid, output_len=2, block_keys=[rid * 100 + 1])
+            response = self.schedule(rid, output_len=output_len, block_keys=block_keys)
             if response.code != 200 or not response.success:
                 return False, f"schedule failed: {response.error_message}"
+            # NON_BATCH re-builds the GenerateInputPB client-side; it must
+            # carry the SAME shape/block-keys the ScheduleRequest carried,
+            # otherwise the engine sees a different request than the master
+            # scheduled (input_len/block cache keys diverge).
             input_pb = (
-                None if response.enqueued_by_master else self.build_generate_input(rid)
+                None
+                if response.enqueued_by_master
+                else self.build_generate_input(
+                    rid, output_len=output_len, block_keys=block_keys
+                )
             )
             handle = self.start_stream(response, rid, input_pb=input_pb)
             handle.thread.join(RECOVERY_TIMEOUT_S)
@@ -540,8 +558,12 @@ class EngineOps:
             if response.code != 200 or not response.success:
                 return "", f"schedule failed: {response.error_message}"
             addr = self.role_addr(response, "PREFILL")
+            # NON_BATCH re-builds the GenerateInputPB client-side with the
+            # SAME shape/block-keys kwargs the ScheduleRequest carried — a
+            # default-shape rebuild would desynchronize the engine's view
+            # (admitting default block keys) from the master's routing view.
             input_pb = (
-                self.build_generate_input(rid)
+                self.build_generate_input(rid, **kwargs)
                 if not response.enqueued_by_master
                 else None
             )

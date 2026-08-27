@@ -15,22 +15,30 @@ here via the Java "type" format:
 
     generate_error  -> chaos_inject_generate_error (client-direct
                        GenerateStreamCall path: the fault fires ONLY in
-                       generateStreamCall, and master-routed traffic — all
-                       three modes deliver via enqueueBatch + FetchResponse
-                       (direct-run evidence: generate_stream_rpcs=0 with
-                       enqueue_rpcs=3/fetch_response_rpcs=3) — never
-                       reaches it; the case drives the client-direct
-                       contract instead of imagining a master path)
-    fetch_error     -> chaos_inject_fetch_error (batch only: FetchResponse
-                       is the batch-mode client stream)
-    crash_after     -> chaos_inject_crash_after (batch: Nth enqueue flips
-                       the engine to stopped — NOT a process exit, a
-                       stopped flag; /start_engine clears the fault config
-                       and resets the enqueue counter)
-    enqueue_delay   -> chaos_inject_enqueue_delay (batch only: the enqueue
-                       ack is deferred by the scheduler, so the batch-mode
-                       schedule() latency grows by delay_ms)
-    generate_delay  -> chaos_inject_generate_delay (all modes: delay_ms is
+                       generateStreamCall.  Under the v1 mode axis master
+                       traffic never reached it (all three modes delivered
+                       via enqueueBatch + FetchResponse); under v2 the
+                       BATCH dispatcher is still unreachable, while the
+                       NON_BATCH dispatcher routes client-sent
+                       GenerateStreamCall traffic through it (master-path
+                       injection is dedicated-phase material).  The case
+                       pins the client-direct contract and runs under
+                       every profile — the direct stub sequence does not
+                       pass through the master at all)
+    fetch_error     -> chaos_inject_fetch_error (BATCH dispatcher only:
+                       FetchResponse is the BATCH-dispatcher client stream; the
+                       fault config template pins the legacy chaos axes)
+    crash_after     -> chaos_inject_crash_after (BATCH dispatcher only: Nth
+                       enqueue flips the engine to stopped — NOT a process
+                       exit, a stopped flag; /start_engine clears the fault
+                       config and resets the enqueue counter; the fault
+                       config template pins the legacy chaos axes)
+    enqueue_delay   -> chaos_inject_enqueue_delay (BATCH dispatcher only:
+                       the enqueue runnable (admission + ack) is deferred
+                       by the scheduler, so the schedule() latency grows
+                       by delay_ms; runs under both BATCH-dispatch profiles
+                       via requires=["enqueue_batch"])
+    generate_delay  -> chaos_inject_generate_delay (all profiles: delay_ms is
                        added to the prefill execution time, visible in TTFT)
     kv_pressure     -> consumed by gate_slo_queue_deadline (G11)
     queue_depth     -> consumed by gate_queue_depth_reject (G8)
@@ -122,14 +130,23 @@ MOCK_TOTAL_KV_TOKENS = 6_291_456
 ENGINE_RECOVERY_WAIT_S = 3.0
 
 
-def case(name: str, profiles=None, source: str = "", suite: str = "chaos"):
+def case(
+    name: str, profiles=None, requires=None, source: str = "", suite: str = "chaos"
+):
     """Register into INJECTION_GATE_CASES; *suite* drives the runner
     grouping (injections -> chaos, gates -> smoke), following the
     elastic_* precedent in chaos_cases.py."""
 
     def deco(fn):
         INJECTION_GATE_CASES.append(
-            CaseDef(name=name, suite=suite, fn=fn, profiles=profiles, source=source)
+            CaseDef(
+                name=name,
+                suite=suite,
+                fn=fn,
+                profiles=profiles,
+                requires=requires,
+                source=source,
+            )
         )
         return fn
 
@@ -214,11 +231,15 @@ def engine_inflight_clean(
 
 def _measure_ttft(
     ops, rid: int, timeout_s: float = 12.0
-) -> tuple[float, Optional[str]]:
-    """schedule + stream one request, measuring first-output latency."""
+) -> tuple[float, Optional[str], bool]:
+    """schedule + stream one request, measuring first-output latency.
+
+    Returns (ttft, error, enqueued_by_master) — the flag lets callers
+    branch master-inflight checks on the actual delivery mode instead of
+    inferring it from the profile."""
     response = ops.schedule(rid)
     if response.code != 200 or not response.success:
-        return -1.0, f"schedule failed: {response.error_message}"
+        return -1.0, f"schedule failed: {response.error_message}", False
     input_pb = None if response.enqueued_by_master else ops.build_generate_input(rid)
     handle = ops.start_stream(response, rid, input_pb=input_pb)
     t0 = time.monotonic()
@@ -226,12 +247,16 @@ def _measure_ttft(
     ttft = time.monotonic() - t0
     if not got_first:
         handle.cancel()
-        return -1.0, "no first output"
+        return -1.0, "no first output", response.enqueued_by_master
     ended = handle.wait_end(timeout_s)
     if not ended or handle.snap.error:
         handle.cancel()
-        return ttft, f"stream error after first output: {handle.snap.error}"
-    return ttft, None
+        return (
+            ttft,
+            f"stream error after first output: {handle.snap.error}",
+            (response.enqueued_by_master),
+        )
+    return ttft, None, response.enqueued_by_master
 
 
 def _any_engine_busy(ops, names: list[str]) -> bool:
@@ -277,20 +302,25 @@ def _gate_config(
 
 @case(
     "chaos_inject_generate_error",
-    profiles=["batch-window"],
     source="gap G6/G7: /inject type=generate_error (GenerateStreamCall entry, client-direct path)",
 )
 def inject_generate_error(ctx: CaseContext):
     """generate_error is checked ONLY at the engine's GenerateStreamCall
     entry (JavaMockEngineCluster.generateStreamCall: onError before any
-    request state is registered).  Master-routed traffic structurally never
-    reaches that check: ALL three master modes (direct/queue/batch) deliver
-    through enqueueBatch + FetchResponse — round-4 evidence from a direct
-    run: generate_stream_rpcs=0 while enqueue_rpcs=3 and
-    fetch_response_rpcs=3 — so instead of imagining a master path, this
-    case pins the CROSS-PROCESS contract on the client-direct
-    GenerateStreamCall path (the load-client direct deployment shape;
-    same direct-stub sequence EngineOps already uses for worker_cancel):
+    request state is registered).
+
+    Profile semantics (v2, task #55): under the v1 mode axis ALL master
+    modes delivered via enqueueBatch + FetchResponse (direct-run evidence:
+    generate_stream_rpcs=0 while enqueue_rpcs=3 / fetch_response_rpcs=3),
+    so the fault was structurally unreachable for master traffic and the
+    case pinned the client-direct contract.  Under v2 the BATCH
+    dispatcher is still unreachable, but the NON_BATCH dispatcher routes
+    client-sent GenerateStreamCall traffic through this exact check — a
+    master-routed variant of this case is dedicated-phase material.  The
+    contract pinned here is the CLIENT-DIRECT path (the load-client
+    direct deployment shape; same direct-stub sequence EngineOps already
+    uses for worker_cancel), which does not pass through the master at
+    all — so the case runs unconditionally under every profile:
 
     inject -> the direct stream fails immediately with the injected
     error and registers no engine-side inflight; clear -> a fresh direct
@@ -435,7 +465,17 @@ def inject_fetch_error(ctx: CaseContext):
     emitting one unfinished output.  The client must observe the error;
     the engine-side inflight drains immediately; the master-side ledger
     entry is cleaned by the 30s stale-inflight TTL (verified contract);
-    a fresh request succeeds once the injection is cleared."""
+    a fresh request succeeds once the injection is cleared.
+
+    Profile semantics (v2, task #55): the fault is checked only at the
+    engine's fetchResponse entry, which exists only under the BATCH
+    dispatcher — and _fault_spec pins the legacy chaos axes
+    (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG, so re-running
+    under another --profile would execute the identical configuration.
+    The declaration stays batch-window (regression efficiency + label
+    honesty); a NON_BATCH master-path generate_error variant is
+    dedicated-phase material.
+    """
     ops = ctx.engine_ops(ctx.env_manager.ensure(_fault_spec(ctx)))
     base = rid_base(ctx, "chaos")
     names = _prefill_names(ops)
@@ -512,7 +552,14 @@ def inject_crash_after(ctx: CaseContext):
     engine never saw the request so no WorkerStatus terminal ever
     settles it) — verified in PriorityScheduler.handleEngineFenceOutcome /
     cleanupInflight.  The engine side, which never registered the request,
-    must be fully clean."""
+    must be fully clean.
+
+    Profile semantics (v2, task #55): the fault fires at the engine's
+    EnqueueBatch entry (BATCH dispatcher only) and _fault_spec pins the
+    legacy chaos axes (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG,
+    so the declaration stays batch-window — re-running under another
+    --profile would execute the identical configuration.
+    """
     ops = ctx.engine_ops(ctx.env_manager.ensure(_fault_spec(ctx)))
     base = rid_base(ctx, "chaos")
     names = _prefill_names(ops)
@@ -620,19 +667,28 @@ def inject_crash_after(ctx: CaseContext):
 
 @case(
     "chaos_inject_enqueue_delay",
-    profiles=["batch-window"],
-    source="gap G6/G7: /inject type=enqueue_delay (deferred enqueue ack, batch mode)",
+    requires=["enqueue_batch"],
+    source="gap G6/G7: /inject type=enqueue_delay (deferred enqueue ack, BATCH dispatch)",
 )
 def inject_enqueue_delay(ctx: CaseContext):
     """enqueue_delay defers the whole enqueue runnable (admission + ack) by
-    delay_ms, so the batch-mode schedule() — which waits for the enqueue
+    delay_ms, so the BATCH-dispatch schedule() — which waits for the enqueue
     ack — grows by roughly delay_ms.  delay_ms must stay well below
     dispatcher.enqueueRpcTimeoutMs (default 5000) or the RPC deadline
     fires first.
 
     Assertions: end-to-end latency delta >= 1.2s at delay_ms=1500, the
     request still SUCCEEDS (delay, not failure), and latency recovers once
-    the injection is cleared."""
+    the injection is cleared.
+
+    Profile semantics (v2, task #55): the deferred runnable is the
+    engine's EnqueueBatch processing, which exists only under the BATCH
+    dispatcher — requires=["enqueue_batch"] keeps the case to the
+    BATCH-dispatch profiles (batch-window, single-batch).  Unlike the
+    fetch_error/crash_after cases this one runs on the shared smoke env
+    (real per-profile config), so single-batch exercises the SINGLE
+    decision axis on the same enqueue path.
+    """
     ops = ctx.ops()
     base = rid_base(ctx, "chaos")
     names = _prefill_names(ops)
@@ -684,13 +740,13 @@ def inject_enqueue_delay(ctx: CaseContext):
 
 @case(
     "chaos_inject_generate_delay",
-    source="gap G6/G7: /inject type=generate_delay (prefill execution inflation, all modes)",
+    source="gap G6/G7: /inject type=generate_delay (prefill execution inflation, all profiles)",
 )
 def inject_generate_delay(ctx: CaseContext):
     """generate_delay adds delay_ms to the prefill execution estimate
     (runPrefillBatch), so the first-output latency grows by roughly
-    delay_ms in EVERY mode (unlike enqueue_delay, schedule() stays fast
-    and only TTFT inflates).
+    delay_ms under EVERY profile (unlike enqueue_delay, schedule() stays
+    fast and only TTFT inflates).
 
     Assertions: TTFT delta >= 1.2s at delay_ms=1500, the request still
     SUCCEEDS, and TTFT recovers after the injection is cleared."""
@@ -701,23 +757,24 @@ def inject_generate_delay(ctx: CaseContext):
         return False, "no prefill engines found"
     try:
         rid0 = ops.next_request_id(base)
-        ttft_base, err0 = _measure_ttft(ops, rid0)
+        ttft_base, err0, enq0 = _measure_ttft(ops, rid0)
         if err0:
             return False, f"baseline request failed: {err0}"
 
         inject_type_all(ops, names, "generate_delay", delay_ms=1500)
         rid1 = ops.next_request_id(base)
-        ttft_delayed, err1 = _measure_ttft(ops, rid1)
+        ttft_delayed, err1, _ = _measure_ttft(ops, rid1)
 
         clear_type_all(ops, names, "generate_delay")
         rid2 = ops.next_request_id(base)
-        ttft_recovered, err2 = _measure_ttft(ops, rid2)
+        ttft_recovered, err2, _ = _measure_ttft(ops, rid2)
 
         delta = ttft_delayed - ttft_base
-        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), 10.0
-        )
-        if not ctx.batch_dispatch():
+        if enq0:
+            inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+                _master_http(ops), 10.0
+            )
+        else:
             inflight_ok, inflight_detail = True, "N/A (non-batch path)"
 
         passed = (
@@ -746,7 +803,7 @@ def inject_generate_delay(ctx: CaseContext):
 
 @case(
     "gate_queue_depth_reject",
-    profiles=["batch-window"],
+    requires=["enqueue_batch"],
     source="gap G8: engine queue_depth admission gate (fast reject + recovery)",
     suite="smoke",
 )
@@ -755,7 +812,16 @@ def gate_queue_depth(ctx: CaseContext):
     pending request, the next enqueue is rejected FAST with "queue depth
     limit exceeded" (-> BATCH_DISPATCH_FAILED schedule response), NOT an
     unbounded pile-up; after the gate is lifted the occupiers finish and
-    a fresh request succeeds with no inflight leak."""
+    a fresh request succeeds with no inflight leak.
+
+    Profile semantics (v2, task #55): the gate is checked only at the
+    engine's EnqueueBatch entry (BATCH dispatcher) — the
+    GenerateStreamCall path never consults it — so
+    requires=["enqueue_batch"] keeps the case to the BATCH-dispatch
+    profiles (batch-window, single-batch).  The case runs on the shared
+    smoke env (real per-profile config), so single-batch exercises the
+    SINGLE decision axis on the same gate path.
+    """
     ops = ctx.ops()
     base = rid_base(ctx, "chaos")
     names = _prefill_names(ops)
@@ -973,7 +1039,15 @@ def gate_slo_deadline(ctx: CaseContext):
     error around 1.5s — fast, terminal, surfaced to the client.  Also
     covers the kv_pressure injection type cross-process (gap G6/G7).
 
-    Recovery: clear kv_pressure and a fresh request must succeed."""
+    Recovery: clear kv_pressure and a fresh request must succeed.
+
+    Profile semantics (v2, task #55): the KV gate + queue deadline apply
+    to the scheduler queue regardless of the decision/dispatcher axes,
+    but _slo_spec pins the legacy chaos axes (PRIORITY + FIXED_WINDOW +
+    BATCH) via FLEXLB_CONFIG — re-running under another --profile would
+    execute the identical configuration, so the declaration stays
+    batch-window (label honesty + regression efficiency).
+    """
     env = ctx.env_manager.ensure(_slo_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "chaos")
@@ -1051,7 +1125,15 @@ def gate_capacity(ctx: CaseContext):
     fast-rejects every request beyond the global budget with
     RESOURCE_EXHAUSTED "master outstanding capacity exhausted" — a
     synchronous rejection, no queueing and no leak.  Once the in-flight
-    occupants terminate, a sequential request must succeed again."""
+    occupants terminate, a sequential request must succeed again.
+
+    Profile semantics (v2, task #55): the outstanding-capacity permit is
+    taken on the master submit path for every delivery mode, but
+    _capacity_spec pins the legacy chaos axes (PRIORITY + FIXED_WINDOW +
+    BATCH) via FLEXLB_CONFIG — re-running under another --profile would
+    execute the identical configuration, so the declaration stays
+    batch-window (label honesty + regression efficiency).
+    """
     env = ctx.env_manager.ensure(_capacity_spec(ctx))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "chaos")

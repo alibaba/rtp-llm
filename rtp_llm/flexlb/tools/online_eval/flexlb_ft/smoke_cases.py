@@ -6,10 +6,17 @@ Ported 1:1 from the legacy scripts (assertion thresholds preserved):
   smoke_scheduling_s1..s12   <- scheduling_smoke.py S1-S12
   smoke_anomaly_e1..e3       <- anomaly_smoke.py   E1-E3
 
-Mode adaptation follows run_matrix_smoke.sh grouping:
-  * S4/S5/S6 assert only under batch (COST_BASED_PREFILL)
-  * S7/S8/S9 assert only under direct/queue (SHORTEST_TTFT)
-  * everything else runs under all modes
+Profile adaptation (task #55; supersedes the legacy run_matrix_smoke.sh
+mode grouping): the v1 batch/direct/queue split existed to vary the LB
+strategy per mode, which v2 removed — all four profiles (batch-window /
+single-nonbatch / single-batch / window-nonbatch) share QUEUE + FIFO
+ordering and the same ESTIMATED_TTFT prefill selector, so scoping is by
+delivery-path semantics instead:
+  * S9 requires enqueue_batch — the queue-depth gate lives at the
+    engine's EnqueueBatch entry only (structurally unreachable on the
+    NON_BATCH GenerateStreamCall path)
+  * everything else runs under all profiles; S4 opens the seed's client
+    stream itself under NON_BATCH (see its docstring)
 
 Behavioural corrections for the Java mock (documented inline):
   * S1 — the legacy "slow worker gets zero of 10 requests" assertion never
@@ -70,10 +77,17 @@ STREAM_TIMEOUT_S = 15.0
 SMOKE_CASES: list[CaseDef] = []
 
 
-def case(name: str, profiles=None, source: str = ""):
+def case(name: str, profiles=None, requires=None, source: str = ""):
     def deco(fn):
         SMOKE_CASES.append(
-            CaseDef(name=name, suite="smoke", fn=fn, profiles=profiles, source=source)
+            CaseDef(
+                name=name,
+                suite="smoke",
+                fn=fn,
+                profiles=profiles,
+                requires=requires,
+                source=source,
+            )
         )
         return fn
 
@@ -575,7 +589,6 @@ def s3_decode_balance(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s4",
-    profiles=["batch-window"],
     source="scheduling_smoke.py S4 (Java-corrected)",
 )
 def s4_hotspot_filter(ctx: CaseContext):
@@ -609,6 +622,17 @@ def s4_hotspot_filter(ctx: CaseContext):
          is far past the tolerance window (~205ms), and outlier rejection
          removes X outright
       6. assertion (deterministic): 0 of 5 requests land on X
+
+    Profile semantics (v2, task #55): the hotspot lives in the master-side
+    request ledger, which books BOTH delivery modes — BATCH groups through
+    the inflight-batch accounting and NON_BATCH/direct requests through
+    PrefillEndpoint.registerDirectRequest — so the deterministic-avoidance
+    contract holds under every profile.  The only profile-dependent step is
+    the seed's dispatch proof: under BATCH the master enqueues the
+    fire-and-forget seed itself (the engine shows pending with no client
+    action), while under NON_BATCH the master only publishes a route
+    decision, so the seed's client stream is OPENED at fire time (never
+    consumed) for the engine-side pending the hotspot poll needs.
     """
     ops = ctx.ops()
     base = rid_base(ctx, "scheduling")
@@ -623,6 +647,7 @@ def s4_hotspot_filter(ctx: CaseContext):
 
         addr_map = ops.addr_to_name()
         fired: list[tuple[int, object]] = []  # (rid, response) — cancelled in finally
+        fired_handles: dict[int, object] = {}  # rid -> stream handle (NON_BATCH)
 
         def fire(rid: int, **kwargs):
             """Schedule without consuming the stream — keeps it pending."""
@@ -630,6 +655,17 @@ def s4_hotspot_filter(ctx: CaseContext):
             if resp.code != 200 or not resp.success:
                 return None, f"schedule failed: {resp.error_message}"
             fired.append((rid, resp))
+            if resp.enqueued_by_master:
+                return addr_map.get(ops.role_addr(resp, "PREFILL"), ""), None
+            # NON_BATCH: the master only published the route decision; the
+            # engine sees the seed when the CLIENT opens the stream.  Open it
+            # fire-and-forget (never wait) so the engine-side pending the
+            # hotspot poll needs really exists.
+            input_pb = ops.build_generate_input(rid, **kwargs)
+            try:
+                fired_handles[rid] = ops.start_stream(resp, rid, input_pb=input_pb)
+            except Exception as exc:
+                return None, f"seed direct stream failed to open: {exc!r}"
             return addr_map.get(ops.role_addr(resp, "PREFILL"), ""), None
 
         # -- seed: big ledger footprint, fire-and-forget.  input_len=49152
@@ -713,7 +749,12 @@ def s4_hotspot_filter(ctx: CaseContext):
         # ~5s prefill is the only slow one), with cancel as fallback.
         for rid, resp in fired:
             try:
-                ops.start_stream(resp, rid).wait_end(20.0)
+                if rid in fired_handles:
+                    # NON_BATCH: the direct stream opened at fire time IS the
+                    # completion path — consume it to terminal state.
+                    fired_handles[rid].wait_end(20.0)
+                else:
+                    ops.start_stream(resp, rid).wait_end(20.0)
             except Exception:
                 try:
                     ops.cancel(rid, resp)
@@ -725,7 +766,7 @@ def s4_hotspot_filter(ctx: CaseContext):
             pass
 
 
-@case("smoke_scheduling_s5", profiles=["batch-window"], source="scheduling_smoke.py S5")
+@case("smoke_scheduling_s5", source="scheduling_smoke.py S5")
 def s5_kv_cache_hit_preference(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "scheduling")
@@ -769,7 +810,6 @@ def s5_kv_cache_hit_preference(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s6",
-    profiles=["batch-window"],
     source="scheduling_smoke.py S6 (Java-corrected)",
 )
 def s6_cost_based_tie_window_balance(ctx: CaseContext):
@@ -819,7 +859,7 @@ def s6_cost_based_tie_window_balance(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("smoke_scheduling_s7", profiles=["batch-window"], source="scheduling_smoke.py S7")
+@case("smoke_scheduling_s7", source="scheduling_smoke.py S7")
 def s7_cas_fairness(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "scheduling")
@@ -860,25 +900,26 @@ def s7_cas_fairness(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s8",
-    profiles=["batch-window"],
     source="scheduling_smoke.py S8 (Java-corrected)",
 )
 def s8_ttft_sorting(ctx: CaseContext):
-    """SHORTEST_TTFT tie-window balance: equivalent-score engines share traffic.
+    """ESTIMATED_TTFT tie-window balance: equivalent-score engines share traffic.
 
     Java-corrected semantics: the legacy S8 asserted that a fast engine
     (set_perf 10ms) receives at least as many requests as a slow one
     (500ms), assuming the TTFT sort "sees" engine speed.  It does not:
-    SHORTEST_TTFT's score is ledger wait + FORMULA estimate (a pure
-    function of the request's token shape) — engine perf is not a score
-    input, exactly like COST_BASED (see S1).  Serial requests with no
-    backlog leave both engines tied, so the split is a uniform draw
-    (P(fast < slow) ≈ 38% for 10 requests); the historical passes leaned
-    on a settle-latency side effect — a request on the slow engine leaves
-    its ledger entry alive longer, nudging later requests away — which
-    queue mode's prompt settling does not reproduce.  The real contract
-    is the same balance as S1: of 20 requests both prefills are used and
-    neither takes more than 80%; the perf split is observational only.
+    the v2 prefill selector (ESTIMATED_TTFT in the harness config) scores
+    ledger wait + FORMULA estimate (a pure function of the request's token
+    shape) — engine perf is not a score input, exactly like COST_BASED
+    (see S1).  Serial requests with no backlog leave both engines tied,
+    so the split is a uniform draw (P(fast < slow) ≈ 38% for 10 requests);
+    the historical passes leaned on a settle-latency side effect — a
+    request on the slow engine leaves its ledger entry alive longer,
+    nudging later requests away — which prompt settling does not
+    reproduce.  The real contract is the same balance as S1: of 20
+    requests both prefills are used and neither takes more than 80%; the
+    perf split is observational only.  Dispatcher/decision axes are
+    invisible to the selector, so the case runs under all profiles.
     """
     ops = ctx.ops()
     perf_engines = []
@@ -928,7 +969,7 @@ def s8_ttft_sorting(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s9",
-    profiles=["batch-window"],
+    requires=["enqueue_batch"],
     source="scheduling_smoke.py S9 (Java-corrected)",
 )
 def s9_no_hard_filter(ctx: CaseContext):
@@ -939,6 +980,13 @@ def s9_no_hard_filter(ctx: CaseContext):
     reachable pending count, so the gate never fires and requests still
     route to the target worker — the legacy ``target_count > 0`` assertion
     is preserved and now documents exactly that behaviour.
+
+    Profile semantics (v2, task #55): the gate is checked ONLY at the
+    engine's EnqueueBatch entry (JavaMockEngineCluster.enqueueBatch);
+    the GenerateStreamCall path (NON_BATCH dispatcher) never consults it,
+    so "the high gate does not block routing" is only observable where
+    the master actually enqueues — requires=["enqueue_batch"] keeps the
+    case to the BATCH-dispatch profiles (batch-window, single-batch).
     """
     ops = ctx.ops()
     injected_engine = None
@@ -1150,6 +1198,10 @@ def s12_reserve_weight_change(ctx: CaseContext):
 TIMEOUT_WAIT_S = 5.0
 ANOMALY_STREAM_TIMEOUT_S = 10.0
 WORKER_RECOVERY_WAIT_S = 3.0
+# E4 probe: short client-side gRPC deadline proving the parked Schedule RPC
+# stays pending (the master's own scheduling deadline is queueTimeoutMs,
+# default 1h — far beyond any useful probe).
+E4_PROBE_DEADLINE_S = 5.0
 
 
 def _inject_all_prefill(ops, config: dict) -> list[str]:
@@ -1190,12 +1242,16 @@ def e1_cancel_path(ctx: CaseContext):
         ended = handle.wait_end(5.0)
         cancel_latency = time.monotonic() - cancel_at
         recovery_ok, recovery_msg = ops.verify_recovery()
-        if ctx.batch_dispatch():
+        if response.enqueued_by_master:
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )
         else:
-            inflight_ok, inflight_detail = True, "N/A (non-batch path)"
+            # NON_BATCH: a client Cancel on a delivered request cannot
+            # safely release the master ledger entry (fence probe NOT_FOUND
+            # is not a safe-release fact), so immediate-zero is not a
+            # contract here — see E4's watermark rationale.
+            inflight_ok, inflight_detail = True, "N/A (NON_BATCH residue contract)"
         passed = ended and recovery_ok
         return passed, (
             f"cancel_latency={cancel_latency:.3f}s, stream_terminated={ended}, "
@@ -1255,12 +1311,14 @@ def _anomaly_error_case(
 
         time.sleep(WORKER_RECOVERY_WAIT_S)
         recovery_ok, recovery_msg = ops.verify_recovery()
-        if ctx.batch_dispatch():
+        if response is not None and response.success and response.enqueued_by_master:
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )
         else:
-            inflight_ok, inflight_detail = True, "N/A (non-batch path)"
+            # NON_BATCH: see E1 — client Cancel cannot safely release a
+            # delivered ledger entry, so immediate-zero is not asserted.
+            inflight_ok, inflight_detail = True, "N/A (NON_BATCH residue contract)"
         passed = error_observed and recovery_ok
         return passed, (
             f"error_observed={error_observed} ({error_detail}), "
@@ -1285,12 +1343,12 @@ def e3_worker_fail(ctx: CaseContext):
 
 @case(
     "smoke_anomaly_e4",
-    profiles=["batch-window"],
     source="decode-side anomaly gap (G1) — new",
 )
 def e4_decode_capacity_exhausted(ctx: CaseContext):
-    """Decode-side anomaly: every decode engine KV-exhausted -> scheduling is
-    rejected fail-fast; clear the pressure -> fresh request recovers.
+    """Decode-side anomaly: every decode engine KV-exhausted -> the request
+    is parked undelivered, a master Cancel releases it without residue, and
+    clearing the pressure recovers routing.
 
     Why KV pressure and not the E-series ops.inject faults: a decode engine
     in the Java mock never receives traffic through any gRPC entry point.
@@ -1302,20 +1360,50 @@ def e4_decode_capacity_exhausted(ctx: CaseContext):
     no_respond on decode only suppresses the "intermediate first-step
     output" which the mock never produces (each request yields exactly one
     finished message).  The one decode-side anomaly observable e2e is KV
-    capacity: the master's decode selector (COST_BASED_DECODE) hard-filters
-    every decode endpoint whose available_kv_tokens < seq_len
-    (KV_CAPACITY rejection) plus the kv-usage% availability gate, so
-    exhausting every decode engine's KV must fail scheduling with
-    NO_AVAILABLE_WORKER instead of hanging or erroring 500.
+    capacity: the delivery-capacity admission hard-filters every decode
+    endpoint whose available_kv_tokens < seq_len, so exhausting every
+    decode engine's KV must block delivery.
 
-    Scenario: set active_kv_tokens = total on every decode engine -> the
-    next schedule must be rejected (correct fail-fast error, not a hang);
-    the rejection must leave no inflight residue; clearing the pressure
-    must let a fresh request complete again.
+    v2 contract (task #55, source-verified — supersedes the v1 fail-fast
+    assertion): the QUEUE scheduler treats decode KV exhaustion as a WAIT
+    condition, not a fail-fast rejection:
+      * FixedWindowBatcherAlgorithm parks the head when delivery capacity
+        cannot be reserved ("Dynamic KV pressure is a wait condition, not a
+        rejection"; BatcherContext.admitAndDeliverCapacityFeasiblePrefix
+        returns CapacityBlocked and the worker loop waits for the exact
+        resource-change event).
+      * The scheduling deadline is owned by the queue config
+        (QueueSchedulerConfig.queueTimeoutMs, default 1h), not the caller,
+        so the Schedule RPC stays pending while parked — the client
+        observes its own gRPC DEADLINE_EXCEEDED instead of a rejection
+        response.  The pre-v2 fail-fast NO_AVAILABLE_WORKER contract
+        belonged to the v1 non-QUEUE flow and does not exist in v2.
+      * A client-side RPC deadline/cancellation does NOT release the
+        parked entry (it lingered until the stale-inflight TTL eviction in
+        the repro); an explicit master Cancel does
+        (PriorityScheduler.cancelRequest -> isLocallyReversible -> local
+        cleanup).
 
-    batch/direct only: queue mode's soft queue placement does not apply the
-    KV hard filter at decode selection (requests legitimately queue), so
-    the fail-fast assertion does not hold there.
+    Scenario:
+      1. set active_kv_tokens = total on every decode engine
+      2. probe Schedule with a short client-side deadline: it must stay
+         pending (client DEADLINE_EXCEEDED, no rejection response) and the
+         parked rid must NOT be delivered to any engine
+      3. master Cancel must release the parked request and leave no
+         inflight residue
+      4. clear the pressure -> a fresh request must complete again
+
+    Profile semantics (v2): the decision and dispatcher axes are invisible
+    to the decode-side delivery capacity gate — both delivery modes share
+    the per-worker batcher and the same capacity admission — so the case
+    runs under all profiles.  The no-residue assertion is a pre-probe
+    WATERMARK comparison rather than a global zero check: under NON_BATCH
+    dispatch a client-side Cancel cannot safely release a delivered
+    request's master ledger entry (the fence probe's NOT_FOUND ack is not
+    a safe-release fact — the client connects to the engine
+    asynchronously after RouteDecision), so earlier E-series requests on
+    the shared env may leave contract-parked entries; this case only owns
+    the residue of ITS OWN parked probe.
     """
     ops = ctx.ops()
     base = rid_base(ctx, "anomaly")
@@ -1338,30 +1426,90 @@ def e4_decode_capacity_exhausted(ctx: CaseContext):
             injected.append(name)
         time.sleep(1.5)  # master worker-status sync
 
-        # Probe until the master's view reflects the exhaustion.  A probe
-        # that still succeeds raced the sync window — consume its stream to
-        # terminal state so no inflight residue is left behind (S4 lesson:
-        # fire-and-forget streams poison later inflight assertions).
-        rejected_detail = ""
-        probes_accepted = 0
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline:
-            rid = ops.next_request_id(base)
-            response = ops.schedule(rid)
-            if response.code != 200 or not response.success:
-                rejected_detail = (
-                    f"code={response.code}, error={response.error_message}"
-                )
-                break
-            probes_accepted += 1
-            input_pb = (
-                None if response.enqueued_by_master else ops.build_generate_input(rid)
-            )
-            ops.start_stream(response, rid, input_pb=input_pb).wait_end(15.0)
-            time.sleep(0.3)
-        error_observed = bool(rejected_detail)
+        # 1. The probe stays pending: a short client-side deadline fires
+        #    instead of the master returning a rejection.
+        base_view = ops.master_inflight() or {}
 
-        # Clear the pressure on every decode engine.
+        def _inflight_totals(view: dict) -> tuple[int, int, int]:
+            return (
+                int(view.get("scheduler_inflight", 0) or 0),
+                sum(
+                    int(ep.get("inflight_batches", 0) or 0)
+                    for ep in view.get("prefill_endpoints", []) or []
+                ),
+                sum(
+                    int(ep.get("inflight_requests", 0) or 0)
+                    for ep in view.get("decode_endpoints", []) or []
+                ),
+            )
+
+        base_sched, base_prefill, base_decode = _inflight_totals(base_view)
+        rid = ops.next_request_id(base)
+        probe: dict = {}
+
+        def _probe() -> None:
+            try:
+                resp = ops.schedule(rid, timeout_s=E4_PROBE_DEADLINE_S)
+                probe["returned"] = (
+                    f"code={resp.code}, success={resp.success}, "
+                    f"error={resp.error_message!r}"
+                )
+            except Exception as exc:  # client deadline while parked
+                code_fn = getattr(exc, "code", None)
+                probe["grpc_code"] = str(code_fn()) if callable(code_fn) else ""
+                probe["exc"] = repr(exc)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_probe).result(timeout=E4_PROBE_DEADLINE_S + 10.0)
+        parked_ok = probe.get("grpc_code") == "StatusCode.DEADLINE_EXCEEDED"
+        parked_detail = probe.get("returned") or probe.get(
+            "grpc_code", probe.get("exc", "no outcome")
+        )
+
+        # 2. The parked request must not have been delivered to any engine.
+        time.sleep(0.5)
+        snap2 = ops.snapshot()
+        delivered = [
+            engine["name"]
+            for engine in snap2.get("engines", [])
+            if str(rid) in engine.get("request_lifecycle", {})
+        ]
+        not_delivered_ok = not delivered
+
+        # 3. An explicit master Cancel releases the parked request: master
+        #    inflight must return to the pre-probe watermark (scheduler
+        #    entry + decode shadow reservation both released).
+        cancel_err = None
+        try:
+            ops.cancel(rid, None)
+        except Exception as exc:
+            cancel_err = repr(exc)
+        time.sleep(0.5)
+        inflight_ok, inflight_detail = False, "no inflight view"
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            view = ops.master_inflight()
+            if view is not None:
+                sched, pre, dec = _inflight_totals(view)
+                if sched <= base_sched and pre <= base_prefill and dec <= base_decode:
+                    inflight_ok = True
+                    inflight_detail = (
+                        f"back to pre-probe watermark "
+                        f"(scheduler={sched}/{base_sched}, "
+                        f"prefill_batches={pre}/{base_prefill}, "
+                        f"decode_reservations={dec}/{base_decode})"
+                    )
+                    break
+                inflight_detail = (
+                    f"scheduler={sched} (base {base_sched}), "
+                    f"prefill_batches={pre} (base {base_prefill}), "
+                    f"decode_reservations={dec} (base {base_decode})"
+                )
+            time.sleep(0.5)
+
+        # 4. Clear the pressure on every decode engine; recovery must be
+        #    functional, not just cosmetic: a fresh request must schedule
+        #    and complete again.
         for name in injected:
             try:
                 ops.set_kv_pressure(name, 0)
@@ -1369,28 +1517,24 @@ def e4_decode_capacity_exhausted(ctx: CaseContext):
                 pass
         time.sleep(2.0)  # master worker-status sync (recovery view)
 
-        # Recovery must be functional, not just cosmetic: a fresh request
-        # must schedule and complete again once the pressure is cleared
-        # (distinguishes "health flag back to green" from "actually able
-        # to route decode again").
         rid_rec = ops.next_request_id(base)
         rec_addr, rec_err = ops.run_one_request(
             rid_rec, output_len=2, stream_timeout_s=STREAM_TIMEOUT_S
         )
-
         recovery_ok, recovery_msg = ops.verify_recovery()
-        if ctx.batch_dispatch():
-            inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-                _master_http(ops), 10.0
-            )
-        else:
-            inflight_ok, inflight_detail = True, "N/A (non-batch path)"
-        passed = error_observed and rec_err is None and recovery_ok and inflight_ok
+
+        passed = (
+            parked_ok
+            and not_delivered_ok
+            and cancel_err is None
+            and inflight_ok
+            and rec_err is None
+            and recovery_ok
+        )
         return passed, (
-            f"error_observed={error_observed} "
-            f"({rejected_detail or 'never rejected'}), "
-            f"probes_accepted_before_reject={probes_accepted}, "
-            f"decode_engines={len(injected)}, "
+            f"parked_pending={parked_ok} ({parked_detail}), "
+            f"delivered_while_parked={delivered or 'none'}, "
+            f"cancel_err={cancel_err}, "
             f"recovered_request_ok={rec_err is None}"
             f"(prefill={rec_addr}, err={rec_err}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
