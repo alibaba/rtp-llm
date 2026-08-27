@@ -577,6 +577,20 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
         copyStridedHost(inputs.attention_inputs.kv_cache_kernel_block_id_host,
                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
     }
+
+    // The attention implementation owns derived replay metadata in addition
+    // to the graph runner's persistent block-table buffers.  TokenSpeed MLA,
+    // for example, densifies the compact page table into fixed-address device
+    // storage from prepare_cuda_graph().  K3 PD can replace cache block ids
+    // after the asynchronous LOAD completes, so copying the new ids without
+    // rebuilding that derived metadata leaves the next replay on the pre-LOAD
+    // pages.  Re-plan after both the device and pinned-host mirrors are ready;
+    // forbid_realloc remains enforced by the Python implementation.
+    {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId(prepare_cuda_graph)");
+        py::gil_scoped_acquire gil;
+        attn_pyobj.attr("prepare_cuda_graph")(py_model_inputs_.attention_inputs);
+    }
 }
 
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
