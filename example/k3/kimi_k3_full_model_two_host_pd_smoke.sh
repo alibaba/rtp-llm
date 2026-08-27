@@ -123,6 +123,9 @@ Important optional variables:
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
+  SMOKE_RDMA_CONNECT_TIMEOUT_MS
+                            defaults to 120000; bounded Barex cold-connect
+                            timeout for each Prefill/Decode rank pair
   KIMI_K3_DECODE_TOPOLOGY   tp8_ep8 (default) validates the legacy baseline;
                             dp8_ep8_tp1_ktp8 validates Decode TP1/DP8/EP8/KTP8
                             with a replicated full-width 576 MLA cache on every
@@ -287,11 +290,13 @@ smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
 smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
 smoke_rdma_prewarm_settle_s="${SMOKE_RDMA_PREWARM_SETTLE_S:-2}"
+smoke_rdma_connect_timeout_ms="${SMOKE_RDMA_CONNECT_TIMEOUT_MS:-120000}"
 for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
     "${smoke_chunk_tokens}" \
-    "${smoke_linear_step}"; do
+    "${smoke_linear_step}" \
+    "${smoke_rdma_connect_timeout_ms}"; do
     [[ "${size_value}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke block/chunk/linear settings must be positive integers"
 done
@@ -481,6 +486,7 @@ verify_role_environment() {
         "${smoke_chunk_tokens}" \
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
+        "${smoke_rdma_connect_timeout_ms}" \
         "${smoke_prefill_kv_cache_mem_mb}" \
         "${smoke_decode_kv_cache_mem_mb}" \
         "${decode_topology}" \
@@ -498,6 +504,7 @@ import sys
     chunk_tokens,
     linear_step,
     chunkwise_rdma,
+    rdma_connect_timeout_ms,
     prefill_kv_cache_mem_mb,
     decode_kv_cache_mem_mb,
     decode_topology,
@@ -519,7 +526,7 @@ expected = {
     "MAX_CONTEXT_BATCH_SIZE": "1",
     "LINEAR_STEP": linear_step,
     "CACHE_STORE_RDMA_MODE": "1",
-    "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "30000",
+    "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": rdma_connect_timeout_ms,
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
@@ -651,7 +658,7 @@ apply_validated_common_profile() {
     export MAX_CONTEXT_BATCH_SIZE=1
     export LINEAR_STEP="${smoke_linear_step}"
     export CACHE_STORE_RDMA_MODE=1
-    export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=30000
+    export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS="${smoke_rdma_connect_timeout_ms}"
     export KIMI_K3_CHUNKWISE_RDMA="${smoke_chunkwise_rdma}"
     export DSV4_MEGA_MOE_INPUT_PACKER=fused
     export DSV4_MEGA_MOE_INPUT_PACKER_IMPL=optimized
