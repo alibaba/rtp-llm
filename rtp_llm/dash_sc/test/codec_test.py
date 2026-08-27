@@ -21,6 +21,7 @@ from rtp_llm.dash_sc.codec import (
     DashErrorSpec,
     DashScParameterError,
     LLMFinishReason,
+    MultimodalPart,
     OtherParams,
     SamplingParams,
     build_dash_error_response,
@@ -28,6 +29,7 @@ from rtp_llm.dash_sc.codec import (
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
+    parse_multimodal_parts_from_request,
     parse_other_params,
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
@@ -131,6 +133,14 @@ def _add_tensor(
 
 
 class DashScGrpcRequestTest(TestCase):
+    @staticmethod
+    def _set_payload(
+        req: predict_v2_pb2.ModelInferRequest,
+        payload_obj: object,
+        key: str = "payload",
+    ) -> None:
+        req.parameters[key].string_param = json.dumps(payload_obj)
+
     def test_parse_input_ids_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         raw = struct.pack("<3i", 10, 20, 30)
@@ -1554,6 +1564,7 @@ class DashScGrpcRequestTest(TestCase):
         )
         parts = parse_multimodal_parts_from_request(req)
         self.assertEqual(parts[0].min_pixels, 9999)
+
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):
     def test_empty_generate_outputs_raises(self) -> None:

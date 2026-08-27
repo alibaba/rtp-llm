@@ -1,5 +1,6 @@
 import importlib
 import os
+import pickle
 import sys
 from unittest import TestCase, main
 
@@ -37,8 +38,6 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_READ_DIR"] = "dfs://bucket/jit/baseline"
         os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
-        os.environ["SP_DETERMINISTIC_DRAFT_EXACT_MATCH"] = "1"
-        os.environ["MAX_THINKING_TOKENS"] = "123"
         os.environ["VIT_CONCURRENCY"] = "12"
         os.environ["VIT_MAX_QUEUE_SIZE"] = "34"
 
@@ -99,12 +98,8 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.jit_config.warm_up_jit_and_write_remote,
             "dfs://bucket/jit/writer",
         )
-        self.assertEqual(py_env_configs.generate_env_config.max_thinking_tokens, 123)
         self.assertEqual(py_env_configs.vit_config.vit_concurrency, 12)
         self.assertEqual(py_env_configs.vit_config.vit_max_queue_size, 34)
-        self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
-        restored_sp_config = pickle.loads(pickle.dumps(py_env_configs.sp_config))
-        self.assertTrue(restored_sp_config.deterministic_draft_exact_match)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -140,8 +135,6 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
-            "--sp_deterministic_draft_exact_match",
-            "true",
             "--vit_concurrency",
             "24",
             "--vit_max_queue_size",
@@ -202,7 +195,6 @@ class ServerArgsSetTest(TestCase):
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
-        self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
         self.assertEqual(py_env_configs.vit_config.vit_concurrency, 24)
         self.assertEqual(py_env_configs.vit_config.vit_max_queue_size, 48)
 

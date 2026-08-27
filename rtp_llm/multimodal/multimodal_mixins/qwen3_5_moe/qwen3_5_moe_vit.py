@@ -6,11 +6,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
-from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from transformers.processing_utils import Unpack
-from transformers.utils import TransformersKwargs
+
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ModuleNotFoundError:
+    # transformers 4.51, pinned by RTP-LLM, predates this inference-only base.
+    class GradientCheckpointingLayer(nn.Module):
+        gradient_checkpointing = False
+
 
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
@@ -213,7 +218,7 @@ def eager_attention_forward(
     attention_mask: torch.Tensor | None,
     scaling: float,
     dropout: float = 0.0,
-    **kwargs: Unpack[TransformersKwargs],
+    **kwargs,
 ):
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)

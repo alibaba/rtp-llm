@@ -173,8 +173,8 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
-                     << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
+                     << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key
+                     << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size() << "}";
         return debug_string.str();
     }
