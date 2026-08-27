@@ -21,7 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * overwrote each other. These tests pin the derivation formula, the CLI
  * switch (both space-separated and glued {@code =false} forms), and the
  * discovery-file wiring (DOMAIN_ADDRESS / endpoints.json keep the HTTP port
- * convention grpcPort-1 with a unique host per engine).
+ * convention grpcPort-1 with a unique host per engine). Advertised hosts
+ * use the full quad form 127.a.0.b: java.net.URI — which gRPC channel
+ * construction runs over every advertised host — yields a null host for
+ * 3-segment shorthand such as "127.1.0", breaking master-to-engine dialing.
  */
 class UniqueEngineIpsTest {
 
@@ -38,12 +41,13 @@ class UniqueEngineIpsTest {
         for (int idx = 0; idx < 1250; idx++) {
             String ip = JavaMockEngineCluster.derivedLoopbackIp(idx);
             String[] octets = ip.split("\\.");
-            assertEquals(3, octets.length, "loopback advertisement is a /8-style 127.a.b: " + ip);
+            assertEquals(4, octets.length, "loopback advertisement is a full-quad 127.a.0.b: " + ip);
             assertEquals("127", octets[0]);
-            int third = Integer.parseInt(octets[1]);
-            int fourth = Integer.parseInt(octets[2]);
-            assertTrue(third >= 1 && third <= 5,
-                    "third octet must stay out of the real 127.0.0.x range: " + ip);
+            assertEquals("0", octets[2], "third octet is fixed at 0: " + ip);
+            int second = Integer.parseInt(octets[1]);
+            int fourth = Integer.parseInt(octets[3]);
+            assertTrue(second >= 1 && second <= 5,
+                    "second octet must stay out of the real 127.0.0.x range: " + ip);
             assertTrue(fourth >= 0 && fourth <= 249, "fourth octet must stay below 250: " + ip);
             assertTrue(seen.add(ip), "duplicate advertisement IP at engine index " + idx + ": " + ip);
         }
@@ -52,12 +56,12 @@ class UniqueEngineIpsTest {
 
     @Test
     void derivationCoversKnownBoundaries() {
-        assertEquals("127.1.0", JavaMockEngineCluster.derivedLoopbackIp(0));
-        assertEquals("127.1.249", JavaMockEngineCluster.derivedLoopbackIp(249));
-        assertEquals("127.2.0", JavaMockEngineCluster.derivedLoopbackIp(250));
+        assertEquals("127.1.0.0", JavaMockEngineCluster.derivedLoopbackIp(0));
+        assertEquals("127.1.0.249", JavaMockEngineCluster.derivedLoopbackIp(249));
+        assertEquals("127.2.0.0", JavaMockEngineCluster.derivedLoopbackIp(250));
         // 750P + 500D: the first decode engine continues the global index.
-        assertEquals("127.4.0", JavaMockEngineCluster.derivedLoopbackIp(750));
-        assertEquals("127.5.249", JavaMockEngineCluster.derivedLoopbackIp(1249));
+        assertEquals("127.4.0.0", JavaMockEngineCluster.derivedLoopbackIp(750));
+        assertEquals("127.5.0.249", JavaMockEngineCluster.derivedLoopbackIp(1249));
     }
 
     @Test
@@ -111,23 +115,23 @@ class UniqueEngineIpsTest {
 
         JsonNode engines = payload.get("engines");
         assertEquals(4, engines.size());
-        assertEquals("127.1.0", engines.get(0).get("ip").asText());
-        assertEquals("127.1.0:64000", engines.get(0).get("grpc_addr").asText());
-        assertEquals("127.1.0:63999", engines.get(0).get("http_addr").asText());
-        assertEquals("127.1.1:64001", engines.get(1).get("grpc_addr").asText());
-        assertEquals("127.1.2", engines.get(2).get("ip").asText(),
+        assertEquals("127.1.0.0", engines.get(0).get("ip").asText());
+        assertEquals("127.1.0.0:64000", engines.get(0).get("grpc_addr").asText());
+        assertEquals("127.1.0.0:63999", engines.get(0).get("http_addr").asText());
+        assertEquals("127.1.0.1:64001", engines.get(1).get("grpc_addr").asText());
+        assertEquals("127.1.0.2", engines.get(2).get("ip").asText(),
                 "decode engines continue the global index after prefill");
-        assertEquals("127.1.2:64002", engines.get(2).get("grpc_addr").asText());
-        assertEquals("127.1.3:64003", engines.get(3).get("grpc_addr").asText());
+        assertEquals("127.1.0.2:64002", engines.get(2).get("grpc_addr").asText());
+        assertEquals("127.1.0.3:64003", engines.get(3).get("grpc_addr").asText());
 
         // DOMAIN_ADDRESS keeps the HTTP-port convention (grpcPort - 1); the
         // master-side http-protocol conversion and JavaLoadClient add +1 back.
         String prefillEnv = payload.get("env")
                 .get("DOMAIN_ADDRESS:mock.prefill.hosts.address").asText();
-        assertEquals("127.1.0:63999,127.1.1:64000", prefillEnv);
+        assertEquals("127.1.0.0:63999,127.1.0.1:64000", prefillEnv);
         String decodeEnv = payload.get("env")
                 .get("DOMAIN_ADDRESS:mock.decode.hosts.address").asText();
-        assertEquals("127.1.2:64001,127.1.3:64002", decodeEnv);
+        assertEquals("127.1.0.2:64001,127.1.0.3:64002", decodeEnv);
     }
 
     @Test

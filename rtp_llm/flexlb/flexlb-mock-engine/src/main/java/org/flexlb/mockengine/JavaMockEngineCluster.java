@@ -402,10 +402,12 @@ public final class JavaMockEngineCluster {
 
     /**
      * Derives the unique loopback advertisement IP for engine index
-     * {@code engineIndex}: {@code 127.(idx/250 + 1).(idx%250)} — the third
+     * {@code engineIndex}: {@code 127.(idx/250 + 1).0.(idx%250)} — the second
      * octet starts at 1 to stay out of the real 127.0.0.x range, and 250
-     * slots per third octet mean 1250 engines (750P + 500D) fit inside
-     * 127.1.0.0-127.5.249. Valid for engineIndex in [0, 63749].
+     * slots per second octet mean 1250 engines (750P + 500D) fit inside
+     * 127.1.0.0-127.5.0.249. Valid for engineIndex in [0, 63749]. The full
+     * quad form is mandatory: java.net.URI (gRPC channel construction) yields
+     * a null host for 3-segment shorthand such as "127.1.0".
      */
     static String derivedLoopbackIp(int engineIndex) {
         if (engineIndex < 0) {
