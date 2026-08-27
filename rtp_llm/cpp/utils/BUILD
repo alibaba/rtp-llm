@@ -45,6 +45,18 @@ cc_library(
 )
 
 cc_library(
+    name = "coordinated_stop_util",
+    srcs = ["CoordinatedStopUtil.cc"],
+    hdrs = ["CoordinatedStopUtil.h"],
+    copts = copts(),
+    deps = [
+        ":core_utils",
+        "@com_google_absl//absl/status",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "profiling_scope",
     hdrs = [
         "ProfilingScope.h",

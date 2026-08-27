@@ -26,6 +26,7 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
         "//rtp_llm/cpp/distribute:rpc_cpu_tp_broadcaster_hdr",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
+        "//rtp_llm/cpp/utils:coordinated_stop_util",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
         "//:using_cuda": [

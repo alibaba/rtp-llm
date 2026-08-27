@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/CoordinatedStopUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/EnvUtil.h"
 #include "autil/TimeUtility.h"
@@ -631,16 +632,16 @@ absl::Status NormalEngine::armStopAtStep(int64_t target_step, int64_t timeout_ms
     }
     // Shutdown must be able to make progress after SetPause. The loop's pause
     // wait already treats resume as a control-plane operation.
-    pause_                   = false;
-    int64_t    observed_step = -1;
-    const auto deadline      = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (running_.load(std::memory_order_acquire)
-           && (observed_step = armed_stop_observed_step_.load(std::memory_order_acquire)) < 0) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return absl::DeadlineExceededError("engine loop did not acknowledge coordinated stop arm");
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    pause_          = false;
+    auto ack_status = waitForCoordinatedStopAck(
+        running_,
+        [this]() { return armed_stop_observed_step_.load(std::memory_order_acquire) >= 0; },
+        timeout_ms,
+        "arm");
+    if (!ack_status.ok()) {
+        return ack_status;
     }
+    const int64_t observed_step = armed_stop_observed_step_.load(std::memory_order_acquire);
     if (observed_step < 0 || target_step <= observed_step) {
         return absl::FailedPreconditionError("coordinated stop target has already been reached");
     }
@@ -653,12 +654,13 @@ absl::Status NormalEngine::cancelArmedStop(int64_t timeout_ms) {
         return absl::OkStatus();
     }
     armed_stop_cancel_requested_.store(true, std::memory_order_release);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (running_.load(std::memory_order_acquire) && !armed_stop_cancel_observed_.load(std::memory_order_acquire)) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            return absl::DeadlineExceededError("engine loop did not acknowledge coordinated stop cancellation");
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    auto ack_status = waitForCoordinatedStopAck(
+        running_,
+        [this]() { return armed_stop_cancel_observed_.load(std::memory_order_acquire); },
+        timeout_ms,
+        "cancellation");
+    if (!ack_status.ok()) {
+        return ack_status;
     }
     return armed_stop_cancel_observed_.load(std::memory_order_acquire) ?
                absl::OkStatus() :
@@ -670,7 +672,7 @@ absl::Status NormalEngine::stopAtStep(int64_t target_step) {
         return stop();
     }
     if (armed_stop_target_step_.load(std::memory_order_acquire) != target_step) {
-        auto arm_status = armStopAtStep(target_step, 5000);
+        auto arm_status = armStopAtStep(target_step, coordinatedStopTimeoutMs());
         if (!arm_status.ok()) {
             return arm_status;
         }

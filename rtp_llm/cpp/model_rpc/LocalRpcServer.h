@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/CoordinatedStopUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
@@ -87,13 +88,19 @@ public:
 
     void armStop(int64_t target_step) {
         if (engine_) {
-            THROW_IF_STATUS_ERROR(engine_->armStopAtStep(target_step, 5000));
+            const auto status = engine_->armStopAtStep(target_step, coordinatedStopTimeoutMs());
+            if (!status.ok()) {
+                throw std::runtime_error(status.ToString());
+            }
         }
     }
 
     void cancelArmedStop() {
         if (engine_) {
-            THROW_IF_STATUS_ERROR(engine_->cancelArmedStop(5000));
+            const auto status = engine_->cancelArmedStop(coordinatedStopTimeoutMs());
+            if (!status.ok()) {
+                throw std::runtime_error(status.ToString());
+            }
         }
     }
 
