@@ -241,7 +241,7 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                          decode_context.peer_addrs.size(),
                          cache_config.seq_size_per_block,
                          decode_kda_tp,
-                         decode_kda_tp / kK3PrefillAttentionTp,
+                         decode_kda_tp / decode_context.prefill_attention_tp_size,
                          cache_config.kernel_seq_size_per_block);
     }
     if (maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded
