@@ -122,6 +122,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final int REAL_REQUEST_TEMPLATE_COUNT = 128;
     private static final int DISPATCH_THREADS = 32;
     private static final int DISPATCH_QUEUE_CAPACITY = 2_048;
+    private static final long PACING_SPIN_THRESHOLD_NANOS =
+            TimeUnit.MICROSECONDS.toNanos(100);
     private static final int MAX_RECORDED_DELIVERY_WAIT_MS = 1_000;
     private static final DeliveryMode DELIVERY_MODE = DeliveryMode.parse(
             System.getProperty("flexlb.perf.delivery-mode", "BATCH"));
@@ -997,7 +999,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static void paceUntil(long targetNanos) {
         long remainingNanos;
         while ((remainingNanos = targetNanos - System.nanoTime()) > 0L) {
-            LockSupport.parkNanos(remainingNanos);
+            if (remainingNanos > PACING_SPIN_THRESHOLD_NANOS) {
+                LockSupport.parkNanos(
+                        remainingNanos - PACING_SPIN_THRESHOLD_NANOS);
+            } else {
+                Thread.onSpinWait();
+            }
         }
     }
 
