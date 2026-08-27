@@ -45,6 +45,15 @@ final class MockPerformanceModel {
     // Cap on queued (not running) prefill batches from JSON "prefill.max_waiting_batches".
     // <= 0 disables the cap; defaults to DEFAULT_MAX_WAITING_PREFILL_BATCHES when absent.
     private final int maxWaitingPrefillBatches;
+    // Cap on the number of requests coalesced into ONE prefill batch on the direct
+    // (generate_stream / NON_BATCH) path, JSON "prefill.direct_batch_size_max"
+    // (default 32, matching the master FIXED_WINDOW maxRequests). Production
+    // engines run continuous batching on the prefill side, so per-engine drain
+    // scales with batch size instead of being capped at 1 request per batch —
+    // without coalescing the mock's direct-path drain rate is ~batch_ms per
+    // SINGLE request, several times below production. 1 restores the legacy
+    // one-request-per-batch behaviour.
+    private final int directBatchSizeMax;
     private final PrefillTimeFormula prefillFormula;
     private final List<DecodePoint> decodePoints;
     private final double decodeScale;
@@ -52,24 +61,14 @@ final class MockPerformanceModel {
     // When non-null, decodeMs uses outputLen * perTokenMs instead of the
     // step_ms_by_batch curve. Null signals "absent in JSON → use curve fallback".
     private final Double perTokenMs;
-    // Opt-in decode hard admission gate + pending queue, JSON
-    // "decode.max_pending_requests". Null signals "absent in JSON → legacy
-    // behavior": decodeMaxConcurrency stays a soft accounting/reporting value,
-    // requests are never queued nor rejected on the decode side. When present,
-    // decodeMaxConcurrency becomes a hard admission gate with a pending queue:
-    // 0 = unbounded queue (mirrors prefill.max_waiting_batches semantics),
-    // N > 0 = queue capped at N requests, overflow rejected (backpressure).
-    // Kept independent of the fault-injection queue_depth_limit, which retains
-    // its original request-level RPC-entry gate semantics only.
-    private final Integer decodeMaxPendingRequests;
     // Opt-in accepted-layer visibility window, JSON
     // "decode.report_queued_as_kv_allocated" (default false = current
     // behavior, zero change). When true, decode requests parked in the
     // pending queue (admitted, not yet running) are reported in WorkerStatus
     // as TASK_PHASE_KV_ALLOCATED instead of TASK_PHASE_RUNNING — mirroring a
     // real engine where KV_ALLOCATED is exactly "KV reserved, not running
-    // yet". Combined with decode.max_pending_requests this lets tests build
-    // a stable accepted-layer backlog for Phase 5 (8429) eviction.
+    // yet". The decode hard concurrency gate (park overflow in the engine-side
+    // waiting queue) is unconditional and needs no switch.
     private final boolean reportQueuedAsKvAllocated;
     private volatile double jitterPct;
     private volatile double cacheAdmissionRate;
@@ -85,11 +84,11 @@ final class MockPerformanceModel {
                                  Double fixedPrefillMs,
                                  Double prefillMinMs,
                                  int maxWaitingPrefillBatches,
+                                 int directBatchSizeMax,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
                                  double decodeScale,
                                  Double perTokenMs,
-                                 Integer decodeMaxPendingRequests,
                                  boolean reportQueuedAsKvAllocated,
                                  double jitterPct,
                                  double cacheAdmissionRate) {
@@ -99,11 +98,11 @@ final class MockPerformanceModel {
         this.fixedPrefillMs = fixedPrefillMs;
         this.prefillMinMs = prefillMinMs;
         this.maxWaitingPrefillBatches = maxWaitingPrefillBatches;
+        this.directBatchSizeMax = Math.max(1, directBatchSizeMax);
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.decodeScale = decodeScale;
         this.perTokenMs = perTokenMs;
-        this.decodeMaxPendingRequests = decodeMaxPendingRequests;
         this.reportQueuedAsKvAllocated = reportQueuedAsKvAllocated;
         this.jitterPct = jitterPct;
         this.cacheAdmissionRate = cacheAdmissionRate;
@@ -119,14 +118,13 @@ final class MockPerformanceModel {
         Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
         int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
                 .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
+        int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
 
         String expression = loadPrefillExpression(masterConfigFile);
         PrefillTimeFormula formula = expression == null ? null : PrefillTimeFormula.parse(expression);
 
         JsonNode decode = performance.path("decode");
         Double perTokenMs = decode.has("per_token_ms") ? decode.get("per_token_ms").asDouble() : null;
-        Integer decodeMaxPendingRequests = decode.has("max_pending_requests")
-                ? decode.get("max_pending_requests").asInt() : null;
         boolean reportQueuedAsKvAllocated =
                 decode.path("report_queued_as_kv_allocated").asBoolean(false);
         List<DecodePoint> points = new ArrayList<>();
@@ -144,8 +142,8 @@ final class MockPerformanceModel {
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
-                prefillMinMs, maxWaitingPrefillBatches, formula, List.copyOf(points),
-                decode.path("scale").asDouble(1.0), perTokenMs, decodeMaxPendingRequests,
+                prefillMinMs, maxWaitingPrefillBatches, directBatchSizeMax, formula, List.copyOf(points),
+                decode.path("scale").asDouble(1.0), perTokenMs,
                 reportQueuedAsKvAllocated, jitterPct, cacheAdmissionRate);
     }
 
@@ -248,13 +246,11 @@ final class MockPerformanceModel {
     }
 
     /**
-     * Opt-in decode hard admission gate + pending-queue cap (JSON
-     * "decode.max_pending_requests"). Null = key absent = legacy soft
-     * accounting (no gate, no queue, no rejection); 0 = gate on with an
-     * unbounded queue; N &gt; 0 = gate on with the queue capped at N.
+     * Cap on requests coalesced into one direct-path prefill batch
+     * (JSON "prefill.direct_batch_size_max", default 32, minimum 1).
      */
-    Integer decodeMaxPendingRequests() {
-        return decodeMaxPendingRequests;
+    int directBatchSizeMax() {
+        return directBatchSizeMax;
     }
 
     /**
@@ -285,6 +281,29 @@ final class MockPerformanceModel {
         }
         double effectiveScale = overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
         return scaledMs(outputLen * stepMs * effectiveScale);
+    }
+
+    /**
+     * Per-step decode delay for the continuous-batching decode loop (production
+     * FIFOScheduler semantics): the step unit WITHOUT output-length
+     * multiplication, resolved with the same caliber priority as
+     * {@link #decodeMs} (runtime override > per_token_ms > step_ms_by_batch
+     * curve at the CURRENT running batch size), then scaled by decode scale +
+     * sleep scale and jittered (same formula as {@code scaledMs}). Returns
+     * >= 1 ms. The curve itself already amortizes speculative decoding, so a
+     * per-step consumer needs no separate acceptance-rate modeling.
+     */
+    long decodeStepDelayMs(int activeBatchSize) {
+        double stepMs;
+        if (overrideDecodeStepMs != null) {
+            stepMs = overrideDecodeStepMs;
+        } else if (perTokenMs != null) {
+            stepMs = perTokenMs;
+        } else {
+            stepMs = interpolateStepMs(activeBatchSize);
+        }
+        double effectiveScale = overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
+        return scaledMs(stepMs * effectiveScale);
     }
 
     boolean shouldAdmitCache() {

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Analyse TTFT time-series around a Master kill-restart cycle.
 
-Loads per_request.jsonl (from flexlb_load_client.py) and monitor.jsonl
-(from stability_monitor.py), divides the timeline into baseline /
+Loads per_request.jsonl (from the Java load client, JavaLoadClient) and
+monitor.jsonl (from stability_monitor.py), divides the timeline into baseline /
 fallback / recovery phases, computes per-phase TTFT statistics,
 classifies the degradation pattern (spike vs sustained), runs an
 attribution decision tree, and emits a Markdown report plus a JSON
@@ -771,7 +771,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--per-requests",
         required=True,
-        help="Path to per_request.jsonl from flexlb_load_client.py",
+        help="Path to per_request.jsonl from the Java load client (JavaLoadClient)",
     )
     parser.add_argument(
         "--monitor",

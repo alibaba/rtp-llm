@@ -963,9 +963,13 @@ public final class JavaLoadClient {
             blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
         }
 
-        // Auto-TPM QoS priority: per-record "priority" field wins, else the
-        // client-wide PRIORITY env default; 0 keeps the field unset on the wire.
-        int priority = raw.path("priority").asInt(config.priority);
+        // Auto-TPM QoS priority: FORCE_PRIORITY > 0 pins every replayed
+        // request to that single level (single-QoS runs); otherwise the
+        // per-record "priority" field wins, else the client-wide PRIORITY env
+        // default; 0 keeps the field unset on the wire.
+        int priority = config.forcePriority > 0
+                ? config.forcePriority
+                : raw.path("priority").asInt(config.priority);
 
         return new TraceRecord(requestId, sourceRid, traceId, tsMs,
                 inputLen, outputLen, blockKeys, tokenIds, priority);
@@ -1712,6 +1716,8 @@ public final class JavaLoadClient {
         final boolean dryRun;
         /** Default Auto-TPM QoS priority for all replayed requests; 0 = unset. */
         final int priority;
+        /** Single-priority override: > 0 pins every request to that level. */
+        final int forcePriority;
         /** Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval). */
         final String sendMode;
         /** Total target QPS across all shards; required > 0 in uniform mode. */
@@ -1734,7 +1740,7 @@ public final class JavaLoadClient {
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
                     skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, "replay", 0.0);
+                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
@@ -1756,7 +1762,7 @@ public final class JavaLoadClient {
                     skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    "replay", 0.0);
+                    0, "replay", 0.0);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
@@ -1770,7 +1776,7 @@ public final class JavaLoadClient {
                boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority, String sendMode, double sendModeQps) {
+               int priority, int forcePriority, String sendMode, double sendModeQps) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -1805,6 +1811,7 @@ public final class JavaLoadClient {
             this.endpointsFile = endpointsFile;
             this.dryRun = dryRun;
             this.priority = priority;
+            this.forcePriority = forcePriority;
             this.sendMode = sendMode;
             this.sendModeQps = sendModeQps;
             if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
@@ -1871,6 +1878,7 @@ public final class JavaLoadClient {
                     env("ENDPOINTS_FILE", ""),
                     envBool("DRY_RUN", false),
                     envInt("PRIORITY", 0),
+                    envInt("FORCE_PRIORITY", 0),
                     env("SEND_MODE", "replay"),
                     envDouble("SEND_MODE_QPS", 0.0)
             );
@@ -1911,6 +1919,7 @@ public final class JavaLoadClient {
             System.out.println("  ENABLE_FALLBACK=" + enableFallback);
             System.out.println("  ENDPOINTS_FILE=" + endpointsFile);
             System.out.println("  PRIORITY=" + priority);
+            System.out.println("  FORCE_PRIORITY=" + forcePriority);
             System.out.println("  SEND_MODE=" + sendMode);
             System.out.println("  SEND_MODE_QPS=" + sendModeQps);
             System.out.println("=====================================");

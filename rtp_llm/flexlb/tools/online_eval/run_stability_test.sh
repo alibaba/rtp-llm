@@ -36,6 +36,11 @@ SLA_TTFT_MS="${SLA_TTFT_MS:-500}"
 LIMIT="${LIMIT:-1000}"
 ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY:-one}"
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-2}"
+# M8: pin the secondary per-second pollers OFF so the stability baseline
+# keeps its historical zero-observation-overhead profile (numbers stay
+# comparable with the old baseline). stability_monitor.py above is the
+# observation channel for these runs.
+export FLEXLB_SECONDARY_POLLERS_ENABLED="${FLEXLB_SECONDARY_POLLERS_ENABLED:-0}"
 
 # 端口 (与 run_online_eval.sh 默认值一致)
 FLEXLB_HTTP_ADDR="${FLEXLB_HTTP_ADDR:-127.0.0.1:7001}"
@@ -181,7 +186,7 @@ for dir in "${ROUND_DIRS[@]}"; do
   echo "      summary: ${dir}/load_client/summary.json"
   echo "      monitor: ${dir}/monitor.jsonl"
   echo "      gc log:  ${dir}/gc.log"
-  echo "      flexlb:  ${dir}/flexlb.log"
+  echo "      flexlb:  ${dir}/master.log (consolidated; pre-consolidation runs keep ${dir}/flexlb.log)"
 done
 echo ""
 echo "查看报告: cat ${REPORT_PATH}"
