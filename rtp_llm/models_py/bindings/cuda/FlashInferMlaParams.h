@@ -40,6 +40,7 @@ private:
                             torch::Tensor t_sequence_lengths,
                             torch::Tensor t_input_lengths,
                             torch::Tensor t_kv_cache_block_id_host,
+                            int           input_batch_size,
                             int           batch_size,
                             int           seq_size_per_block,
                             int&          input_token_num,
@@ -66,7 +67,8 @@ public:
                     torch::Tensor t_input_lengths,
                     torch::Tensor t_kv_cache_block_id_host,
                     int           seq_size_per_block,
-                    bool          forbid_realloc = false);
+                    bool          forbid_realloc     = false,
+                    int           planned_batch_size = -1);
 
     void fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                    torch::Tensor kv_cache_block_id_device,
@@ -80,7 +82,8 @@ public:
                              torch::Tensor t_input_lengths,
                              torch::Tensor t_kv_cache_block_id_device,
                              int           seq_size_per_block,
-                             bool          forbid_realloc = false);
+                             bool          forbid_realloc     = false,
+                             int           planned_batch_size = -1);
 
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;

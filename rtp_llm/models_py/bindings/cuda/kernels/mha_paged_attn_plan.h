@@ -12,11 +12,15 @@ namespace rtp_llm {
 // (FlashInfer plan/append + MHA RoPE) actually consume; MLA-only fields
 // (reuse_cache, batch_reuse_info, qo_indptr, ...) are not touched.
 //
+// planned_batch_size may exceed input_lengths.size(0) during CUDA graph replay.
+// The extra graph slots receive a one-token dummy KV page (page 0), while
+// producing no batch_indice/position entries.
+//
 // Required sizes (caller responsibility):
-//   paged_kv_last_page_len   >= batch_size
-//   decode_page_indptr       >= batch_size + 1
-//   page_indice              >= batch_size * max_blocks_per_bs (loose upper bound)
-//   batch_indice             >= sum(input_lengths) for prefill, or batch_size for decode
+//   paged_kv_last_page_len   >= planned_batch_size
+//   decode_page_indptr       >= planned_batch_size + 1
+//   page_indice              >= planned_batch_size * max_blocks_per_bs (loose upper bound)
+//   batch_indice             >= sum(input_lengths) for prefill, or input batch size for decode
 //   positions                >= same as batch_indice
 //
 // One CTA, batch_size threads — designed for the small batches typical of
@@ -31,6 +35,7 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                             at::Tensor&       page_indice,
                             at::Tensor&       batch_indice,
                             at::Tensor&       positions,
+                            int               planned_batch_size,
                             cudaStream_t      stream);
 
 }  // namespace rtp_llm
