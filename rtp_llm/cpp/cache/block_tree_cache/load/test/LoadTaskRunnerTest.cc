@@ -194,7 +194,7 @@ TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0), makeTaskRunnerTestGroupSet(1)};
     LoadTaskRunner runner(group_sets);
     auto engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true, true, true});
-    BlockTransferDispatcher dispatcher(engine);
+    BlockTransferDispatcher dispatcher(engine, nullptr, 8, 8);
     BlockTreeCacheMetricsReporter metrics_reporter;
     auto task = std::make_shared<LoadTaskRunner::Task>();
     task->load_descs = {TransferDescriptor::hostToDevice(0, 1, {1}),
