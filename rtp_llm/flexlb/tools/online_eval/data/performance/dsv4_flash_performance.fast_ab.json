@@ -7,6 +7,7 @@
   },
   "decode": {
     "scale": 1.0,
+    "max_pending_requests": 0,
     "step_ms_by_batch": [
       [1, 10.5],
       [4, 10.6],
