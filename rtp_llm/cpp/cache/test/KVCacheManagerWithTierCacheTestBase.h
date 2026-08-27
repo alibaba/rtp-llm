@@ -560,7 +560,7 @@ inline BlockIdxType lowerBlockForTier(const GroupSetResource& resource, Tier tie
         return resource.host_block;
     }
     if (tier == Tier::DISK) {
-        return resource.disk_slot;
+        return resource.disk_block;
     }
     return NULL_BLOCK_IDX;
 }
@@ -1532,7 +1532,7 @@ protected:
                     const auto& expected = (*expected_snapshot)[path_index][group_set_id];
                     EXPECT_EQ(resource.device_blocks, expected.device_blocks);
                     EXPECT_EQ(resource.host_block, expected.host_block);
-                    EXPECT_EQ(resource.disk_slot, expected.disk_slot);
+                    EXPECT_EQ(resource.disk_block, expected.disk_block);
                     EXPECT_EQ(resource.transfer_state, expected.transfer_state);
                     EXPECT_EQ(resource.candidate_meta.last_access_seq, expected.candidate_meta.last_access_seq);
                     EXPECT_EQ(resource.candidate_meta.admission_seq, expected.candidate_meta.admission_seq);
@@ -1704,9 +1704,9 @@ protected:
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
             } else {
                 ASSERT_EQ(source_tiers[group_set_id], Tier::DISK);
-                source_blocks[group_set_id] = resource.disk_slot;
+                source_blocks[group_set_id] = resource.disk_block;
                 ++disk_source_count;
-                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 1u);
+                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 1u);
             }
         }
         if (failure_source == LoadFailureSource::HOST) {
@@ -1761,8 +1761,8 @@ protected:
                 EXPECT_EQ(resource.host_block, source_blocks[group_set_id]);
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
             } else {
-                EXPECT_EQ(resource.disk_slot, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 2u);
+                EXPECT_EQ(resource.disk_block, source_blocks[group_set_id]);
+                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 2u);
             }
             ASSERT_EQ(group_set->groupIds().size(), group_set->devicePools().size());
             for (size_t member_group_id = 0; member_group_id < group_set->groupIds().size(); ++member_group_id) {
@@ -1805,8 +1805,8 @@ protected:
                 EXPECT_EQ(resource.host_block, source_blocks[group_set_id]);
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
             } else {
-                EXPECT_EQ(resource.disk_slot, source_blocks[group_set_id]);
-                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_slot), 1u);
+                EXPECT_EQ(resource.disk_block, source_blocks[group_set_id]);
+                EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 1u);
             }
             ASSERT_EQ(group_set->devicePools().size(), failed_targets[group_set_id].size());
             for (size_t member_group_id = 0; member_group_id < group_set->devicePools().size(); ++member_group_id) {

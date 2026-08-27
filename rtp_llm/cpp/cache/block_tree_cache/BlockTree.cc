@@ -74,9 +74,9 @@ void BlockTree::releaseNode(TreeNode* node) {
             resource.host_block = NULL_BLOCK_IDX;
         }
         if (resource.hasTier(Tier::DISK)) {
-            group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::DISK, {{node, {resource.disk_slot}}}},
+            group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::DISK, {{node, {resource.disk_block}}}},
                                          BlockTreeRefType::CACHE);
-            resource.disk_slot = NULL_BLOCK_IDX;
+            resource.disk_block = NULL_BLOCK_IDX;
         }
         resource.transfer_state = GroupSetTransferState::IDLE;
     }

@@ -68,7 +68,7 @@ std::vector<TreeNode*> insertFullSandwich(TieredFullCache& environment) {
     resources[1][0].device_blocks = {11};
     resources[2][0].host_block    = host_block;
     resources[3][0].device_blocks = {12};
-    resources[4][0].disk_slot     = disk_block;
+    resources[4][0].disk_block     = disk_block;
     RTP_LLM_CHECK(
         block_tree_cache_test::insertGroupSetResources(*environment.cache, {100, 200, 300, 400, 500}, resources));
     return environment.cache->tree()->findNode({100, 200, 300, 400, 500});
@@ -84,7 +84,7 @@ std::vector<TreeNode*> insertFullLowerTierDescendants(TieredFullCache& environme
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
     resources[2][0].host_block    = host_block;
-    resources[3][0].disk_slot     = disk_block;
+    resources[3][0].disk_block     = disk_block;
     RTP_LLM_CHECK(block_tree_cache_test::insertGroupSetResources(*environment.cache, {100, 200, 300, 400}, resources));
     return environment.cache->tree()->findNode({100, 200, 300, 400});
 }
@@ -387,7 +387,7 @@ TEST(FullPruneTest, PrunesDependentFullSubtreeAcrossTiers) {
     ASSERT_EQ(path.size(), 5u);
 
     const BlockIdxType host_block = path[2]->group_set_resources[0].host_block;
-    const BlockIdxType disk_block = path[4]->group_set_resources[0].disk_slot;
+    const BlockIdxType disk_block = path[4]->group_set_resources[0].disk_block;
     ASSERT_EQ(environment.device_pool->freeBlocksNum(), device_free_before);
     ASSERT_EQ(environment.host_pool->freeBlocksNum(), host_free_before - 1);
     ASSERT_EQ(environment.disk_pool->freeBlocksNum(), disk_free_before - 1);
