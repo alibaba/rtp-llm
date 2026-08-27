@@ -308,7 +308,7 @@ void expectPlanningSourceRefCounts(const FullSWAEnvironment& environment, Tier t
         ASSERT_EQ(resources.size(), 2u);
         for (size_t group_id = 0; group_id < resources.size(); ++group_id) {
             const BlockIdxType block =
-                tier == Tier::HOST ? resources[group_id].host_block : resources[group_id].disk_slot;
+                tier == Tier::HOST ? resources[group_id].host_block : resources[group_id].disk_block;
             const IBlockPool& pool          = tier == Tier::HOST ?
                                                   static_cast<const IBlockPool&>(*environment.host_pools[group_id]) :
                                                   static_cast<const IBlockPool&>(*environment.disk_pools[group_id]);
@@ -482,10 +482,10 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::HOST));
     EXPECT_TRUE(resource.hasTier(Tier::DISK));
-    EXPECT_NE(resource.disk_slot, NULL_BLOCK_IDX);
+    EXPECT_NE(resource.disk_block, NULL_BLOCK_IDX);
     EXPECT_FALSE(host_pool->isAllocated(host_block));
-    EXPECT_TRUE(disk_pool->isAllocated(resource.disk_slot));
-    EXPECT_EQ(disk_pool->treeRefCount(resource.disk_slot), 1u);
+    EXPECT_TRUE(disk_pool->isAllocated(resource.disk_block));
+    EXPECT_EQ(disk_pool->treeRefCount(resource.disk_block), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
@@ -652,7 +652,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         std::vector<std::vector<GroupSetResource>> source_resources(1, std::vector<GroupSetResource>(1));
-        source_resources[0][0].disk_slot = source_block;
+        source_resources[0][0].disk_block = source_block;
         ASSERT_TRUE(insertGroupSetResources(*cache, {100}, source_resources));
 
         BlockTreeMatchResult              result  = cache->match({100});
@@ -1368,7 +1368,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     const BlockIdxType source_block     = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(source_block));
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
-    resources[0][0].disk_slot = source_block;
+    resources[0][0].disk_block = source_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
 
     BlockTreeMatchResult              result  = cache->match({100});
@@ -1391,7 +1391,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     ASSERT_FALSE(find_result.empty());
     const GroupSetResource& resource = find_result.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_EQ(resource.disk_slot, source_block);
+    EXPECT_EQ(resource.disk_block, source_block);
     EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
     EXPECT_EQ(disk_pool->treeRefCount(source_block), 1u);
     EXPECT_EQ(device_pool->refCount(request_targets.front()), 1u);
@@ -1977,7 +1977,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
         for (size_t group_id = 0; group_id < resources_after.size(); ++group_id) {
             EXPECT_EQ(resources_after[group_id].device_blocks, resources_before[path_index][group_id].device_blocks);
             EXPECT_EQ(resources_after[group_id].host_block, resources_before[path_index][group_id].host_block);
-            EXPECT_EQ(resources_after[group_id].disk_slot, resources_before[path_index][group_id].disk_slot);
+            EXPECT_EQ(resources_after[group_id].disk_block, resources_before[path_index][group_id].disk_block);
             EXPECT_EQ(resources_after[group_id].transfer_state, GroupSetTransferState::IDLE);
         }
     }
@@ -2074,7 +2074,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     for (size_t group_id = 0; group_id < resources_after.size(); ++group_id) {
         EXPECT_EQ(resources_after[group_id].device_blocks, resources_before[group_id].device_blocks);
         EXPECT_EQ(resources_after[group_id].host_block, resources_before[group_id].host_block);
-        EXPECT_EQ(resources_after[group_id].disk_slot, resources_before[group_id].disk_slot);
+        EXPECT_EQ(resources_after[group_id].disk_block, resources_before[group_id].disk_block);
         EXPECT_EQ(resources_after[group_id].transfer_state, GroupSetTransferState::IDLE);
     }
     for (const SourceRef& source : source_refs) {
@@ -2226,7 +2226,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
         for (size_t group_id = 0; group_id < resources_after.size(); ++group_id) {
             EXPECT_EQ(resources_after[group_id].device_blocks, resources_before[path_index][group_id].device_blocks);
             EXPECT_EQ(resources_after[group_id].host_block, resources_before[path_index][group_id].host_block);
-            EXPECT_EQ(resources_after[group_id].disk_slot, resources_before[path_index][group_id].disk_slot);
+            EXPECT_EQ(resources_after[group_id].disk_block, resources_before[path_index][group_id].disk_block);
             EXPECT_EQ(resources_after[group_id].transfer_state, GroupSetTransferState::IDLE);
         }
     }

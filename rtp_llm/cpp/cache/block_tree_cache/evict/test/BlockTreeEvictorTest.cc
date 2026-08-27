@@ -217,7 +217,7 @@ GroupSetResource makeResource(Tier tier, BlockIdxType block) {
             resource.host_block = block;
             break;
         case Tier::DISK:
-            resource.disk_slot = block;
+            resource.disk_block = block;
             break;
         default:
             break;
@@ -536,8 +536,8 @@ public:
                 groups_[group_set_id]->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
             }
             if (resource.hasTier(Tier::DISK)) {
-                const BlockIdxType block = resource.disk_slot;
-                resource.disk_slot       = NULL_BLOCK_IDX;
+                const BlockIdxType block = resource.disk_block;
+                resource.disk_block       = NULL_BLOCK_IDX;
                 groups_[group_set_id]->releaseSingleBlock(Tier::DISK, block, BlockTreeRefType::CACHE);
             }
         }
@@ -1968,20 +1968,20 @@ TEST(BlockTreeEvictorCascadeTest, OrderedTransferSuccessPublishesFullTask) {
     const auto& success_resource = environment.node_->group_set_resources[2];
     EXPECT_EQ(primary_resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(primary_resource.hasTier(Tier::HOST));
-    EXPECT_EQ(primary_resource.disk_slot, primary_target);
+    EXPECT_EQ(primary_resource.disk_block, primary_target);
     EXPECT_EQ(environment.disk_pools_[0]->treeRefCount(primary_target), 1u);
     EXPECT_FALSE(environment.host_pools_[0]->isAllocated(environment.host_blocks_[0]));
 
     EXPECT_EQ(first_resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(first_resource.hasTier(Tier::HOST));
-    EXPECT_EQ(first_resource.disk_slot, first_target);
+    EXPECT_EQ(first_resource.disk_block, first_target);
     EXPECT_EQ(environment.disk_pools_[1]->treeRefCount(first_target), 1u);
     EXPECT_FALSE(environment.host_pools_[1]->isAllocated(environment.host_blocks_[1]));
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 0u);
 
     EXPECT_EQ(success_resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(success_resource.hasTier(Tier::HOST));
-    EXPECT_EQ(success_resource.disk_slot, success_target);
+    EXPECT_EQ(success_resource.disk_block, success_target);
     EXPECT_EQ(environment.disk_pools_[2]->treeRefCount(success_target), 1u);
     EXPECT_FALSE(environment.host_pools_[2]->isAllocated(environment.host_blocks_[2]));
 
@@ -2127,7 +2127,7 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     EXPECT_EQ(disk_victim->group_set_id, 1);
 
     insertedNode(first)->group_set_resources[0].evictFromTier(Tier::DEVICE);
-    insertedNode(first)->group_set_resources[1].disk_slot   = NULL_BLOCK_IDX;
+    insertedNode(first)->group_set_resources[1].disk_block   = NULL_BLOCK_IDX;
     insertedNode(second)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     unreferenceDeviceBlocksForTest(*group0, device_set, BlockTreeRefType::CACHE);
     group0->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::CACHE);
