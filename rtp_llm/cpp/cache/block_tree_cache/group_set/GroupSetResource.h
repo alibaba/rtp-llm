@@ -37,7 +37,7 @@ struct GroupSetResource {
     // L2: CPU Host — one packed block
     BlockIdxType host_block{NULL_BLOCK_IDX};
     // L3: Disk — one disk resource
-    BlockIdxType disk_slot{NULL_BLOCK_IDX};
+    BlockIdxType disk_block{NULL_BLOCK_IDX};
 
     // Async migration state and the single sorting-metadata copy (current serving tier).
     GroupSetTransferState transfer_state{GroupSetTransferState::IDLE};
@@ -54,7 +54,7 @@ struct GroupSetResource {
             case Tier::HOST:
                 return !isNullBlockIdx(host_block);
             case Tier::DISK:
-                return !isNullBlockIdx(disk_slot);
+                return !isNullBlockIdx(disk_block);
             default:
                 return false;
         }
