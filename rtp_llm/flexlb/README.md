@@ -198,6 +198,11 @@ export FLEXLB_CONFIG='{
 export FLEXLB_MONITOR_PROVIDER=prometheus
 ```
 
+The top-level `enableFallback` switch defaults to `false`. When enabled, the gRPC
+schedule endpoint returns `success=false`, code `8600`, and error message `FALLBACK`
+before forwarding or routing so the caller can use domain routing. The compatibility
+environment variable `ENABLE_FALLBACK=true|false` overrides the JSON baseline.
+
 `MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
 not a second FlexLB behavior configuration:
 

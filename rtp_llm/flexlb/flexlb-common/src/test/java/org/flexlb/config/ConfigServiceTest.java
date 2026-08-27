@@ -24,8 +24,16 @@ class ConfigServiceTest {
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isBatchDispatch());
+        assertFalse(config.isEnableFallback());
         assertEquals(1, config.getSchemaVersion());
         assertNull(configService.loadModelServiceConfig());
+    }
+
+    @Test
+    void parses_explicit_fallback_switch() {
+        FlexlbConfig config = ConfigService.parse("{\"enableFallback\":true}");
+
+        assertTrue(config.isEnableFallback());
     }
 
     @Test

@@ -11,4 +11,11 @@ class StrategyErrorTypeTest {
         assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE,
                 StrategyErrorType.fromErrorCode(8432));
     }
+
+    @Test
+    void fallbackIsRetainedForClientDomainRouting() {
+        assertEquals(StrategyErrorType.FALLBACK,
+                StrategyErrorType.fromErrorCode(8600));
+        assertEquals("FALLBACK", StrategyErrorType.FALLBACK.buildErrorMessage(null));
+    }
 }

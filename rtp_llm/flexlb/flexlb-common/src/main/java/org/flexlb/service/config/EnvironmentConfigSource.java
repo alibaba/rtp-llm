@@ -19,6 +19,7 @@ final class EnvironmentConfigSource implements ConfigSource {
     private static final String BLOCK_HASH_STRATEGY_ENV = "BLOCK_HASH_STRATEGY";
     private static final String LOG_LEVEL_ENV = "FLEXLB_LOG_LEVEL";
     private static final String STDOUT_LOG_ENV = "ENABLE_STDOUT_LOG";
+    private static final String FALLBACK_ENV = "ENABLE_FALLBACK";
 
     private String configContent;
 
@@ -69,6 +70,11 @@ final class EnvironmentConfigSource implements ConfigSource {
         if (stdoutEnabled != null) {
             config.getObservability().getLogging().setStdoutEnabled(
                     parseBoolean(STDOUT_LOG_ENV, stdoutEnabled));
+        }
+
+        String fallbackEnabled = System.getenv(FALLBACK_ENV);
+        if (fallbackEnabled != null) {
+            config.setEnableFallback(parseBoolean(FALLBACK_ENV, fallbackEnabled));
         }
     }
 

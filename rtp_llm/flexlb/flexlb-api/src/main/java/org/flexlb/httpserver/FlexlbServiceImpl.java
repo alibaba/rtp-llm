@@ -93,11 +93,28 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         try {
             context = buildContext(request);
             BalanceContext requestContext = context;
+            engineHealthReporter.reportArriveDelayTime(requestContext);
+
+            if (routeService.isFallbackEnabled()) {
+                Response fallbackResponse = Response.error(StrategyErrorType.FALLBACK);
+                fallbackResponse.setRealMasterHost(
+                        lbStatusConsistencyService.getMasterHostIpPort());
+                requestContext.setResponse(fallbackResponse);
+                completeOnce(
+                        request.getRequestId(),
+                        requestContext,
+                        toProtoResponse(fallbackResponse),
+                        responseObserver,
+                        ScheduleOrigin.CONFIGURED_FALLBACK,
+                        token,
+                        completionClaimed);
+                return;
+            }
+
             boolean consistencyEnabled = lbStatusConsistencyService.isNeedConsistency();
             boolean masterAtEntry = consistencyEnabled
                     && lbStatusConsistencyService.isMaster();
             boolean forwardToMaster = consistencyEnabled && !masterAtEntry;
-            engineHealthReporter.reportArriveDelayTime(requestContext);
 
             if (forwardToMaster) {
                 errorOrigin = ScheduleOrigin.FORWARDED_TO_MASTER;
@@ -839,6 +856,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private enum ScheduleOrigin {
         FORWARDED_TO_MASTER,
         FORWARD_FAILED,
+        CONFIGURED_FALLBACK,
         LOCAL_MASTER,
         LOCAL_FALLBACK,
         LOCAL_STANDALONE,

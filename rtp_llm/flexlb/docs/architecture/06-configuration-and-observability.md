@@ -33,7 +33,8 @@ last-known-good 快照；合法推送原子替换 `FlexlbConfig`，随后通知�
 
 - `BLOCK_HASH_STRATEGY`：`VLLM` / `SGLANG`；
 - `FLEXLB_LOG_LEVEL`：`TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR`；
-- `ENABLE_STDOUT_LOG`：严格的 `true` / `false`。
+- `ENABLE_STDOUT_LOG`：严格的 `true` / `false`；
+- `ENABLE_FALLBACK`：严格的 `true` / `false`，覆盖 JSON 中的 `enableFallback`。
 
 ### Nacos 连接
 
@@ -77,6 +78,8 @@ Nacos 部分更新示例：
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。
 - `observability.logging`：FlexLB logger group 级别与 root/PV stdout 开关。
 - `blockHashStrategy`：cache block hash 策略。
+- `enableFallback`：默认 `false`；启用时调度入口在转发和路由前返回错误码 `8600`，
+  由调用方执行 domain fallback。
 - `internalRuntime`：代码内部设置，不接受公共 JSON 输入。
 
 `DIRECT + BATCH` 非法；可选配置应省略，不能写 `null`。完整示例和 selector

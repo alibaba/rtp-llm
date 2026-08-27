@@ -29,6 +29,7 @@ public final class FlexlbConfig {
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
     private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;
+    private boolean enableFallback = false;
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();

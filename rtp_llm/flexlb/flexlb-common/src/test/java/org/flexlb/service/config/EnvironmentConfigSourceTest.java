@@ -25,6 +25,7 @@ class EnvironmentConfigSourceTest {
                         """,
                 "FLEXLB_LOG_LEVEL", "DEBUG",
                 "ENABLE_STDOUT_LOG", "true",
+                "ENABLE_FALLBACK", "true",
                 "BLOCK_HASH_STRATEGY", "SGLANG",
                 "MODEL_SERVICE_CONFIG",
                 "{\"service_id\":\"test-service\",\"role_endpoints\":[]}");
@@ -45,6 +46,7 @@ class EnvironmentConfigSourceTest {
         assertThat(config.getObservability().getLogging().getLevel())
                 .isEqualTo(LogLevel.DEBUG);
         assertThat(config.getObservability().getLogging().isStdoutEnabled()).isTrue();
+        assertThat(config.isEnableFallback()).isTrue();
         assertThat(configService.loadModelServiceConfig().getServiceId())
                 .isEqualTo("test-service");
         configService.close();

@@ -143,6 +143,39 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void testSchedule_configuredFallbackReturns8600BeforeForwardingOrRouting() {
+        when(routeService.isFallbackEnabled()).thenReturn(true);
+        when(lbStatusConsistencyService.getMasterHostIpPort())
+                .thenReturn("10.0.0.1:7001");
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(8600L)
+                        .setSeqLen(4)
+                        .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(
+                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        verify(observer, never()).onError(any());
+        assertFalse(response.getValue().getSuccess());
+        assertEquals(8600, response.getValue().getCode());
+        assertEquals("FALLBACK", response.getValue().getErrorMessage());
+        assertEquals("10.0.0.1:7001", response.getValue().getRealMasterHost());
+        verify(routeService, never()).route(any());
+        verifyNoInteractions(grpcForwarder);
+        verify(lbStatusConsistencyService, never()).isNeedConsistency();
+        verify(lbStatusConsistencyService, never()).isMaster();
+        verify(requestToken).close();
+        assertPvContains("\"scheduleOrigin\":\"CONFIGURED_FALLBACK\"");
+    }
+
+    @Test
     void testSchedule_preservesBothEnqueuedByMasterValues() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
 
