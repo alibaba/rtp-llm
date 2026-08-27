@@ -190,7 +190,6 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
     // linear-step-derived block count.
@@ -203,6 +202,13 @@ struct KVCacheConfig {
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
     // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
     bool dsv4_fixed_pool_use_memory = false;
+
+    // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
+    std::string kv_cache_event_publisher_type        = "none";  // none | kvcm
+    std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
+    std::string kv_cache_event_instance_group        = "";
+    std::string kv_cache_event_instance_id           = "";
+    std::string kv_cache_event_host_ip_port          = "";
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

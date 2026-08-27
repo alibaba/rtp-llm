@@ -184,6 +184,21 @@ cc_test(
 )
 
 cc_test(
+    name = "cache_group_publication_test",
+    srcs = [
+        "CacheGroupPublicationTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_group_type",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "block_pool_test",
     srcs = [
         "BlockPoolTest.cc",

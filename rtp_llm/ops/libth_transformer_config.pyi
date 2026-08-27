@@ -737,6 +737,11 @@ class KVCacheConfig:
     enable_independent_group_eviction: bool
     device_cache_min_free_blocks: int
     load_cache_retry_times: int
+    kv_cache_event_publisher_type: str
+    kv_cache_event_manager_endpoint: str
+    kv_cache_event_instance_group: str
+    kv_cache_event_instance_id: str
+    kv_cache_event_host_ip_port: str
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
