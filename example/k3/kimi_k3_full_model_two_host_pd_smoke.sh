@@ -565,6 +565,11 @@ else:
             # same collective shapes even when its live DP-local BS differs.
             "DECODE_CAPTURE_CONFIG": "4",
             "KIMI_K3_KTP_LOCAL_BS_BUCKET": "4",
+            # CudaGraphRunner performs one full-capacity synthetic forward
+            # before slicing the per-key graph input. Keep that capacity equal
+            # to the KTP-local bucket so the warmup follows the same 4->32
+            # rank-major physical-row contract as capture and replay.
+            "CONCURRENCY_LIMIT": "4",
         })
     else:
         expected.update({
@@ -687,11 +692,15 @@ apply_validated_decode_profile() {
     if [[ "${decode_topology}" == "dp8_ep8_tp1_ktp8" ]]; then
         # All DP workers capture the same local-BS=4 KTP collective schedule;
         # smaller live batches replay this graph with framework dummy rows.
+        # The graph runner's initial synthetic forward uses the configured
+        # maximum generation batch, so it must match the KTP-local bucket.
+        export CONCURRENCY_LIMIT=4
         export ENABLE_CUDA_GRAPH=1
         export DECODE_CAPTURE_CONFIG=4
         export KIMI_K3_KTP_LOCAL_BS_BUCKET=4
     else
         # Leave headroom for CUDA graph capture with the validated TP8 baseline.
+        export CONCURRENCY_LIMIT=32
         export ENABLE_CUDA_GRAPH=1
         export DECODE_CAPTURE_CONFIG=1,2,3,4
         unset KIMI_K3_KTP_LOCAL_BS_BUCKET
