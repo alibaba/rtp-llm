@@ -639,7 +639,13 @@ bool KVCacheManager::writeP2PLayer(size_t                                model_i
     held_resource->initGroups(config_.topologyPtr());
     held_resource->setCacheKeys(cache_keys);
     held_resource->mutableBlockIdsForLayer(static_cast<int>(global_layer_id), tag).assign(block_ids);
-    if (!cache_keys.empty()) {
+    // TP rank 0 owns allocation bookkeeping and broadcasts its physical block
+    // indices to the other ranks in tpSyncModelInputs(). Non-root ranks can
+    // address those indices, but their local block pools do not mark them as
+    // allocated, so attempting to take an allocator reference there aborts in
+    // IBlockPool::checkAllocatedNoLock(). The rank-0 connector reference keeps
+    // the request blocks alive for the whole per-rank transfer.
+    if (!cache_keys.empty() && parallelism_config_.tp_rank == 0) {
         held_resource = allocator_->incrKVCacheRef(*held_resource, cache_keys, true);
         if (!held_resource) {
             RTP_LLM_LOG_WARNING("writeP2PLayer failed to hold connector ref, request_id=%ld layer_id=%u tag=%s",
