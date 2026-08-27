@@ -16,6 +16,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -325,12 +326,50 @@ class DynamicEngineScaleTest {
     // ════════════════════════════════════════════════════════════════
 
     /**
+     * Claim the next 32-port block with every port bindable right now.
+     *
+     * <p>The allocator restarts at its fixed base (63200) in every JVM, so
+     * residue from a previous suite run (a not-yet-reaped socket from the
+     * last JVM, or any other squatter on one of the ports) fails the
+     * wildcard bind inside startEngine — the observed "Failed to bind
+     * 0.0.0.0:63233" flake on back-to-back runs. Both the bootstrap engines
+     * and the dynamically added ones (auto-allocated as max+1) take
+     * consecutive ports inside the block, so the whole block must be free;
+     * occupied blocks are skipped. The probe binds exactly like the engine
+     * does (wildcard address, same JVM-default socket options), so anything
+     * that would fail the engine bind also fails the probe. Mirrors the
+     * established {@code ComprehensiveFaultInjectionTest.allocatePortBlock}
+     * pattern.
+     */
+    private static int allocatePortBlock() {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int basePort = PORT_ALLOCATOR.getAndAdd(32);
+            boolean allFree = true;
+            for (int port = basePort; port < basePort + 32; port++) {
+                // Wildcard bind with the same JVM-default socket options as
+                // the NettyServerBuilder.forPort() bind inside startEngine,
+                // so probe success/failure predicts the engine bind 1:1.
+                try (ServerSocket probe = new ServerSocket()) {
+                    probe.bind(new InetSocketAddress(port), 1);
+                } catch (IOException e) {
+                    allFree = false;
+                    break;
+                }
+            }
+            if (allFree) {
+                return basePort;
+            }
+        }
+        throw new IllegalStateException("no bindable 32-port block after 20 attempts");
+    }
+
+    /**
      * Boot a real cluster (gRPC servers + control server + discovery file +
      * dynamic engine manager), mirroring {@code JavaMockEngineCluster.main}.
      */
     private int startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
-        int basePort = PORT_ALLOCATOR.getAndAdd(32);
+        int basePort = allocatePortBlock();
         scheduler = Executors.newScheduledThreadPool(4, r -> {
             Thread thread = new Thread(r, "scale-test-scheduler");
             thread.setDaemon(true);
