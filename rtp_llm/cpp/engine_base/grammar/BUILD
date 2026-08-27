@@ -11,8 +11,10 @@ cc_library(
         "XGrammarBackendCpp.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:json",
+        "@havenask//aios/autil:lock_free",
         "@xgrammar//:xgrammar",
     ],
     copts = copts(),
