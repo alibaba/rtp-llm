@@ -493,7 +493,7 @@ def _pump_until_accepted(ops, engine_name: str, base: int, timeout_s: float) -> 
 )
 def elastic_add_flow(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "elastic")
     flow: Optional[_BackgroundFlow] = None
     try:
         # Warm the initial topology: every case may run in a shared env, so
@@ -543,7 +543,7 @@ def elastic_add_flow(ctx: CaseContext):
 )
 def elastic_remove_flow(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "elastic")
     flow: Optional[_BackgroundFlow] = None
     try:
         _cleanup_dynamic(ops, env)
@@ -622,7 +622,7 @@ def elastic_remove_flow(ctx: CaseContext):
 )
 def elastic_add_remove_cycle(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "elastic")
     try:
         _cleanup_dynamic(ops, env)
         p_prefill, p_decode = _discovery_entry_count(env)
@@ -700,7 +700,7 @@ def elastic_add_remove_cycle(ctx: CaseContext):
 )
 def elastic_rebalance(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "elastic")
     try:
         _cleanup_dynamic(ops, env)
 
@@ -795,7 +795,7 @@ def elastic_rebalance(ctx: CaseContext):
 )
 def elastic_stop_after_add(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "elastic")
     try:
         _cleanup_dynamic(ops, env)
 
@@ -884,7 +884,7 @@ def elastic_stop_after_add(ctx: CaseContext):
 )
 def elastic_concurrent_ops(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "elastic")
     try:
         _cleanup_dynamic(ops, env)
 

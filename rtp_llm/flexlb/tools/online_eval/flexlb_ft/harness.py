@@ -614,6 +614,18 @@ class EnvManager:
         if env is None:
             return
         self._log(f"tearing down env '{env.spec.label}'")
+        self._stop_env_processes(env)
+        if not self.keep:
+            pass  # keep run dirs on disk (logs), like legacy scripts
+        self.current = None
+
+    def _stop_env_processes(self, env: FlexEnv) -> None:
+        """Stop every process owned by *env* (idempotent, env refs cleared).
+
+        Used by teardown() and by the _build() failure path: when a build
+        dies mid-way self.current is still None, so the regular teardown()
+        would see nothing and leak the JVMs this build already started.
+        """
         for mp in env.load_clients:
             mp.terminate()
         env.load_clients.clear()
@@ -628,9 +640,6 @@ class EnvManager:
             env.mock.terminate()
             env.mock = None
         time.sleep(1)
-        if not self.keep:
-            pass  # keep run dirs on disk (logs), like legacy scripts
-        self.current = None
 
     def register_atexit(self) -> None:
         if not self._registered:
@@ -673,11 +682,19 @@ class EnvManager:
         # perf config
         env.perf_file.write_text(json.dumps(spec.perf, indent=2))
 
-        # mock cluster
-        self._start_mock(env)
-        # master
-        if spec.master_mode != "none":
-            self.start_master(env)
+        try:
+            # mock cluster
+            self._start_mock(env)
+            # master
+            if spec.master_mode != "none":
+                self.start_master(env)
+        except Exception:
+            # Build failed before self.current was assigned: teardown()
+            # would see None and leak the mock/master JVMs already started.
+            # Stop the partial env, then re-raise for the caller.
+            self._log(f"env '{spec.label}' build failed — stopping partial env")
+            self._stop_env_processes(env)
+            raise
         self.current = env
         return env
 

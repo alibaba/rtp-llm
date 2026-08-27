@@ -93,11 +93,16 @@ class CaseContext:
         self._ops_cache.clear()
 
 
-# request-id bases per legacy run_matrix_smoke.sh group config
+# request-id bases per legacy run_matrix_smoke.sh group config.  The
+# "elastic" family was split off "chaos" when the elastic_* cases moved
+# into the functional suite (2026-08 rework): smoke and chaos now run in
+# separate processes whose case_seq counters both start at 1, so the two
+# families need disjoint base ranges to keep request ids collision-free.
 RID_BASES = {
     "cancel": {"batch": 10000, "direct": 40000, "queue": 70000},
     "scheduling": {"batch": 20000, "direct": 50000, "queue": 80000},
     "anomaly": {"batch": 30000, "direct": 60000, "queue": 90000},
+    "elastic": {"batch": 140000, "direct": 150000, "queue": 160000},
     "chaos": {"batch": 110000, "direct": 120000, "queue": 130000},
 }
 
