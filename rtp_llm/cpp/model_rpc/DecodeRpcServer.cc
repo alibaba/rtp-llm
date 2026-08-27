@@ -193,13 +193,22 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     }
     if (generate_stream->hasError()) {
         auto   stream_error = generate_stream->statusInfo();
+        auto   error_code   = stream_error.code();
         string error_msg    = stream_error.ToString();
+        if (error_code == ErrorCode::NONE_ERROR) {
+            error_code = ErrorCode::UNKNOWN_ERROR;
+            error_msg  = "decode stream reported error without an error code";
+        }
         if (error_msg.empty()) {
-            error_msg = "malloc kv cache block failed at decode node";
+            error_msg = ErrorCodeToString(error_code);
         }
         error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
-        RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
+        decode_context.error_info = ErrorInfo(error_code, error_msg);
+        RTP_LLM_LOG_ERROR("request [%s] allocate resource failed, error code [%s], error message [%s]",
+                          decode_context.request_key.c_str(),
+                          ErrorCodeToString(error_code).c_str(),
+                          error_msg.c_str());
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
         return;
     }
 
