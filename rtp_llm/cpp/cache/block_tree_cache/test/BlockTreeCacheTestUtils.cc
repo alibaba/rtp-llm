@@ -616,7 +616,11 @@ bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
 }
 
 int BlockTreeCacheTestPeer::pendingTasksForTest(const BlockTreeCache& cache) {
-    return cache.task_pool_->pending_tasks_.load();
+    // Async load/store queue work can finish before its transfer callback
+    // settles. The business credit spans that whole lifecycle, while a queue
+    // task and its credit overlap during dispatch, so use the larger count.
+    return std::max(cache.task_pool_->pending_tasks_.load(),
+                    static_cast<int>(cache.task_pool_->business_credits_.load()));
 }
 
 void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
