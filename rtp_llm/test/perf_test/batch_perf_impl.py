@@ -173,12 +173,22 @@ class BatchPerfImpl(object):
                 self.warmup_runs,
                 self.profile_trace_name,
             )
-            _ = self._curl_server()
+            warmup_metric = self._curl_server()
+            check_with_info(
+                warmup_metric.success_requests == warmup_metric.total_requests,
+                "performance warmup requests did not all succeed: "
+                f"{warmup_metric.success_requests}/{warmup_metric.total_requests}",
+            )
 
         all_measure_responses: List[ResponseInfo] = []
         for i in range(self.measure_runs):
             responses = self._curl_server_responses()
             metric = analyze_results(responses)
+            check_with_info(
+                metric.success_requests == metric.total_requests,
+                "performance measure requests did not all succeed: "
+                f"{metric.success_requests}/{metric.total_requests}",
+            )
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
                 "avg_prefill_ms=%.3f avg_total_ms=%.3f avg_wait_ms=%.3f "
@@ -199,9 +209,9 @@ class BatchPerfImpl(object):
         results = analyze_results(all_measure_responses)
 
         if self.profile and self.profile_runs > 0:
-            # Pre-arm via /start_profile with enable_all_rank=true so that
-            # all TP/DP ranks profile the upcoming request.  Requires the
-            # NormalEngine::step() patch that ticks BEFORE process(), so
+            # Pre-arm via /start_profile; PERF_PROFILE_ENABLE_ALL_RANK controls
+            # whether only rank 0 or all TP/DP ranks profile the upcoming request.
+            # This requires the NormalEngine::step() patch to tick before process(), so
             # the first post-configure tick starts the profiler in time
             # for the next process() to be captured.  Controlled by env
             # PERF_PREARM_PROFILE=1.
@@ -211,6 +221,9 @@ class BatchPerfImpl(object):
                         self.is_decode, self.decode_test_length
                     )
                     arm_sleep = float(os.environ.get("PERF_PROFILE_ARM_SLEEP", "2"))
+                    enable_all_rank = (
+                        os.environ.get("PERF_PROFILE_ENABLE_ALL_RANK", "0") == "1"
+                    )
                     r = requests.post(
                         f"http://127.0.0.1:{self.base_port}/start_profile",
                         json={
@@ -218,12 +231,13 @@ class BatchPerfImpl(object):
                             "trace_name": self.profile_trace_name or "perf_prearm",
                             "start_step": 0,
                             "num_steps": num_steps,
-                            "enable_all_rank": True,
+                            "enable_all_rank": enable_all_rank,
                         },
                         timeout=60,
                     )
                     logging.info(
-                        f"[PERF_PREARM_PROFILE] num_steps={num_steps} arm_sleep={arm_sleep} "
+                        f"[PERF_PREARM_PROFILE] num_steps={num_steps} "
+                        f"enable_all_rank={enable_all_rank} arm_sleep={arm_sleep} "
                         f"-> {r.status_code} {r.text[:200]}"
                     )
                     time.sleep(arm_sleep)
@@ -236,7 +250,12 @@ class BatchPerfImpl(object):
                     self.profile_runs,
                     self.profile_trace_name,
                 )
-                _ = self._curl_server(True)
+                profile_metric = self._curl_server(True)
+                check_with_info(
+                    profile_metric.success_requests == profile_metric.total_requests,
+                    "performance profile requests did not all succeed: "
+                    f"{profile_metric.success_requests}/{profile_metric.total_requests}",
+                )
             time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
         return results
 

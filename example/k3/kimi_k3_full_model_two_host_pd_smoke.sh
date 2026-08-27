@@ -96,7 +96,7 @@ Important optional variables:
   SMOKE_REQUEST_TIMEOUT_S   defaults to 900
   SMOKE_RESULT_TIMEOUT_S    defaults to 18000
   SMOKE_RESULT_ENDPOINT     defaults to decode-host:(decode-port + 100)
-  SMOKE_MAX_TOKENS          defaults to 128 for ordinary cache cases
+  SMOKE_MAX_TOKENS          defaults to 256 for ordinary cache cases
   SMOKE_IDENTITY_MAX_TOKENS defaults to 256 for the reasoning identity case
   SMOKE_SINGLE_EXACT_MAX_TOKENS
                             defaults to 128 for exact-cache seed/hit answers
@@ -108,6 +108,12 @@ Important optional variables:
                             defaults to 5 seconds between failed attempts
   SMOKE_RDMA_PREWARM_SETTLE_S
                             defaults to 2 seconds after a successful prewarm
+  SMOKE_ACCL_USE_NICS       optional comma-separated Barex HCA allowlist.
+                            When unset, mlx5_bond_0..7 are used only if all
+                            are present and active; otherwise ACCL_USE_NICS is
+                            left unset for Barex auto-discovery. An explicit
+                            allowlist remains strict. Both roles must use the
+                            same explicit order.
   SMOKE_SUITE               all (default) or flow
                             flow: four-layer-friendly multi-round RDMA flow
                                   check without semantic-answer assertions
@@ -266,6 +272,8 @@ smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
 smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
 smoke_rdma_prewarm_settle_s="${SMOKE_RDMA_PREWARM_SETTLE_S:-2}"
+smoke_accl_use_nics=""
+smoke_accl_use_nics_mode="auto-discovery"
 for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
@@ -286,6 +294,32 @@ for seconds_value in \
     [[ "${seconds_value}" =~ ^[0-9]+([.][0-9]+)?$ ]] \
         || die "RDMA prewarm backoff/settle values must be non-negative numbers"
 done
+
+resolve_rdma_nic_allowlist() {
+    local selector="${repo_root}/example/k3/kimi_k3_full_model_pd_nic_selection.py"
+    [[ -f "${selector}" ]] || die "RDMA HCA selector is missing: ${selector}"
+    if [[ "${SMOKE_ACCL_USE_NICS+x}" == "x" ]]; then
+        [[ -n "${SMOKE_ACCL_USE_NICS}" ]] \
+            || die "SMOKE_ACCL_USE_NICS must not be empty when explicitly set"
+        smoke_accl_use_nics="$(python3 "${selector}" --explicit "${SMOKE_ACCL_USE_NICS}")" \
+            || die "explicit SMOKE_ACCL_USE_NICS validation failed"
+        smoke_accl_use_nics_mode="explicit"
+    else
+        smoke_accl_use_nics="$(python3 "${selector}")" \
+            || die "default RDMA HCA discovery failed"
+        if [[ -n "${smoke_accl_use_nics}" ]]; then
+            smoke_accl_use_nics_mode="default-bond"
+        fi
+    fi
+
+    if [[ -n "${smoke_accl_use_nics}" ]]; then
+        echo "using ${smoke_accl_use_nics_mode} RDMA HCA allowlist: ${smoke_accl_use_nics}"
+    else
+        echo "using Barex RDMA HCA auto-discovery (ACCL_USE_NICS unset)"
+    fi
+}
+
+resolve_rdma_nic_allowlist
 
 service_pid=
 listener_pid=
@@ -397,6 +431,39 @@ verify_rdma_log() {
     fi
 }
 
+verify_rdma_selected_devices() {
+    local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
+    local evidence_file="${role_dir}/rdma-selected-devices.txt"
+    python3 - "${engine_log}" "${smoke_accl_use_nics}" "${evidence_file}" <<'PY'
+import pathlib
+import re
+import sys
+
+engine_log, allowlist, output = sys.argv[1:]
+allowed = set(allowlist.split(",")) if allowlist else None
+selected = []
+for line in pathlib.Path(engine_log).read_text(
+    encoding="utf-8", errors="replace"
+).splitlines():
+    if "XContextImpl::SpawnChannel" not in line:
+        continue
+    match = re.search(r"device=\[IbvDevice@.*?\bname=([^\]]+)\]", line)
+    if match:
+        selected.append(match.group(1))
+if not selected:
+    raise SystemExit("no Barex SpawnChannel device evidence was recorded")
+unexpected = sorted(set(selected) - allowed) if allowed is not None else []
+if unexpected:
+    raise SystemExit(f"Barex selected HCAs outside ACCL_USE_NICS: {unexpected}")
+counts = {nic: selected.count(nic) for nic in sorted(set(selected))}
+pathlib.Path(output).write_text(
+    "ACCL_USE_NICS=" + (allowlist or "<unset>") + "\n"
+    + "selected=" + ",".join(f"{nic}:{count}" for nic, count in counts.items()) + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
 verify_role_environment() {
     local env_file="${role_dir}/service.env"
     # Never dump the full process environment: it can contain unrelated
@@ -411,7 +478,8 @@ verify_role_environment() {
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
         "${sp_checkpoint_real}" \
-        "${smoke_eagle3_aux_layer_ids}" <<'PY'
+        "${smoke_eagle3_aux_layer_ids}" \
+        "${smoke_accl_use_nics}" <<'PY'
 import pathlib
 import sys
 
@@ -426,6 +494,7 @@ import sys
     chunkwise_rdma,
     sp_checkpoint_path,
     eagle3_aux_layer_ids,
+    accl_use_nics,
 ) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 env = {}
@@ -459,6 +528,10 @@ expected = {
     "KIMI_K3_EAGLE3_AUX_LAYER_IDS": eagle3_aux_layer_ids,
 }
 absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb"]
+if accl_use_nics:
+    expected["ACCL_USE_NICS"] = accl_use_nics
+else:
+    absent.append("ACCL_USE_NICS")
 if role == "prefill":
     expected.update({
         "MAX_SEQ_LEN": "1258294",
@@ -530,6 +603,11 @@ apply_validated_common_profile() {
     export LINEAR_STEP="${smoke_linear_step}"
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=30000
+    if [[ -n "${smoke_accl_use_nics}" ]]; then
+        export ACCL_USE_NICS="${smoke_accl_use_nics}"
+    else
+        unset ACCL_USE_NICS
+    fi
     export KIMI_K3_CHUNKWISE_RDMA="${smoke_chunkwise_rdma}"
     export DSV4_MEGA_MOE_INPUT_PACKER=fused
     export DSV4_MEGA_MOE_INPUT_PACKER_IMPL=optimized
@@ -677,6 +755,7 @@ PY
     [[ -f "${result_file}" ]] || die "timed out waiting for Prefill result"
     verdict="$(tr -d '[:space:]' <"${result_file}")"
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
+    verify_rdma_selected_devices
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     exit 0
 fi
@@ -686,7 +765,7 @@ fi
 # also checks local Prefill health before every sequential/concurrent stage.
 wait_for_health "${decode_host}" "${decode_port}"
 wait_for_result_listener
-max_tokens="${SMOKE_MAX_TOKENS:-128}"
+max_tokens="${SMOKE_MAX_TOKENS:-256}"
 identity_max_tokens="${SMOKE_IDENTITY_MAX_TOKENS:-256}"
 single_exact_max_tokens="${SMOKE_SINGLE_EXACT_MAX_TOKENS:-128}"
 mtp_chunk_max_tokens="${SMOKE_MTP_CHUNK_MAX_TOKENS:-128}"
@@ -722,6 +801,7 @@ python3 "${case_runner}" \
     --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \
     --timeout "${request_timeout}"
 
+verify_rdma_selected_devices
 notify_decode PASS "smoke-suite-${smoke_suite}-validated"
 echo "PASS: Prefill validated suite=${smoke_suite}; artifacts=${role_dir}"
 exit 0

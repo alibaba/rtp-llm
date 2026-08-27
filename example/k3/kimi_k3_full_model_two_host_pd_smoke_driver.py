@@ -184,6 +184,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_RDMA_PREWARM_ATTEMPTS",
         "SMOKE_RDMA_PREWARM_BACKOFF_S",
         "SMOKE_RDMA_PREWARM_SETTLE_S",
+        "SMOKE_ACCL_USE_NICS",
         "SMOKE_EXPECTED_LAYERS",
         "SMOKE_BLOCK_SIZE",
         "SMOKE_KERNEL_BLOCK_SIZE",

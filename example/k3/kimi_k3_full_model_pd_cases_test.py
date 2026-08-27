@@ -22,7 +22,7 @@ def make_args() -> argparse.Namespace:
         batch_size=4,
         block_size=4096,
         chunk_tokens=65536,
-        max_tokens=128,
+        max_tokens=256,
         identity_max_tokens=256,
         single_exact_max_tokens=128,
         mtp_chunk_max_tokens=128,
@@ -100,11 +100,11 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
 
         single_exact_seed = stages["single_exact_seed"][0]
         single_exact_hit = stages["single_exact_hit"][0]
-        self.assertEqual(single_exact_seed.max_tokens, 128)
-        self.assertEqual(single_exact_hit.max_tokens, 128)
+        self.assertEqual(single_exact_seed.max_tokens, 256)
+        self.assertEqual(single_exact_hit.max_tokens, 256)
 
         mtp_chunk = stages["mtp_chunk_prefill_miss"][0]
-        self.assertEqual(mtp_chunk.max_tokens, 128)
+        self.assertEqual(mtp_chunk.max_tokens, 256)
         self.assertTrue(mtp_chunk.require_chunk)
         self.assertTrue(mtp_chunk.require_mtp)
         self.assertGreater(len(mtp_chunk.prompt), runner.args.chunk_tokens)
@@ -122,7 +122,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
                 all(case.max_tokens is None for case in stages[stage_name]),
                 stage_name,
             )
-        self.assertEqual(runner.args.max_tokens, 128)
+        self.assertEqual(runner.args.max_tokens, 256)
 
     def test_mtp_chunk_case_requires_an_accepted_draft_token(self) -> None:
         runner = Runner(make_args())

@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--block-size", type=int, default=4096)
     parser.add_argument("--chunk-tokens", type=int, default=65536)
-    parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--identity-max-tokens", type=int, default=256)
     parser.add_argument("--single-exact-max-tokens", type=int, default=128)
     parser.add_argument("--mtp-chunk-max-tokens", type=int, default=128)
