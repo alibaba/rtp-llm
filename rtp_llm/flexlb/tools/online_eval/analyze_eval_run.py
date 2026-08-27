@@ -13,7 +13,7 @@ Dimension -> data source map
  1  latency_layers      server_latency.json (5 stage histograms) + per_request
                         schedule_ms per-second p50/p95/p99 + master.log
                         flexlb_server_schedule_latency 10s rows + e2e
-                        ttft/total (auto-disabled when schedule_only=1)
+                        ttft/total (auto-disabled when fetch_output_stream=0)
  2  queues              java_mock_stats timeline (mock.json stats[] or legacy
                         mock_engine.log); per-engine panel from mock.json
                         per_engine_timeseries when present, else a
@@ -949,15 +949,23 @@ class RunData:
     # ---- derived helpers -------------------------------------------------
 
     @property
-    def schedule_only(self) -> bool:
-        value = str(self.params.get("schedule_only", "0")).strip()
-        if value in ("1", "true", "True"):
+    def fetch_output_stream(self) -> bool:
+        """True when the load client read engine output streams in this run.
+
+        False (FETCH_OUTPUT_STREAM=0) means the client skipped the phase-2
+        stream read: client-side e2e ttft/total are unavailable, while the
+        engine still executed prefill + decode in full.
+        """
+        value = str(self.params.get("fetch_output_stream", "1")).strip()
+        if value in ("0", "false", "False", "no"):
+            return False
+        if value in ("1", "true", "True", "yes"):
             return True
         # legacy fallback: the env file snapshot in run_meta
         env = self.run_meta.get("flexlb_env", {})
         if isinstance(env, dict):
-            return any("SCHEDULE_ONLY=1" in str(v) for v in env.values())
-        return False
+            return not any("FETCH_OUTPUT_STREAM=0" in str(v) for v in env.values())
+        return True
 
     def decode_capacity(self) -> Optional[int]:
         """Total decode concurrency: per-engine cap x engine count."""
@@ -1530,7 +1538,7 @@ def analyze_latency_layers(
     scan: PerRequestScan,
     server_latency: Dict[str, Any],
     log_rows: List[Dict[str, Any]],
-    schedule_only: bool,
+    fetch_output_stream: bool,
 ) -> Dict[str, Any]:
     stages = {}
     for name in (
@@ -1561,7 +1569,7 @@ def analyze_latency_layers(
             "master_wait_batch_wait_ms": stages.get("batch_wait_ms"),
             "network_client_to_master_ms_mean": net_client_master,
             "network_master_to_engine_dispatch_ack_ms": stages.get("dispatch_ack_ms"),
-            "e2e_disabled": schedule_only,
+            "e2e_disabled": not fetch_output_stream,
         },
         "schedule_per_second": [
             {
@@ -1587,10 +1595,11 @@ def analyze_latency_layers(
                 "server percentile (approximate window indexing)"
             ),
         }
-    if schedule_only:
+    if not fetch_output_stream:
         result["note"] = (
-            "SCHEDULE_ONLY=1: end-to-end layer (total_ms / ttft_ms) "
-            "disabled — no engine execution in this run."
+            "FETCH_OUTPUT_STREAM=0: end-to-end layer (total_ms / ttft_ms) "
+            "disabled — the client skipped engine stream reads; engine-side "
+            "prefill/decode execution ran to completion in this run."
         )
     else:
         result["e2e"] = {
@@ -2383,7 +2392,7 @@ def build_report(run_dir: Path) -> Dict[str, Any]:
             "generated_at_utc": datetime.now(timezone.utc).isoformat(
                 timespec="seconds"
             ),
-            "schedule_only": data.schedule_only,
+            "fetch_output_stream": data.fetch_output_stream,
             "sources": data.sources,
             "data_notes": [],
         },
@@ -2393,7 +2402,7 @@ def build_report(run_dir: Path) -> Dict[str, Any]:
             scan,
             data.server_latency,
             parsed_logs["server_latency_rows"],
-            data.schedule_only,
+            data.fetch_output_stream,
         ),
         DIMENSIONS[2]: analyze_queues(
             data.mock_stats,
@@ -2456,7 +2465,7 @@ def build_report(run_dir: Path) -> Dict[str, Any]:
         "balance_grade": balance.get("grade", "unavailable"),
         "balance_gini": (balance.get("decode_from_per_request") or {}).get("gini"),
         "pacing_verdict": report["pacing"].get("verdict", "unavailable"),
-        "schedule_only": data.schedule_only,
+        "fetch_output_stream": data.fetch_output_stream,
     }
     return report
 
@@ -3045,7 +3054,7 @@ def render_latency(report: Dict[str, Any]) -> str:
                 (
                     "L4 e2e",
                     (
-                        "DISABLED (schedule_only)"
+                        "DISABLED (fetch_output_stream=0)"
                         if dim.get("layers", {}).get("e2e_disabled")
                         else "see below"
                     ),
@@ -4155,10 +4164,11 @@ def render_html(report: Dict[str, Any]) -> str:
         render_comparison(report),
     ]
     banner = ""
-    if meta.get("schedule_only"):
+    if meta.get("fetch_output_stream") is False:
         banner = (
-            '<div class="banner"><b>SCHEDULE_ONLY=1</b> &mdash; end-to-end latency layer '
-            "(total_ms / ttft_ms) is disabled in this run; schedule latency remains valid.</div>"
+            '<div class="banner"><b>FETCH_OUTPUT_STREAM=0</b> &mdash; end-to-end latency layer '
+            "(total_ms / ttft_ms) is disabled in this run (client skipped engine "
+            "stream reads; engine executed fully); schedule latency remains valid.</div>"
         )
     chart_json = json.dumps(
         {cid: payload for cid, payload in _CHARTS}, separators=(",", ":")
@@ -4880,7 +4890,7 @@ def build_synthetic_run(
         "params": {
             "n_prefill": "4",
             "n_decode": "4",
-            "schedule_only": "0",
+            "fetch_output_stream": "1",
             "send_mode": "replay",
             "send_mode_qps": "",
             "duration_s": "150",
@@ -5096,7 +5106,7 @@ def run_self_test(args: argparse.Namespace) -> int:
         "balance_grade",
         "error_rate",
         "pacing_verdict",
-        "schedule_only",
+        "fetch_output_stream",
     ):
         if field not in rep["verdict"]:
             failures.append(f"verdict.{field} missing")
@@ -5391,7 +5401,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(
         f"verdict: test_valid={v.get('test_valid')} leak={v.get('leak_verdict')} "
         f"balance={v.get('balance_grade')} err_rate={v.get('error_rate')} "
-        f"pacing={v.get('pacing_verdict')} schedule_only={v.get('schedule_only')}"
+        f"pacing={v.get('pacing_verdict')} fetch_output_stream={v.get('fetch_output_stream')}"
     )
     return 0
 

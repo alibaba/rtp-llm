@@ -7,7 +7,7 @@ chaos scripts.  Provides:
                    (flexlb-api) and standalone victim JVMs, with health waits,
                    port planning, per-spec environment reuse and teardown.
   * ProcessOps   — managed subprocess handles (kill -9, restart, pgrep sweep).
-  * ClientOps    — JavaLoadClient driver (all 36 env vars explicit) plus
+  * ClientOps    — JavaLoadClient driver (all 35 env vars explicit) plus
                    summary.json / per_request.jsonl parsing.
   * EngineOps    — mock HTTP control-plane + gRPC schedule/cancel/stream
                    (see engine_ops.py).
@@ -108,7 +108,7 @@ LOAD_CLIENT_ENV_VARS = [
     "TIMEOUT_MS",
     "SLA_TTFT_MS",
     "ZERO_OUTPUT_POLICY",
-    "SCHEDULE_ONLY",
+    "FETCH_OUTPUT_STREAM",
     "LOOP",
     "N_CHANNELS",
     "EVENT_LOOP_THREADS",
@@ -117,7 +117,6 @@ LOAD_CLIENT_ENV_VARS = [
     "SKIP_SERVER_LATENCY",
     "MODEL",
     "API_KEY",
-    "FLEXLB_EXPECT_FETCH_RESPONSE",
     "GRADIENT",
     "GRADIENT_START_SPEED",
     "GRADIENT_MAX_SPEED",

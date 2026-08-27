@@ -25,7 +25,7 @@
 
 `trace 到达时间 -> Schedule RPC -> Master 路由 -> fixed-window 凑批 -> EnqueueBatch -> engine ACK -> Schedule 返回`
 
-本测试设置 `SCHEDULE_ONLY=1`，不调用 `FetchResponse`。Master 延迟在服务端打点，从 RPC 到达 Master 开始，到 Schedule response 完成为止，不使用 client RTT 作为正式延迟。
+本测试设置 `FETCH_OUTPUT_STREAM=0`，客户端不调用 `FetchResponse`，engine 侧仍完整执行 prefill+decode。Master 延迟在服务端打点，从 RPC 到达 Master 开始，到 Schedule response 完成为止，不使用 client RTT 作为正式延迟。
 
 ## 3. 固定配置
 

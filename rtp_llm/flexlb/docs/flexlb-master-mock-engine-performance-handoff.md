@@ -24,16 +24,18 @@ fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报�
 本手册只测 Master 调度能力：
 
 - Master 进程配置必须在 `FLEXLB_CONFIG` 中选择
-  `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`SCHEDULE_ONLY=1` 只是
-  load client 的测试开关。历史 10 ms base case 需要在独立进程 JSON 中
-  配置当时的 `dispatcher.maxCollectionWaitMs=10`，在当前 schema v2 中应写为
+  `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`FETCH_OUTPUT_STREAM=0` 只是
+  load client 的测试开关：客户端不读输出流，engine 侧仍完整执行 prefill+decode。
+  历史 10 ms base case 需要在独立进程 JSON 中配置当时的
+  `dispatcher.maxCollectionWaitMs=10`，在当前 schema v2 中应写为
   `scheduler.decision.maxCollectionWaitMs=10`；当前仓库的
   `master_fixed_window.json` 已不是该 10 ms fixture，不能用已删除的标量
   环境变量覆盖。历史 `slo500_wait160` case 在独立 JSON 中配置
   当时的 `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
   `dispatcher.maxCollectionWaitMs=160`；当前 fixture 已迁移到对应的
   `scheduler.decision` 字段。
-- 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能。
+- 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能；
+  关闭客户端读流（`FETCH_OUTPUT_STREAM=0`）不影响 engine 侧的完整执行。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
 - 延迟以 Master 服务端的 `schedule_latency_ms` 为准，不以 client RTT 作为最终报告口径。
 - mock engine 必须有足够余量，不能让 mock 的 CPU、线程或队列先成为瓶颈。
@@ -262,7 +264,7 @@ MOCK_BASE_GRPC_PORT=61000 \
 JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.fast_ab.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window.json" \
-SCHEDULE_ONLY=1 \
+FETCH_OUTPUT_STREAM=0 \
 SCHEDULE_WORKER_SIZE=16 \
 LOAD_CLIENT_WORKERS=1 \
 REPLAY_SPEED=13 \
@@ -296,7 +298,7 @@ BASE_ENV=(
   JAVA_MOCK_EVENT_LOOP_THREADS=32
   "PERFORMANCE_FILE=$PWD/data/performance/dsv4_flash_performance.fast_ab.json"
   "PROCESS_CONFIG_FILE=$PWD/data/config/master_fixed_window.json"
-  SCHEDULE_ONLY=1
+  FETCH_OUTPUT_STREAM=0
   SCHEDULE_WORKER_SIZE=16
   DURATION_S=60
   LOOP=1
@@ -353,7 +355,7 @@ JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 JAVA_MOCK_ENGINE_HEAP_SIZE=32g \
 PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.formula_1x.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window_slo500_wait160.json" \
-SCHEDULE_ONLY=1 \
+FETCH_OUTPUT_STREAM=0 \
 SCHEDULE_WORKER_SIZE=16 \
 LOAD_CLIENT_WORKERS=8 \
 REPLAY_SPEED=1400 \
@@ -565,7 +567,7 @@ artifact directory:
 ## 15. 常见错误
 
 - 只看 client RTT：会把发压端排队和网络抖动算到 Master。正式值必须取服务端打点。
-- 忘记 `SCHEDULE_ONLY=1`：会执行 FetchResponse，测试目标变成端到端链路。
+- 忘记 `FETCH_OUTPUT_STREAM=0`：客户端会读取 FetchResponse 输出流，测试目标变成端到端链路。
 - mock 余量不足就冲高 QPS：mock 可能先成为瓶颈，无法证明 Master 容量。
 - 使用固定 completion delay：丢失输入长度、cache 命中和 active batch 对执行时间的影响。
 - 一次直接打 10K：无法定位拐点，还可能用冷启动失败污染结论。
@@ -579,7 +581,7 @@ artifact directory:
 
 - [ ] Java 21 和两个 jar 校验通过。
 - [ ] 使用 Java mock、750 prefill、500 decode 和 `fast_ab`。
-- [ ] 使用 batch、`SCHEDULE_ONLY=1`、fixed-window 10 ms，没有 FetchResponse。
+- [ ] 使用 batch、`FETCH_OUTPUT_STREAM=0`、fixed-window 10 ms，客户端不读输出流。
 - [ ] endpoint 全部 ready 后预热至少 10 秒。
 - [ ] 从约 100 QPS 开始，按阶梯逐级加压。
 - [ ] QPS 和延迟均取 Master 服务端指标。
