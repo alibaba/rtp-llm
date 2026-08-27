@@ -537,6 +537,18 @@ def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+    # Smoke/perf targets can explicitly disable the new real-request warmup.
+    # This is especially important for SM120 builds where the startup probe
+    # must not select an incompatible generic FP8 recipe before the dedicated
+    # blockwise backend has been initialized.
+    if os.environ.get("DSV4_STARTUP_REAL_WARMUP", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        logging.info("skip DSV4 startup real warmup: DSV4_STARTUP_REAL_WARMUP is disabled")
+        return False
     runtime_config = py_env_configs.runtime_config
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False

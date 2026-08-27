@@ -727,7 +727,31 @@ def forward_prefill(
     #    (the field the dev branch called ``position_ids``; it is only populated
     #    when the model declares a position-id length factor, so the synthesize
     #    branch below stays the live path for DSV4).
-    cu_seqlens = attn.cu_seqlens
+    cu_seqlens = getattr(attn, "cu_seqlens", None)
+    # The startup real-warmup request is a valid single-request prefill, but
+    # some framework paths leave the optional cu_seqlens field as an empty
+    # tensor.  The FP8 metadata builder requires the vLLM-style [B+1] prefix
+    # sum, so reconstruct it from the authoritative input_lengths when
+    # available (and fall back to the complete flat input for a single request).
+    if cu_seqlens is None or cu_seqlens.numel() < 2:
+        input_lengths_for_cu = getattr(attn, "input_lengths", None)
+        if input_lengths_for_cu is not None and input_lengths_for_cu.numel() > 0:
+            lengths = input_lengths_for_cu.reshape(-1).to(
+                device=input_ids.device, dtype=torch.int32
+            )
+            if int(lengths.sum().item()) == int(inputs.input_ids.numel()):
+                cu_seqlens = torch.cat(
+                    [
+                        torch.zeros(1, dtype=torch.int32, device=input_ids.device),
+                        torch.cumsum(lengths, dim=0),
+                    ]
+                )
+        if cu_seqlens is None or cu_seqlens.numel() < 2:
+            cu_seqlens = torch.tensor(
+                [0, int(input_ids.numel())],
+                dtype=torch.int32,
+                device=input_ids.device,
+            )
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)
