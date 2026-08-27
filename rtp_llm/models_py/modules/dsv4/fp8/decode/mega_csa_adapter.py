@@ -275,9 +275,7 @@ class MegaCSAAdapter:
             return table
 
         main_state_block_table = require_block_table(CSA_STATE, "CSA_STATE")
-        indexer_state_block_table = require_block_table(
-            INDEXER_STATE, "INDEXER_STATE"
-        )
+        indexer_state_block_table = require_block_table(INDEXER_STATE, "INDEXER_STATE")
         indexer_block_table = require_block_table(INDEXER_KV, "INDEXER_KV")
 
         main_entries = attn._pool_entries_per_block(CSA_KV)
@@ -360,10 +358,7 @@ class MegaCSAAdapter:
             or not hidden.is_contiguous()
         ):
             raise TypeError("DSV4 mega hidden must be contiguous CUDA bfloat16")
-        if (
-            metadata.batch_size != batch_size
-            or metadata.q_len_per_req != q_len
-        ):
+        if metadata.batch_size != batch_size or metadata.q_len_per_req != q_len:
             raise ValueError("DSV4 mega hidden and metadata geometry disagree")
         if metadata.position_ids_long is None:
             raise RuntimeError("DSV4 mega metadata is missing int64 positions")
@@ -414,9 +409,7 @@ class MegaCSAAdapter:
         )
         hidden_rows = hidden.view(token_count, HC, g.dim)
 
-        compressed_lengths_2d = metadata.compressed_lens_per_token.get(
-            COMPRESS_RATIO
-        )
+        compressed_lengths_2d = metadata.compressed_lens_per_token.get(COMPRESS_RATIO)
         if (
             compressed_lengths_2d is None
             or compressed_lengths_2d.dim() != 2
@@ -426,9 +419,7 @@ class MegaCSAAdapter:
             raise RuntimeError(
                 "DSV4 mega metadata is missing per-token CSA compressed lengths"
             )
-        compressed_lengths_2d = compressed_lengths_2d[
-            :batch_size, :q_len
-        ].contiguous()
+        compressed_lengths_2d = compressed_lengths_2d[:batch_size, :q_len].contiguous()
         compressed_lengths = compressed_lengths_2d.view(token_count)
         if (
             compressed_lengths.dtype != torch.int32
@@ -451,9 +442,7 @@ class MegaCSAAdapter:
             or not topk_buffer.is_contiguous()
         ):
             raise TypeError("DSV4 mega TopK output must be contiguous CUDA int32")
-        topk_output = topk_buffer[:batch_size, :q_len, :topk].reshape(
-            token_count, topk
-        )
+        topk_output = topk_buffer[:batch_size, :q_len, :topk].reshape(token_count, topk)
 
         for attn_type, name in ((SWA_KV, "SWA_KV"), (CSA_KV, "CSA_KV")):
             pool = attn._pool_view_3d_fp8(attn_type)
@@ -544,9 +533,7 @@ class MegaCSAAdapter:
             positions_i32,
             rope_cos,
             rope_sin,
-            head_ssq=None,
             mock_post=False,
-            enable_ssq=False,
             cmp_pos=positions_i64,
             idx_norm=self.weights.indexer_norm,
             cos_tab=rope_cos,
