@@ -24,18 +24,25 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.QueueRouteAdmission;
 import org.flexlb.balance.scheduler.QueueRoutingResult;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
+import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
+import org.flexlb.cache.domain.CacheMatch;
+import org.flexlb.cache.domain.EngineGeneration;
+import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
@@ -121,6 +128,37 @@ import static org.mockito.Mockito.withSettings;
 @Tag("performance-regression")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
+
+    private static final CacheAwareService NO_CACHE = new CacheAwareService() {
+        @Override
+        public Map<EngineGeneration, CacheMatch> findMatchingEngines(
+                List<Long> keys,
+                RoleType role,
+                List<EngineGeneration> candidates) {
+            return Map.of();
+        }
+
+        @Override
+        public boolean activateEngineGeneration(
+                String address, RoleType role, long generation) {
+            return true;
+        }
+
+        @Override
+        public WorkerCacheUpdateResult updateEngineBlockCache(
+                String address,
+                RoleType role,
+                long generation,
+                CacheStatus status) {
+            throw new AssertionError("placement benchmark does not update cache state");
+        }
+
+        @Override
+        public boolean retireEngineGeneration(
+                String address, RoleType role, long generation) {
+            return true;
+        }
+    };
 
     private static final int WARMUP_REQUESTS = 64;
     /** Per-request schedule deadline; a stalled Master fails fast instead of hanging. */
@@ -351,6 +389,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 new ConfiguredLoadBalanceSelector(List.of(
                         new RandomStrategy(
                                 engineWorkerStatus, resourceMeasureFactory),
+                        new CostBasedPrefillStrategy(
+                                engineWorkerStatus,
+                                NO_CACHE,
+                                resourceMeasureFactory,
+                                createNoOpEngineHealthReporter()),
                         new CostBasedDecodeStrategy(
                                 engineWorkerStatus, resourceMeasureFactory)));
         ModelMetaConfig modelMeta = mock(
@@ -776,18 +819,22 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         assertTrue(PLACEMENT_ROUTE_PREFILL_ENGINES > 0);
         assertTrue(PLACEMENT_ROUTE_DECODE_ENGINES > 0);
         assertTrue(PLACEMENT_ROUTE_OPERATIONS > 0);
-        provisionLogicalPlacementEndpoints(
-                PLACEMENT_ROUTE_PREFILL_ENGINES,
-                PLACEMENT_ROUTE_DECODE_ENGINES);
-
-        PlacementRouteCost healthy = measurePlacementRoutes(
-                false, 70_000_000L);
+        RoutingConfig.PrefillSelectorConfig previousPrefillSelector = config
+                .getRouter().getRoles().getPrefill().getSelector();
+        config.getRouter().getRoles().getPrefill().setSelector(
+                new RoutingConfig.EstimatedTtftSelectorConfig());
 
         RoutingConfig.DecodeAvailabilityConfig availability = config
                 .getRouter().getRoles().getDecode().getAvailability();
         Long previousMaxEngineRequests = availability.getMaxEngineRequests();
         List<DecodePlacementHold> holds = new ArrayList<>();
         try {
+            provisionLogicalPlacementEndpoints(
+                    PLACEMENT_ROUTE_PREFILL_ENGINES,
+                    PLACEMENT_ROUTE_DECODE_ENGINES);
+            PlacementRouteCost healthy = measurePlacementRoutes(
+                    false, 70_000_000L);
+
             availability.setMaxEngineRequests(1L);
             long holdRequestId = 80_000_000L;
             for (DecodeEndpoint endpoint
@@ -844,6 +891,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 holds.get(index).close();
             }
             availability.setMaxEngineRequests(previousMaxEngineRequests);
+            config.getRouter().getRoles().getPrefill().setSelector(
+                    previousPrefillSelector);
         }
     }
 
@@ -932,27 +981,29 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private void routePlacementOnce(
             BalanceContext context, boolean expectAllFull) {
         QueueRoutingResult result = router.routeForQueue(context);
-        if (expectAllFull) {
-            QueueRoutingResult.Deferred deferred = assertInstanceOf(
-                    QueueRoutingResult.Deferred.class, result);
-            assertEquals(RoleType.DECODE, deferred.role(),
-                    "the all-full fixture must block on Decode capacity");
-            return;
-        }
         QueueRoutingResult.Admitted admitted = assertInstanceOf(
                 QueueRoutingResult.Admitted.class, result);
-        admitted.admission().close();
+        try (QueueRouteAdmission admission = admitted.admission()) {
+            QueueRouteAdmission.DecodePrepareStatus status =
+                    admission.prepareDecode(context);
+            assertEquals(
+                    expectAllFull
+                            ? QueueRouteAdmission.DecodePrepareStatus.CAPACITY_FULL
+                            : QueueRouteAdmission.DecodePrepareStatus.PREPARED,
+                    status,
+                    "the measured scheduling turn must observe live Decode capacity");
+        }
     }
 
     private static void assertPlacementRouteCeilings(
             String mode, PlacementRouteCost cost) {
         long maximumP95Nanos = Long.getLong(
-                "flexlb.perf.placement-route-max-p95-ns", 20_000_000L);
+                "flexlb.perf.placement-route-max-p95-ns", 2_000_000L);
         long maximumCpuNanos = Long.getLong(
-                "flexlb.perf.placement-route-max-cpu-ns", 20_000_000L);
+                "flexlb.perf.placement-route-max-cpu-ns", 1_000_000L);
         long maximumAllocatedBytes = Long.getLong(
                 "flexlb.perf.placement-route-max-allocated-bytes",
-                4L * 1_024L * 1_024L);
+                2L * 1_024L * 1_024L);
         assertTrue(cost.p95Nanos() <= maximumP95Nanos,
                 () -> mode + " route p95 " + cost.p95Nanos()
                         + " ns exceeds " + maximumP95Nanos + " ns");

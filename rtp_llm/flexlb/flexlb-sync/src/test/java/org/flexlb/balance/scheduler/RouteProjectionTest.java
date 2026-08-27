@@ -65,6 +65,120 @@ class RouteProjectionTest {
     }
 
     @Test
+    void emptyQueueFixedWindowKeepsPlanningAndServiceBoundaries() {
+        AtomicInteger planningCalls = new AtomicInteger();
+        AtomicInteger serviceCalls = new AtomicInteger();
+        RouteProjection.DeliveryProjection observed =
+                new RouteProjection.DeliveryProjection() {
+                    @Override
+                    public RouteProjection.GroupPlanning planning(
+                            RouteProjection.Predictions predictions) {
+                        planningCalls.incrementAndGet();
+                        return BATCH.planning(predictions);
+                    }
+
+                    @Override
+                    public RouteProjection.GroupService service(
+                            GroupPlanner.Plan<GroupPlanner.Item> plan,
+                            RouteProjection.Predictions predictions) {
+                        serviceCalls.incrementAndGet();
+                        return BATCH.service(plan, predictions);
+                    }
+                };
+
+        RouteProjection.Result result = project(
+                queue(false, constraints(4, 30L), List.of()),
+                noCommittedWork(), TOKEN_EVALUATOR,
+                probe(99L, 50, 20L, 5L,
+                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                observed);
+
+        assertModeled(result, 46L, 46L);
+        assertEquals(2, planningCalls.get(),
+                "the frozen fixed window is planned before and at its deadline");
+        assertEquals(1, serviceCalls.get());
+    }
+
+    @Test
+    void emptyQueuePredictionCapStillDispatchesWithoutWindowDelay() {
+        GroupPlanner.Constraints predictionCapped =
+                new GroupPlanner.Constraints(
+                        4, 1_000_000L, 1_000_000L, 10L, 30L);
+
+        RouteProjection.Result result = project(
+                queue(false, predictionCapped, List.of()),
+                noCommittedWork(), TOKEN_EVALUATOR,
+                probe(99L, 50, 20L, 0L,
+                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                BATCH);
+
+        assertModeled(result, 20L, 20L);
+    }
+
+    @Test
+    void emptyQueueDrainFailureDoesNotEraseEstablishedTtft() {
+        GroupPlanner.Item failingDrain = new GroupPlanner.Item(
+                1_000L, 0, 0L, NOW_MS, Long.MAX_VALUE, 999L, 0L);
+        RouteProjection.DeliveryProjection failingDrainProjection =
+                new RouteProjection.DeliveryProjection() {
+                    @Override
+                    public RouteProjection.GroupPlanning planning(
+                            RouteProjection.Predictions predictions) {
+                        return (items, requiredThroughIndex) ->
+                                predictions.itemDurationMs(
+                                        items.get(requiredThroughIndex));
+                    }
+
+                    @Override
+                    public RouteProjection.GroupService service(
+                            GroupPlanner.Plan<GroupPlanner.Item> plan,
+                            RouteProjection.Predictions predictions) {
+                        return new RouteProjection.GroupService() {
+                            @Override
+                            public long completionOffsetMs(int memberIndex) {
+                                return predictions.itemDurationMs(
+                                        plan.items().get(memberIndex));
+                            }
+
+                            @Override
+                            public long totalDurationMs() {
+                                return predictions.itemDurationMs(failingDrain);
+                            }
+                        };
+                    }
+                };
+        PrefillTimePredictor.Evaluator evaluator = evaluator(
+                (tokens, hits) -> {
+                    if (tokens == 999L) {
+                        throw new IllegalStateException(
+                                "drain prediction unavailable");
+                    }
+                    return tokens - hits;
+                },
+                items -> 0.0);
+
+        RouteProjection.Result ttftOnly = project(
+                queue(false, constraints(1, 0L), List.of()),
+                noCommittedWork(), evaluator,
+                probe(99L, 50, 20L, 5L,
+                        RouteProjection.Demand.TTFT_ONLY),
+                failingDrainProjection);
+        RouteProjection.Result withDrain = project(
+                queue(false, constraints(1, 0L), List.of()),
+                noCommittedWork(), evaluator,
+                probe(100L, 50, 20L, 5L,
+                        RouteProjection.Demand.TTFT_AND_DRAIN),
+                failingDrainProjection);
+
+        assertEquals(OptionalLong.of(15L), ttftOnly.projectedTtftMs());
+        assertEquals(OptionalLong.empty(), ttftOnly.projectedDrainMs());
+        assertEquals("SERIAL_FROZEN_QUEUE_TTFT_ONLY", ttftOnly.detail());
+        assertEquals(OptionalLong.of(15L), withDrain.projectedTtftMs());
+        assertEquals(OptionalLong.empty(), withDrain.projectedDrainMs());
+        assertEquals("DRAIN_PREDICTION_UNAVAILABLE", withDrain.detail());
+    }
+
+    @Test
     void successiveDecisionGroupsUseOneSerialCursor() {
         List<GroupPlanner.Item> active = List.of(
                 item(1L, 50, 1L, 10L),

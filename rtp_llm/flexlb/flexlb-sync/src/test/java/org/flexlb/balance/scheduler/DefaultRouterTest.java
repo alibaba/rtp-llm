@@ -1,11 +1,13 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.balance.strategy.StaticCapacityExceededException;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -81,6 +83,47 @@ class DefaultRouterTest {
 
         assertEquals(role, deferred.role());
         assertEquals(null, deferred.group());
+    }
+
+    @Test
+    void staticCapacityFailureIsTerminalAndDoesNotHoldTheNextRequest() {
+        when(modelMeta.requiredRoles()).thenReturn(
+                List.of(RoleType.PREFILL, RoleType.DECODE));
+        DefaultRouter router = router();
+        BalanceContext oversized = context(12L);
+        BalanceContext small = context(13L);
+        SelectionFixture oversizedPrefill = selection(
+                RoleType.PREFILL, 12L, "p", 8001, "g1");
+        SelectionFixture smallPrefill = selection(
+                RoleType.PREFILL, 13L, "p", 8001, "g1");
+        SelectionFixture smallDecode = selection(
+                RoleType.DECODE, 13L, "d", 8002, "g1");
+        when(selector.select(oversized, RoleType.PREFILL, null))
+                .thenReturn(oversizedPrefill.selection);
+        when(selector.select(oversized, RoleType.DECODE, "g1"))
+                .thenThrow(new StaticCapacityExceededException(
+                        "seq_len exceeds every Decode worker"));
+        when(selector.select(small, RoleType.PREFILL, null))
+                .thenReturn(smallPrefill.selection);
+        when(selector.select(small, RoleType.DECODE, "g1"))
+                .thenReturn(smallDecode.selection);
+
+        QueueRoutingResult.Rejected rejected = assertInstanceOf(
+                QueueRoutingResult.Rejected.class,
+                router.routeForQueue(oversized));
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                rejected.response().getCode());
+
+        QueueRoutingResult.Admitted admitted = assertInstanceOf(
+                QueueRoutingResult.Admitted.class,
+                router.routeForQueue(small));
+        admitted.admission().close();
+
+        verify(oversizedPrefill.selection).close();
+        verify(selector).select(oversized, RoleType.DECODE, "g1");
+        verify(selector).select(small, RoleType.DECODE, "g1");
+        verify(smallPrefill.pin).close();
+        verify(smallDecode.pin).close();
     }
 
     @Test
@@ -249,6 +292,8 @@ class DefaultRouterTest {
         WorkerEndpoint endpoint = role == RoleType.PREFILL
                 || role == RoleType.PDFUSION
                 ? mock(PrefillEndpoint.class)
+                : role == RoleType.DECODE
+                ? mock(DecodeEndpoint.class)
                 : mock(WorkerEndpoint.class);
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);

@@ -180,6 +180,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
             ConcurrentHashMap.newKeySet();
 
     /**
+     * Scalar inputs to queued-placement and engine-dispatch capacity gates.
+     * Running-task identity is deliberately absent: an unchanged heartbeat
+     * must not wake every wait lane, while every value used by either gate is
+     * represented here.
+     */
+    private record CapacitySignalState(
+            boolean generationUnavailable,
+            long queuedPlacementSlots,
+            int engineDispatchSlots,
+            long totalKv,
+            long queuedHardKvAvailable,
+            long queuedExpectedKvUsed,
+            long engineHardKvAvailable,
+            long engineExpectedKvUsed) {
+    }
+
+    /**
      * Serializes reserve/release, dispatch-permit, calibration, and eviction
      * transactions. Reads stay lock-free.
      */
@@ -2315,22 +2332,65 @@ public class DecodeEndpoint extends WorkerEndpoint {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
         List<WorkerStatusFact> facts;
+        boolean capacityChanged;
         admissionLock.lock();
         try {
+            CapacitySignalState capacityBefore = capacitySignalStateLocked(
+                    getStatus().committedWorkerStatus().fields());
             facts = doCalibrate(
                     observation.engine(), observation.finishedTasks());
             if (!observation.alive()) {
                 beginRetirement();
             }
             ws.publishPreparedStatus(prepared);
+            capacityChanged = !capacityBefore.equals(
+                    capacitySignalStateLocked(
+                            getStatus().committedWorkerStatus().fields()));
         } catch (RuntimeException | Error failure) {
             beginRetirement();
             throw failure;
         } finally {
             admissionLock.unlock();
         }
-        notifyEngineDispatchCapacityListeners();
+        if (capacityChanged) {
+            notifyEngineDispatchCapacityListeners();
+        }
         return new StatusReduction(this, facts);
+    }
+
+    /** Caller holds {@link #admissionLock}. */
+    private CapacitySignalState capacitySignalStateLocked(
+            WorkerStatus.EngineObservation fields) {
+        long queuedWithoutPermit = Math.max(
+                0L, (long) queuedPhaseCount.get()
+                        - activeEngineDispatchPermitCount);
+        long queuedPlacementSlots = saturatedAddNonNegative(
+                engineDispatchHardGateUsageLocked(), queuedWithoutPermit);
+        long reportedUsed = Math.max(
+                0L, fields.totalKvCacheTokens()
+                        - fields.availableKvCacheTokens());
+        long queuedHardAvailable = Math.max(
+                0L,
+                fields.availableKvCacheTokens()
+                        - inflightKvReservedTotal.get()
+                        - priorityPreemptionHeldKv.get()
+                        - engineFenceHeldKv.get());
+        long queuedExpectedUsed = saturatedAddNonNegative(
+                saturatedAddNonNegative(
+                        reportedUsed,
+                        inflightExpectedKvReservedTotal.get()),
+                saturatedAddNonNegative(
+                        priorityPreemptionHeldExpectedKv.get(),
+                        engineFenceHeldExpectedKv.get()));
+        return new CapacitySignalState(
+                isGenerationRetiringOrRetired(),
+                queuedPlacementSlots,
+                engineDispatchHardGateUsageLocked(),
+                fields.totalKvCacheTokens(),
+                queuedHardAvailable,
+                queuedExpectedUsed,
+                engineFacingKvAvailable(fields),
+                engineFacingKvUsed(fields));
     }
 
     @Override

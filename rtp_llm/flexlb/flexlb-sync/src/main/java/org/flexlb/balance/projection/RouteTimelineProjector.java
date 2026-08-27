@@ -117,8 +117,8 @@ final class RouteTimelineProjector {
                 initialActiveHead == null
                         ? RouteProjection.Result.InitialHeadDisposition.NONE
                         : null;
-        List<GroupPlanner.Item> eligibleActive = new ArrayList<>(
-                queue.activeItems().size());
+        List<GroupPlanner.Item> eligibleActive = queue.activeItems().isEmpty()
+                ? List.of() : new ArrayList<>(queue.activeItems().size());
         for (GroupPlanner.Item item : queue.activeItems()) {
             // Expired work is a terminal queue mutation, not work ahead of a
             // new request in this snapshot projection.
@@ -395,6 +395,7 @@ final class RouteTimelineProjector {
         private final PriorityQueue<ProjectionNode> expiry;
         private final ProjectionNode probeNode;
         private final ProjectionNode initialHeadNode;
+        private List<GroupPlanner.Item> singletonItems;
 
         private ProjectedQueue(
                 List<ProjectionNode> orderedNodes,
@@ -407,11 +408,22 @@ final class RouteTimelineProjector {
             this.initialHeadNode = initialHeadNode;
         }
 
+        private ProjectedQueue(ProjectionNode probeNode) {
+            this.live = null;
+            this.expiry = null;
+            this.probeNode = probeNode;
+            this.initialHeadNode = null;
+            this.singletonItems = List.of(probeNode.item);
+        }
+
         private static ProjectedQueue create(
                 List<GroupPlanner.Item> eligibleActive,
                 GroupPlanner.Item probe,
                 GroupPlanner.Item initialActiveHead,
                 Comparator<GroupPlanner.Item> order) {
+            if (eligibleActive.isEmpty()) {
+                return new ProjectedQueue(new ProjectionNode(probe, 0));
+            }
             List<ProjectionNode> orderedNodes = new ArrayList<>(
                     eligibleActive.size() + 1);
             ProjectionNode probeNode = null;
@@ -437,7 +449,8 @@ final class RouteTimelineProjector {
         }
 
         private boolean isEmpty() {
-            return live.isEmpty();
+            return singletonItems != null
+                    ? singletonItems.isEmpty() : live.isEmpty();
         }
 
         private RouteProjection.Result.InitialHeadDisposition
@@ -451,6 +464,12 @@ final class RouteTimelineProjector {
         }
 
         private GroupPlanner.Item head() {
+            if (singletonItems != null) {
+                if (singletonItems.isEmpty()) {
+                    throw new IllegalStateException("projected queue is empty");
+                }
+                return singletonItems.getFirst();
+            }
             Iterator<ProjectionNode> iterator = live.iterator();
             if (!iterator.hasNext()) {
                 throw new IllegalStateException("projected queue is empty");
@@ -459,6 +478,13 @@ final class RouteTimelineProjector {
         }
 
         private void removeHead() {
+            if (singletonItems != null) {
+                if (singletonItems.isEmpty()) {
+                    throw new IllegalStateException("projected queue is empty");
+                }
+                singletonItems = List.of();
+                return;
+            }
             Iterator<ProjectionNode> iterator = live.iterator();
             if (!iterator.hasNext()) {
                 throw new IllegalStateException("projected queue is empty");
@@ -474,6 +500,9 @@ final class RouteTimelineProjector {
          * rescanned.
          */
         private Iterable<GroupPlanner.Item> items() {
+            if (singletonItems != null) {
+                return singletonItems;
+            }
             return () -> {
                 Iterator<ProjectionNode> nodes = live.iterator();
                 return new Iterator<>() {
@@ -495,6 +524,14 @@ final class RouteTimelineProjector {
                 throw new IllegalArgumentException(
                         "planned prefix must contain at least one item");
             }
+            if (singletonItems != null) {
+                if (count > singletonItems.size()) {
+                    throw new IllegalStateException(
+                            "planner selected beyond the projected queue prefix");
+                }
+                singletonItems = List.of();
+                return;
+            }
             Iterator<ProjectionNode> iterator = live.iterator();
             for (int removed = 0; removed < count; removed++) {
                 if (!iterator.hasNext()) {
@@ -507,6 +544,14 @@ final class RouteTimelineProjector {
         }
 
         private ExpirationPrune pruneExpired(long nowMs) {
+            if (singletonItems != null) {
+                if (singletonItems.isEmpty()
+                        || !expiredAt(probeNode.item, nowMs)) {
+                    return new ExpirationPrune(false, false);
+                }
+                singletonItems = List.of();
+                return new ExpirationPrune(true, false);
+            }
             boolean probeExpired = false;
             boolean initialHeadExpired = false;
             while (!expiry.isEmpty()) {

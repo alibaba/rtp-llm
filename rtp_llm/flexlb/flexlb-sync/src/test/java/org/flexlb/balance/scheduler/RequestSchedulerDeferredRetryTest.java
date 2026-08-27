@@ -64,6 +64,13 @@ class RequestSchedulerDeferredRetryTest {
     }
 
     @Test
+    void nanoDeadlineSaturationSupportsNegativeNanoTimeOrigins() {
+        assertEquals(-5L, RequestScheduler.saturatingAddNanos(-10L, 5L));
+        assertEquals(Long.MAX_VALUE,
+                RequestScheduler.saturatingAddNanos(Long.MAX_VALUE - 2L, 5L));
+    }
+
+    @Test
     @Timeout(30)
     void deferredSelectionKeepsOriginalFutureAndRetriesFreshRouting()
             throws Exception {
@@ -81,6 +88,32 @@ class RequestSchedulerDeferredRetryTest {
                 "the scheduler must make a fresh placement decision after backoff");
         assertSame(original, fixture.lifecycle.requestSlot(101L).future(),
                 "retry must retain the exact registered request future");
+    }
+
+    @Test
+    @Timeout(30)
+    void terminalCapacityRejectionDoesNotCreateALaneOrBlockALaterRequest()
+            throws Exception {
+        StaticRejectingRouter router = new StaticRejectingRouter();
+        SchedulerFixture fixture = fixture(router);
+        BalanceContext oversized = context(151L);
+        oversized.getRequest().setSeqLen(257L);
+        BalanceContext small = context(152L);
+        small.getRequest().setSeqLen(128L);
+
+        Response first = fixture.scheduler.submit(oversized)
+                .get(3, TimeUnit.SECONDS);
+        Response second = fixture.scheduler.submit(small)
+                .get(3, TimeUnit.SECONDS);
+
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                first.getCode());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                second.getCode(),
+                "a later request for the same role/group must be routed immediately");
+        assertEquals(2, router.attempts.get());
+        assertEquals(0, fixture.scheduler.getQueuedRequestCount(),
+                "a static rejection must not occupy a placement wait lane");
     }
 
     @Test
@@ -217,6 +250,74 @@ class RequestSchedulerDeferredRetryTest {
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(1, terminalPublications.get(),
                 "deadline ownership must publish exactly one terminal result");
+    }
+
+    @Test
+    @Timeout(30)
+    void policyReselectDeadlineBypassesAFullSevenHundredFiftyLaneBudget()
+            throws Exception {
+        int backgroundLanes = 750;
+        long targetId = 900_000L;
+        long reselectAtMs = System.currentTimeMillis() + 120L;
+        PolicyDeadlineRouter router = new PolicyDeadlineRouter(
+                targetId, reselectAtMs);
+        SchedulerFixture fixture = fixture(router, backgroundLanes + 16);
+        for (int lane = 0; lane < backgroundLanes; lane++) {
+            fixture.scheduler.submit(context(
+                    targetId + 1L + lane,
+                    50,
+                    Long.MAX_VALUE,
+                    fixture.config));
+        }
+
+        long startedNanos = System.nanoTime();
+        Response terminal = fixture.scheduler.submit(context(
+                        targetId, 50, Long.MAX_VALUE, fixture.config))
+                .get(1, TimeUnit.SECONDS);
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(
+                System.nanoTime() - startedNanos);
+
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                terminal.getCode());
+        assertTrue(router.targetAttempts.get() >= 2);
+        assertTrue(elapsedMs < 500L,
+                () -> "policy refresh waited " + elapsedMs
+                        + "ms behind the global fallback stream");
+    }
+
+    @Test
+    @Timeout(30)
+    void cancellingEarlierLanesDoesNotLeaveAGhostFallbackDelay()
+            throws Exception {
+        int laneCount = 300;
+        ManyLaneDeferredRouter router = new ManyLaneDeferredRouter(laneCount);
+        SchedulerFixture fixture = fixture(router, laneCount + 16);
+        for (int lane = 0; lane < laneCount; lane++) {
+            fixture.scheduler.submit(context(
+                    ManyLaneDeferredRouter.FIRST_REQUEST_ID + lane,
+                    50,
+                    Long.MAX_VALUE,
+                    fixture.config));
+        }
+        int survivor = laneCount - 1;
+        assertEquals(1, router.attemptsFor(survivor),
+                "the tail lane unexpectedly consumed its fallback turn");
+        for (int lane = 0; lane < survivor; lane++) {
+            fixture.scheduler.cancelRequest(
+                    ManyLaneDeferredRouter.FIRST_REQUEST_ID + lane,
+                    0L,
+                    CancelReason.CLIENT_CANCELLED);
+        }
+        awaitCondition(() -> fixture.scheduler.getQueuedRequestCount() == 1);
+
+        int before = router.attemptsFor(survivor);
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300L);
+        while (router.attemptsFor(survivor) == before
+                && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(1L);
+        }
+        assertTrue(router.attemptsFor(survivor) > before,
+                "cancelled lanes left their old global probe reservations behind");
     }
 
     @Test
@@ -462,6 +563,24 @@ class RequestSchedulerDeferredRetryTest {
         }
     }
 
+    private static final class StaticRejectingRouter implements Router {
+        private final AtomicInteger attempts = new AtomicInteger();
+
+        @Override
+        public Response routeDirect(BalanceContext context) {
+            throw new AssertionError("QUEUE contract must not route DIRECT");
+        }
+
+        @Override
+        public QueueRoutingResult routeForQueue(BalanceContext context) {
+            attempts.incrementAndGet();
+            StrategyErrorType type = context.getRequest().getSeqLen() > 256L
+                    ? StrategyErrorType.RESOURCE_EXHAUSTED
+                    : StrategyErrorType.INVALID_REQUEST;
+            return new QueueRoutingResult.Rejected(rejected(type));
+        }
+    }
+
     private static final class ConcurrentFatalRouter implements Router {
         private final CyclicBarrier routeTogether;
         private final AtomicInteger attempts = new AtomicInteger();
@@ -538,6 +657,66 @@ class RequestSchedulerDeferredRetryTest {
                 if (attemptsByLane.get(lane) < 2) { return false; }
             }
             return true;
+        }
+
+        private int attemptsFor(int lane) {
+            return attemptsByLane.get(lane);
+        }
+    }
+
+    private static final class PolicyDeadlineRouter implements Router {
+        private final long targetId;
+        private final long reselectAtMs;
+        private final AtomicInteger targetAttempts = new AtomicInteger();
+        private final PrefillEndpoint full = mock(PrefillEndpoint.class);
+
+        private PolicyDeadlineRouter(long targetId, long reselectAtMs) {
+            this.targetId = targetId;
+            this.reselectAtMs = reselectAtMs;
+            when(full.getIp()).thenReturn("policy-hot");
+            when(full.prepareOfferPinned(
+                    org.mockito.ArgumentMatchers.any(),
+                    org.mockito.ArgumentMatchers.anyLong(),
+                    org.mockito.ArgumentMatchers.anyInt()))
+                    .thenReturn(null);
+        }
+
+        @Override
+        public Response routeDirect(BalanceContext context) {
+            throw new AssertionError("QUEUE contract must not route DIRECT");
+        }
+
+        @Override
+        public QueueRoutingResult routeForQueue(BalanceContext context) {
+            if (context.getRequestId() != targetId) {
+                return new QueueRoutingResult.Deferred(
+                        RoleType.PREFILL,
+                        "policy-background-" + context.getRequestId());
+            }
+            targetAttempts.incrementAndGet();
+            if (System.currentTimeMillis() >= reselectAtMs) {
+                return new QueueRoutingResult.Rejected(
+                        rejected(StrategyErrorType.INVALID_REQUEST));
+            }
+            WorkerEndpoint.GenerationPin pin =
+                    mock(WorkerEndpoint.GenerationPin.class);
+            when(pin.endpoint()).thenReturn(full);
+            SelectedRole selected = mock(SelectedRole.class);
+            ServerStatus status = new ServerStatus();
+            status.setSuccess(true);
+            status.setRole(RoleType.PREFILL);
+            status.setRequestId(targetId);
+            status.setServerIp("policy-hot");
+            status.setHttpPort(8010);
+            status.setGroup("policy-target");
+            when(selected.serverStatus()).thenReturn(status);
+            when(selected.takeGenerationPin()).thenReturn(pin);
+            when(selected.reselectNotAfterMs()).thenReturn(reselectAtMs);
+            Response response = new Response();
+            response.setSuccess(true);
+            response.setServerStatus(List.of(status));
+            return QueueRouteAdmission.prepare(
+                    context, List.of(selected), response);
         }
     }
 

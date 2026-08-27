@@ -144,11 +144,20 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
                 boolean modeledSelection =
                         selectedCandidates.candidate(0).projection().selectable();
+                long minProjectedTtftMs = Long.MAX_VALUE;
+                long selectionNowMs = System.currentTimeMillis();
+                RoutingConfig.CacheAffinityConfig cacheAffinity =
+                        config.getRouter().getRoles().getPrefill().getCacheAffinity();
+                long remainingAffinityBudgetMs = cacheAffinity == null
+                        ? 0L
+                        : remainingCacheAffinityBudgetMs(
+                                balanceContext,
+                                cacheAffinity.getMaxExtraTtftMs(),
+                                selectionNowMs);
                 final int selectedIndex;
                 if (modeledSelection) {
                     // Numeric TTFT policies see only candidates with a complete model.
                     boolean hasAvailable = selectedCandidates.hasAvailable();
-                    long minProjectedTtftMs = Long.MAX_VALUE;
                     for (int i = 0; i < selectedCandidates.size(); i++) {
                         if (hasAvailable
                                 && !selectedCandidates.resourceAvailable(i)) {
@@ -163,11 +172,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                             selectBestCandidate(
                                     survivors,
                                     minProjectedTtftMs,
-                                    balanceContext,
                                     roleType,
                                     group,
                                     seqLen,
-                                    config);
+                                    config,
+                                    remainingAffinityBudgetMs);
                 } else {
                     // Existing Engine work has no honest duration. This fallback never
                     // invents a TTFT or passes the candidates through TTFT/cache policy.
@@ -186,6 +195,16 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 RouteProjection.Candidate selectedCandidate = selectedCandidates.candidate(selectedIndex);
                 long bestCacheHit = selectedCandidates.cacheHit(selectedIndex);
                 long selectedPrefillMs = selectedCandidates.prefillMs(selectedIndex);
+                long reselectNotAfterMs = modeledSelection
+                        ? cacheReselectNotAfterMs(
+                                selectedCandidates,
+                                selectedIndex,
+                                minProjectedTtftMs,
+                                balanceContext,
+                                config,
+                                remainingAffinityBudgetMs,
+                                selectionNowMs)
+                        : Long.MAX_VALUE;
                 reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
                 long candidateMaxRoutingHit = 0L;
                 for (int i = 0; i < selectedCandidates.size(); i++) {
@@ -208,7 +227,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                 requestId,
                                 selectedCandidate.projection().projectedTtftMs(),
                                 selectedPrefillMs,
-                                bestCacheHit);
+                                bestCacheHit,
+                                reselectNotAfterMs);
                 return selectedRole;
             }
         }
@@ -259,11 +279,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
      */
     protected int selectBestCandidate(CandidateSet survivors,
                                       long minProjectedTtftMs,
-                                      BalanceContext balanceContext,
                                       RoleType roleType,
                                       String group,
                                       long seqLen,
-                                      FlexlbConfig config) {
+                                      FlexlbConfig config,
+                                      long remainingAffinityBudgetMs) {
         if (survivors.size() == 0) {
             return -1;
         }
@@ -284,13 +304,15 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
         CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
                 survivors.size(),
+                index -> remainingAffinityBudgetMs > 0L
+                        || !hasAvailable
+                        || survivors.resourceAvailable(index),
                 survivors::projectedTtftMs,
                 survivors::cacheHit,
                 minProjectedTtftMs,
                 referenceHitTokens,
                 seqLen,
-                remainingCacheAffinityBudgetMs(
-                        balanceContext, cacheAffinity.getMaxExtraTtftMs()),
+                remainingAffinityBudgetMs,
                 cacheAffinity.getMinPrefixHitPercent());
 
         int selectedIndex;
@@ -723,15 +745,55 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     /** Cache affinity spends one request-scoped budget across every reselect. */
     protected static long remainingCacheAffinityBudgetMs(
-            BalanceContext context, long configuredBudgetMs) {
+            BalanceContext context,
+            long configuredBudgetMs,
+            long nowMs) {
         long budgetMs = Math.max(0L, configuredBudgetMs);
         long startedAtMs = context.getEnqueueTime();
         if (startedAtMs <= 0L) {
             return budgetMs;
         }
         long elapsedMs = Math.max(
-                0L, System.currentTimeMillis() - startedAtMs);
+                0L, nowMs - startedAtMs);
         return Math.max(0L, budgetMs - elapsedMs);
+    }
+
+    /**
+     * Return one absolute, policy-neutral refresh time only when elapsed
+     * affinity budget can change the selected affinity decision. The
+     * scheduler sees neither cache scores nor policy reasons.
+     */
+    private static long cacheReselectNotAfterMs(
+            CandidateSet candidates,
+            int selectedIndex,
+            long baselineTtftMs,
+            BalanceContext context,
+            FlexlbConfig config,
+            long remainingAffinityBudgetMs,
+            long selectionNowMs) {
+        RoutingConfig.CacheAffinityConfig affinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        if (!config.isQueue()
+                || affinity == null
+                || candidates.projectedTtftMs(selectedIndex) <= baselineTtftMs) {
+            return Long.MAX_VALUE;
+        }
+        long minimumHit = Long.MAX_VALUE;
+        for (int index = 0; index < candidates.size(); index++) {
+            minimumHit = Math.min(minimumHit, candidates.cacheHit(index));
+        }
+        if (candidates.cacheHit(selectedIndex) <= minimumHit) {
+            return Long.MAX_VALUE;
+        }
+        long budgetMs = Math.max(0L, affinity.getMaxExtraTtftMs());
+        if (budgetMs == 0L
+                || remainingAffinityBudgetMs == 0L) {
+            return Long.MAX_VALUE;
+        }
+        long startedAtMs = context.getEnqueueTime() > 0L
+                ? context.getEnqueueTime()
+                : selectionNowMs;
+        return saturatingAdd(startedAtMs, budgetMs);
     }
 
     private FilterResult rejectOutliers(
@@ -916,6 +978,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             RoleType roleType,
             EndpointDiscovery discovery) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
+        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
+            return Map.of();
+        }
         List<EngineGeneration> candidates = new ArrayList<>(
                 discovery.preferredEndpoints().size()
                         + (discovery.excludedEndpoint() == null ? 0 : 1));
@@ -1016,7 +1081,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             long requestId,
             OptionalLong projectedTtftMs,
             long selectedPrefillMs,
-            long bestCacheHit) {
+            long bestCacheHit,
+            long reselectNotAfterMs) {
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
         DebugInfo debugInfo = new DebugInfo();
         debugInfo.setHitCacheLen(bestCacheHit);
@@ -1041,7 +1107,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         result.setDpRank(status.dpRank());
         result.setDebugInfo(debugInfo);
         result.setSuccess(true);
-        return SelectedRole.prefill(owner.takePin(selectedIndex), result, selectedPrefillMs);
+        return SelectedRole.prefill(
+                owner.takePin(selectedIndex),
+                result,
+                selectedPrefillMs,
+                reselectNotAfterMs);
     }
 
     protected void reportCacheAffinityDecision(

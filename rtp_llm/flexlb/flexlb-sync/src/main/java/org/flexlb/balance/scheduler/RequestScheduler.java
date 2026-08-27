@@ -60,8 +60,18 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
     private final ReentrantLock[] commitTurns = new ReentrantLock[COMMIT_TURN_STRIPES];
     private final Object laneLock = new Object();
     private final Map<WaitResource, WaitLane> lanes = new HashMap<>();
-    private long nextFallbackProbeNanos;
-    private int scheduledFallbackProbes;
+    private final NavigableSet<WaitLane> fallbackQueue = new TreeSet<>(
+            Comparator.comparingLong((WaitLane lane) -> lane.fallbackReadyNanos)
+                    .thenComparingLong(lane -> lane.fallbackOrder));
+    private final NavigableSet<WaitLane> policyQueue = new TreeSet<>(
+            Comparator.comparingLong((WaitLane lane) -> lane.policyReadyNanos)
+                    .thenComparingLong(lane -> lane.policyOrder));
+    private ScheduledFuture<?> fallbackPump;
+    private long fallbackPumpGeneration;
+    private long fallbackPumpDueNanos;
+    private long fallbackOrder;
+    private long policyOrder;
+    private long nextFallbackPermitNanos = Long.MIN_VALUE;
     @Autowired
     RequestScheduler(ConfigService configService, Router router,
             EndpointRegistry endpointRegistry, BatchSchedulerReporter reporter,
@@ -156,10 +166,17 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
             QueueRoutingResult result = router.routeForQueue(waiter.context);
             if (result instanceof QueueRoutingResult.Admitted admitted) {
                 QueueRouteAdmission admission = admitted.admission();
+                long prefillReselectNotAfterMs =
+                        admission.prefillReselectNotAfterMs();
                 CommitTurn turn = tryEnterCommitTurn(admission.response());
                 try (turn; admission) {
                     if (!turn.acquired()) {
                         deferred = turn.blockedResource();
+                        updateReselectDeadline(
+                                waiter,
+                                deferred,
+                                admission.response(),
+                                prefillReselectNotAfterMs);
                         park(waiter, source, deferred, false);
                         parked = true;
                     } else {
@@ -190,6 +207,11 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
                             }
                         }
                         if (deferred != null) {
+                            updateReselectDeadline(
+                                    waiter,
+                                    deferred,
+                                    admission.response(),
+                                    prefillReselectNotAfterMs);
                             fallbackTurn = park(
                                     waiter, source, deferred, true);
                             parked = true;
@@ -198,6 +220,7 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
                 }
             } else if (result instanceof QueueRoutingResult.Deferred wait) {
                 deferred = new WaitResource(wait.role(), wait.group(), null);
+                waiter.reselectNotAfterMs = Long.MAX_VALUE;
             } else { terminal = ((QueueRoutingResult.Rejected) result).response(); }
         } catch (Throwable failure) {
             Logger.error("Request placement failed for request id: {}",
@@ -350,6 +373,7 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
             }
             if (current.active == waiter) { current.active = null; }
             boolean displaced = current.waiters.first() != waiter;
+            refreshPolicyProbe(current);
             if (current.active == null && !hasProbe(current)) {
                 long delay = current.signalled || displaced ? 0L : current.backoffMs;
                 current.signalled = false;
@@ -384,63 +408,171 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
         if (lane.waiters.isEmpty() && lane.active == null) {
             cancelProbe(lane);
             if (lanes.remove(lane.key, lane)) { lane.unsubscribe.run(); }
-        } else if (lane.active == null && !hasProbe(lane)) {
-            scheduleProbe(lane, 0L);
+        } else if (lane.active == null) {
+            refreshPolicyProbe(lane);
+            if (!hasProbe(lane)) { scheduleProbe(lane, 0L); }
         }
     }
     private void scheduleProbe(WaitLane lane, long delayMs) {
         if (closed.get() || hasProbe(lane) || lane.active != null
                 || lane.waiters.isEmpty()) { return; }
-        long delayNanos = 0L;
         if (delayMs > 0L) {
-            long now = System.nanoTime();
-            long locallyReady = now + TimeUnit.MILLISECONDS.toNanos(delayMs);
-            long globallyReady = Math.max(locallyReady, nextFallbackProbeNanos);
-            nextFallbackProbeNanos = globallyReady + FALLBACK_PROBE_INTERVAL_NANOS;
-            delayNanos = Math.max(0L, globallyReady - now);
-            lane.fallbackProbe = true;
-            scheduledFallbackProbes++;
+            lane.fallbackReadyNanos = saturatingAddNanos(
+                    System.nanoTime(), TimeUnit.MILLISECONDS.toNanos(delayMs));
+            lane.fallbackOrder = ++fallbackOrder;
+            fallbackQueue.add(lane);
+            refreshPolicyProbe(lane);
+            scheduleFallbackPump();
+            return;
         }
         long probe = ++lane.probeGeneration;
         try {
             lane.probe = executor.schedule(() -> fireProbe(lane, probe),
-                    delayNanos, TimeUnit.NANOSECONDS);
+                    0L, TimeUnit.NANOSECONDS);
         } catch (RejectedExecutionException stopped) {
             lane.probe = null;
-            releaseFallbackReservation(lane);
         }
     }
     private boolean hasProbe(WaitLane lane) {
-        return lane.probe != null;
+        return lane.probe != null || fallbackQueue.contains(lane);
+    }
+
+    private void refreshPolicyProbe(WaitLane lane) {
+        policyQueue.remove(lane);
+        if (closed.get() || lane.active != null || lane.waiters.isEmpty()) {
+            scheduleFallbackPump();
+            return;
+        }
+        long deadlineMs = lane.waiters.first().reselectNotAfterMs;
+        if (deadlineMs == Long.MAX_VALUE) {
+            scheduleFallbackPump();
+            return;
+        }
+        long delayMs = Math.max(0L, deadlineMs - System.currentTimeMillis());
+        long delayNanos = TimeUnit.MILLISECONDS.toNanos(delayMs);
+        long nowNanos = System.nanoTime();
+        lane.policyReadyNanos = saturatingAddNanos(nowNanos, delayNanos);
+        lane.policyOrder = ++policyOrder;
+        policyQueue.add(lane);
+        scheduleFallbackPump();
     }
     private void fireProbe(WaitLane lane, long probe) {
         Waiter head;
         synchronized (laneLock) {
             if (lane.probeGeneration != probe || closed.get()) { return; }
             lane.probe = null;
-            releaseFallbackReservation(lane);
-            if (lane.active != null || lane.waiters.isEmpty()) {
-                advance(lane); return;
-            }
-            head = lane.waiters.first();
-            lane.active = head;
-            lane.signalled = false;
+            head = claimProbe(lane);
         }
-        attempt(head, lane);
+        if (head != null) { attempt(head, lane); }
+    }
+    private void scheduleFallbackPump() {
+        if (closed.get() || fallbackQueue.isEmpty() && policyQueue.isEmpty()) {
+            if (fallbackPump != null) { fallbackPump.cancel(false); }
+            fallbackPump = null;
+            fallbackPumpDueNanos = 0L;
+            return;
+        }
+        long now = System.nanoTime();
+        long fallbackDue = fallbackQueue.isEmpty()
+                ? Long.MAX_VALUE
+                : Math.max(
+                        fallbackQueue.first().fallbackReadyNanos,
+                        nextFallbackPermitNanos);
+        long policyDue = policyQueue.isEmpty()
+                ? Long.MAX_VALUE
+                : policyQueue.first().policyReadyNanos;
+        long due = Math.min(fallbackDue, policyDue);
+        if (fallbackPump != null && fallbackPumpDueNanos <= due) { return; }
+        if (fallbackPump != null) { fallbackPump.cancel(false); }
+        long generation = ++fallbackPumpGeneration;
+        fallbackPumpDueNanos = due;
+        try {
+            fallbackPump = executor.schedule(
+                    () -> fireFallbackPump(generation),
+                    nanosUntil(due, now),
+                    TimeUnit.NANOSECONDS);
+        } catch (RejectedExecutionException stopped) {
+            fallbackPump = null;
+            fallbackPumpDueNanos = 0L;
+        }
+    }
+    private void fireFallbackPump(long generation) {
+        Waiter head = null;
+        WaitLane lane = null;
+        synchronized (laneLock) {
+            if (generation != fallbackPumpGeneration || closed.get()) { return; }
+            fallbackPump = null;
+            fallbackPumpDueNanos = 0L;
+            long now = System.nanoTime();
+            while (!fallbackQueue.isEmpty() || !policyQueue.isEmpty()) {
+                long fallbackReady = fallbackQueue.isEmpty()
+                        ? Long.MAX_VALUE
+                        : Math.max(
+                                fallbackQueue.first().fallbackReadyNanos,
+                                nextFallbackPermitNanos);
+                long policyReady = policyQueue.isEmpty()
+                        ? Long.MAX_VALUE
+                        : policyQueue.first().policyReadyNanos;
+                long ready = Math.min(fallbackReady, policyReady);
+                if (ready > now) {
+                    scheduleFallbackPump();
+                    return;
+                }
+                boolean policyWake = !policyQueue.isEmpty()
+                        && (fallbackQueue.isEmpty()
+                                || policyReady <= fallbackReady);
+                WaitLane candidate = policyWake
+                        ? policyQueue.first()
+                        : fallbackQueue.first();
+                removeQueuedProbe(candidate);
+                head = claimProbe(candidate);
+                if (head != null) {
+                    lane = candidate;
+                    if (!policyWake) {
+                        nextFallbackPermitNanos = saturatingAddNanos(
+                                now, FALLBACK_PROBE_INTERVAL_NANOS);
+                    }
+                    break;
+                }
+            }
+            scheduleFallbackPump();
+        }
+        if (head != null) { attempt(head, lane); }
+    }
+
+    static long saturatingAddNanos(long nowNanos, long delayNanos) {
+        return delayNanos > 0L && nowNanos > Long.MAX_VALUE - delayNanos
+                ? Long.MAX_VALUE
+                : nowNanos + delayNanos;
+    }
+
+    private static long nanosUntil(long dueNanos, long nowNanos) {
+        if (dueNanos <= nowNanos) { return 0L; }
+        long remaining = dueNanos - nowNanos;
+        return remaining < 0L ? Long.MAX_VALUE : remaining;
+    }
+
+    private Waiter claimProbe(WaitLane lane) {
+        if (lane.active != null || lane.waiters.isEmpty()) {
+            advance(lane);
+            return null;
+        }
+        Waiter head = lane.waiters.first();
+        lane.active = head;
+        lane.signalled = false;
+        return head;
     }
     private void cancelProbe(WaitLane lane) {
         ScheduledFuture<?> probe = lane.probe;
         lane.probe = null;
         lane.probeGeneration++;
-        releaseFallbackReservation(lane);
         if (probe != null) { probe.cancel(false); }
+        removeQueuedProbe(lane);
+        scheduleFallbackPump();
     }
-    private void releaseFallbackReservation(WaitLane lane) {
-        if (!lane.fallbackProbe) { return; }
-        lane.fallbackProbe = false;
-        if (--scheduledFallbackProbes == 0) {
-            nextFallbackProbeNanos = System.nanoTime();
-        }
+    private void removeQueuedProbe(WaitLane lane) {
+        fallbackQueue.remove(lane);
+        policyQueue.remove(lane);
     }
     private void stop(Waiter waiter, WaitLane source, Response terminal) {
         if (terminal != null) { waiter.future.complete(terminal); }
@@ -475,6 +607,19 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
             }
         }
         return new WaitResource(RoleType.PREFILL, null, null);
+    }
+
+    private static void updateReselectDeadline(
+            Waiter waiter,
+            WaitResource deferred,
+            Response response,
+            long selectedDeadlineMs) {
+        WaitResource prefill = selectedPrefill(response);
+        waiter.reselectNotAfterMs = deferred != null
+                && deferred.endpointAddress() != null
+                && deferred.equals(prefill)
+                ? selectedDeadlineMs
+                : Long.MAX_VALUE;
     }
     private static WaitResource selectedDecode(Response response) {
         if (response.getServerStatus() != null) {
@@ -567,6 +712,7 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
         private final int priority;
         private final boolean priorityOrdering;
         private final AtomicBoolean owned = new AtomicBoolean(true);
+        private long reselectNotAfterMs = Long.MAX_VALUE;
         private WaitLane lane;
         private Waiter(BalanceContext context, CompletableFuture<Response> future,
                        long sequence, boolean priorityOrdering) {
@@ -582,7 +728,10 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
         private Waiter active;
         private ScheduledFuture<?> probe;
         private long probeGeneration;
-        private boolean fallbackProbe;
+        private long fallbackReadyNanos;
+        private long fallbackOrder;
+        private long policyReadyNanos;
+        private long policyOrder;
         private boolean signalled;
         private long backoffMs = MIN_BACKOFF_MS;
         private Runnable unsubscribe = () -> { };

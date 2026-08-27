@@ -297,13 +297,15 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         this.key = key;
         this.prefillEndpoint = prefillEp;
         boolean queueScheduling = config.isQueue();
-        this.priorityOrdering = config.isPriorityOrdering();
+        this.priorityOrdering = queueScheduling && config.isPriorityOrdering();
         this.deliveryStrategy = deliveryStrategy;
         this.deliveryLifecycle = deliveryLifecycle;
         this.maximumPendingRequests = config.getRouter().getRoles()
                 .getPrefill().getAvailability().getMaxPendingRequests();
-        this.maximumWaitingRequests = config.queueScheduler().getCapacity()
-                .getMaxWaitingRequestsPerPrefillWorker();
+        this.maximumWaitingRequests = queueScheduling
+                ? config.queueScheduler().getCapacity()
+                        .getMaxWaitingRequestsPerPrefillWorker()
+                : 0;
         Comparator<BatchItem> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         Comparator<GroupPlanner.Item> projectionOrder =
@@ -312,7 +314,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         this.queue = new PriorityBlockingQueue<>(11, queueOrder);
         this.workRegistry = new PrefillWorkRegistry(
                 queueLock, queue, capacityAvailableSignal);
-        this.groupPolicy = config.isSingleDecision()
+        this.groupPolicy = !queueScheduling || config.isSingleDecision()
                 ? new SingleRequestGroupPolicy()
                 : new FixedWindowGroupPolicy();
         this.ctx = new BatcherContext(

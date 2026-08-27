@@ -98,6 +98,7 @@ class CacheAffinityPolicyTest {
             double minRate) {
         return CacheAffinityPolicy.evaluate(
                 scores.length,
+                index -> true,
                 index -> scores[index],
                 index -> hits[index],
                 minScore,

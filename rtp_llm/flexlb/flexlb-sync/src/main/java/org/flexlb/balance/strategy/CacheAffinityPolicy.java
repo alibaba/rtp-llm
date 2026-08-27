@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import java.util.function.IntPredicate;
 import java.util.function.IntToLongFunction;
 
 /** Shared bounded cache-affinity policy layered on top of a baseline prefill strategy. */
@@ -33,6 +34,7 @@ final class CacheAffinityPolicy {
 
     static Decision evaluate(
             int candidateCount,
+            IntPredicate affinityEligibleAt,
             IntToLongFunction projectedTtftAt,
             IntToLongFunction cacheHitAt,
             long minProjectedTtftMs,
@@ -47,7 +49,12 @@ final class CacheAffinityPolicy {
 
         long minHitTokens = Long.MAX_VALUE;
         long maxHitTokens = 0L;
+        int eligibleCount = 0;
         for (int i = 0; i < candidateCount; i++) {
+            if (!affinityEligibleAt.test(i)) {
+                continue;
+            }
+            eligibleCount++;
             long hitTokens = clampHit(cacheHitAt.applyAsLong(i), seqLen);
             minHitTokens = Math.min(minHitTokens, hitTokens);
             maxHitTokens = Math.max(maxHitTokens, hitTokens);
@@ -58,7 +65,7 @@ final class CacheAffinityPolicy {
         long maxExtraTtftMs = Math.max(0L, configuredMaxExtraTtftMs);
         long projectedTtftCutoffMs = saturatingAdd(
                 minProjectedTtftMs, maxExtraTtftMs);
-        if (maxHitTokens <= minHitTokens) {
+        if (eligibleCount == 0 || maxHitTokens <= minHitTokens) {
             return new Decision(
                     new int[0], 0, Reason.NO_CACHE_LEAD,
                     minProjectedTtftMs, projectedTtftCutoffMs);
@@ -68,6 +75,9 @@ final class CacheAffinityPolicy {
         int[] preferredIndexes = new int[candidateCount];
         int preferredCount = 0;
         for (int i = 0; i < candidateCount; i++) {
+            if (!affinityEligibleAt.test(i)) {
+                continue;
+            }
             long hitTokens = clampHit(cacheHitAt.applyAsLong(i), seqLen);
             if (hitTokens <= minHitTokens
                     || hitTokens < referenceHitTokens

@@ -11,8 +11,10 @@ import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.balance.strategy.StaticCapacityExceededException;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -54,6 +56,8 @@ public class DefaultRouter implements Router {
                 return buildFailureResponse(routing.failedRole());
             }
             return commitDirect(context, routing.selections());
+        } catch (StaticCapacityExceededException failure) {
+            return buildStaticCapacityFailure(failure);
         }
     }
 
@@ -71,6 +75,9 @@ public class DefaultRouter implements Router {
             Response response = buildSuccessResponse(routing.serverStatuses());
             return QueueRouteAdmission.prepare(
                     context, routing.selections(), response);
+        } catch (StaticCapacityExceededException failure) {
+            return new QueueRoutingResult.Rejected(
+                    buildStaticCapacityFailure(failure));
         }
     }
 
@@ -339,6 +346,17 @@ public class DefaultRouter implements Router {
         response.setSuccess(false);
         response.setCode(errorType.getErrorCode());
         response.setErrorMessage(errorType.getErrorMsg());
+        return response;
+    }
+
+    private static Response buildStaticCapacityFailure(
+            StaticCapacityExceededException failure) {
+        Response response = Response.error(
+                StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
+        response.setErrorMessage(
+                StrategyErrorType.RESOURCE_EXHAUSTED.buildErrorMessage(
+                        failure.getMessage()));
         return response;
     }
 

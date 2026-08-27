@@ -107,6 +107,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         EndpointFilterResult<EndpointRegistry.DecodeRoutingSnapshot> filterResult =
                 getAvailableEndpointSnapshots(
                         group, indicator, softQueuePlacement);
+        rejectIfPhysicalCapacityIsTooSmall(filterResult, seqLen);
         List<EndpointRegistry.DecodeRoutingSnapshot> eligible =
                 filterResult.candidates();
         if (eligible.isEmpty()) {
@@ -250,7 +251,16 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     private record EndpointFilterResult<T>(
             List<T> candidates,
             Map<String, Integer> rejections,
-            int registered) {}
+            int registered,
+            long maxKnownPhysicalKv,
+            boolean physicalKvUnknown) {
+        private EndpointFilterResult(
+                List<T> candidates,
+                Map<String, Integer> rejections,
+                int registered) {
+            this(candidates, rejections, registered, 0L, true);
+        }
+    }
 
     private record FilterResult<T>(
             List<T> candidates,
@@ -292,9 +302,17 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
         ArrayList<EndpointRegistry.DecodeRoutingSnapshot> filtered = null;
         int unavailable = 0;
+        long maxKnownPhysicalKv = 0L;
+        boolean physicalKvUnknown = false;
         for (int index = 0; index < registered; index++) {
             EndpointRegistry.DecodeRoutingSnapshot snapshot =
                     snapshots.get(index);
+            long totalKv = snapshot.routing().totalKv();
+            if (totalKv <= 0L) {
+                physicalKvUnknown = true;
+            } else {
+                maxKnownPhysicalKv = Math.max(maxKnownPhysicalKv, totalKv);
+            }
             if (!measure.isResourceAvailable(snapshot.routing())) {
                 unavailable++;
                 if (filtered == null) {
@@ -310,18 +328,23 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
         if (filtered == null) {
             return new EndpointFilterResult<>(
-                    snapshots, Map.of(), registered);
+                    snapshots, Map.of(), registered,
+                    maxKnownPhysicalKv, physicalKvUnknown);
         }
         if (filtered.isEmpty() && softQueuePlacement) {
             return new EndpointFilterResult<>(
                     snapshots,
                     Map.of("TEMPORARILY_FULL", unavailable),
-                    registered);
+                    registered,
+                    maxKnownPhysicalKv,
+                    physicalKvUnknown);
         }
         return new EndpointFilterResult<>(
                 Collections.unmodifiableList(filtered),
                 Map.of("RESOURCE_UNAVAILABLE", unavailable),
-                registered);
+                registered,
+                maxKnownPhysicalKv,
+                physicalKvUnknown);
     }
 
     private EndpointFilterResult<DecodeCandidate> getAvailableEndpoints(
@@ -396,6 +419,21 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                         ? "RESOURCE_UNAVAILABLE" : "TEMPORARILY_FULL",
                         unavailable);
         return new EndpointFilterResult<>(result, rejections, registered);
+    }
+
+    private static void rejectIfPhysicalCapacityIsTooSmall(
+            EndpointFilterResult<?> endpoints,
+            long seqLen) {
+        if (seqLen <= 0L
+                || endpoints.registered() == 0
+                || endpoints.physicalKvUnknown()
+                || endpoints.maxKnownPhysicalKv() >= seqLen) {
+            return;
+        }
+        throw new StaticCapacityExceededException(
+                "Decode request seq_len=" + seqLen
+                        + " exceeds max known physical KV="
+                        + endpoints.maxKnownPhysicalKv());
     }
 
     private <T> FilterResult<T> applyHardFilters(

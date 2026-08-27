@@ -23,6 +23,7 @@ import org.mockito.Mockito;
 import java.util.HashMap;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 
 @Slf4j
@@ -370,6 +371,74 @@ class CostBasedDecodeStrategyTest {
                 costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
         Assertions.assertNull(status);
+    }
+
+    @Test
+    void queueRejectsSequenceLargerThanEveryKnownPhysicalDecodeCapacity() {
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        WorkerStatus smaller = createWorkerStatus("127.0.0.1");
+        WorkerStatus larger = createWorkerStatus("127.0.0.2");
+        setKv(smaller, 128L, 128L);
+        setKv(larger, 256L, 256L);
+        decodeMap.put("127.0.0.1:8080", smaller);
+        decodeMap.put("127.0.0.2:8080", larger);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        allowDecodeSelection(measure);
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new EngineWorkerStatus(registry), factory);
+
+        Request request = new Request();
+        request.setRequestId(3_050L);
+        request.setSeqLen(257L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        StaticCapacityExceededException failure = assertThrows(
+                StaticCapacityExceededException.class,
+                () -> strategy.select(context, RoleType.DECODE, null));
+
+        Assertions.assertTrue(failure.getMessage().contains("257"));
+        Assertions.assertTrue(failure.getMessage().contains("256"));
+    }
+
+    @Test
+    void queueWaitsWhenAFullWorkerStillHasEnoughPhysicalDecodeCapacity() {
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        WorkerStatus availableButSmall = createWorkerStatus("127.0.0.1");
+        WorkerStatus fullButCapable = createWorkerStatus("127.0.0.2");
+        setKv(availableButSmall, 128L, 128L);
+        setKv(fullButCapable, 512L, 0L);
+        decodeMap.put("127.0.0.1:8080", availableButSmall);
+        decodeMap.put("127.0.0.2:8080", fullButCapable);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(measure.isResourceAvailable(any())).thenAnswer(invocation -> {
+            DecodeEndpoint.DecodeRoutingView view = invocation.getArgument(0);
+            return view.realKvAvailable() > 0L;
+        });
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new EngineWorkerStatus(registry), factory);
+
+        Request request = new Request();
+        request.setRequestId(3_051L);
+        request.setSeqLen(257L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        Assertions.assertNull(strategy.select(
+                context, RoleType.DECODE, null),
+                "the capable worker is temporarily full, so QUEUE must wait");
     }
 
     @Test

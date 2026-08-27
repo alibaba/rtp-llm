@@ -661,6 +661,46 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
+    void identicalFullWorkerStatusHeartbeatDoesNotWakeCapacityListener() {
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(1L);
+        running.setPhase(TaskPhase.RUNNING);
+        Map<String, TaskInfo> full = Map.of("1", running);
+        updateStatus(full, Map.of(), 10_000L);
+        assertEquals(1, endpoint.getTotalLoad(),
+                "one running task fills a one-request Decode capacity");
+
+        AtomicInteger notifications = new AtomicInteger();
+        endpoint.addEngineDispatchCapacityListener(
+                notifications::incrementAndGet);
+
+        updateStatus(full, Map.of(), 10_000L);
+
+        assertEquals(0, notifications.get(),
+                "an unchanged full heartbeat must not wake placement lanes");
+    }
+
+    @Test
+    void fullToAvailableWorkerStatusWakesCapacityListenerExactlyOnce() {
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(1L);
+        running.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("1", running), Map.of(), 10_000L);
+        assertEquals(1, endpoint.getTotalLoad());
+
+        AtomicInteger notifications = new AtomicInteger();
+        endpoint.addEngineDispatchCapacityListener(
+                notifications::incrementAndGet);
+
+        updateStatus(Map.of(), Map.of(), 10_000L);
+        updateStatus(Map.of(), Map.of(), 10_000L);
+
+        assertEquals(1, notifications.get(),
+                "capacity release wakes once; its identical heartbeat is coalesced");
+        assertEquals(0, endpoint.getTotalLoad());
+    }
+
+    @Test
     void closePreservesTransferredPermitOutcomeWhileRetiringEndpointOwnership() {
         long requestId = 1L;
         reserve(requestId, 100, 110, 50);

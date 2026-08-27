@@ -24,12 +24,14 @@ public final class SelectedRole implements AutoCloseable {
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long decodeTotalKv;
+    private final long reselectNotAfterMs;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long decodeTotalKv) {
+            long decodeTotalKv,
+            long reselectNotAfterMs) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
         if (!serverStatus.isSuccess()) {
@@ -60,14 +62,28 @@ public final class SelectedRole implements AutoCloseable {
             throw new IllegalArgumentException(
                     "Decode selection requires a Decode endpoint role");
         }
+        if (reselectNotAfterMs <= 0L) {
+            throw new IllegalArgumentException(
+                    "reselectNotAfterMs must be positive");
+        }
         this.prefillWorkMs = prefillWorkMs;
         this.decodeTotalKv = decodeTotalKv;
+        this.reselectNotAfterMs = reselectNotAfterMs;
     }
 
     public static SelectedRole prefill(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs) {
+        return prefill(
+                generationPin, serverStatus, prefillWorkMs, Long.MAX_VALUE);
+    }
+
+    static SelectedRole prefill(
+            WorkerEndpoint.GenerationPin generationPin,
+            ServerStatus serverStatus,
+            long prefillWorkMs,
+            long reselectNotAfterMs) {
         if (prefillWorkMs < 0L) {
             if (generationPin != null) {
                 generationPin.close();
@@ -76,7 +92,11 @@ public final class SelectedRole implements AutoCloseable {
                     "Prefill work must be non-negative");
         }
         return createOwned(
-                generationPin, serverStatus, prefillWorkMs, -1L);
+                generationPin,
+                serverStatus,
+                prefillWorkMs,
+                -1L,
+                reselectNotAfterMs);
     }
 
     public static SelectedRole decode(
@@ -85,14 +105,14 @@ public final class SelectedRole implements AutoCloseable {
             long decodeTotalKv) {
         return createOwned(
                 generationPin, serverStatus, -1L,
-                Math.max(0L, decodeTotalKv));
+                Math.max(0L, decodeTotalKv), Long.MAX_VALUE);
     }
 
     public static SelectedRole stateless(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus) {
         return createOwned(
-                generationPin, serverStatus, -1L, -1L);
+                generationPin, serverStatus, -1L, -1L, Long.MAX_VALUE);
     }
 
     /** Calling a factory consumes the pin, including every validation failure. */
@@ -100,10 +120,15 @@ public final class SelectedRole implements AutoCloseable {
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long decodeTotalKv) {
+            long decodeTotalKv,
+            long reselectNotAfterMs) {
         try {
             return new SelectedRole(
-                    generationPin, serverStatus, prefillWorkMs, decodeTotalKv);
+                    generationPin,
+                    serverStatus,
+                    prefillWorkMs,
+                    decodeTotalKv,
+                    reselectNotAfterMs);
         } catch (RuntimeException | Error failure) {
             if (generationPin != null) {
                 generationPin.close();
@@ -130,6 +155,11 @@ public final class SelectedRole implements AutoCloseable {
                     "selection does not carry Decode capacity");
         }
         return decodeTotalKv;
+    }
+
+    /** Absolute, scheduler-neutral time by which this selection should be refreshed. */
+    public long reselectNotAfterMs() {
+        return reselectNotAfterMs;
     }
 
     /** Move the exact pin to the next domain owner. */

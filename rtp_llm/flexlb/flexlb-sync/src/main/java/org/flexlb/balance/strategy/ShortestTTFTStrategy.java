@@ -5,7 +5,6 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -48,11 +47,11 @@ public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
     @Override
     protected int selectBestCandidate(CandidateSet survivors,
                                       long minProjectedTtftMs,
-                                      BalanceContext balanceContext,
                                       RoleType roleType,
                                       String group,
                                       long seqLen,
-                                      FlexlbConfig config) {
+                                      FlexlbConfig config,
+                                      long remainingAffinityBudgetMs) {
         if (survivors.size() == 0) {
             return -1;
         }
@@ -75,13 +74,15 @@ public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
             }
             affinity = CacheAffinityPolicy.evaluate(
                     survivors.size(),
+                    index -> remainingAffinityBudgetMs > 0L
+                            || !hasAvailable
+                            || survivors.resourceAvailable(index),
                     survivors::projectedTtftMs,
                     survivors::cacheHit,
                     minProjectedTtftMs,
                     referenceHitTokens,
                     seqLen,
-                    remainingCacheAffinityBudgetMs(
-                            balanceContext, cacheAffinity.getMaxExtraTtftMs()),
+                    remainingAffinityBudgetMs,
                     cacheAffinity.getMinPrefixHitPercent());
         }
 

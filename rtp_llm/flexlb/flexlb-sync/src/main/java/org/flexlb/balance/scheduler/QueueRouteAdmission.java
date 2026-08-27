@@ -48,9 +48,9 @@ public final class QueueRouteAdmission implements AutoCloseable {
         PrefillEndpoint prefillEndpoint = null;
         WorkerEndpoint.GenerationPin prefillPin = null;
         ServerStatus prefillStatus = null;
+        long prefillReselectNotAfterMs = Long.MAX_VALUE;
         DecodeEndpoint decodeEndpoint = null;
         WorkerEndpoint.GenerationPin decodePin = null;
-        DecodeEndpoint.ReservationHandle decodeReservation = null;
         ServerStatus decodeStatus = null;
 
         try {
@@ -74,6 +74,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     prefillEndpoint = prefill;
                     prefillPin = pin;
                     prefillStatus = status;
+                    long selectedDeadline = selected.reselectNotAfterMs();
+                    prefillReselectNotAfterMs = selectedDeadline > 0L
+                            ? selectedDeadline
+                            : Long.MAX_VALUE;
                     continue;
                 }
                 if (role == RoleType.DECODE) {
@@ -109,17 +113,15 @@ public final class QueueRouteAdmission implements AutoCloseable {
                                     prefillEndpoint,
                                     prefillPin,
                                     prefillStatus,
+                                    prefillReselectNotAfterMs,
                                     decodeEndpoint,
                                     decodePin,
-                                    decodeReservation,
+                                    null,
                                     decodeStatus)));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
             try (ownedPrefillPin; ownedDecodePin) {
-                if (decodeEndpoint != null && decodeReservation != null) {
-                    decodeEndpoint.rollbackExact(decodeReservation);
-                }
                 throw failure;
             }
         }
@@ -153,6 +155,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
         WorkerEndpoint.GenerationPin decodePin = null;
         try {
             ServerStatus prefillStatus = prefillSelection.serverStatus();
+            long selectedDeadline = prefillSelection.reselectNotAfterMs();
+            long prefillReselectNotAfterMs = selectedDeadline > 0L
+                    ? selectedDeadline
+                    : Long.MAX_VALUE;
             if (prefillStatus.getRequestId() != requestId
                     || decodeStatus.getRequestId() != requestId) {
                 throw new IllegalStateException(
@@ -191,6 +197,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                             prefillEndpoint,
                             prefillPin,
                             prefillStatus,
+                            prefillReselectNotAfterMs,
                             decodeEndpoint,
                             decodePin,
                             decodeReservation,
@@ -207,6 +214,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
 
     public Response response() {
         return response;
+    }
+
+    long prefillReselectNotAfterMs() {
+        return requireOwned().prefillReselectNotAfterMs();
     }
 
     /**
@@ -497,6 +508,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             PrefillEndpoint prefillEndpoint,
             WorkerEndpoint.GenerationPin prefillPin,
             ServerStatus prefillStatus,
+            long prefillReselectNotAfterMs,
             DecodeEndpoint decodeEndpoint,
             WorkerEndpoint.GenerationPin decodePin,
             DecodeEndpoint.ReservationHandle decodeReservation,
@@ -513,6 +525,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     prefillEndpoint,
                     prefillPin,
                     prefillStatus,
+                    prefillReselectNotAfterMs,
                     decodeEndpoint,
                     decodePin,
                     reservation,

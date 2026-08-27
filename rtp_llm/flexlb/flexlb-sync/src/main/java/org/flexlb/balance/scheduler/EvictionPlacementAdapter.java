@@ -273,6 +273,11 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
         }
         QueueRouteAdmission admission = admitted.admission();
         try {
+            if (admission.prepareDecode(context)
+                    == QueueRouteAdmission.DecodePrepareStatus.CAPACITY_FULL) {
+                admission.close();
+                return null;
+            }
             BatchItem item = admission.buildItem(
                     context, future, System.currentTimeMillis());
             DecodeEndpoint decodeEndpoint = item.decodeEp();
