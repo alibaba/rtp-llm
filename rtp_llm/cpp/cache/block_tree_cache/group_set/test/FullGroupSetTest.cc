@@ -68,8 +68,8 @@ protected:
         node->group_set_resources[static_cast<size_t>(group_set_id)].host_block = block.value();
     }
 
-    void setDiskSlot(TreeNode* node, int group_set_id, BlockIdxType disk_block) {
-        node->group_set_resources[static_cast<size_t>(group_set_id)].disk_slot = disk_block;
+    void setDiskBlock(TreeNode* node, int group_set_id, BlockIdxType disk_block) {
+        node->group_set_resources[static_cast<size_t>(group_set_id)].disk_block = disk_block;
     }
 
     DeviceBlockPoolPtr               pool_;
@@ -152,7 +152,7 @@ TEST_F(FullGroupSetTest, EvictFromTierHost) {
 
 TEST_F(FullGroupSetTest, EvictFromTierDisk) {
     auto* a = makeNode(100);
-    setDiskSlot(a, 0, 8);
+    setDiskBlock(a, 0, 8);
 
     a->group_set_resources[0].evictFromTier(Tier::DISK);
 

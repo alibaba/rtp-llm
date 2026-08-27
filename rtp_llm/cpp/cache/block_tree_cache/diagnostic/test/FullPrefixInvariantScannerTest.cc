@@ -66,7 +66,7 @@ GroupSetResource hostRes() {
 
 GroupSetResource diskRes() {
     GroupSetResource resource;
-    resource.disk_slot = 7;
+    resource.disk_block = 7;
     return resource;
 }
 
@@ -232,7 +232,7 @@ TEST(FullPrefixDetectorTest, InvalidResourceReportsReasonInsteadOfPathViolation)
     // inconsistent, so only that is reported.
     GroupSetResource multi_tier;
     multi_tier.host_block = 2;
-    multi_tier.disk_slot  = 3;
+    multi_tier.disk_block  = 3;
 
     SyntheticTree tree(makeFullGroupSet());
     const auto    nodes   = tree.addSingleGroupPath({deviceRes(), multi_tier, deviceRes()});
