@@ -231,6 +231,10 @@ cc_library(
         "RegisterCudaOps.cc",
     ],
     copts = copts() + ["-fno-strict-aliasing"],
+    local_defines = select({
+        "@//:using_cuda13_sm120": ["ENABLE_FP8_SM120=1"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
@@ -242,6 +246,11 @@ cc_library(
         ],
         "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda13_sm120": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp8_blockwise_sm120_cu",
         ],
         "//conditions:default": [],
     }),

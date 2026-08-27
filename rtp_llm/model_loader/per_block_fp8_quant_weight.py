@@ -813,9 +813,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
-        # e8m0 not reshape, weight scale need be non contiguous
-        # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        # Consumer SM120 uses the float-scale CUTLASS backend rather than
+        # DeepGEMM's packed int32 UE8M0 layout.
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        use_e8m0 = is_deep_gemm_e8m0_used() and not is_sm12x()
+        if not use_e8m0:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -824,7 +827,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            if not is_deep_gemm_e8m0_used():
+            if not use_e8m0:
                 scale_weight = (
                     scale_weight.reshape(scale_weight.shape[-1], -1)
                     if scale_weight.dim() == 2
@@ -838,7 +841,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            if use_e8m0:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
