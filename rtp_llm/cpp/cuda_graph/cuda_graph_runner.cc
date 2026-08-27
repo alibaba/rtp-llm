@@ -944,6 +944,10 @@ void CudaGraphRunner::initCapture() {
 
         // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+        // The Python prepare call receives a copied PyModelInputs value.  Mark the
+        // held metadata only after prepare has selected and provisioned the graph
+        // implementation, so the synthetic forward takes the CUDA-graph KTP path.
+        capture_mem_hold_.py_model_inputs_.attention_inputs.is_cuda_graph = true;
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
         {
             ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
@@ -1090,6 +1094,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_cuda_graph    = true;
     inputs.attention_inputs.total_tokens     = seq_len_or_tokens;
     // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
     // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at

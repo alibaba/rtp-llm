@@ -105,7 +105,8 @@ struct KVCache {
                 const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
                 if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    const int64_t width              = static_cast<int64_t>(kv_lora_rank + rope_head_dim);
+                    const int64_t width = base.dim() == 3 ? base.size(2) :
+                                                           static_cast<int64_t>(kv_lora_rank + rope_head_dim);
                     const int64_t logical_page_elems = static_cast<int64_t>(kernel_seq_size_per_block) * width;
                     if (base.dim() == 2 && base.stride(0) != static_cast<int64_t>(seq_size_per_block) * width) {
                         // Shared HybridCache may be sized by a larger KDA state.
@@ -345,6 +346,15 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths_host;
     torch::Tensor sequence_lengths_host;
     torch::Tensor input_lengths_host;
+    torch::Tensor request_ids_host;
+    torch::Tensor generation_epochs_host;
+    // READY rank-local KDA shadow-cache snapshot. Keys are [N,2] int64;
+    // physical/kernel tables are [N,max_blocks] int32 and may use different
+    // local block ids on every KTP rank.
+    torch::Tensor kda_shadow_keys_host;
+    torch::Tensor kda_shadow_block_ids_host;
+    torch::Tensor kda_shadow_kernel_block_ids_host;
+    int           kda_shadow_group_id{-1};
     // Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id_host;

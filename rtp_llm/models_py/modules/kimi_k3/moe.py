@@ -16,13 +16,64 @@ from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_ena
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
 from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import ParallelismConfig, RoleType
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
+
+
+def _validate_k3_mega_parallelism(
+    *,
+    attn_tp_size: int,
+    dp_size: int,
+    ep_size: int,
+    ktp_size: int,
+    world_size: int,
+    local_expert_count: int,
+    role_type: RoleType,
+) -> str:
+    """Validate the supported K3 MegaMoE token-placement contracts.
+
+    MegaMoE itself dispatches EP-local tokens through the world process group.
+    The legacy TP8 path first slices replicated TP tokens, while Decode
+    DP/KTP Decode supplies a disjoint owner-local token set on every rank.
+    Both therefore use the symmetric kernel without changing expert
+    ownership or gathering the DP-local output.
+    """
+
+    legacy_tp8 = (
+        ep_size == 8
+        and world_size == 8
+        and local_expert_count == 112
+        and attn_tp_size == 8
+        and dp_size == 1
+        and ktp_size == 1
+    )
+    decode_width = dp_size
+    decode_dp_ktp = (
+        os.environ.get("KIMI_K3_DECODE_KTP", "0") == "1"
+        and role_type == RoleType.DECODE
+        and attn_tp_size == 1
+        and decode_width in (8, 16)
+        and ep_size == decode_width
+        and ktp_size == decode_width
+        and world_size == decode_width
+        and local_expert_count == 896 // decode_width
+    )
+    if legacy_tp8:
+        return "tp8_ep8"
+    if decode_dp_ktp:
+        return f"dp{decode_width}_ep{decode_width}_ktp{decode_width}"
+    raise RuntimeError(
+        "K3 DeepGEMM MegaMoE requires TP8/DP1/EP8 or Decode "
+        "TP1/DP=EP=KTP=WORLD in {8,16} with 896/EP local experts; got "
+        f"TP={attn_tp_size} DP={dp_size} EP={ep_size} KTP={ktp_size} "
+        f"world={world_size} local_experts={local_expert_count} "
+        f"role={role_type}"
+    )
 
 
 def _transient_full_native_column_weight(
@@ -72,6 +123,8 @@ class KimiK3LatentMoE(nn.Module):
         self.num_expert_group = int(config.moe_n_group)
         self.topk_group = int(config.moe_topk_group)
         self.ep_size = int(parallelism_config.ep_size)
+        self.dp_size = int(parallelism_config.dp_size)
+        self.ktp_size = int(parallelism_config.ktp_size)
         if self.expert_num % self.ep_size:
             raise ValueError(
                 f"expert count {self.expert_num} must divide EP size {self.ep_size}"
@@ -233,17 +286,11 @@ class KimiK3LatentMoE(nn.Module):
                 "K3 DeepGEMM MegaMoE requires torch.distributed initialization"
             )
         world_size = int(dist.get_world_size())
-        if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
-        ):
+        mega_parallel_mode = self._mega_parallel_mode(world_size)
+        if mega_parallel_mode.startswith("dp") and self.shared_expert_weight_shard:
             raise RuntimeError(
-                "K3 DeepGEMM MegaMoE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
-                f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
-                f"local_experts={self.local_expert_count}"
+                "Decode DP/KTP requires a full shared-expert weight on every "
+                "request owner"
             )
 
         mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
@@ -381,13 +428,17 @@ class KimiK3LatentMoE(nn.Module):
         if device_index not in _DEEPGEMM_MEGA_LOGGED_DEVICES:
             logging.info(
                 "[KimiK3 DeepGEMM MegaMoE] enabled device=%s module=%s "
-                "TP=%d EP=%d experts=%d local_experts=%d topk=%d "
+                "mode=%s TP=%d DP=%d EP=%d KTP=%d experts=%d "
+                "local_experts=%d topk=%d "
                 "latent=%d intermediate=%d max_tokens_per_rank=%d "
                 "input_packer=%s",
                 device,
                 deep_gemm_path,
+                mega_parallel_mode,
                 self.attn_tp_size,
+                self.dp_size,
                 self.ep_size,
+                self.ktp_size,
                 self.expert_num,
                 self.local_expert_count,
                 self.top_k,
@@ -397,6 +448,17 @@ class KimiK3LatentMoE(nn.Module):
                 self._mega_input_packer.name,
             )
             _DEEPGEMM_MEGA_LOGGED_DEVICES.add(device_index)
+
+    def _mega_parallel_mode(self, world_size: int) -> str:
+        return _validate_k3_mega_parallelism(
+            attn_tp_size=self.attn_tp_size,
+            dp_size=self.dp_size,
+            ep_size=self.ep_size,
+            ktp_size=self.ktp_size,
+            world_size=world_size,
+            local_expert_count=self.local_expert_count,
+            role_type=self.parallelism_config.role_type,
+        )
 
     def _deep_gemm_mega_expert_sum(
         self,

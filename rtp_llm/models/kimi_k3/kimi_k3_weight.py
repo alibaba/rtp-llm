@@ -22,6 +22,7 @@ from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
     LinearAttnConfig,
 )
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
@@ -34,6 +35,7 @@ from rtp_llm.model_loader.weight_module import (
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
 )
+from rtp_llm.models.kimi_k3.decode_ktp import KdaParallelContext, decode_ktp_enabled
 from rtp_llm.ops import HybridAttentionType, MlaOpsType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -210,11 +212,45 @@ class _KimiExpertByteWeight(MoeAtomicWeight):
         return sp_id
 
 
+class _KimiK3MLAWeight(MlaAttnAtomicWeight):
+    """Optionally replicate only K3 MLA tensors for Decode request-DP."""
+
+    def __init__(self, *args, replicate_for_decode_ktp: bool = False, **kwargs):
+        self.replicate_for_decode_ktp = bool(replicate_for_decode_ktp)
+        super().__init__(*args, **kwargs)
+
+    def _get_split_func(self):
+        if self.replicate_for_decode_ktp:
+            return sp_id
+        return super()._get_split_func()
+
+
+class _KimiK3KDAWeight(LinearAttnAtomicWeight):
+    """Split KDA tensors with KTP rather than the model's global TP1 view."""
+
+    def __init__(self, *args, kda_tp_size: int, kda_tp_rank: int, **kwargs):
+        self.kda_tp_size = int(kda_tp_size)
+        self.kda_tp_rank = int(kda_tp_rank)
+        super().__init__(*args, **kwargs)
+
+    def _split(self, tensor, load_config: LoadConfig):
+        kda_load_config = load_config.model_copy(
+            update={"tp_size": self.kda_tp_size, "tp_rank": self.kda_tp_rank}
+        )
+        return super()._split(tensor, kda_load_config)
+
+
 class KimiK3Weight(ModelDeployWeightInfo):
     """Describe every text-model tensor in the Kimi K3 checkpoint."""
 
     MODEL_PREFIX = "language_model.model."
     LAYER_PREFIX = MODEL_PREFIX + "layers.{i}."
+
+    def __init__(self, model_config, parallelism_config, *args, **kwargs):
+        self.kda_parallel_context = KdaParallelContext.from_parallelism(
+            parallelism_config
+        )
+        super().__init__(model_config, parallelism_config, *args, **kwargs)
 
     _COMMON_LAYER_SUFFIXES = (
         "input_layernorm.weight",
@@ -452,16 +488,18 @@ class KimiK3Weight(ModelDeployWeightInfo):
         cfg = LinearAttnConfig(self.model_config.linear_attention_config)
 
         def _w(name, suffix, process_fun, *, data_type=None):
-            return LinearAttnAtomicWeight(
+            return _KimiK3KDAWeight(
                 name,
                 [CkptWeightInfo(self._layer_ckpt(suffix), identity)],
                 process_fun,
                 cfg,
                 data_type=data_type,
+                kda_tp_size=self.kda_parallel_context.size,
+                kda_tp_rank=self.kda_parallel_context.rank,
             )
 
         return [
-            LinearAttnAtomicWeight(
+            _KimiK3KDAWeight(
                 W.linear_attn_qkvg_fa_beta_w,
                 [
                     CkptWeightInfo(
@@ -485,8 +523,10 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 _merge_kda_qkvg_fa_beta,
                 cfg,
+                kda_tp_size=self.kda_parallel_context.size,
+                kda_tp_rank=self.kda_parallel_context.rank,
             ),
-            LinearAttnAtomicWeight(
+            _KimiK3KDAWeight(
                 W.linear_attn_conv1d_w,
                 [
                     CkptWeightInfo(
@@ -501,6 +541,8 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 _merge_conv1d,
                 cfg,
+                kda_tp_size=self.kda_parallel_context.size,
+                kda_tp_rank=self.kda_parallel_context.rank,
                 # The checkpoint tensors are FP32, but the official model
                 # converts ShortConvolution parameters to the requested model
                 # dtype in ``from_pretrained``.  Inherit the runtime load dtype
@@ -560,13 +602,17 @@ class KimiK3Weight(ModelDeployWeightInfo):
         """
 
         cfg = self._mla_config()
+        replicate = decode_ktp_enabled(self.role_type)
+        mla_tp_size = 1 if replicate else self.tp_size
+        mla_tp_rank = 0 if replicate else self.tp_rank
 
         def _mla(name, suffix, process_fun):
-            return MlaAttnAtomicWeight(
+            return _KimiK3MLAWeight(
                 name,
                 [CkptWeightInfo(self._layer_ckpt(suffix), identity)],
                 process_fun,
                 config=cfg,
+                replicate_for_decode_ktp=replicate,
             )
 
         weights: List[WeightModule] = [
@@ -587,7 +633,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
             _mla(W.mla_q_b_w, "self_attn.q_b_proj.weight", transpose),
             _mla(W.mla_q_a_ln_gamma, "self_attn.q_a_layernorm.weight", identity),
             # Q-A and KV-A are replicated; g_proj contributes this rank's heads.
-            MlaAttnAtomicWeight(
+            _KimiK3MLAWeight(
                 W.mla_fusedqkrope_w,
                 [
                     CkptWeightInfo(
@@ -603,10 +649,11 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 functools.partial(
                     _merge_mla_input_projections,
-                    tp_size=self.tp_size,
-                    tp_rank=self.tp_rank,
+                    tp_size=mla_tp_size,
+                    tp_rank=mla_tp_rank,
                 ),
                 config=cfg,
+                replicate_for_decode_ktp=replicate,
             ),
         ]
 

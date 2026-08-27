@@ -39,6 +39,19 @@ from rtp_llm.ops import (
 )
 
 
+def _reject_legacy_k3_mla_cache_tp() -> None:
+    legacy_mla_cache_tp = os.environ.get("KIMI_K3_MLA_CACHE_TP")
+    if legacy_mla_cache_tp == "1":
+        raise ValueError(
+            "KIMI_K3_MLA_CACHE_TP=1 selects the retired 576/TP cache ABI; "
+            "Prefill MLA cache is now replicated at physical width 576"
+        )
+    if legacy_mla_cache_tp not in (None, "0"):
+        raise ValueError(
+            "KIMI_K3_MLA_CACHE_TP must be unset or 0; the sharded MLA cache ABI is retired"
+        )
+
+
 @dataclass
 class EngineConfig:
     """Engine configuration collection created from py_env_configs.
@@ -227,6 +240,8 @@ class EngineConfig:
         Returns:
             Initialized EngineConfig instance
         """
+        _reject_legacy_k3_mla_cache_tp()
+
         server_config = py_env_configs.server_config
         distribute_config = py_env_configs.distribute_config
 
@@ -325,8 +340,13 @@ def update_worker_addrs(
     worker_addrs = []
     worker_grpc_addrs = []
     local_rank = parallelism_config.local_rank
+    ktp_decode = (
+        os.environ.get("KIMI_K3_DECODE_KTP", "0") == "1"
+        and parallelism_config.role_type == RoleType.DECODE
+        and int(parallelism_config.ktp_size) > 1
+    )
     for member in world_info.members:
-        if (
+        if ktp_decode or (
             int(
                 (member.world_rank / parallelism_config.tp_size)
                 % parallelism_config.dp_size
@@ -342,6 +362,17 @@ def update_worker_addrs(
                 f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
                 f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
             )
+    if ktp_decode:
+        if len(worker_grpc_addrs) != int(parallelism_config.ktp_size):
+            raise ValueError(
+                "Decode KTP worker discovery must include exactly one RPC endpoint "
+                f"per KTP rank: got {len(worker_grpc_addrs)}, "
+                f"expected {parallelism_config.ktp_size}"
+            )
+        logging.info(
+            "Decode KTP worker discovery uses all %d DP workers in world-rank order",
+            len(worker_grpc_addrs),
+        )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs
     runtime_config.worker_addrs = worker_addrs
 

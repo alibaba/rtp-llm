@@ -20,6 +20,14 @@ def init_parallel_group_args(
         help="指定用于张量并行度。",
     )
     parallel_group.add_argument(
+        "--ktp_size",
+        env_name="KTP_SIZE",
+        bind_to=(parallelism_config, "ktp_size"),
+        type=int,
+        default=1,
+        help="Decode KDA 专用张量并行大小；默认 1 表示不创建独立 KTP communicator。",
+    )
+    parallel_group.add_argument(
         "--ep_size",
         env_name="EP_SIZE",
         bind_to=(parallelism_config, "ep_size"),

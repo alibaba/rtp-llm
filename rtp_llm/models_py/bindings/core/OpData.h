@@ -79,7 +79,10 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
-    torch::Tensor request_id;             // int64, [context_batch_size]
+    torch::Tensor request_id;             // int64, [batch_size]
+    // Per-stream incarnation.  KTP shadow-cache keys use
+    // (request_id, generation_epoch) so a stale release cannot free a reused id.
+    torch::Tensor generation_epoch;       // int64, [batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     size_t        kv_block_stride_bytes;

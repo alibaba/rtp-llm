@@ -12,11 +12,9 @@ from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_reduce,
     get_process_group,
+    reduce_scatter_padded,
 )
-from rtp_llm.models_py.distributed.sequence_parallel import (
-    TokenShardLayout,
-    shard_tokens_with_padding,
-)
+from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
 from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
@@ -36,6 +34,7 @@ from rtp_llm.utils.util import to_torch_dtype
 
 if TYPE_CHECKING:
     from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
+    from rtp_llm.models.kimi_k3.decode_ktp import KtpBatchPlan
 
 
 KDAExecutionMode = Literal["prefill", "decode"]
@@ -50,10 +49,12 @@ class KimiK3KDA(nn.Module):
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
         layer_idx: int = -1,
+        collective_group: Group = Group.TP,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.parallelism_config = parallelism_config
+        self.collective_group = collective_group
         self.weights = weights
         runtime = config.k3_runtime_config
         self.head_dim = int(config.linear_attention_config.linear_key_head_dim)
@@ -164,6 +165,7 @@ class KimiK3KDA(nn.Module):
         hidden_states: torch.Tensor,
         *,
         prefill_sp_layout: Optional[TokenShardLayout],
+        ktp_batch_plan: Optional["KtpBatchPlan"] = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -175,7 +177,12 @@ class KimiK3KDA(nn.Module):
     ]:
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
 
-        if prefill_sp_layout is not None:
+        if ktp_batch_plan is not None:
+            hidden_states = ktp_batch_plan.compact_valid_rows(
+                ktp_batch_plan.all_gather_rows(hidden_states)
+            )
+            projected_fused = torch.matmul(hidden_states, self.kda_fused_w)
+        elif prefill_sp_layout is not None:
             projected_fused = all_gather_gemm(
                 hidden_states,
                 [self.kda_fused_w],
@@ -252,8 +259,10 @@ class KimiK3KDA(nn.Module):
         sequence_parallel: bool,
         hidden_states: torch.Tensor,
         mode: KDAExecutionMode,
+        ktp_batch_plan: Optional["KtpBatchPlan"] = None,
     ) -> torch.Tensor:
         token_count = output_gate.shape[1]
+        collective_group = getattr(self, "collective_group", Group.TP)
         # Decode and target-verify must use the same numerics. Mixing the fused
         # projection path with this explicit path can change near-tied logits.
         use_explicit_output = mode == "decode"
@@ -283,17 +292,29 @@ class KimiK3KDA(nn.Module):
                 self.weights[W.linear_attn_out_w],
             )
             if self.attn_tp_size > 1:
-                output = all_reduce(output, group=Group.TP)
                 decode_sp = (
                     sequence_parallel and not is_target_verify and hidden_states.is_cuda
                 )
                 if decode_sp:
-                    output, _ = shard_tokens_with_padding(
-                        output,
-                        token_count,
-                        self.attn_tp_size,
-                        self.attn_tp_rank,
-                    )
+                    # Each rank contributes its row-parallel output projection
+                    # and retains only its fixed-bucket DP rows. This is
+                    # equivalent to all-reduce + shard, while avoiding the
+                    # replicated output activation and extra NVLink traffic.
+                    if ktp_batch_plan is not None:
+                        # Different DP owners receive different physical
+                        # ReduceScatter shards.  Accumulating the eight KDA
+                        # row-parallel partials directly in BF16 makes the
+                        # result depend on the NCCL reduction destination/order
+                        # strongly enough to violate the cross-owner numerical
+                        # contract.  Keep only this KTP reduction in FP32, then
+                        # restore the model dtype after the collective.
+                        output_dtype = output.dtype
+                        reduced = ktp_batch_plan.reduce_scatter_rows(
+                            ktp_batch_plan.expand_valid_rows(output.float())
+                        )
+                        return reduced.to(dtype=output_dtype)
+                    return reduce_scatter_padded(output, group=collective_group)
+                output = all_reduce(output, group=collective_group)
             return output
         use_reduce_scatter = (
             sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
@@ -305,7 +326,7 @@ class KimiK3KDA(nn.Module):
             fused = gemm_reduce_scatter(
                 projection_input,
                 self.weights[W.linear_attn_out_w],
-                get_process_group(Group.TP),
+                get_process_group(collective_group),
                 pad_rows=pad_reduce_scatter,
             )
             if fused is not None:
@@ -317,6 +338,7 @@ class KimiK3KDA(nn.Module):
             reduce_scatter_tokens=use_reduce_scatter,
             pad_reduce_scatter_tokens=pad_reduce_scatter,
             use_input_dtype_reduce_scatter=(mode == "prefill"),
+            group=collective_group,
         )
 
     def _validate_request(
@@ -370,6 +392,7 @@ class KimiK3KDA(nn.Module):
         prefill_sp_layout: Optional[TokenShardLayout] = None,
         prefill_metadata: Optional[KimiKDAPrefillMetadata] = None,
         current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
+        ktp_batch_plan: Optional["KtpBatchPlan"] = None,
     ) -> torch.Tensor:
         is_target_verify = self._validate_request(
             hidden_states,
@@ -379,6 +402,10 @@ class KimiK3KDA(nn.Module):
             sequence_parallel=sequence_parallel,
             prefill_sp_layout=prefill_sp_layout,
         )
+        if ktp_batch_plan is not None and ktp_batch_plan.valid_rows == 0:
+            # All KTP ranks validated the same empty descriptor set. No request
+            # cache exists to read or write, and every rank takes this branch.
+            return hidden_states.narrow(0, 0, 0)
         (
             mixed_qkv_projected,
             q_projected,
@@ -390,6 +417,7 @@ class KimiK3KDA(nn.Module):
         ) = self._project_fused_kda_inputs(
             hidden_states,
             prefill_sp_layout=prefill_sp_layout,
+            ktp_batch_plan=ktp_batch_plan,
         )
         token_count = q_projected.shape[0]
         output_gate = output_gate_projected.reshape(
@@ -430,6 +458,7 @@ class KimiK3KDA(nn.Module):
             sequence_parallel=sequence_parallel,
             hidden_states=hidden_states,
             mode=mode,
+            ktp_batch_plan=ktp_batch_plan,
         )
         return output
 
