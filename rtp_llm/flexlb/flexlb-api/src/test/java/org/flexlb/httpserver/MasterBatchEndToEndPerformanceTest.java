@@ -832,12 +832,24 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
 
         long trafficStartNanos = System.nanoTime();
+        long issueIntervalNanos = targetQps > 0
+                ? TimeUnit.SECONDS.toNanos(1) / targetQps
+                : 0L;
+        long nextIssueNanos = trafficStartNanos;
         for (int index = 0; index < requestCount; index++) {
             if (targetQps > 0) {
-                paceUntil(trafficStartNanos
-                        + (long) index * TimeUnit.SECONDS.toNanos(1) / targetQps);
+                paceUntil(nextIssueNanos);
             }
+            long issueStartedNanos = System.nanoTime();
             issueRequest(futures.get(index), serializedRequests[index], index);
+            if (targetQps > 0) {
+                // Preserve the configured open-loop rate after a scheduling or GC
+                // pause. Replaying missed slots as an immediate burst measures the
+                // load generator's catch-up policy, not steady Master capacity.
+                nextIssueNanos = Math.max(
+                        nextIssueNanos + issueIntervalNanos,
+                        issueStartedNanos + issueIntervalNanos);
+            }
         }
 
         try {
