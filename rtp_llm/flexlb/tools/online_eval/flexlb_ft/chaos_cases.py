@@ -1,30 +1,45 @@
 """Chaos test cases: elastic scaling (dynamic discovery) + core chaos scenarios.
 
-Suite ``chaos`` — two groups:
+Registration model (2026-08 test-taxonomy rework):
 
-  chaos_elastic_*   (6 cases) — dynamic engine scale-out/in through the mock
-      control plane (/add_engine + /remove_engine) with the file-based dynamic
-      discovery chain enabled end to end:
+  elastic_*   (6 cases, suite="smoke") — dynamic engine scale-out/in through
+      the mock control plane (/add_engine + /remove_engine) with the
+      file-based dynamic discovery chain enabled end to end:
       mock ``--discovery-file`` → DiscoveryFileStore (atomic rewrite) →
       master ``FLEXLB_DISCOVERY_FILE`` → FileServiceDiscovery (re-read per
       poll) → EngineSyncRunner → EndpointRegistry → routing.
+      Elastic scaling is a normal functional requirement, NOT chaos (user
+      ruling 2026-08): these cases are registered with suite="smoke" so the
+      runner's ``--suite smoke`` selects them as part of the functional
+      suite while ``--suite chaos`` no longer does.  They physically stay in
+      this file / CHAOS_CASES list for file-ownership isolation (parallel
+      agent work on smoke_cases.py); the suite field alone drives the
+      grouping, so no runner change is needed.  Run them individually with
+      ``--filter elastic``.
       Convergence bounds follow the verified flexlb-api e2e behaviour
       (FileDiscoveryDynamicScaleEndToEndTest: add ~26ms, remove ~1s); the
       framework asserts at second-scale timeouts (10-15s) to stay robust
       against slow CI machines.
 
-  chaos_*           (4 core cases) — ported from flexlb_behavior_test.sh:
-      S1 → chaos_inflight_ttl_cleanup (stuck inflight cleaned by TTL),
-      S3 → chaos_master_quota_block (1P+1D quota blocking + recovery),
-      plus chaos_engine_down_http_stop_prefill (five-phase engine-down
-      uniform assertion set) and chaos_master_kill (kill -9 master + restart).
+Suite ``chaos`` (fault injection & self-healing):
 
-  chaos_coldstart_burst (1 probe) — intake defect regression probe: fire 20
+  chaos_engine_down_http_stop_prefill — five-phase engine-down uniform
+      assertion set (S2/S4 port) plus a post-recovery TTFT regression gate
+      (master_recovery_ttft_test.sh semantics: once the fault heals, TTFT
+      must fall back within 1.5x of the pre-fault baseline p50).
+  chaos_master_kill          — kill -9 master + restart + clean state.
+  chaos_master_quota_block   — S3 port (1P+1D quota blocking + TTL recovery).
+  chaos_inflight_ttl_cleanup — S1 port (stuck inflight cleaned by TTL).
+  chaos_coldstart_burst (probe) — intake defect regression probe: fire 20
       requests the instant the master reports ready (stability window
       disabled). Expected to FAIL or pass marginally until the intake fix
       (CONNECT_TIMEOUT 20ms / 3-strike dead marking / non-atomic
       getOrCreateWorkerStatus); the recorded failure rate and marked-dead
       samples are the baseline for that fix.
+  chaos_engine_flap (gap G2) — connection flapping: rapid /stop_engine +
+      /start_engine oscillation on one prefill (>=5 cycles) under live
+      traffic; asserts master stays healthy, no inflight leak, and full
+      re-discovery + routing recovery once the flapping stops.
 
 The mock is a SINGLE JVM hosting all engines: /add_engine opens a new port
 inside the same process (no per-engine kill possible — use /stop_engine for
@@ -58,10 +73,16 @@ REMOVE_CONVERGENCE_S = 10.0
 MASTER_EVICT_S = 30.0
 
 
-def case(name: str, modes=None, source: str = ""):
+def case(name: str, modes=None, source: str = "", suite: str = "chaos"):
+    """Register into CHAOS_CASES; *suite* drives the runner grouping.
+
+    The elastic_* cases pass suite="smoke" (functional taxonomy — see the
+    module docstring); everything else stays in the chaos suite.
+    """
+
     def deco(fn):
         CHAOS_CASES.append(
-            CaseDef(name=name, suite="chaos", fn=fn, modes=modes, source=source)
+            CaseDef(name=name, suite=suite, fn=fn, modes=modes, source=source)
         )
         return fn
 
@@ -399,13 +420,14 @@ def _pump_until_accepted(ops, engine_name: str, base: int, timeout_s: float) -> 
 
 
 # ===========================================================================
-# Elastic group — 6 cases
+# Elastic group — 6 cases (suite="smoke": functional taxonomy, not chaos)
 # ===========================================================================
 
 
 @case(
-    "chaos_elastic_add_flow",
+    "elastic_add_flow",
     source="elastic acceptance: add under load (FileDiscoveryDynamicScaleEndToEndTest phase 2)",
+    suite="smoke",
 )
 def elastic_add_flow(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
@@ -453,8 +475,9 @@ def elastic_add_flow(ctx: CaseContext):
 
 
 @case(
-    "chaos_elastic_remove_flow",
+    "elastic_remove_flow",
     source="elastic acceptance: remove under load (FileDiscoveryDynamicScaleEndToEndTest phase 3)",
+    suite="smoke",
 )
 def elastic_remove_flow(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
@@ -531,8 +554,9 @@ def elastic_remove_flow(ctx: CaseContext):
 
 
 @case(
-    "chaos_elastic_add_remove_cycle",
+    "elastic_add_remove_cycle",
     source="elastic acceptance: 3x add→verify→remove→verify cycle",
+    suite="smoke",
 )
 def elastic_add_remove_cycle(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
@@ -608,8 +632,9 @@ def elastic_add_remove_cycle(ctx: CaseContext):
 
 
 @case(
-    "chaos_elastic_rebalance",
+    "elastic_rebalance",
     source="elastic acceptance: cost-based rebalance after scale-out (share < 60%)",
+    suite="smoke",
 )
 def elastic_rebalance(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
@@ -702,8 +727,9 @@ def elastic_rebalance(ctx: CaseContext):
 
 
 @case(
-    "chaos_elastic_stop_after_add",
+    "elastic_stop_after_add",
     source="elastic acceptance: add → traffic → /stop_engine (3-fail evict) → /start_engine recovery",
+    suite="smoke",
 )
 def elastic_stop_after_add(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
@@ -790,8 +816,9 @@ def elastic_stop_after_add(ctx: CaseContext):
 
 
 @case(
-    "chaos_elastic_concurrent_ops",
+    "elastic_concurrent_ops",
     source="elastic acceptance: concurrent add/remove storm, master stays healthy",
+    suite="smoke",
 )
 def elastic_concurrent_ops(ctx: CaseContext):
     env, ops = _elastic_env(ctx)
