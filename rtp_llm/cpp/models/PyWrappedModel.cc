@@ -1064,7 +1064,16 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
         // (and group 0 for MLA), which only appears correct while a request stays
         // inside its first cache page.
         d2d_copies_.clear();
-        setupKVCacheForAttentionInputs(attention_inputs_, inputs);
+        // The focused executor refresh updates kv_cache_kernel_block_id after
+        // PD LOAD, but its host mirror still describes the table captured by
+        // the earlier asynchronous prepare.  Using that stale host tensor here
+        // silently restores pre-LOAD MLA pages when the request spans more than
+        // one physical block.  Re-materialize the host views from the freshly
+        // gathered device table; setupKVCacheForAttentionInputs will then
+        // replace the KDA group with the READY shadow-registry rows as before.
+        auto refreshed_inputs = inputs;
+        refreshed_inputs.kv_cache_kernel_block_id_host = torch::Tensor();
+        setupKVCacheForAttentionInputs(attention_inputs_, refreshed_inputs);
 
         // setupKVCacheForAttentionInputs stages the rebuilt KDA shadow table in
         // pinned host memory.  Flush that H2D copy before the graph runner mirrors
