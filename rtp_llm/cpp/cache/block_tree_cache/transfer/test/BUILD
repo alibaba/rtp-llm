@@ -63,9 +63,20 @@ cc_test(
     env = {},
 )
 
+cc_test(
+    name = "per_rank_transfer_engine_data_correctness_test",
+    testonly = True,
+    srcs = ["PerRankBlockTransferEngineDataCorrectnessTest.cc"],
+    copts = test_copts,
+    tags = ["exclusive"],
+    deps = test_deps + [":block_transfer_engine_test_utils"],
+    env = {},
+)
+
 test_suite(
     name = "block_transfer_engine_test",
     tests = [
+        ":per_rank_transfer_engine_data_correctness_test",
         ":per_rank_transfer_engine_device_host_test",
         ":per_rank_transfer_engine_host_disk_test",
     ],
