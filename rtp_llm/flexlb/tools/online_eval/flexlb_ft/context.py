@@ -8,19 +8,28 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from .engine_ops import EngineOps
-from .harness import EnvManager, EnvSpec, default_perf
+from .harness import EnvManager, EnvSpec, default_perf, profile_dispatches_batch
 
 SMOKE_LABEL_PERF = default_perf()
 
 
 @dataclass
 class CaseDef:
-    """One test case: name, suite, callable and optional mode restriction."""
+    """One test case: name, suite, callable and optional profile restriction.
+
+    ``profiles`` restricts a case to specific scheduling profiles (None = all
+    profiles apply).  ``requires`` declares semantic capabilities the case
+    needs (vocabulary: see harness.PROFILE_CAPS, e.g. ``enqueue_batch``,
+    ``generate_stream``); a case runs only under profiles whose capability
+    set is a superset.  Phase 1 wires the field and the runner filter —
+    per-case semantic declarations land with task #55.
+    """
 
     name: str  # e.g. smoke_cancel_t1
     suite: str  # smoke | chaos
     fn: Callable  # ctx -> (passed, detail)
-    modes: Optional[List[str]] = None  # None = all modes apply
+    profiles: Optional[List[str]] = None  # None = all profiles apply
+    requires: Optional[List[str]] = None  # semantic capability requirements
     source: str = ""  # legacy script this was ported from
 
 
@@ -35,14 +44,14 @@ class CaseContext:
     def __init__(
         self,
         env_manager: EnvManager,
-        mode: str,
+        profile: str,
         run_root: Path,
         log_fn: Optional[Callable[[str], None]] = None,
     ):
         CaseContext._case_seq += 1
         self.case_seq = CaseContext._case_seq
         self.env_manager = env_manager
-        self.mode = mode  # batch | direct | queue
+        self.profile = profile  # scheduling profile (harness.PROFILES)
         self.run_root = run_root
         self._log_fn = log_fn or (lambda msg: None)
         self._ops_cache: dict = {}
@@ -51,16 +60,26 @@ class CaseContext:
     def log(self, msg: str) -> None:
         self._log_fn(msg)
 
+    # -- profile helpers ----------------------------------------------------
+
+    def batch_dispatch(self) -> bool:
+        """True when the current profile dispatches via BATCH (master sends
+        EnqueueBatch, clients consume FetchResponse); False for NON_BATCH
+        (frontend sends GenerateStreamCall).  The client path itself is
+        decided per response by ``enqueued_by_master``."""
+        return profile_dispatches_batch(self.profile)
+
     # -- environments ------------------------------------------------------
 
     def smoke_spec(self) -> EnvSpec:
-        """Shared smoke environment: 2P + 4D, standard perf, master in ctx.mode."""
+        """Shared smoke environment: 2P + 4D, standard perf, master in
+        ctx.profile."""
         return EnvSpec(
-            label=f"smoke_{self.mode}",
+            label=f"smoke_{self.profile}",
             n_prefill=2,
             n_decode=4,
             perf=default_perf(),
-            master_mode=self.mode,
+            master_profile=self.profile,
         )
 
     def engine_ops(self, env) -> EngineOps:
@@ -71,7 +90,6 @@ class CaseContext:
                 "127.0.0.1",
                 env.master_http_port,
                 env.mock_http_port,
-                deploy_mode=self.mode,
             )
         return self._ops_cache[key]
 
@@ -93,25 +111,52 @@ class CaseContext:
         self._ops_cache.clear()
 
 
-# request-id bases per legacy run_matrix_smoke.sh group config.  The
-# "elastic" family was split off "chaos" when the elastic_* cases moved
-# into the functional suite (2026-08 rework): smoke and chaos now run in
-# separate processes whose case_seq counters both start at 1, so the two
-# families need disjoint base ranges to keep request ids collision-free.
+# request-id bases per case family × scheduling profile.  All bases live in a
+# single < 1M window (RID_BASES + case_seq * 1M can never collide across
+# (family, profile) pairs because every pairwise base distance is < 1M), so a
+# reused master's dedup table stays collision-free across profiles and reruns.
+# The legacy "elastic" family was split off "chaos" (2026-08 rework); smoke and
+# chaos run in separate processes whose case_seq counters both start at 1, so
+# the families need disjoint base ranges.
 RID_BASES = {
-    "cancel": {"batch": 10000, "direct": 40000, "queue": 70000},
-    "scheduling": {"batch": 20000, "direct": 50000, "queue": 80000},
-    "anomaly": {"batch": 30000, "direct": 60000, "queue": 90000},
-    "elastic": {"batch": 140000, "direct": 150000, "queue": 160000},
-    "chaos": {"batch": 110000, "direct": 120000, "queue": 130000},
+    "cancel": {
+        "batch-window": 100_000,
+        "single-nonbatch": 125_000,
+        "single-batch": 150_000,
+        "window-nonbatch": 175_000,
+    },
+    "scheduling": {
+        "batch-window": 200_000,
+        "single-nonbatch": 225_000,
+        "single-batch": 250_000,
+        "window-nonbatch": 275_000,
+    },
+    "anomaly": {
+        "batch-window": 300_000,
+        "single-nonbatch": 325_000,
+        "single-batch": 350_000,
+        "window-nonbatch": 375_000,
+    },
+    "chaos": {
+        "batch-window": 400_000,
+        "single-nonbatch": 425_000,
+        "single-batch": 450_000,
+        "window-nonbatch": 475_000,
+    },
+    "elastic": {
+        "batch-window": 500_000,
+        "single-nonbatch": 525_000,
+        "single-batch": 550_000,
+        "window-nonbatch": 575_000,
+    },
 }
 
 
 def rid_base(ctx: CaseContext, family: str) -> int:
     # ctx.case_seq makes each invocation of a case use a distinct id range
-    # (RID_BASES cover batch/direct/queue, case_seq lifts per re-run).
+    # (RID_BASES cover the profile axis, case_seq lifts per re-run).
     # pid offset: sibling framework processes share the same case_seq
     # sequence, so two agents hammering the same (reused) master would
     # generate colliding ids — the pid term keeps id spaces disjoint.
     pid_offset = (os.getpid() % 100) * 100_000_000
-    return RID_BASES[family][ctx.mode] + ctx.case_seq * 1_000_000 + pid_offset
+    return RID_BASES[family][ctx.profile] + ctx.case_seq * 1_000_000 + pid_offset

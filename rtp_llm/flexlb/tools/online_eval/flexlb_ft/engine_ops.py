@@ -112,12 +112,10 @@ class EngineOps:
         master_ip: str,
         master_http_port: int,
         mock_http_port: int,
-        deploy_mode: str = "batch",
     ):
         self.master_ip = master_ip
         self.master_http_port = master_http_port
         self.mock_http_port = mock_http_port
-        self.deploy_mode = deploy_mode.lower()
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict = {}
@@ -265,7 +263,9 @@ class EngineOps:
             )
 
     def start_stream(self, response, request_id: int, input_pb=None) -> StreamHandle:
-        """Start FetchResponse (batch) or GenerateStreamCall (direct/queue)."""
+        """Start FetchResponse (BATCH dispatch, enqueued_by_master) or
+        GenerateStreamCall (NON_BATCH, frontend-sent) — decided per response
+        from the master's enqueued_by_master flag."""
         target = self.prefill_addr(response)
         if not target:
             raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
@@ -284,7 +284,7 @@ class EngineOps:
     # -- cancel -------------------------------------------------------------
 
     def cancel(self, request_id: int, response=None) -> None:
-        """Cancel via master (always) + worker (direct/queue path only)."""
+        """Cancel via master (always) + worker (NON_BATCH/frontend path only)."""
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             self._channel(self.master_target())
         )

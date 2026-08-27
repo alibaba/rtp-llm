@@ -70,10 +70,10 @@ STREAM_TIMEOUT_S = 15.0
 SMOKE_CASES: list[CaseDef] = []
 
 
-def case(name: str, modes=None, source: str = ""):
+def case(name: str, profiles=None, source: str = ""):
     def deco(fn):
         SMOKE_CASES.append(
-            CaseDef(name=name, suite="smoke", fn=fn, modes=modes, source=source)
+            CaseDef(name=name, suite="smoke", fn=fn, profiles=profiles, source=source)
         )
         return fn
 
@@ -434,7 +434,7 @@ def s1_load_balance(ctx: CaseContext):
     """
     ops = ctx.ops()
     n = 20
-    is_batch = ctx.mode == "batch"
+    is_batch = ctx.batch_dispatch()
     perf_engine = None
     try:
         if is_batch:
@@ -575,7 +575,7 @@ def s3_decode_balance(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s4",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="scheduling_smoke.py S4 (Java-corrected)",
 )
 def s4_hotspot_filter(ctx: CaseContext):
@@ -725,7 +725,7 @@ def s4_hotspot_filter(ctx: CaseContext):
             pass
 
 
-@case("smoke_scheduling_s5", modes=["batch"], source="scheduling_smoke.py S5")
+@case("smoke_scheduling_s5", profiles=["batch-window"], source="scheduling_smoke.py S5")
 def s5_kv_cache_hit_preference(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "scheduling")
@@ -769,7 +769,7 @@ def s5_kv_cache_hit_preference(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s6",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="scheduling_smoke.py S6 (Java-corrected)",
 )
 def s6_cost_based_tie_window_balance(ctx: CaseContext):
@@ -819,7 +819,7 @@ def s6_cost_based_tie_window_balance(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("smoke_scheduling_s7", modes=["direct", "queue"], source="scheduling_smoke.py S7")
+@case("smoke_scheduling_s7", profiles=["batch-window"], source="scheduling_smoke.py S7")
 def s7_cas_fairness(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "scheduling")
@@ -860,7 +860,7 @@ def s7_cas_fairness(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s8",
-    modes=["direct", "queue"],
+    profiles=["batch-window"],
     source="scheduling_smoke.py S8 (Java-corrected)",
 )
 def s8_ttft_sorting(ctx: CaseContext):
@@ -928,7 +928,7 @@ def s8_ttft_sorting(ctx: CaseContext):
 
 @case(
     "smoke_scheduling_s9",
-    modes=["direct", "queue"],
+    profiles=["batch-window"],
     source="scheduling_smoke.py S9 (Java-corrected)",
 )
 def s9_no_hard_filter(ctx: CaseContext):
@@ -1190,7 +1190,7 @@ def e1_cancel_path(ctx: CaseContext):
         ended = handle.wait_end(5.0)
         cancel_latency = time.monotonic() - cancel_at
         recovery_ok, recovery_msg = ops.verify_recovery()
-        if ctx.mode == "batch":
+        if ctx.batch_dispatch():
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )
@@ -1255,7 +1255,7 @@ def _anomaly_error_case(
 
         time.sleep(WORKER_RECOVERY_WAIT_S)
         recovery_ok, recovery_msg = ops.verify_recovery()
-        if ctx.mode == "batch":
+        if ctx.batch_dispatch():
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )
@@ -1285,7 +1285,7 @@ def e3_worker_fail(ctx: CaseContext):
 
 @case(
     "smoke_anomaly_e4",
-    modes=["batch", "direct"],
+    profiles=["batch-window"],
     source="decode-side anomaly gap (G1) — new",
 )
 def e4_decode_capacity_exhausted(ctx: CaseContext):
@@ -1379,7 +1379,7 @@ def e4_decode_capacity_exhausted(ctx: CaseContext):
         )
 
         recovery_ok, recovery_msg = ops.verify_recovery()
-        if ctx.mode == "batch":
+        if ctx.batch_dispatch():
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )

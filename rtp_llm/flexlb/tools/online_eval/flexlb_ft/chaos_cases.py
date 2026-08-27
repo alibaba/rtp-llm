@@ -81,7 +81,7 @@ REMOVE_CONVERGENCE_S = 10.0
 MASTER_EVICT_S = 30.0
 
 
-def case(name: str, modes=None, source: str = "", suite: str = "chaos"):
+def case(name: str, profiles=None, source: str = "", suite: str = "chaos"):
     """Register into CHAOS_CASES; *suite* drives the runner grouping.
 
     The elastic_* cases pass suite="smoke" (functional taxonomy — see the
@@ -90,7 +90,7 @@ def case(name: str, modes=None, source: str = "", suite: str = "chaos"):
 
     def deco(fn):
         CHAOS_CASES.append(
-            CaseDef(name=name, suite=suite, fn=fn, modes=modes, source=source)
+            CaseDef(name=name, suite=suite, fn=fn, profiles=profiles, source=source)
         )
         return fn
 
@@ -127,11 +127,11 @@ def chaos_flexlb_config(
 def elastic_spec(ctx: CaseContext) -> EnvSpec:
     """Shared elastic/chaos env: 2P+4D, dynamic file discovery, TTL=30s."""
     return EnvSpec(
-        label=f"chaos_{ctx.mode}",
+        label=f"chaos_{ctx.profile}",
         n_prefill=2,
         n_decode=4,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         discovery="discovery_file",
         master_env={"FLEXLB_CONFIG": chaos_flexlb_config()},
     )
@@ -140,11 +140,11 @@ def elastic_spec(ctx: CaseContext) -> EnvSpec:
 def ttl_spec(ctx: CaseContext) -> EnvSpec:
     """Inflight-TTL env (S1): 2P+2D, TTL=30s."""
     return EnvSpec(
-        label=f"chaos_ttl_{ctx.mode}",
+        label=f"chaos_ttl_{ctx.profile}",
         n_prefill=2,
         n_decode=2,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         discovery="discovery_file",
         master_env={"FLEXLB_CONFIG": chaos_flexlb_config()},
     )
@@ -155,11 +155,11 @@ def quota_spec(ctx: CaseContext) -> EnvSpec:
     (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env var
     FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer)."""
     return EnvSpec(
-        label=f"chaos_quota_{ctx.mode}",
+        label=f"chaos_quota_{ctx.profile}",
         n_prefill=1,
         n_decode=1,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         discovery="discovery_file",
         master_env={"FLEXLB_CONFIG": chaos_flexlb_config(max_inflight_batches=1)},
     )
@@ -991,18 +991,18 @@ def coldstart_spec(ctx: CaseContext) -> EnvSpec:
     discovery, default config) but disables the master stability window so
     traffic hits the master during the first-connect storm."""
     return EnvSpec(
-        label=f"chaos_coldstart_{ctx.mode}",
+        label=f"chaos_coldstart_{ctx.profile}",
         n_prefill=2,
         n_decode=4,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         master_stable_window_s=0.0,
     )
 
 
 @case(
     "chaos_coldstart_burst",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="intake defect regression probe (cold-start first-connect storm)",
 )
 def coldstart_burst(ctx: CaseContext):
@@ -1120,7 +1120,7 @@ def coldstart_burst(ctx: CaseContext):
 
 @case(
     "chaos_inflight_ttl_cleanup",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="flexlb_behavior_test.sh S1 (stuck inflight TTL cleanup)",
 )
 def inflight_ttl_cleanup(ctx: CaseContext):
@@ -1349,7 +1349,7 @@ def master_kill(ctx: CaseContext):
 
 @case(
     "chaos_master_quota_block",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="flexlb_behavior_test.sh S3 (1P+1D quota blocking + TTL recovery)",
 )
 def master_quota_block(ctx: CaseContext):

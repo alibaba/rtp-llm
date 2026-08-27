@@ -16,7 +16,7 @@ The legacy standalone smoke/chaos scripts (`cancel_smoke.py`,
 `master_recovery_ttft_test.sh`, `engine_disconnect_ttft_test.sh`,
 `run_matrix_smoke.sh`, `run_cancel_smoke.sh`) have been removed: their
 coverage now lives in the `flexlb_ft/` functional-test framework
-(`flexlb_functional_tests.py --suite smoke|chaos --mode batch|queue|direct`).
+(`flexlb_functional_tests.py --suite smoke|chaos --profile batch-window|single-nonbatch|single-batch|window-nonbatch`).
 
 ## One-command run
 

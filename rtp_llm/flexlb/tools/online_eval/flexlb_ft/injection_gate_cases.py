@@ -122,14 +122,14 @@ MOCK_TOTAL_KV_TOKENS = 6_291_456
 ENGINE_RECOVERY_WAIT_S = 3.0
 
 
-def case(name: str, modes=None, source: str = "", suite: str = "chaos"):
+def case(name: str, profiles=None, source: str = "", suite: str = "chaos"):
     """Register into INJECTION_GATE_CASES; *suite* drives the runner
     grouping (injections -> chaos, gates -> smoke), following the
     elastic_* precedent in chaos_cases.py."""
 
     def deco(fn):
         INJECTION_GATE_CASES.append(
-            CaseDef(name=name, suite=suite, fn=fn, modes=modes, source=source)
+            CaseDef(name=name, suite=suite, fn=fn, profiles=profiles, source=source)
         )
         return fn
 
@@ -277,7 +277,7 @@ def _gate_config(
 
 @case(
     "chaos_inject_generate_error",
-    modes=["direct"],
+    profiles=["batch-window"],
     source="gap G6/G7: /inject type=generate_error (GenerateStreamCall entry, client-direct path)",
 )
 def inject_generate_error(ctx: CaseContext):
@@ -370,11 +370,11 @@ def _fault_spec(ctx: CaseContext) -> EnvSpec:
     DOES drain immediately; the master ledger entry lingers).  With the
     smoke env's 300s TTL the case would have to wait 5 minutes."""
     return EnvSpec(
-        label=f"inject_fault_{ctx.mode}",
+        label=f"inject_fault_{ctx.profile}",
         n_prefill=2,
         n_decode=2,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         master_env={"FLEXLB_CONFIG": _gate_config(stale_inflight_ms=30_000)},
     )
 
@@ -427,7 +427,7 @@ def _fence_residue_stable(
 
 @case(
     "chaos_inject_fetch_error",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="gap G6/G7: /inject type=fetch_error (cross-process, batch FetchResponse path)",
 )
 def inject_fetch_error(ctx: CaseContext):
@@ -490,7 +490,7 @@ def inject_fetch_error(ctx: CaseContext):
 
 @case(
     "chaos_inject_crash_after",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="gap G6/G7: /inject type=crash_after (enqueue-count triggered stop, not process death)",
 )
 def inject_crash_after(ctx: CaseContext):
@@ -620,7 +620,7 @@ def inject_crash_after(ctx: CaseContext):
 
 @case(
     "chaos_inject_enqueue_delay",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="gap G6/G7: /inject type=enqueue_delay (deferred enqueue ack, batch mode)",
 )
 def inject_enqueue_delay(ctx: CaseContext):
@@ -717,7 +717,7 @@ def inject_generate_delay(ctx: CaseContext):
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), 10.0
         )
-        if ctx.mode != "batch":
+        if not ctx.batch_dispatch():
             inflight_ok, inflight_detail = True, "N/A (non-batch path)"
 
         passed = (
@@ -746,7 +746,7 @@ def inject_generate_delay(ctx: CaseContext):
 
 @case(
     "gate_queue_depth_reject",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="gap G8: engine queue_depth admission gate (fast reject + recovery)",
     suite="smoke",
 )
@@ -850,11 +850,11 @@ def gate_queue_depth(ctx: CaseContext):
 def _lru_spec(ctx: CaseContext) -> EnvSpec:
     """G10 env: 2P+2D with a tiny per-engine prefill LRU (4 blocks)."""
     return EnvSpec(
-        label=f"gate_lru_{ctx.mode}",
+        label=f"gate_lru_{ctx.profile}",
         n_prefill=2,
         n_decode=2,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         prefill_cache_blocks=4,
         decode_cache_blocks=4,
     )
@@ -950,18 +950,18 @@ def gate_lru(ctx: CaseContext):
 def _slo_spec(ctx: CaseContext) -> EnvSpec:
     """G11a env: tight SLO deadline (scheduler.queueTimeoutMs=1500)."""
     return EnvSpec(
-        label=f"gate_slo_{ctx.mode}",
+        label=f"gate_slo_{ctx.profile}",
         n_prefill=2,
         n_decode=2,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         master_env={"FLEXLB_CONFIG": _gate_config(queue_timeout_ms=1500)},
     )
 
 
 @case(
     "gate_slo_queue_deadline",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="gap G11: SLO queue deadline + kv_pressure admission (wait-then-expire)",
     suite="smoke",
 )
@@ -1029,18 +1029,18 @@ def gate_slo_deadline(ctx: CaseContext):
 def _capacity_spec(ctx: CaseContext) -> EnvSpec:
     """G11b env: global outstanding capacity of 2 under PRIORITY ordering."""
     return EnvSpec(
-        label=f"gate_cap_{ctx.mode}",
+        label=f"gate_cap_{ctx.profile}",
         n_prefill=2,
         n_decode=2,
         perf=default_perf(),
-        master_mode=ctx.mode,
+        master_profile=ctx.profile,
         master_env={"FLEXLB_CONFIG": _gate_config(max_outstanding=2)},
     )
 
 
 @case(
     "gate_master_capacity_reject",
-    modes=["batch"],
+    profiles=["batch-window"],
     source="gap G11: master outstanding-capacity admission (RESOURCE_EXHAUSTED fast reject)",
     suite="smoke",
 )

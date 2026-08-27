@@ -460,7 +460,10 @@ class EnvSpec:
     n_decode: int = 4
     mock_heap: str = DEFAULT_MOCK_HEAP
     perf: dict = field(default_factory=default_perf)
-    master_mode: str = "batch"  # batch | direct | queue | custom | none
+    # Built-in scheduling profile (PROFILES) or "none" (master not started);
+    # the FLEXLB_CONFIG document is generated from the profile axes unless
+    # master_env overrides it (chaos/gate suites bring their own config).
+    master_profile: str = "batch-window"
     master_env: dict = field(default_factory=dict)  # extra/override env vars
     spring_profile: str = "default"
     master_debug_log: bool = False
@@ -487,7 +490,7 @@ class EnvSpec:
                 "n_prefill": self.n_prefill,
                 "n_decode": self.n_decode,
                 "perf": self.perf,
-                "master_mode": self.master_mode,
+                "master_profile": self.master_profile,
                 "master_env": self.master_env,
                 "discovery": self.discovery,
                 "domain_addrs": self.domain_addrs,
@@ -498,6 +501,85 @@ class EnvSpec:
             },
             sort_keys=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Scheduling profiles (schema-v2 FLEXLB_CONFIG axes)
+# ---------------------------------------------------------------------------
+#
+# v2 exposes four behaviour axes through the single strict FLEXLB_CONFIG
+# document: scheduler.type / scheduler.ordering.type /
+# scheduler.decision.type / dispatcher.type (see
+# rtp_llm/flexlb/docs/priority-scheduler-delivery-modes.md).  The legacy
+# v1 env vars (DEFAULT_SCHEDULE_MODE / LOAD_BALANCE_STRATEGY / FLEXLB_BATCH_*)
+# have zero consumers in the v2 Java code and are gone; a "profile" is now
+# a named axis combination.
+#
+# Phase-1 profile set (user ruling 2026-08): all QUEUE + FIFO ordering.
+# PRIORITY ordering / DIRECT / preemption / selector variants are left for a
+# dedicated later phase.
+
+PROFILES = (
+    "batch-window",
+    "single-nonbatch",
+    "single-batch",
+    "window-nonbatch",
+)
+
+# decision × dispatcher axes per profile (scheduler is QUEUE, ordering FIFO).
+PROFILE_SPECS = {
+    "batch-window": {"decision": "fixed_window", "dispatcher": "batch"},
+    "single-nonbatch": {"decision": "single", "dispatcher": "non_batch"},
+    "single-batch": {"decision": "single", "dispatcher": "batch"},
+    "window-nonbatch": {"decision": "fixed_window", "dispatcher": "non_batch"},
+}
+
+# Semantic capabilities per profile, used by CaseDef.requires filtering
+# (e.g. requires=["enqueue_batch"] keeps a case to BATCH-dispatch profiles).
+# Capability vocabulary (stable identifiers, extended in later phases):
+#   queue / fifo / fixed_window / single
+#   batch_dispatch / enqueue_batch / fetch_response   — BATCH dispatcher
+#   non_batch_dispatch / frontend_send / generate_stream — NON_BATCH dispatcher
+PROFILE_CAPS = {
+    "batch-window": {
+        "queue",
+        "fifo",
+        "fixed_window",
+        "batch_dispatch",
+        "enqueue_batch",
+        "fetch_response",
+    },
+    "single-nonbatch": {
+        "queue",
+        "fifo",
+        "single",
+        "non_batch_dispatch",
+        "frontend_send",
+        "generate_stream",
+    },
+    "single-batch": {
+        "queue",
+        "fifo",
+        "single",
+        "batch_dispatch",
+        "enqueue_batch",
+        "fetch_response",
+    },
+    "window-nonbatch": {
+        "queue",
+        "fifo",
+        "fixed_window",
+        "non_batch_dispatch",
+        "frontend_send",
+        "generate_stream",
+    },
+}
+
+
+def profile_dispatches_batch(profile: str) -> bool:
+    """True when *profile*'s dispatcher axis is BATCH (master sends via
+    EnqueueBatch; clients consume FetchResponse)."""
+    return PROFILE_SPECS[profile]["dispatcher"] == "batch"
 
 
 def build_flexlb_config(
@@ -526,9 +608,10 @@ def build_flexlb_config(
 ) -> str:
     """Unified strict schema-v2 FLEXLB_CONFIG generator.
 
-    One template for every environment the framework boots: the chaos
+    One template for every environment the framework boots: the four
+    built-in profiles (via :func:`flexlb_config_for_profile`), the chaos
     suites (chaos_cases.chaos_flexlb_config) and the admission-gate cases
-    (injection_gate_cases._gate_config) both delegate here.  The router uses
+    (injection_gate_cases._gate_config) all delegate here.  The router uses
     the Java-default FORMULA execution-time estimator (omitted): the online
     LEARNING estimator only trains from completed EnqueueBatch groups, so a
     stable prediction cap for FIXED_WINDOW + NON_BATCH requires FORMULA.
@@ -606,25 +689,31 @@ def build_flexlb_config(
     )
 
 
-_CONFIG_FILE = Path(__file__).resolve().parent / "na130_flexlb_config.json"
-DEFAULT_FLEXLB_CONFIG = (
-    _CONFIG_FILE.read_text(encoding="utf-8")
-    if _CONFIG_FILE.is_file()
-    else json.dumps({"schemaVersion": 2})
-)
+def flexlb_config_for_profile(profile: str, **overrides) -> str:
+    """FLEXLB_CONFIG for a built-in profile; *overrides* forward to
+    :func:`build_flexlb_config` (e.g. window size / TTL tuning)."""
+    axes = PROFILE_SPECS[profile]
+    kwargs = {
+        "ordering": "fifo",
+        "decision": axes["decision"],
+        "dispatcher": axes["dispatcher"],
+        # Queue deadline for functional profiles: tight enough that the
+        # queue-timeout gate cases can observe expiry without waiting for
+        # the Java default (1h).
+        "queue_timeout_ms": 60_000,
+    }
+    kwargs.update(overrides)
+    return build_flexlb_config(**kwargs)
+
 
 # Master env that is actually consumed by the v2 code:
-#   FLEXLB_CONFIG           — ConfigService (strict schema-v2 document)
-#   HIPPO_ROLE              — flexlb-sync (zookeeper elect / LB status)
+#   FLEXLB_CONFIG          — set per spec from the profile generator below
+#   HIPPO_ROLE             — flexlb-sync (zookeeper elect / LB status)
 #   OTEL_TRACE_SKIP_PATTERN — flexlb-api application.yml (spring tracing)
 #   OTEL_EXPORTER_OTLP_ENDPOINT — OpenTelemetry SDK exporter ("none" disables)
-# Every legacy v1 var previously exported here (DECODE_LOAD_BALANCE_STRATEGY,
-# FLEXLB_BATCH_*, MAX_QUEUE_SIZE, COST_*, STRATEGY_CONFIGS, HYSTERESIS_BIAS_PERCENT,
-# FLEXLB_EXPECT_FETCH_RESPONSE — client-only, see LOAD_CLIENT_ENV_VARS) had zero
-# consumers in the v2 Java modules and was removed; likewise the MODE_STRATEGY
-# map (LOAD_BALANCE_STRATEGY / DEFAULT_SCHEDULE_MODE).
+# Every other legacy v1 var previously exported here had zero consumers in
+# the v2 Java code and was removed (task #54 dead-env sweep).
 BASE_MASTER_ENV = {
-    "FLEXLB_CONFIG": DEFAULT_FLEXLB_CONFIG,
     "OTEL_TRACE_SKIP_PATTERN": ".*",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "none",
 }
@@ -772,7 +861,7 @@ class EnvManager:
             # mock cluster
             self._start_mock(env)
             # master
-            if spec.master_mode != "none":
+            if spec.master_profile != "none":
                 self.start_master(env)
         except Exception:
             # Build failed before self.current was assigned: teardown()
@@ -863,6 +952,8 @@ class EnvManager:
     def _master_env(self, env: FlexEnv) -> dict:
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
+        if spec.master_profile != "none":
+            menv["FLEXLB_CONFIG"] = flexlb_config_for_profile(spec.master_profile)
         menv["HIPPO_ROLE"] = f"flexlb_ft_{spec.label}"
         if spec.discovery == "file":
             payload = json.loads(env.endpoint_file.read_text(encoding="utf-8"))
@@ -1042,7 +1133,7 @@ class EnvManager:
                     f"~/ai-whale/logs/flexlb.log"
                 )
         self._log(
-            f"master up (pid={proc.pid}, mode={spec.master_mode}, log={log_name})"
+            f"master up (pid={proc.pid}, profile={spec.master_profile}, log={log_name})"
         )
         return proc
 
