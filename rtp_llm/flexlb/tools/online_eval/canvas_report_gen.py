@@ -775,7 +775,9 @@ def main():
             + " 条无发送时间戳的请求行，sum(arrivals) ≠ total_requests"
         )
     if integrity_notes:
-        lines.append('      <Text tone="warning">')
+        # Text tone accepts only primary/secondary/tertiary/quaternary
+        # ("warning" is a chart-series tone, not a Text tone).
+        lines.append('      <Text tone="secondary">')
         for _note in integrity_notes:
             lines.append("        ⚠ 数据完整性: " + esc_text(_note))
             warnings.append("integrity: " + _note)
