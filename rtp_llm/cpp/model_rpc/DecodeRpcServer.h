@@ -67,12 +67,11 @@ private:
         size_t                  cache_model_id;
     };
 
-    void         initThreadPool();
-    void         prepareGenerateContext(DecodeGenerateContext& decode_context);
-    void         allocateResource(DecodeGenerateContext& decode_context);
-    grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
-    void         loadCacheFromPrefill(DecodeGenerateContext& decode_context);
-    void         localGenerate(DecodeGenerateContext& decode_context);
+    void initThreadPool();
+    void prepareGenerateContext(DecodeGenerateContext& decode_context);
+    void allocateResource(DecodeGenerateContext& decode_context);
+    void loadCacheFromPrefill(DecodeGenerateContext& decode_context);
+    void localGenerate(DecodeGenerateContext& decode_context);
     // Report a terminal early failure to FlexLB via meta_->finishTask(); guaranteed at most once per
     // request. MUST NOT be called inside functions driven by EXECUTE_WITH_RETRY (would report while
     // retries could still succeed); only call at final failure points.

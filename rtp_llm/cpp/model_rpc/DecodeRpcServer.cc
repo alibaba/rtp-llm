@@ -180,27 +180,83 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     decode_context.request_info       = input->request_info;
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
-
-    // Set CanRun event so that handleWaiting() will execute initKVBlock()
-    generate_stream->reportEvent(StreamEvents::CanRun);
     decode_context.setStream(generate_stream);
 
-    // WAITING -> LOADING_CACHE -> WAITING, 直到load cache完成并移动到 WAITING 状态
-    // NOTE: 此处的 busy-wait 是安全的，因为 stream 尚未 enqueue 到 scheduler，
-    // 不会与其他线程并发调用 moveToNext()。gRPC 线程独占驱动状态机直到 WAITING。
-    while (!generate_stream->hasError() && generate_stream->moveToNext() == StreamState::LOADING_CACHE) {
-        this_thread::sleep_for(chrono::milliseconds(1));
-    }
-    if (generate_stream->hasError()) {
-        auto   stream_error = generate_stream->statusInfo();
-        string error_msg    = stream_error.ToString();
-        if (error_msg.empty()) {
-            error_msg = "malloc kv cache block failed at decode node";
+    auto cache_manager = engine_->getCacheManager();
+    RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "decode cache manager is null");
+
+    const auto& pd_config            = maga_init_params_.pd_sep_config;
+    const auto  allocation_begin_us  = currentTimeUs();
+    const auto  cancellation_poll_ms = std::max<int64_t>(pd_config.decode_retry_interval_ms, 50);
+
+    auto finish_allocation_error = [&](grpc::StatusCode grpc_code, ErrorCode error_code, const std::string& message) {
+        const std::string error_msg = "request: [" + decode_context.request_key + "] " + message;
+        generate_stream->reportError(error_code, error_msg);
+        // The stream has not entered the scheduler yet, so the RPC thread owns this final transition.
+        // Committing FINISHED here releases any partially allocated resource and prevents stopStream()
+        // from waiting for a scheduler that has never seen the stream.
+        generate_stream->moveToNext();
+        decode_context.error_info   = ErrorInfo(error_code, error_msg);
+        decode_context.error_status = grpc::Status(grpc_code, error_msg);
+        RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
+    };
+
+    int64_t allocation_attempts = 0;
+    while (true) {
+        const auto request_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
+        if (decode_context.request_timeout_ms > 0 && request_cost_ms >= decode_context.request_timeout_ms) {
+            finish_allocation_error(grpc::StatusCode::DEADLINE_EXCEEDED,
+                                    ErrorCode::GENERATE_TIMEOUT,
+                                    "decode allocation exceeded request timeout");
+            return;
         }
-        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
-        RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
-        return;
+        if (decode_context.isRequestCancelled()) {
+            finish_allocation_error(
+                grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED, "decode allocation cancelled by client");
+            return;
+        }
+
+        const auto observed_generation = cache_manager->allocationGeneration();
+        const auto allocation_status   = generate_stream->streamCacheResource().initKVBlock();
+        ++allocation_attempts;
+        decode_context.retry_times        = allocation_attempts;
+        decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
+
+        if (allocation_status.ok()) {
+            // External P/D handoff owns the cache load.  Mark it initiated so FIFO admission only
+            // performs the post-handoff incremental reservation and never repeats initKVBlock().
+            generate_stream->reportEvent(StreamEvents::LoadInitiated);
+            break;
+        }
+
+        if (!absl::IsUnavailable(allocation_status)) {
+            const auto grpc_code = absl::IsResourceExhausted(allocation_status) ? grpc::StatusCode::RESOURCE_EXHAUSTED :
+                                                                                  grpc::StatusCode::INTERNAL;
+            finish_allocation_error(grpc_code, ErrorCode::MALLOC_FAILED, allocation_status.ToString());
+            return;
+        }
+
+        int64_t wait_ms = cancellation_poll_ms;
+        if (decode_context.request_timeout_ms > 0) {
+            wait_ms = std::min(wait_ms, decode_context.request_timeout_ms - request_cost_ms);
+        }
+        wait_ms = std::max<int64_t>(wait_ms, 1);
+
+        // Temporary KV pressure is admission backpressure, not a failed RPC stage.  The legacy
+        // DECODE_RETRY_{TIMES,TIMEOUT_MS} limits bound re-execution after stage errors; applying
+        // them here rejects healthy queued requests (the production default is only 100 ms).
+        // Capacity wait therefore follows the request's own deadline/cancellation.  Timed wakeups
+        // only service those stop conditions; a new allocator attempt is made exclusively after
+        // the resource generation changes, avoiding the old 1 ms malloc storm.
+        while (!cache_manager->waitForAllocationChange(observed_generation, wait_ms)) {
+            const auto now_request_cost_ms    = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
+            decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
+            if (decode_context.isRequestCancelled()
+                || (decode_context.request_timeout_ms > 0
+                    && now_request_cost_ms >= decode_context.request_timeout_ms)) {
+                break;
+            }
+        }
     }
 
     GRPC_RET_IF_ERROR(decode_context,
@@ -351,13 +407,13 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             };
             if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
                 generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
-                    .epoch                  = 0,
-                    .accept_len_gpu         = std::move(accept_len),
-                    .accept_tokens_gpu      = std::move(accept_tokens),
-                    .next_seq_len_gpu       = std::move(next_seq_len),
-                    .propose_tokens_gpu     = std::move(propose_tokens_gpu),
-                    .last_hidden_states_gpu = sp_output_buffer->hidden_states,
-                    .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+                    .epoch                        = 0,
+                    .accept_len_gpu               = std::move(accept_len),
+                    .accept_tokens_gpu            = std::move(accept_tokens),
+                    .next_seq_len_gpu             = std::move(next_seq_len),
+                    .propose_tokens_gpu           = std::move(propose_tokens_gpu),
+                    .last_hidden_states_gpu       = sp_output_buffer->hidden_states,
+                    .draft_all_probs_gpu          = sp_output_buffer->all_probs,
                     .previous_seq_len_upper_bound = generate_stream->seqLength(),
                     .next_seq_len_upper_bound     = generate_stream->seqLength(),
                 });
@@ -1288,11 +1344,6 @@ GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB&
     return block_ids_by_group;
 }
 
-grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode_context) {
-    EXECUTE_STAGE_FUNC(allocateResource, decode_context);
-    return grpc::Status::OK;
-}
-
 // Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
 // inflight entry immediately instead of waiting for the 300s TTL eviction. finishTask() removes the
 // running entry first, so the fallback dequeue in ~GenerateContext() becomes a no-op afterwards and
@@ -1326,27 +1377,21 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
 
-    auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
-    auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
-    int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
-
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
-        EXECUTE_WITH_RETRY(
-            allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
+        CHECK_REQUEST_STOP(decode_context);
+        decode_context.stat_info.nextStage();
+        allocateResource(decode_context);
         if (decode_context.hasError()) {
-            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %ld times, cost time ms [%ld], "
-                                "max retry time [%ld], max retry timeout ms [%ld]",
+            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after %ld attempts, cost time ms [%ld]",
                                 decode_context.request_key.c_str(),
                                 decode_context.retry_times,
-                                decode_context.retry_cost_time_ms,
-                                max_retry_times + 1,
-                                max_retry_timeout_ms);
+                                decode_context.retry_cost_time_ms);
             // Retries are exhausted: this is the final failure point, report it to FlexLB so the
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                  ErrorCode::MALLOC_FAILED);
+                                                                                   ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

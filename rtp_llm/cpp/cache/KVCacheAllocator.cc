@@ -116,6 +116,12 @@ MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_inf
 }
 
 MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
+    // Keep capacity classification and the physical allocations it authorizes
+    // in one transaction.  Decode-side P/D admission invokes this entry point
+    // from concurrent RPC threads, while running streams can allocate from the
+    // engine thread at the same time.
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+
     if (!malloc_info.batch_kv_cache_resource) {
         RTP_LLM_LOG_ERROR("BatchKVCacheResource is null");
         return {false, 0};

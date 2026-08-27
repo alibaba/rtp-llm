@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <memory>
 #include <optional>
 #include <algorithm>
@@ -394,6 +395,26 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
     cache_manager.reset();
+}
+
+TEST_F(KVCacheManagerTest, AllocationWaitObservesReleaseGeneration) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    const auto generation_before_release = cache_manager->allocationGeneration();
+    cache_manager->notifyAllocationChange();
+    EXPECT_TRUE(cache_manager->waitForAllocationChange(generation_before_release, /*timeout_ms=*/1));
+
+    const auto generation_before_wait = cache_manager->allocationGeneration();
+    auto       waiter                 = std::async(std::launch::async, [cache_manager, generation_before_wait] {
+        return cache_manager->waitForAllocationChange(generation_before_wait, /*timeout_ms=*/1000);
+    });
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(10)), std::future_status::timeout);
+    cache_manager->notifyAllocationChange();
+    EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(100)), std::future_status::ready);
+    EXPECT_TRUE(waiter.get());
 }
 
 TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {

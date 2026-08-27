@@ -215,6 +215,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 
 KVCacheManager::~KVCacheManager() {
     stop_.store(true, std::memory_order_relaxed);
+    allocation_wait_cv_.notify_all();
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
@@ -337,6 +338,31 @@ void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
     allocator_->free(free_info);
+    notifyAllocationChange();
+}
+
+uint64_t KVCacheManager::allocationGeneration() const {
+    return allocation_generation_.load(std::memory_order_acquire);
+}
+
+bool KVCacheManager::waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms) {
+    if (allocationGeneration() != observed_generation) {
+        return true;
+    }
+    if (timeout_ms <= 0) {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(allocation_wait_mutex_);
+    allocation_wait_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this, observed_generation] {
+        return stop_.load(std::memory_order_relaxed) || allocationGeneration() != observed_generation;
+    });
+    return allocationGeneration() != observed_generation;
+}
+
+void KVCacheManager::notifyAllocationChange() {
+    allocation_generation_.fetch_add(1, std::memory_order_release);
+    allocation_wait_cv_.notify_all();
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
@@ -509,6 +535,7 @@ BatchKVCacheResourcePtr KVCacheManager::popBlocksFromCache(size_t min_blocks_to_
 
 void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
     allocator_->blockCacheFree(batch_kv_cache_resource);
+    notifyAllocationChange();
 }
 
 size_t KVCacheManager::availableTokensNum() const {

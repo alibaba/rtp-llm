@@ -73,8 +73,16 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
         return nullptr;
     }
 
-    return std::shared_ptr<arpc::RPCChannelBase>(
-        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
+    // TCP cache loads fan out by layer.  A hybrid-cache request can therefore
+    // enqueue many RPCs on the same channel, and concurrent P/D handoffs may
+    // temporarily reach the channel's bounded outstanding-request limit.
+    // Let ANet apply backpressure to the CacheStore worker threads instead of
+    // failing postPacket() and surfacing a spurious cache-load error.  This
+    // does not affect the normal path below the limit and keeps memory bounded.
+    constexpr size_t kMaxOutstandingRequests = 1000ul;
+    constexpr bool   kBlockWhenQueueFull     = true;
+    return std::shared_ptr<arpc::RPCChannelBase>(dynamic_cast<arpc::RPCChannelBase*>(
+        rpc_channel_manager_->OpenChannel(spec, kBlockWhenQueueFull, kMaxOutstandingRequests)));
 }
 
 std::shared_ptr<TransferConnection>

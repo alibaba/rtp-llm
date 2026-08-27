@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -802,12 +804,88 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportReserveBlocks) 
     EXPECT_EQ("linear", snapshots[0].pool_name);
     EXPECT_EQ("full", snapshots[1].pool_name);
 
-    const size_t total_reservable_available_blocks = snapshots[0].available_blocks + snapshots[1].available_blocks;
-    ASSERT_GT(total_reservable_available_blocks, 0u);
-    EXPECT_EQ(reserve_blocks * snapshots[0].available_blocks / total_reservable_available_blocks,
-              snapshots[0].reserve_blocks);
-    EXPECT_EQ(reserve_blocks * snapshots[1].available_blocks / total_reservable_available_blocks,
-              snapshots[1].reserve_blocks);
+    const size_t total_reservable_blocks = snapshots[0].total_blocks + snapshots[1].total_blocks;
+    ASSERT_GT(total_reservable_blocks, 0u);
+    EXPECT_EQ(reserve_blocks * snapshots[0].total_blocks / total_reservable_blocks, snapshots[0].reserve_blocks);
+    EXPECT_EQ(reserve_blocks * snapshots[1].total_blocks / total_reservable_blocks, snapshots[1].reserve_blocks);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, ReserveShareDoesNotCollapseForDepletedPool) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/20, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    constexpr size_t reserve_blocks = 10;
+    allocator->setReserveBlocksNum(reserve_blocks);
+    const auto before = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(before.size(), 2u);
+
+    // Consume the FULL pool more aggressively than the LINEAR pool. The safety
+    // share is a property of configured capacity and must remain stable instead
+    // of migrating into the idle LINEAR pool.
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache = false;
+    malloc_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+
+    const auto after = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(after.size(), before.size());
+    EXPECT_LT(after[1].available_blocks, before[1].available_blocks);
+    EXPECT_EQ(after[0].reserve_blocks, before[0].reserve_blocks);
+    EXPECT_EQ(after[1].reserve_blocks, before[1].reserve_blocks);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, ConcurrentInitMallocCannotOverrunReserve) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/40, /*full_block_num=*/40);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    constexpr size_t reserve_blocks = 20;
+    constexpr int    thread_count   = 32;
+    allocator->setReserveBlocksNum(reserve_blocks);
+
+    std::vector<BatchKVCacheResourcePtr> resources;
+    std::vector<CompleteTokenIdsPtr>     token_ids;
+    resources.reserve(thread_count);
+    token_ids.reserve(thread_count);
+    for (int i = 0; i < thread_count; ++i) {
+        auto resource = makeBatchResource(/*batch_size=*/1, config);
+        resource->setBatchCacheKeys(0, CacheKeysType{static_cast<int64_t>(100 + i)});
+        resources.push_back(std::move(resource));
+        token_ids.push_back(makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4));
+    }
+
+    std::atomic<bool>        start{false};
+    std::vector<bool>        successes(static_cast<size_t>(thread_count), false);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    for (int i = 0; i < thread_count; ++i) {
+        threads.emplace_back([&, i] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            MallocInfo info{resources[static_cast<size_t>(i)], token_ids[static_cast<size_t>(i)]};
+            info.enable_device_cache          = false;
+            info.reuse_cache                  = false;
+            info.verbose                      = false;
+            successes[static_cast<size_t>(i)] = allocator->malloc(info).success;
+        });
+    }
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    const auto snapshots = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 2u);
+    for (const auto& snapshot : snapshots) {
+        EXPECT_GE(snapshot.available_blocks, snapshot.reserve_blocks) << "pool=" << snapshot.pool_name;
+    }
+    EXPECT_GT(std::count(successes.begin(), successes.end(), true), 0);
+    EXPECT_LT(std::count(successes.begin(), successes.end(), true), thread_count);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -50,6 +51,13 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     void         insertIntoCache(const InsertInfo& insert_info);
+
+    // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
+    // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
+    // Capture the generation before an allocation attempt; waitForAllocationChange() then cannot
+    // miss a release racing with that attempt.
+    uint64_t allocationGeneration() const;
+    bool     waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
@@ -171,6 +179,7 @@ private:
     void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    void notifyAllocationChange();
 
     // 成员变量
     CacheConfig         config_;
@@ -190,6 +199,10 @@ private:
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
+
+    std::atomic<uint64_t>   allocation_generation_{0};
+    mutable std::mutex      allocation_wait_mutex_;
+    std::condition_variable allocation_wait_cv_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
 
