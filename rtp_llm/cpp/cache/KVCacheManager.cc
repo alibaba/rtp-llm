@@ -30,7 +30,29 @@
 
 namespace rtp_llm {
 
+class KVCacheAllocationWaitState {
+public:
+    std::atomic<uint64_t>   generation{0};
+    std::atomic<bool>       stopped{false};
+    std::mutex              mutex;
+    std::condition_variable cv;
+};
+
 namespace {
+
+void notifyAllocationChangeState(const std::shared_ptr<KVCacheAllocationWaitState>& state) {
+    if (!state) {
+        return;
+    }
+    {
+        // Coordinate the predicate update with wait_for()'s unlock-and-wait
+        // transition. Without this lock a notify can race between the final
+        // predicate check and actually enqueueing the waiter.
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->generation.fetch_add(1, std::memory_order_release);
+    }
+    state->cv.notify_all();
+}
 
 std::string resolveKVCacheEventInstanceGroup(const std::string& event_group, const std::string& reco_group) {
     return event_group.empty() ? reco_group : event_group;
@@ -191,7 +213,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool),
-    warmup_(warmup) {
+    warmup_(warmup),
+    allocation_wait_state_(std::make_shared<KVCacheAllocationWaitState>()) {
     if (warmup) {
         config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
     } else {
@@ -228,6 +251,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 
 KVCacheManager::~KVCacheManager() {
     stop_.store(true, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
+        allocation_wait_state_->stopped.store(true, std::memory_order_release);
+    }
+    allocation_wait_state_->cv.notify_all();
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
@@ -353,6 +381,41 @@ void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
     allocator_->free(free_info);
+    notifyAllocationChange();
+}
+
+uint64_t KVCacheManager::allocationGeneration() const {
+    return allocation_wait_state_->generation.load(std::memory_order_acquire);
+}
+
+bool KVCacheManager::waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms) {
+    const auto state = allocation_wait_state_;
+    if (state->generation.load(std::memory_order_acquire) != observed_generation) {
+        return true;
+    }
+    if (timeout_ms <= 0) {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [state, observed_generation] {
+        return state->stopped.load(std::memory_order_acquire)
+               || state->generation.load(std::memory_order_acquire) != observed_generation;
+    });
+    return state->generation.load(std::memory_order_acquire) != observed_generation;
+}
+
+void KVCacheManager::notifyAllocationChange() {
+    notifyAllocationChangeState(allocation_wait_state_);
+}
+
+std::function<void()> KVCacheManager::allocationChangeCallback() const {
+    std::weak_ptr<KVCacheAllocationWaitState> weak_state = allocation_wait_state_;
+    return [weak_state]() {
+        if (const auto state = weak_state.lock()) {
+            notifyAllocationChangeState(state);
+        }
+    };
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
@@ -411,7 +474,12 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cach
                                    bool                            copy_last_block,
                                    std::vector<TaggedBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
-    return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+    const bool updated =
+        allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+    // updateKVBlock may release dropped batch rows (including on a partial
+    // failure), so always wake admission waiters to re-evaluate capacity.
+    notifyAllocationChange();
+    return updated;
 }
 
 // 地址转换和缓冲区访问
@@ -525,6 +593,7 @@ BatchKVCacheResourcePtr KVCacheManager::popBlocksFromCache(size_t min_blocks_to_
 
 void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
     allocator_->blockCacheFree(batch_kv_cache_resource);
+    notifyAllocationChange();
 }
 
 size_t KVCacheManager::availableTokensNum() const {
@@ -628,7 +697,8 @@ bool KVCacheManager::hasActiveConnectors() const {
 // PD separation: increment KV cache reference count
 std::shared_ptr<KVCacheResource>
 KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector) {
-    return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
+    return allocator_->incrKVCacheRefWithReleaseCallback(
+        resource, cache_keys, is_connector, allocationChangeCallback());
 }
 
 bool KVCacheManager::hasP2PConnector() const {
@@ -672,7 +742,8 @@ void KVCacheManager::initConnectorCoordinator() {
                                                                  allocator_,
                                                                  metrics_reporter_,
                                                                  pd_sep_config_,
-                                                                 cache_store_config_);
+                                                                 cache_store_config_,
+                                                                 allocationChangeCallback());
     RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
 }
 
