@@ -13,7 +13,7 @@ void GroupSetResource::evictFromTier(Tier tier) {
             host_block = NULL_BLOCK_IDX;
             break;
         case Tier::DISK:
-            disk_slot = NULL_BLOCK_IDX;
+            disk_block = NULL_BLOCK_IDX;
             break;
         default:
             break;
@@ -30,7 +30,7 @@ std::vector<BlockIdxType> GroupSetResource::getBlocks(Tier tier) const {
         case Tier::HOST:
             return {host_block};
         case Tier::DISK:
-            return {disk_slot};
+            return {disk_block};
         default:
             return {};
     }
@@ -45,7 +45,7 @@ void GroupSetResource::setBlocks(Tier tier, const std::vector<BlockIdxType>& blo
             host_block = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
             break;
         case Tier::DISK:
-            disk_slot = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
+            disk_block = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
             break;
         default:
             break;
