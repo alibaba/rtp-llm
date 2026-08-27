@@ -55,8 +55,8 @@ public final class JavaMockEngineCluster {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     /** Default KV cache token capacity per engine (Python --prefill/--decode-total-kv-tokens default). */
     static final long DEFAULT_TOTAL_KV_TOKENS = 6_291_456L;
-    /** Default decode available_concurrency reported to the master (previously hard-coded 132). */
-    static final int DEFAULT_DECODE_MAX_CONCURRENCY = 132;
+    /** Default decode available_concurrency reported to the master (CONCURRENCY_LIMIT-aligned, previously 132). */
+    static final int DEFAULT_DECODE_MAX_CONCURRENCY = 128;
     /** CLI flag for unique per-engine loopback advertisement IPs (default on). */
     static final String UNIQUE_ENGINE_IPS_FLAG = "--unique-engine-ips";
     /**
