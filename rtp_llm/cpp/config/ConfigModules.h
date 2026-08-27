@@ -385,20 +385,29 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     std::string grammar_backend                         = "xgrammar";
     bool        constrained_json_disable_any_whitespace = false;
-    int         num_workers                             = 8;
-    // Wall-clock budget for one grammar compile; <=0 restores the unbounded synchronous compile.
-    int compile_timeout_ms = 50;
-    // Grammar compiles running at once. Each one internally fans out over num_workers threads, so this
-    // multiplies CPU usage. It caps what used to be unbounded: before the guard every caller compiled
-    // inline on its own thread.
-    int compile_concurrency = 16;
-    // Queued grammar compiles. Soft bound: a slot is freed when a worker picks the compile up, so up to
-    // compile_queue_size + compile_concurrency compiles can be outstanding.
-    int compile_queue_size = 64;
+    // Threads one compile fans out over, and the main lever on compile latency: a compile spends nearly
+    // all of its time in a phase that parallelises almost perfectly. <=0 is resolved on the Python side
+    // from the CPU this rank owns, so a value reaching the engine should already be concrete.
+    int num_workers = 0;
+    // Wall-clock budget a caller waits for one grammar compile; <=0 restores the unbounded synchronous
+    // compile. The compile keeps running past this, so the budget bounds only the wait, not the CPU cost.
+    int compile_timeout_ms = 2000;
+    // Grammar compiles running at once. This times num_workers is the compile thread budget, which should
+    // stay within the CPU the rank owns or compiles contend with the engine's own threads. For a fixed
+    // budget, fanout finishes one compile sooner where concurrency finishes several slowly together, so
+    // the budget belongs in num_workers. The cost of a single lane is head-of-line blocking: one
+    // pathological grammar delays every other distinct grammar on the rank. It also caps what used to be
+    // unbounded: before the guard every caller compiled inline on its own thread.
+    int compile_concurrency = 1;
+    // Queued grammar compiles, kept shallow: with a single lane, only the entries near the head can still
+    // finish inside compile_timeout_ms, and anything behind them outlives its caller and runs only to warm
+    // the cache for a retry. Soft bound: a slot is freed when a worker picks the compile up rather than when
+    // it finishes, so a little more than compile_queue_size + compile_concurrency can be outstanding.
+    int compile_queue_size = 2;
     // Byte ceiling for cached compiled grammars, applied both to xgrammar's compiler cache and to the
-    // engine's verdict cache. The two share the same compiled grammars, so the per-rank bound is about
-    // 4/3 of this, and a DP8 node holds eight times that. <=0 is unlimited, which is how the engine
-    // behaved before the ceiling existed.
+    // engine's verdict cache. The two hold the same compiled grammars, so the resident total is not the
+    // sum of the two, and every rank owns a backend. <=0 is unlimited, which is how the engine behaved
+    // before the ceiling existed.
     int64_t              compiler_cache_bytes = 2L * 1024L * 1024L * 1024L;
     std::string          tokenizer_info_json;
     std::vector<int32_t> override_stop_tokens;
