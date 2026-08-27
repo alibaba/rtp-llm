@@ -1083,7 +1083,7 @@ def coldstart_burst(ctx: CaseContext):
 
         # Burst: 20 requests (10-way concurrent) immediately after ready.
         # The prefill address of every request is kept for the load-balance
-        # assertion (S1/S6 contract) below.
+        # assertion (bal_uniform_serial P1 contract) below.
         def run(rid: int):
             addr, err = ops.run_one_request(
                 rid,
@@ -1114,14 +1114,18 @@ def coldstart_burst(ctx: CaseContext):
 
         # Load-balance contract (user-mandated): under the cold-start burst
         # traffic must still spread across the engines.  Same calibration
-        # as scheduling S1/S6: 20 requests over 2 prefills (10-way
-        # concurrent), both engines used, no engine above 80% of the
-        # *successful* requests — COST_BASED_PREFILL scores the two prefills
-        # identically on an empty cold ledger and RANDOM_WITHIN_TOLERANCE
-        # samples the tie window uniformly, so a one-sided distribution can
-        # only come from an engine being 3-strike-marked dead (the S10-class
-        # intake defect this probe guards).  80% of 20 = 16 requests, i.e.
-        # the same "no engine eats the burst" bound as S1/S6.
+        # as the task #61 balance suite (bal_uniform_serial / P1, with the
+        # bal_concurrent_mix relaxed-caliber note): 20 requests over 2
+        # prefills (10-way concurrent), both engines used, no engine above
+        # 80% of the *successful* requests — COST_BASED_PREFILL scores the
+        # two prefills identically on an empty cold ledger and
+        # RANDOM_WITHIN_TOLERANCE samples the tie window uniformly, so a
+        # one-sided distribution can only come from an engine being
+        # 3-strike-marked dead (the intake defect this probe guards).
+        # 80% of 20 = 16 requests, i.e. the same "no engine eats the burst"
+        # bound as the balance suite's P1 (loose floor 0.85 over the
+        # uniform-random calibration; this probe keeps the historical 0.80
+        # as its hard bound — semantics unchanged by the task #61 rework).
         addr_map = ops.addr_to_name()
         dist = Counter(addr_map.get(a, a) for a, e in results if e is None and a)
         n_ok = sum(dist.values())

@@ -1,64 +1,47 @@
 """Smoke test cases (functional correctness e2e).
 
-Ported 1:1 from the legacy scripts (assertion thresholds preserved):
+Two families:
 
-  smoke_cancel_t1..t6        <- cancel_smoke.py    T1-T6
-  smoke_scheduling_s1..s12   <- scheduling_smoke.py S1-S12
-  smoke_anomaly_e1..e3       <- anomaly_smoke.py   E1-E3
+  * cancel (smoke_cancel_t1..t6) and anomaly (smoke_anomaly_e1..e4) —
+    functional-correctness cases ported 1:1 from the legacy scripts
+    (cancel_smoke.py / anomaly_smoke.py), unchanged by the task #61 rework.
 
-Profile adaptation (task #55; supersedes the legacy run_matrix_smoke.sh
-mode grouping): the v1 batch/direct/queue split existed to vary the LB
-strategy per mode, which v2 removed — all four profiles (batch-window /
-single-nonbatch / single-batch / window-nonbatch) share QUEUE + FIFO
-ordering and the same ESTIMATED_TTFT prefill selector, so scoping is by
-delivery-path semantics instead:
-  * S9 requires enqueue_batch — the queue-depth gate lives at the
-    engine's EnqueueBatch entry only (structurally unreachable on the
-    NON_BATCH GenerateStreamCall path)
-  * everything else runs under all profiles; S4 opens the seed's client
-    stream itself under NON_BATCH (see its docstring)
+  * balance/affinity (bal_* / aff_*) — RESULT-PROPERTY cases (task #61
+    rework, superseding scheduling_smoke.py S1-S12).  They assert observable
+    outcome properties (P-series), not mechanism narratives; every measured
+    property is graded against the central band table (grade.GRADE_BANDS) —
+    strict=优异 / normal=良好 / loose 地板（超出即不可用）— and each case
+    returns its achieved grade for the suite-level verdict
+    (all strict=优异 / all ≥normal=良好 / any beyond loose=不可用).
+    Hard invariants (P2 no-starvation, P6 completeness) carry no band:
+    violation is unusable at every grade.
 
-Behavioural corrections for the Java mock (documented inline):
-  * S1 — the legacy "slow worker gets zero of 10 requests" assertion never
-    held on the Java stack (it was inert in the legacy code due to the
-    role_addr bug): COST_BASED_PREFILL's score is ledgerWaitMs + FORMULA
-    estimate (a pure function of the request's token shape) + batcherWaitMs,
-    so an engine's *speed* (set_perf 100 -> 200ms) is invisible to the score
-    and serial requests leave no backlog — both engines score identically
-    and RANDOM_WITHIN_TOLERANCE samples uniformly within the tie window.
-    S1 now asserts the balance contract (both engines used, neither above
-    80% of 20 requests); slow-engine avoidance is a *backlog* signal and is
-    asserted by S4 (real pending hotspot).
-  * S6 — the legacy "all 5 requests land on one worker" assertion assumed
-    deterministic selection, but RANDOM_WITHIN_TOLERANCE uniformly samples
-    the tie window per request by design (determinism needs BEST_ONLY), so
-    5 requests only co-located with probability 2*(1/2)^4 = 12.5%.  S6 now
-    asserts the same balance contract as S1 on 20 equivalent requests.
-  * S4 — legacy injected a fake ``queue_depth`` display value (80000) that the
-    Java mock implements as a *real* enqueue rejection gate
-    (FaultInjectionConfig.queueDepthLimit); a huge limit never triggers, so
-    the legacy "requests avoid the hot worker" assertion no longer holds via
-    that knob.  The Java-true way to build a hotspot is real ledger load:
-    a big seed request (input_len 49152 -> FORMULA estimate ~49s) lands on
-    one engine, the mock snapshot confirms the seed is really enqueued
-    there, and every subsequent request must deterministically avoid it
-    (score gap ~49s >> the ~205ms tolerance window; outlier rejection also
-    removes the loaded engine).  The engine that did NOT get the seed is
-    restored to fast perf so it drains instantly and its ledger wait stays
-    ~0 — otherwise the verification wave itself piles pending onto the cool
-    engine and the load balancer correctly sees-saws back (an earlier port
-    asserted "4 concurrent requests concentrate 4/0 on one engine", which
-    only holds when the whole burst is evaluated against one stale ledger
-    snapshot; when the master processes it in two groups the second group
-    sees the first group's pending and splits 2/2 — correct balancing, not
-    a defect).  The verification wave is serial with spacing so every
-    request is evaluated against live ledger state: 0 of 5 requests may
-    land on the heavy engine (deterministic, no concurrency window).
-  * S9 — 50000 is far above any reachable pending count, so the gate never
-    fires and requests still route to the target worker; the legacy
-    ``target_count > 0`` assertion is kept and now documents exactly that.
-  * role_addr is called with the proto role *string* (the legacy code passed
-    the ROLE_TYPE enum int, which never matched — see engine_ops.py).
+    Case map (task #61 disposition):
+
+      bal_uniform_serial        <- S1+S6+S8 merged (P1+P2, two variants:
+                                    plain / speed-heterogeneous injection)
+      bal_concurrent_mix        <- S7 strengthened (P1 relaxed + P2 + P6)
+      bal_overload_avoid_prefill<- S4 + new P7 short-request protection
+                                    (P5 graded + P6 + P7 dual-caliber)
+      bal_overload_avoid_decode <- S11 strengthened (P5 delta-caliber graded
+                                    + P6 + takeover assertions)
+      bal_decode_spread         <- S3+S10 merged (P2+P1, n=10/50 two tiers)
+      aff_prefix_stickiness     <- S2+S5 merged (P9 graded; the legacy
+                                    cache_keys>0 assertion demoted to an
+                                    observational log — mock-internal cache
+                                    accounting belongs to mock unit tests)
+      bal_gate_no_starvation    <- S9 rebuilt around a REAL queue-depth
+                                    gate (P6 + share-shift observation)
+      (S12 deleted — the reserve weight-lowering mechanism it asserted
+      does not exist on the Java stack; its collapse guard is subsumed by
+      bal_decode_spread's P2.)
+
+    Historical mechanism notes survive as per-case comments only where they
+    explain WHY a property band is what it is (e.g. tie-window uniform
+    sampling calibrates P1's loose floor).  Result properties are asserted
+    profile-agnostically: all bal_/aff_ cases run under every profile (the
+    only exception is bal_gate_no_starvation's requires=["enqueue_batch"] —
+    the queue-depth gate lives at the engine's EnqueueBatch entry only).
 """
 
 from __future__ import annotations
@@ -69,6 +52,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 from .context import CaseContext, CaseDef, rid_base
+from .grade import GradeReport
 from .harness import AssertUtils
 
 KV_CACHE_SYNC_WAIT_S = 2.0
@@ -423,7 +407,8 @@ def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
 
 
 # ===========================================================================
-# Scheduling cases (scheduling_smoke.py S1-S12)
+# Balance / affinity cases (result-property graded — task #61 rework of
+# scheduling_smoke.py S1-S12)
 # ===========================================================================
 
 
@@ -432,69 +417,88 @@ def _prefill_names(ops) -> list[str]:
     return sorted(name for name, e in snap.items() if e.get("role") == "prefill")
 
 
-@case("smoke_scheduling_s1", source="scheduling_smoke.py S1 (Java-corrected)")
-def s1_load_balance(ctx: CaseContext):
-    """Basic load balance: equivalent-score engines share traffic evenly.
+def _decode_names(ops) -> list[str]:
+    snap = ops.snapshot_by_name()
+    return sorted(name for name, e in snap.items() if e.get("role") == "decode")
 
-    Java-corrected semantics: COST_BASED_PREFILL scores each engine as
-    ledgerWaitMs + FORMULA estimate + batcherWaitMs.  The FORMULA estimate
-    (default ``sum(computeTokens) + 0.3*sum(hitCacheTokens)``) depends only
-    on the request's token shape, and serial requests complete before the
-    next is scheduled, so a *speed* difference (set_perf 100 -> 200ms) never
-    shows up in the score — with no backlog both engines tie and
-    RANDOM_WITHIN_TOLERANCE picks uniformly.  Slow-engine avoidance is a
-    backlog signal and belongs to S4.  Balance contract: of 20 serial
-    requests both prefills are used and neither takes more than 80%.
+
+@case(
+    "bal_uniform_serial",
+    source="scheduling_smoke.py S1+S6+S8 (merged, task #61)",
+)
+def bal_uniform_serial(ctx: CaseContext):
+    """Homogeneous serial traffic spreads evenly across equivalent engines.
+
+    Result properties (graded): P1 request-uniformity max-share + P2
+    no-starvation, measured over n=20 serial requests per variant, counted
+    from CLIENT landing addresses.
+
+    Two parameterized variants:
+      * plain — no injection;
+      * speed_hetero — one prefill slowed via set_perf (200ms fixed).  The
+        injection is a regression guard, not a routing signal: the prefill
+        score is ledgerWaitMs + FORMULA estimate (a pure function of the
+        request's token shape) + batcherWaitMs, so engine *speed* never
+        enters the score and serial requests leave no backlog — both
+        engines stay tied and the tie window is sampled uniformly per
+        request.  A skewed split under this variant would mean the score
+        model started leaking speed or leaving residue — a real defect the
+        P1 property catches at any grade.
     """
     ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
     n = 20
-    is_batch = ctx.batch_dispatch()
     perf_engine = None
     try:
-        if is_batch:
-            prefill_names = _prefill_names(ops)
-            if len(prefill_names) >= 2:
-                ops.set_perf(prefill_names[1], prefill_fixed_ms=200.0)
-                perf_engine = prefill_names[1]
-                # Keep the slow injection as a regression guard: it must not
-                # break the even distribution (the score model ignores
-                # engine speed, only backlog matters — see S4).
-                time.sleep(1.5)
+        for variant, slow in (("plain", False), ("speed_hetero", True)):
+            if slow:
+                prefill_names = _prefill_names(ops)
+                if len(prefill_names) >= 2:
+                    ops.set_perf(prefill_names[1], prefill_fixed_ms=200.0)
+                    perf_engine = prefill_names[1]
+                    time.sleep(1.5)  # master perf sync
 
-        addrs = []
-        for _ in range(n):
-            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
-            keys = [rid * 100 + j for j in range(3)]
-            addr, err = ops.run_one_request(
-                rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
+            addrs = []
+            failure = None
+            for _ in range(n):
+                rid = ops.next_request_id(rid_base(ctx, "scheduling"))
+                keys = [rid * 100 + j for j in range(3)]
+                addr, err = ops.run_one_request(
+                    rid,
+                    output_len=2,
+                    block_keys=keys,
+                    stream_timeout_s=STREAM_TIMEOUT_S,
+                )
+                if err:
+                    failure = f"{variant}: rid={rid} failed: {err}"
+                    break
+                addrs.append(addr)
+            if failure:
+                report.invariant("P6", False, context=variant, detail=failure)
+                break
+
+            addr_map = ops.addr_to_name()
+            dist = Counter(addr_map.get(a, a) for a in addrs)
+            used = len(dist)
+            max_share = max(dist.values()) / n
+            dist_json = json.dumps(dict(dist), sort_keys=True)
+            report.check(
+                "P1",
+                max_share,
+                context=variant,
+                detail=f"n={n}, dist={dist_json}",
             )
-            if err:
-                return False, f"rid={rid} failed: {err}"
-            addrs.append(addr)
+            report.invariant("P2", used >= 2, context=variant, detail=f"workers={used}")
 
-        counts = Counter(addrs)
-        num_workers = len(counts)
-        max_ratio = max(counts.values()) / n if n else 1.0
-        addr_map = ops.addr_to_name()
-        dist_names = {addr_map.get(a, a): c for a, c in counts.items()}
-        snap = ops.snapshot_by_name()
-        accepted = {
-            name: info.get("accepted", 0)
-            for name, info in snap.items()
-            if info.get("role") == "prefill"
-        }
-
-        passed = num_workers >= 2 and max_ratio <= 0.8
-        slow_detail = ""
-        if is_batch and perf_engine:
-            slow_count = dist_names.get(perf_engine, 0)
-            slow_detail = f", slow_worker={perf_engine}({slow_count}) — observational: engine speed is not part of the COST_BASED score"
-        return passed, (
-            f"requests={n}, workers={num_workers}, max_ratio={max_ratio:.2f}, "
-            f"distribution={json.dumps(dist_names, sort_keys=True)}, "
-            f"snapshot_accepted={json.dumps(accepted, sort_keys=True)}, "
-            f"assertion=workers>=2 and max_ratio<=0.8 (tie-window uniform "
-            f"sampling){slow_detail}"
+        slow_note = (
+            f", speed_injection={perf_engine} (observational: engine speed "
+            f"is not a prefill-score input)"
+            if perf_engine
+            else ""
+        )
+        return report.finish(
+            f"variants=plain+speed_hetero, n={n}, grades: {report.summary()}"
+            f"{slow_note}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -506,136 +510,130 @@ def s1_load_balance(ctx: CaseContext):
                 pass
 
 
-@case("smoke_scheduling_s2", source="scheduling_smoke.py S2")
-def s2_kv_cache_affinity(ctx: CaseContext):
+@case(
+    "bal_concurrent_mix",
+    source="scheduling_smoke.py S7 (strengthened, task #61)",
+)
+def bal_concurrent_mix(ctx: CaseContext):
+    """A concurrent mixed burst must not collapse onto a single engine.
+
+    Result properties: P1 (relaxed band inheritance) + P2 no-starvation +
+    P6 completeness over a 20-request / 20-way-concurrent burst, counted
+    from client landing addresses.
+
+    P1 band note (relax=1): under a concurrent burst the master may process
+    the burst in several groups; within a group every request is evaluated
+    against the same live ledger snapshot, so the split is a fresh uniform
+    draw per group — group-splitting is CORRECT balancing behaviour, not a
+    defect.  The effective bands are therefore shifted one tier right
+    (strict→0.75, normal/loose→0.85): the calibrated loose floor (0.85,
+    false-failure < 1% at 2 engines / 20 samples) is never widened past
+    itself.
+    """
     ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
     base = rid_base(ctx, "scheduling")
-    keys = [1001, 1002, 1003]
     try:
-        rid_a = ops.next_request_id(base)
-        addr_a, err_a = ops.run_one_request(
-            rid_a,
-            input_len=2048,
-            output_len=2,
-            block_keys=keys,
-            stream_timeout_s=STREAM_TIMEOUT_S,
-        )
-        if err_a:
-            return False, f"request A failed: {err_a}"
-        time.sleep(KV_CACHE_SYNC_WAIT_S)
-        rid_b = ops.next_request_id(base)
-        addr_b, err_b = ops.run_one_request(
-            rid_b,
-            input_len=2048,
-            output_len=2,
-            block_keys=keys,
-            stream_timeout_s=STREAM_TIMEOUT_S,
-        )
-        if err_b:
-            return False, f"request B failed: {err_b}"
-        if addr_a == addr_b:
-            return True, f"affinity confirmed: A=B={addr_a}"
-        # retry once (cache sync may lag)
-        time.sleep(KV_CACHE_SYNC_WAIT_S)
-        rid_c = ops.next_request_id(base)
-        addr_c, err_c = ops.run_one_request(
-            rid_c,
-            input_len=2048,
-            output_len=2,
-            block_keys=keys,
-            stream_timeout_s=STREAM_TIMEOUT_S,
-        )
-        if err_c:
-            return False, f"request C failed: {err_c}"
-        passed = addr_a == addr_c
-        return passed, (
-            f"retry: A={addr_a}, B={addr_b}, C={addr_c}, "
-            f"match={'A==C' if passed else 'none'}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
+        rids = [ops.next_request_id(base) for _ in range(20)]
 
-
-@case("smoke_scheduling_s3", source="scheduling_smoke.py S3")
-def s3_decode_balance(ctx: CaseContext):
-    ops = ctx.ops()
-    n = 10
-    try:
-        for _ in range(n):
-            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
+        def run(rid: int):
             keys = [rid * 100 + j for j in range(3)]
-            _, err = ops.run_one_request(
+            return ops.run_one_request(
                 rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
             )
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            results = list(pool.map(run, rids))
+        addrs = []
+        failures = []
+        for rid, (addr, err) in zip(rids, results):
             if err:
-                return False, f"rid={rid} failed: {err}"
-        snap = ops.snapshot_by_name()
-        completed = {
-            name: info.get("completed", 0)
-            for name, info in snap.items()
-            if info.get("role") == "decode"
-        }
-        total = sum(completed.values())
-        used = sum(1 for v in completed.values() if v > 0)
-        passed = used >= 2 and total >= n
-        return passed, (
-            f"requests={n}, decode_workers={used}, "
-            f"total_completed={total}, "
-            f"distribution={json.dumps(completed, sort_keys=True)}"
+                failures.append(f"rid={rid}: {err}")
+            else:
+                addrs.append(addr)
+
+        addr_map = ops.addr_to_name()
+        dist = Counter(addr_map.get(a, a) for a in addrs)
+        used = len(dist)
+        n_ok = len(addrs)
+        max_share = max(dist.values()) / n_ok if n_ok else 1.0
+        dist_json = json.dumps(dict(dist), sort_keys=True)
+
+        report.invariant(
+            "P6",
+            not failures and n_ok == 20,
+            detail=f"completed={n_ok}/20, failures={failures[:2]}",
+        )
+        report.check(
+            "P1",
+            max_share,
+            context="burst20",
+            relax=1,
+            detail=f"ok={n_ok}, dist={dist_json} (concurrent group-split "
+            f"is correct behaviour — bands shifted one tier)",
+        )
+        report.invariant("P2", used >= 2, detail=f"workers={used}")
+
+        return report.finish(
+            f"burst=20x20-way, workers={used}, " f"grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
 
 
 @case(
-    "smoke_scheduling_s4",
-    source="scheduling_smoke.py S4 (Java-corrected)",
+    "bal_overload_avoid_prefill",
+    source="scheduling_smoke.py S4 + short-request protection (task #61)",
 )
-def s4_hotspot_filter(ctx: CaseContext):
-    """Hotspot avoidance: requests divert away from the engine with real load.
+def bal_overload_avoid_prefill(ctx: CaseContext):
+    """Single-engine prefill overload: traffic diverts AND short requests stay fast.
 
-    Java-corrected scenario (see module docstring): the hotspot is built
-    from *real* ledger load, not the legacy fake queue_depth knob.  Two
-    earlier race flaws, both fixed here:
+    Result properties: P5 overload-avoidance hot share (graded), P6
+    completeness, P7 short-request protection (graded, dual caliber).
 
-    * waiting for a burst to complete drained the pending back to zero
-      before the assertion had any basis (the original port);
-    * asserting that a 4-request concurrent burst "concentrates 4/0" only
-      holds when the whole burst is evaluated against one stale ledger
-      snapshot — when the master processes the burst in two groups the
-      second group sees the first group's fresh pending and splits 2/2.
-      That seesaw is *correct* load balancing, not a defect, so the
-      deterministic form is a serial wave with spacing:
-
-      1. slow both prefill engines to 5s (the seed must survive on either
-         landing spot) and let the master sync
-      2. seed one fire-and-forget request with input_len=49152: the ledger
-         predicts ~49s, so whichever engine X it lands on stays heavy for
-         the whole observation window
+    Hotspot construction (inherited from the S4 port, Java-true — real
+    ledger load, not the legacy fake queue_depth knob):
+      1. slow BOTH prefill engines to 5s fixed and let the master sync;
+      2. seed one fire-and-forget request with input_len=49152 — the ledger
+         predicts ~49s, so whichever engine it lands on stays heavy for the
+         whole observation window;
       3. poll the mock snapshot until a prefill engine reports
-         waiting+running >= 1 — that engine is X, and the poll proves the
-         batcher really dispatched the seed (no master-ledger guesswork)
-      4. restore the other engine T to 100ms so T drains instantly
-         (ledger wait ~0); X stays slow at 5s
-      5. wave: 5 serial requests (0.4s spacing), default shape — each is
-         evaluated against live ledger state: X's wait (~49s) vs T's (~0)
-         is far past the tolerance window (~205ms), and outlier rejection
-         removes X outright
-      6. assertion (deterministic): 0 of 5 requests land on X
+         waiting+running >= 1 (engine-side proof the seed was dispatched,
+         and identification of the hot engine);
+      4. restore the cool engine to 100ms (drains instantly, ledger ~0);
+      5. baseline: ONE timed request — deterministically lands on the cool
+         engine and anchors the P7 denominator;
+      6. wave: 5 serial timed requests (0.4s spacing) — each is evaluated
+         against live ledger state; every one is consumed to completion so
+         per-request timings are client-observed.
 
-    Profile semantics (v2, task #55): the hotspot lives in the master-side
-    request ledger, which books BOTH delivery modes — BATCH groups through
-    the inflight-batch accounting and NON_BATCH/direct requests through
-    PrefillEndpoint.registerDirectRequest — so the deterministic-avoidance
-    contract holds under every profile.  The only profile-dependent step is
-    the seed's dispatch proof: under BATCH the master enqueues the
-    fire-and-forget seed itself (the engine shows pending with no client
-    action), while under NON_BATCH the master only publishes a route
-    decision, so the seed's client stream is OPENED at fire time (never
-    consumed) for the engine-side pending the hotspot poll needs.
+    P7 dual caliber (profile-dependent measurement, one band table):
+      * NON_BATCH dispatch — client TTFT: schedule-return → first stream
+        output (StreamSnapshot.first_received_s);
+      * BATCH dispatch — completion duration: schedule-return → stream
+        terminal state.  Under BATCH the mock surfaces the first
+        FetchResponse message only after decode completes (the smoke T3
+        lesson), so FetchResponse "TTFT" cannot observe the prefill phase
+        at all; the completion-duration口径 carries the same protection
+        signal (a request swallowed by the hot engine pays its ~5s prefill
+        either way).
+
+    Drainage (inherited S4 lesson, kept in finally): the seed is
+    fire-and-forget, so every fired request is consumed to terminal state
+    (cancel as fallback) — otherwise the seed's ~49s ledger prediction
+    keeps one engine's wait high for the rest of the suite and poisons
+    later balance cases.
     """
     ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
     base = rid_base(ctx, "scheduling")
+    is_batch = ctx.batch_dispatch()
+    caliber = "completion_duration" if is_batch else "client_ttft"
+    prefill_names: list[str] = []
+    fired: list[tuple[int, object]] = []  # (rid, response) — drained in finally
+    fired_handles: dict[int, object] = (
+        {}
+    )  # rid -> opened direct stream (NON_BATCH seed)
     try:
         prefill_names = _prefill_names(ops)
         if len(prefill_names) < 2:
@@ -646,8 +644,6 @@ def s4_hotspot_filter(ctx: CaseContext):
         time.sleep(1.5)  # master syncs the slowed perf before we seed
 
         addr_map = ops.addr_to_name()
-        fired: list[tuple[int, object]] = []  # (rid, response) — cancelled in finally
-        fired_handles: dict[int, object] = {}  # rid -> stream handle (NON_BATCH)
 
         def fire(rid: int, **kwargs):
             """Schedule without consuming the stream — keeps it pending."""
@@ -658,9 +654,9 @@ def s4_hotspot_filter(ctx: CaseContext):
             if resp.enqueued_by_master:
                 return addr_map.get(ops.role_addr(resp, "PREFILL"), ""), None
             # NON_BATCH: the master only published the route decision; the
-            # engine sees the seed when the CLIENT opens the stream.  Open it
-            # fire-and-forget (never wait) so the engine-side pending the
-            # hotspot poll needs really exists.
+            # engine sees the seed when the CLIENT opens the stream.  Open
+            # it fire-and-forget (never wait) so the engine-side pending
+            # the hotspot poll needs really exists.
             input_pb = ops.build_generate_input(rid, **kwargs)
             try:
                 fired_handles[rid] = ops.start_stream(resp, rid, input_pb=input_pb)
@@ -668,10 +664,39 @@ def s4_hotspot_filter(ctx: CaseContext):
                 return None, f"seed direct stream failed to open: {exc!r}"
             return addr_map.get(ops.role_addr(resp, "PREFILL"), ""), None
 
-        # -- seed: big ledger footprint, fire-and-forget.  input_len=49152
-        #    keeps the seed's predicted wait (~49s) far above anything the
-        #    wave can pile onto the cool engine (~10s max) for the whole
-        #    observation window.
+        def timed_request(rid: int, **kwargs):
+            """Schedule + consume to completion, capturing client timings.
+
+            Returns (engine_name, ttft_s, duration_s, err); the request is
+            fully consumed here (NOT appended to *fired* — only the
+            fire-and-forget seed needs the finally-drain).
+            """
+            t_send = time.monotonic()
+            try:
+                resp = ops.schedule(rid, **kwargs)
+            except Exception as exc:
+                return None, None, None, repr(exc)
+            if resp.code != 200 or not resp.success:
+                return None, None, None, f"schedule failed: {resp.error_message}"
+            name = addr_map.get(ops.role_addr(resp, "PREFILL"), "")
+            input_pb = (
+                None
+                if resp.enqueued_by_master
+                else ops.build_generate_input(rid, **kwargs)
+            )
+            try:
+                handle = ops.start_stream(resp, rid, input_pb=input_pb)
+            except Exception as exc:
+                return name, None, None, f"stream failed to open: {exc!r}"
+            ended = handle.wait_end(STREAM_TIMEOUT_S)
+            snap = handle.snap
+            ttft = snap.first_received_s - t_send if snap.first_received_s else None
+            dur = snap.terminated_s - t_send if snap.terminated_s else None
+            if not ended or snap.error or not snap.completed:
+                return name, ttft, dur, (snap.error or "stream did not complete")
+            return name, ttft, dur, None
+
+        # -- seed: big ledger footprint, fire-and-forget (~49s predicted wait).
         seed_rid = ops.next_request_id(base)
         seed_name, err = fire(seed_rid, input_len=49152, output_len=2)
         if err:
@@ -679,9 +704,7 @@ def s4_hotspot_filter(ctx: CaseContext):
         if seed_name not in prefill_names:
             return False, f"seed request went to unknown worker {seed_name}"
 
-        # -- poll the mock snapshot until the seed really shows up on an
-        #    engine: proves the batcher dispatched it and identifies the
-        #    hot engine without guessing at master-side ledger state.
+        # -- engine-side proof: poll the snapshot until the seed shows up.
         deadline = time.monotonic() + 6.0
         hot = None
         while time.monotonic() < deadline and hot is None:
@@ -696,62 +719,86 @@ def s4_hotspot_filter(ctx: CaseContext):
         if hot is None:
             return False, "seed never appeared on any engine (engine side)"
         if hot != seed_name:
-            return False, (f"seed routed to {seed_name} but pending showed up on {hot}")
+            return False, f"seed routed to {seed_name} but pending showed up on {hot}"
         cool = next(n for n in prefill_names if n != hot)
 
-        # -- restore the cool engine to fast so it drains instantly; its
-        #    ledger wait stays ~0 and the wave cannot pile up on it.
+        # -- cool engine fast again; baseline anchors the P7 denominator
+        #    (hot carries the ~49s seed prediction → baseline lands cool).
         ops.set_perf(cool, prefill_fixed_ms=100.0)
         time.sleep(0.3)
+        base_rid = ops.next_request_id(base)
+        base_name, base_ttft, base_dur, base_err = timed_request(base_rid, output_len=2)
+        if base_err:
+            report.invariant("P6", False, detail=f"baseline failed: {base_err}")
+            return report.finish(f"baseline request failed: {base_err}")
 
-        # -- verification wave: serial with spacing — every request is
-        #    evaluated against live ledger state (no stale-snapshot race).
-        wave_names = []
+        # -- serial timed wave: every request faces live ledger state.
+        wave = []
         for i in range(5):
             rid = ops.next_request_id(base)
-            name, err = fire(rid, output_len=2)
-            if err:
-                return False, f"rid={rid} failed: {err}"
-            wave_names.append(name)
+            entry = timed_request(rid, output_len=2)
+            wave.append(entry)
             if i < 4:
                 time.sleep(0.4)
 
-        dist = Counter(wave_names)
+        dist = Counter(w[0] for w in wave if w[3] is None)
         hot_count = dist.get(hot, 0)
-        cool_count = dist.get(cool, 0)
-        passed = hot_count == 0
-        return passed, (
-            f"hot={hot}({hot_count}), cool={cool}({cool_count}), "
-            f"dist={json.dumps(dict(dist), sort_keys=True)}, "
-            f"seed={seed_name}, "
-            f"assertion=0 of 5 requests land on the heavy engine "
-            f"(deterministic avoidance; serial wave, no concurrency window)"
+        hot_share = hot_count / len(wave) if wave else 1.0
+        failures = [f"landing={w[0]}: {w[3]}" for w in wave if w[3] is not None]
+
+        # P6: baseline + every wave request completed (no loss, no hang).
+        report.invariant(
+            "P6",
+            not failures,
+            detail=f"failures={failures[:2]}",
+        )
+        # P5: hot-engine share of the wave (graded; strict=0 = deterministic).
+        report.check(
+            "P5",
+            hot_share,
+            context="prefill_overload",
+            detail=f"hot={hot}({hot_count}/5), cool={cool}({dist.get(cool, 0)}), "
+            f"dist={json.dumps(dict(dist), sort_keys=True)}",
+        )
+        # P7: short-request protection relative to the unloaded baseline,
+        # dual caliber by dispatch mode (see docstring).
+        metric_idx = 2 if is_batch else 1  # (name, ttft, dur, err)
+        metric_base = (base_dur if is_batch else base_ttft) or 0.0
+        wave_metrics = [w[metric_idx] for w in wave if w[3] is None and w[metric_idx]]
+        if metric_base > 0 and wave_metrics:
+            p7_value = max(wave_metrics) / metric_base
+            p7_detail = (
+                f"caliber={caliber}, base={metric_base:.3f}s, "
+                f"wave_max={max(wave_metrics):.3f}s"
+            )
+        else:
+            p7_value = float("inf")
+            p7_detail = f"caliber={caliber}, missing timing (base={metric_base})"
+        report.check("P7", p7_value, context=caliber, detail=p7_detail)
+
+        return report.finish(
+            f"hot={hot}, cool={cool}, hot_share={hot_share:.2f}, {p7_detail}, "
+            f"grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
     finally:
         try:
-            ops.set_perf(prefill_names[0], prefill_fixed_ms=100.0)
-            ops.set_perf(prefill_names[1], prefill_fixed_ms=100.0)
+            for name in prefill_names:
+                ops.set_perf(name, prefill_fixed_ms=100.0)
         except Exception:
             pass
-        # Fire-and-forget requests never consume FetchResponse, so their
-        # master-side inflight/ledger entries can linger long after the
-        # engine finished (observed: inflight_clean timing out at 90s; the
-        # seed's ~49s ledger prediction then kept one engine's wait high
-        # for the rest of the suite and poisoned later balance assertions —
-        # S5 lost its cache affinity and S6 drew 20/20 onto the other
-        # engine).  Cancelling alone does not reliably clear those entries
-        # either: for a stream nobody ever fetched, the cancel/batch-
-        # completion race is nondeterministic.  The deterministic cleanup
-        # is the normal completion path every other case uses — consume
-        # each fired request's FetchResponse to terminal state (the seed's
+        # Drainage (inherited S4 lesson): fire-and-forget requests never
+        # consume FetchResponse, so their master-side inflight/ledger entries
+        # can linger long after the engine finished and poison later balance
+        # cases.  The deterministic cleanup is the normal completion path —
+        # consume each fired request's stream to terminal state (the seed's
         # ~5s prefill is the only slow one), with cancel as fallback.
         for rid, resp in fired:
             try:
                 if rid in fired_handles:
-                    # NON_BATCH: the direct stream opened at fire time IS the
-                    # completion path — consume it to terminal state.
+                    # NON_BATCH: the direct stream opened at fire time IS
+                    # the completion path — consume it to terminal state.
                     fired_handles[rid].wait_end(20.0)
                 else:
                     ops.start_stream(resp, rid).wait_end(20.0)
@@ -766,429 +813,465 @@ def s4_hotspot_filter(ctx: CaseContext):
             pass
 
 
-@case("smoke_scheduling_s5", source="scheduling_smoke.py S5")
-def s5_kv_cache_hit_preference(ctx: CaseContext):
-    ops = ctx.ops()
-    base = rid_base(ctx, "scheduling")
-    keys = [999]
-    try:
-        rid_a = ops.next_request_id(base)
-        addr_a, err_a = ops.run_one_request(
-            rid_a,
-            input_len=2048,
-            output_len=2,
-            block_keys=keys,
-            stream_timeout_s=STREAM_TIMEOUT_S,
-        )
-        if err_a:
-            return False, f"request A failed: {err_a}"
-        time.sleep(KV_CACHE_SYNC_WAIT_S)
-        rid_b = ops.next_request_id(base)
-        addr_b, err_b = ops.run_one_request(
-            rid_b,
-            input_len=2048,
-            output_len=2,
-            block_keys=keys,
-            stream_timeout_s=STREAM_TIMEOUT_S,
-        )
-        if err_b:
-            return False, f"request B failed: {err_b}"
-        addr_map = ops.addr_to_name()
-        name_a = addr_map.get(addr_a, addr_a)
-        name_b = addr_map.get(addr_b, addr_b)
-        snap = ops.snapshot_by_name()
-        cache_count = snap.get(name_a, {}).get("cache_keys", 0)
-        passed = addr_a == addr_b and cache_count > 0
-        return passed, (
-            f"A={name_a}, B={name_b}, "
-            f"same={'yes' if addr_a == addr_b else 'no'}, "
-            f"cache_keys={cache_count}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-
-
 @case(
-    "smoke_scheduling_s6",
-    source="scheduling_smoke.py S6 (Java-corrected)",
+    "bal_overload_avoid_decode",
+    source="scheduling_smoke.py S11 (strengthened, task #61)",
 )
-def s6_cost_based_tie_window_balance(ctx: CaseContext):
-    """Equivalent-cost engines are tied, not deterministic — assert balance.
+def bal_overload_avoid_decode(ctx: CaseContext):
+    """Decode KV exhaustion: the pressured engine stops taking new work and
+    the healthy engines absorb the traffic.
 
-    The legacy ``all 5 requests land on one worker`` assertion assumed
-    COST_BASED_PREFILL selects deterministically, but the selector is
-    RANDOM_WITHIN_TOLERANCE by design: equal scores form a tie window
-    (max(score*10%, 20ms)) and the winner is uniformly sampled per request
-    (reservoir sampling in selectBaselineCandidate) — 5 requests only
-    co-located with probability 2*(1/2)^4 = 12.5%.  A deterministic pick
-    would need candidateChoice BEST_ONLY.  The real contract: equivalent
-    engines share traffic; of 20 requests both prefills are used and
-    neither takes more than 80%.
+    Result properties: P5 overload-avoidance in the *delta caliber* (graded:
+    how many of the n requests still complete on the KV-exhausted engine),
+    P6 completeness, P2 no-starvation takeover assertions.
+
+    P5 band note (case override, absolute-delta caliber): the global P5
+    share bands translate awkwardly to 10 samples (0.05*10 = 0.5); the
+    delta bands strict=0 / normal=1 / loose=2 carry the same intent with
+    the historical calibration that exactly one straggler request can
+    already be in prefill→decode handoff when the pressure snapshot lands
+    (the legacy S11 delta<=1 was the stable-pass baseline).
+
+    Takeover strengthening (vs legacy S11, which only bounded the target
+    delta): the non-pressured decode engines must actually absorb the
+    diverted load — at least two of them take requests, and every one of
+    the n requests completes somewhere (no loss).
     """
     ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
+    injected: str | None = None
     try:
-        addrs = []
-        for _ in range(20):
-            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
-            keys = [rid * 100 + j for j in range(3)]
-            addr, err = ops.run_one_request(
-                rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
-            )
-            if err:
-                return False, f"rid={rid} failed: {err}"
-            addrs.append(addr)
-        addr_map = ops.addr_to_name()
-        dist = Counter(addr_map.get(a, a) for a in addrs)
-        num_workers = len(dist)
-        max_ratio = max(dist.values()) / len(addrs)
-        snap = ops.snapshot_by_name()
-        accepted = {
-            name: info.get("accepted", 0)
-            for name, info in snap.items()
-            if info.get("role") == "prefill"
-        }
-        passed = num_workers >= 2 and max_ratio <= 0.8
-        return passed, (
-            f"workers={num_workers}, max_ratio={max_ratio:.2f}, "
-            f"dist={json.dumps(dict(dist), sort_keys=True)}, "
-            f"accepted={json.dumps(accepted, sort_keys=True)}, "
-            f"assertion=workers>=2 and max_ratio<=0.8 (tie-window uniform "
-            f"sampling, not determinism)"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-
-
-@case("smoke_scheduling_s7", source="scheduling_smoke.py S7")
-def s7_cas_fairness(ctx: CaseContext):
-    ops = ctx.ops()
-    base = rid_base(ctx, "scheduling")
-    try:
-        rids = [ops.next_request_id(base) for _ in range(20)]
-
-        def run(rid):
-            keys = [rid * 100 + j for j in range(3)]
-            return ops.run_one_request(
-                rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
-            )
-
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            results = list(pool.map(run, rids))
-        addrs = []
-        for rid, (addr, err) in zip(rids, results):
-            if err:
-                return False, f"rid={rid} failed: {err}"
-            addrs.append(addr)
-        addr_map = ops.addr_to_name()
-        dist = Counter(addr_map.get(a, a) for a in addrs)
-        num_workers = len(dist)
-        snap = ops.snapshot_by_name()
-        accepted = {
-            name: info.get("accepted", 0)
-            for name, info in snap.items()
-            if info.get("role") == "prefill"
-        }
-        passed = num_workers >= 2
-        return passed, (
-            f"workers={num_workers}, "
-            f"dist={json.dumps(dict(dist), sort_keys=True)}, "
-            f"accepted={json.dumps(accepted, sort_keys=True)}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-
-
-@case(
-    "smoke_scheduling_s8",
-    source="scheduling_smoke.py S8 (Java-corrected)",
-)
-def s8_ttft_sorting(ctx: CaseContext):
-    """ESTIMATED_TTFT tie-window balance: equivalent-score engines share traffic.
-
-    Java-corrected semantics: the legacy S8 asserted that a fast engine
-    (set_perf 10ms) receives at least as many requests as a slow one
-    (500ms), assuming the TTFT sort "sees" engine speed.  It does not:
-    the v2 prefill selector (ESTIMATED_TTFT in the harness config) scores
-    ledger wait + FORMULA estimate (a pure function of the request's token
-    shape) — engine perf is not a score input, exactly like COST_BASED
-    (see S1).  Serial requests with no backlog leave both engines tied,
-    so the split is a uniform draw (P(fast < slow) ≈ 38% for 10 requests);
-    the historical passes leaned on a settle-latency side effect — a
-    request on the slow engine leaves its ledger entry alive longer,
-    nudging later requests away — which prompt settling does not
-    reproduce.  The real contract is the same balance as S1: of 20
-    requests both prefills are used and neither takes more than 80%; the
-    perf split is observational only.  Dispatcher/decision axes are
-    invisible to the selector, so the case runs under all profiles.
-    """
-    ops = ctx.ops()
-    perf_engines = []
-    try:
-        prefill_names = _prefill_names(ops)
-        if len(prefill_names) < 2:
-            return False, "need >=2 prefill workers"
-        fast, slow = prefill_names[0], prefill_names[1]
-        ops.set_perf(fast, prefill_fixed_ms=10.0)
-        ops.set_perf(slow, prefill_fixed_ms=500.0)
-        perf_engines = [fast, slow]
-        time.sleep(1.5)  # master perf sync
-
-        addrs = []
-        for _ in range(20):
-            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
-            keys = [rid * 100 + j for j in range(3)]
-            addr, err = ops.run_one_request(
-                rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
-            )
-            if err:
-                return False, f"rid={rid} failed: {err}"
-            addrs.append(addr)
-        addr_map = ops.addr_to_name()
-        dist = Counter(addr_map.get(a, a) for a in addrs)
-        fast_count = dist.get(fast, 0)
-        slow_count = dist.get(slow, 0)
-        num_workers = len(dist)
-        max_ratio = max(dist.values()) / len(addrs)
-        passed = num_workers >= 2 and max_ratio <= 0.8
-        return passed, (
-            f"fast={fast}({fast_count}), slow={slow}({slow_count}), "
-            f"dist={json.dumps(dict(dist), sort_keys=True)}, "
-            f"assertion=workers>=2 and max_ratio<=0.8 (tie-window uniform "
-            f"sampling; engine perf is not part of the SHORTEST_TTFT score — "
-            f"perf split is observational)"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-    finally:
-        for eng in perf_engines:
-            try:
-                ops.set_perf(eng, prefill_fixed_ms=100.0)
-            except Exception:
-                pass
-
-
-@case(
-    "smoke_scheduling_s9",
-    requires=["enqueue_batch"],
-    source="scheduling_smoke.py S9 (Java-corrected)",
-)
-def s9_no_hard_filter(ctx: CaseContext):
-    """High queue-depth limit must not block routing.
-
-    Java-corrected semantics: /set_queue_depth is a real enqueue rejection
-    gate (reject when pendingRequests >= limit).  50000 is far above any
-    reachable pending count, so the gate never fires and requests still
-    route to the target worker — the legacy ``target_count > 0`` assertion
-    is preserved and now documents exactly that behaviour.
-
-    Profile semantics (v2, task #55): the gate is checked ONLY at the
-    engine's EnqueueBatch entry (JavaMockEngineCluster.enqueueBatch);
-    the GenerateStreamCall path (NON_BATCH dispatcher) never consults it,
-    so "the high gate does not block routing" is only observable where
-    the master actually enqueues — requires=["enqueue_batch"] keeps the
-    case to the BATCH-dispatch profiles (batch-window, single-batch).
-    """
-    ops = ctx.ops()
-    injected_engine = None
-    try:
-        prefill_names = _prefill_names(ops)
-        if len(prefill_names) < 2:
-            return False, "need >=2 prefill workers"
-        target = prefill_names[0]
-        ops.set_queue_depth(target, 50000)
-        injected_engine = target
-
-        addrs = []
-        for _ in range(5):
-            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
-            keys = [rid * 100 + j for j in range(3)]
-            addr, err = ops.run_one_request(
-                rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
-            )
-            if err:
-                return False, f"rid={rid} failed: {err}"
-            addrs.append(addr)
-        addr_map = ops.addr_to_name()
-        dist = Counter(addr_map.get(a, a) for a in addrs)
-        target_count = dist.get(target, 0)
-        passed = target_count > 0
-        return passed, (
-            f"target={target}({target_count}), "
-            f"dist={json.dumps(dict(dist), sort_keys=True)}, "
-            f"note=queue_depth_limit=50000 is a real Java reject gate; "
-            f"never fires at this height so routing is unaffected"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-    finally:
-        if injected_engine:
-            try:
-                ops.set_queue_depth(injected_engine, 0)
-            except Exception:
-                pass
-
-
-@case("smoke_scheduling_s10", source="scheduling_smoke.py S10")
-def s10_weighted_random(ctx: CaseContext):
-    ops = ctx.ops()
-    try:
-        for _ in range(50):
-            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
-            keys = [rid * 100 + j for j in range(3)]
-            _, err = ops.run_one_request(
-                rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
-            )
-            if err:
-                return False, f"rid={rid} failed: {err}"
-        snap = ops.snapshot_by_name()
-        completed = {
-            name: info.get("completed", 0)
-            for name, info in snap.items()
-            if info.get("role") == "decode"
-        }
-        used = sum(1 for v in completed.values() if v > 0)
-        passed = used >= 3
-        return passed, (
-            f"decode_workers={used}, "
-            f"distribution={json.dumps(completed, sort_keys=True)}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-
-
-@case("smoke_scheduling_s11", source="scheduling_smoke.py S11")
-def s11_kv_capacity_filter(ctx: CaseContext):
-    ops = ctx.ops()
-    injected_engine = None
-    try:
-        snap = ops.snapshot_by_name()
-        decode_names = sorted(
-            name for name, e in snap.items() if e.get("role") == "decode"
-        )
+        decode_names = _decode_names(ops)
         if len(decode_names) < 2:
             return False, "need >=2 decode workers"
         target = decode_names[0]
-        target_info = snap[target]
-        avail = target_info.get("available_kv_tokens", 0)
-        active = target_info.get("active_kv_tokens", 0)
-        total_kv = avail + active
-        ops.set_kv_pressure(target, total_kv)
-        injected_engine = target
-        time.sleep(1.0)  # master sync
+        info = ops.snapshot_by_name()[target]
+        total_kv = int(info.get("available_kv_tokens", 0)) + int(
+            info.get("active_kv_tokens", 0)
+        )
+        ops.set_kv_pressure(target, total_kv)  # available -> 0
+        injected = target
+        time.sleep(1.0)  # master worker-status sync
 
         snap_sync = ops.snapshot_by_name()
-        completed_before = snap_sync.get(target, {}).get("completed", 0)
+        completed_before = {
+            name: snap_sync.get(name, {}).get("completed", 0) for name in decode_names
+        }
 
-        for _ in range(10):
+        n = 10
+        failures = []
+        for _ in range(n):
             rid = ops.next_request_id(rid_base(ctx, "scheduling"))
             keys = [rid * 100 + j for j in range(3)]
             _, err = ops.run_one_request(
                 rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
             )
             if err:
-                return False, f"rid={rid} failed: {err}"
+                failures.append(f"rid={rid}: {err}")
 
         snap2 = ops.snapshot_by_name()
-        completed = {
-            name: info.get("completed", 0)
-            for name, info in snap2.items()
-            if info.get("role") == "decode"
+        deltas = {
+            name: snap2[name].get("completed", 0) - completed_before.get(name, 0)
+            for name in decode_names
         }
-        target_delta = completed.get(target, 0) - completed_before
-        passed = target_delta <= 1
-        return passed, (
-            f"target={target}(delta={target_delta}), "
-            f"distribution={json.dumps(completed, sort_keys=True)}, "
-            f"assertion=delta<=1"
+        target_delta = deltas.get(target, 0)
+        others = {name: d for name, d in deltas.items() if name != target}
+        others_used = sum(1 for v in others.values() if v > 0)
+        others_total = sum(others.values())
+
+        # P6: every request completed somewhere — no loss under pressure.
+        report.invariant(
+            "P6",
+            not failures and others_total + target_delta >= n,
+            detail=f"failures={failures[:2]}, total_delta={others_total + target_delta}/{n}",
+        )
+        # P5: hot-engine delta caliber (graded, case override — see docstring).
+        report.check(
+            "P5",
+            float(target_delta),
+            context="decode_kv_pressure",
+            bands={"strict": 0.0, "normal": 1.0, "loose": 2.0},
+            detail=f"target={target}(delta={target_delta}), "
+            f"deltas={json.dumps(deltas, sort_keys=True)}",
+        )
+        # P2: takeover — the diverted load actually lands on the healthy
+        # engines (>=2 of them used), i.e. nobody is starved by the pressure.
+        report.invariant(
+            "P2",
+            others_used >= 2 and others_total >= n - target_delta,
+            context="decode_takeover",
+            detail=f"others_used={others_used}, others_total={others_total}",
+        )
+
+        return report.finish(
+            f"target={target}(delta={target_delta}), others_used={others_used}, "
+            f"grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
     finally:
-        if injected_engine:
+        if injected:
             try:
-                ops.set_kv_pressure(injected_engine, 0)
+                ops.set_kv_pressure(injected, 0)
             except Exception:
                 pass
 
 
-@case("smoke_scheduling_s12", source="scheduling_smoke.py S12 (Java-corrected)")
-def s12_reserve_weight_change(ctx: CaseContext):
-    """Decode single-point collapse guard after request A.
+@case(
+    "bal_decode_spread",
+    source="scheduling_smoke.py S3+S10 (merged, task #61)",
+)
+def bal_decode_spread(ctx: CaseContext):
+    """Decode traffic spreads across the decode fleet at both small and
+    large sample sizes.
 
-    Java-corrected semantics: the legacy S12 asserted COST_BASED_DECODE's
-    reserve weight-lowering (after request A, later requests lean away from
-    A's worker), but the Java stack's decode selector is
-    KV_USAGE_WEIGHTED_RANDOM — the reserve weight-lowering mechanism does
-    not exist here.  11 requests are weighted-random draws whose weights
-    track per-worker KV residue left by earlier cases, so *any* bound on
-    the per-worker share is a coin flip (observed flaps: {6,4,1,0} then
-    {0,3,7,1} with the busiest worker taking 7 while a fresh-env run
-    passed 3/3 with near-uniform draws).  The mechanism-backed assertions
-    live elsewhere — S10 (distribution sanity over 50 requests) and S11
-    (KV-pressure avoidance) — so what remains uniquely assertable here is
-    the collapse guard: 11 requests must not all land on one decode
-    worker (>=2 workers used), which would only happen if the weighted
-    random selector degenerated to a single candidate.
+    Result properties: P2 no-starvation (min engines used) + P1 distribution
+    bound (case-calibrated 4-engine bands) + P6 completeness, parameterized
+    over n=10 and n=50 tiers.  Landing points are engine-completed counts
+    (decode deltas via mock snapshots).
+
+    P1 band note (case override, 4-engine caliber): the decode selector is
+    KV_USAGE_WEIGHTED_RANDOM, not a uniform draw — weights track per-worker
+    KV residue left by earlier cases, so the 2-engine bands do not apply.
+    Calibration (task #61, batch-window, engine-completed deltas): n=10
+    observed max_share 0.40 (dist 1/4/3/2), n=50 observed 0.40 (dist
+    20/10/13/7 — the KV-weighted draw routinely puts ~40% on the residue-
+    heaviest engine).  Bands kept at n=10: 0.60/0.70/0.80, n=50:
+    0.40/0.50/0.60 — the n=50 strict tier sits ON the observed mode (a
+    quality bar for weight convergence, not a statistical guarantee);
+    widen from full-suite regression data in task #63 if the
+    residue-inheritance across predecessor cases pushes it over.
     """
     ops = ctx.ops()
-    base = rid_base(ctx, "scheduling")
+    report = GradeReport(run_grade=ctx.grade)
     try:
-        snap0 = ops.snapshot_by_name()
-        decode_names = sorted(
-            name for name, e in snap0.items() if e.get("role") == "decode"
+        tiers = (
+            # (n, min_used, P1 case bands)
+            (10, 2, {"strict": 0.60, "normal": 0.70, "loose": 0.80}),
+            (50, 3, {"strict": 0.40, "normal": 0.50, "loose": 0.60}),
         )
-        if len(decode_names) < 2:
-            return False, "need >=2 decode workers"
-        baseline = {name: snap0[name].get("completed", 0) for name in decode_names}
+        for n, min_used, bands in tiers:
+            decode_names = _decode_names(ops)
+            if len(decode_names) < 2:
+                return False, "need >=2 decode workers"
+            snap0 = ops.snapshot_by_name()
+            baseline = {name: snap0[name].get("completed", 0) for name in decode_names}
 
-        rid_a = ops.next_request_id(base)
-        keys_a = [rid_a * 100 + j for j in range(3)]
-        _, err_a = ops.run_one_request(
-            rid_a, output_len=2, block_keys=keys_a, stream_timeout_s=STREAM_TIMEOUT_S
+            failures = []
+            for _ in range(n):
+                rid = ops.next_request_id(rid_base(ctx, "scheduling"))
+                keys = [rid * 100 + j for j in range(3)]
+                _, err = ops.run_one_request(
+                    rid,
+                    output_len=2,
+                    block_keys=keys,
+                    stream_timeout_s=STREAM_TIMEOUT_S,
+                )
+                if err:
+                    failures.append(f"rid={rid}: {err}")
+
+            snap1 = ops.snapshot_by_name()
+            deltas = {
+                name: snap1[name].get("completed", 0) - baseline.get(name, 0)
+                for name in decode_names
+            }
+            total = sum(deltas.values())
+            used = sum(1 for v in deltas.values() if v > 0)
+            max_share = max(deltas.values()) / n if n else 1.0
+            deltas_json = json.dumps(deltas, sort_keys=True)
+
+            report.invariant(
+                "P6",
+                not failures and total >= n,
+                context=f"n{n}",
+                detail=f"failures={failures[:2]}, total_delta={total}/{n}",
+            )
+            report.invariant(
+                "P2",
+                used >= min_used,
+                context=f"n{n}",
+                detail=f"used={used}/{len(decode_names)} (need >= {min_used})",
+            )
+            report.check(
+                "P1",
+                max_share,
+                context=f"n{n}",
+                bands=bands,
+                detail=f"dist={deltas_json} (4-engine KV-weighted caliber)",
+            )
+
+        return report.finish(f"tiers=n10+n50, grades: {report.summary()}")
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+@case(
+    "aff_prefix_stickiness",
+    source="scheduling_smoke.py S2+S5 (merged, task #61)",
+)
+def aff_prefix_stickiness(ctx: CaseContext):
+    """Prefix-reuse traffic sticks to the engine that holds the prefix cache.
+
+    Result properties: P9 affinity fidelity (graded, lower band: share of
+    prefix-reuse requests landing on the prime engine) + P6 completeness.
+    Single-family base form only — the multi-family / free-mixing
+    generalization is task #62.
+
+    Construction: one shared key family — a prime request (input_len=2048)
+    seeds the block cache on its landing engine; after KV_CACHE_SYNC_WAIT_S
+    the master's cache-affinity policy (CacheAffinityPolicy.evaluate in
+    CostBasedPrefillStrategy: the cache leader wins when the prefix hit
+    clears minPrefixHitPercent) should keep every follower reusing the
+    SAME keys on the SAME engine.
+
+    The legacy S5 cache_keys>0 assertion is demoted to an observational
+    log: mock-internal cache accounting is the mock's own unit-tested
+    behaviour, not an LB contract.
+
+    P9 band note: followers are serial (each completes before the next
+    fires), so the prime engine's ledger is ~0 at every draw and a miss
+    can only come from a tie-window random pick overriding affinity;
+    normal (0.90) tolerates one miss in ten, loose (0.80) two.
+    """
+    ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
+    followers_n = 10
+    # Constant key family disjoint from the rid-derived keys used by other
+    # cases (rid*100+j stays far below 10^7) — no cross-case cache pollution.
+    family_keys = [9900001, 9900002, 9900003]
+    try:
+        rid_prime = ops.next_request_id(rid_base(ctx, "scheduling"))
+        prime_addr, prime_err = ops.run_one_request(
+            rid_prime,
+            input_len=2048,
+            output_len=2,
+            block_keys=family_keys,
+            stream_timeout_s=STREAM_TIMEOUT_S,
         )
-        if err_a:
-            return False, f"request A failed: {err_a}"
+        if prime_err:
+            report.invariant("P6", False, detail=f"prime failed: {prime_err}")
+            return report.finish(f"prime request failed: {prime_err}")
 
-        snap_a = ops.snapshot_by_name()
-        delta_a = {
-            name: snap_a[name].get("completed", 0) - baseline[name]
-            for name in decode_names
-        }
-        a_worker = max(delta_a, key=delta_a.get) if any(delta_a.values()) else None
-        if a_worker is None:
-            return False, "could not identify A's decode worker"
+        time.sleep(KV_CACHE_SYNC_WAIT_S)  # master cache sync
 
-        for _ in range(10):
-            rid = ops.next_request_id(base)
-            keys = [rid * 100 + j for j in range(3)]
-            _, err = ops.run_one_request(
-                rid, output_len=2, block_keys=keys, stream_timeout_s=STREAM_TIMEOUT_S
+        addrs = []
+        failures = []
+        for _ in range(followers_n):
+            rid = ops.next_request_id(rid_base(ctx, "scheduling"))
+            addr, err = ops.run_one_request(
+                rid,
+                input_len=2048,
+                output_len=2,
+                block_keys=family_keys,
+                stream_timeout_s=STREAM_TIMEOUT_S,
             )
             if err:
-                return False, f"subsequent request failed: {err}"
+                failures.append(f"rid={rid}: {err}")
+            else:
+                addrs.append(addr)
 
-        snap_f = ops.snapshot_by_name()
-        total_delta = {
-            name: snap_f[name].get("completed", 0) - baseline[name]
-            for name in decode_names
-        }
-        a_total = total_delta.get(a_worker, 0)
-        other_max = max(
-            (total_delta[n] for n in decode_names if n != a_worker), default=0
+        addr_map = ops.addr_to_name()
+        prime_name = addr_map.get(prime_addr, prime_addr)
+        hits = sum(1 for a in addrs if a == prime_addr)
+        stick_share = hits / len(addrs) if addrs else 0.0
+
+        # Observational only (legacy S5 demoted to log — mock-internal
+        # cache accounting belongs to mock unit tests, not the LB contract).
+        cache_keys = ops.snapshot_by_name().get(prime_name, {}).get("cache_keys", -1)
+
+        report.invariant("P6", not failures, detail=f"failures={failures[:2]}")
+        report.check(
+            "P9",
+            stick_share,
+            context="single_family",
+            detail=f"prime={prime_name}, hits={hits}/{len(addrs)}, "
+            f"cache_keys={cache_keys} (observational)",
         )
-        used = sum(1 for v in total_delta.values() if v > 0)
-        busiest = max(total_delta.values())
-        passed = used >= 2
-        return passed, (
-            f"a_worker={a_worker}(total={a_total}), other_max={other_max}, "
-            f"busiest={busiest}, used={used}/{len(decode_names)}, "
-            f"delta={json.dumps(total_delta, sort_keys=True)}, "
-            f"assertion=used>=2 (collapse guard; Java decode selector is "
-            f"KV_USAGE_WEIGHTED_RANDOM with no reserve weight-lowering — "
-            f"distribution sanity is S10, KV-pressure avoidance is S11)"
+        return report.finish(
+            f"prime={prime_name}, stick={hits}/{len(addrs)}, "
+            f"cache_keys={cache_keys}(log), grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
+
+
+@case(
+    "bal_gate_no_starvation",
+    requires=["enqueue_batch"],
+    source="scheduling_smoke.py S9 (rebuilt around a real gate, task #61)",
+)
+def bal_gate_no_starvation(ctx: CaseContext):
+    """A REAL engine queue-depth gate: rejections are explicit and visible;
+    nothing is lost or left hanging behind the gate.
+
+    Result properties: P6 completeness (hard invariant — every wave request
+    reaches a visible terminal state: completed, or explicitly rejected by
+    the gate with BATCH_DISPATCH_FAILED / "queue depth limit exceeded",
+    observed either at the schedule RPC or on the stream) plus
+    observational share-shift accounting (where the surviving traffic
+    lands while the gate is full).
+
+    Java-truth note (supersedes the legacy S9's 50000-limit no-op form and
+    its "rejected requests still complete elsewhere" expectation): the
+    Java master does NOT requeue a gate-rejected EnqueueBatch — the
+    rejection is fail-fast to a terminal BATCH_DISPATCH_FAILED state
+    (PriorityScheduler.reduceDeliveryFailure; e2e-proven by
+    FaultInjectionE2ETest.c08).  "No starvation" is therefore the
+    black-box completeness contract: a gated request fails fast and
+    loudly (never hangs, never vanishes), and the healthy engine keeps
+    accepting.
+
+    Construction (all levers real):
+      1. slow BOTH prefills to 5s fixed;
+      2. decoy: one fire-and-forget input_len=16384 request (~16s ledger
+         prediction) — poll the snapshot for its landing engine; that
+         engine is priced out for the window (high score), the OTHER
+         engine is the gated target;
+      3. restore the decoy engine to 100ms; set queue_depth=2 on the
+         target — the REAL Java enqueue gate (EnqueueBatch rejects when
+         pendingRequests >= limit, JavaMockEngineCluster.enqueueBatch);
+      4. two slow fire-and-forget seeds: the decoy's ledger prediction
+         keeps the other engine's score high, so both seeds land on the
+         target — pending hits 2 and the gate is FULL for ~5s (proven
+         engine-side before the wave starts);
+      5. wave: 6 serial requests — each either hits the full gate
+         (explicit fast rejection) or diverts to the decoy engine once
+         the master backs off / the decoy's prediction decays
+         (share-shift, observational).
+
+    requires=["enqueue_batch"] (S9 inheritance): the gate is checked ONLY
+    at the engine's EnqueueBatch entry — the GenerateStreamCall path
+    (NON_BATCH dispatcher) never consults it.
+    """
+    ops = ctx.ops()
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "scheduling")
+    prefill_names: list[str] = []
+    fired: list[tuple[int, object]] = []  # (rid, response) — drained in finally
+    target: str | None = None
+    try:
+        prefill_names = _prefill_names(ops)
+        if len(prefill_names) < 2:
+            return False, "need >=2 prefill workers"
+
+        for name in prefill_names:
+            ops.set_perf(name, prefill_fixed_ms=5000.0)
+        time.sleep(1.5)  # master perf sync
+
+        addr_map = ops.addr_to_name()
+
+        # -- decoy: prices one engine out of the window (~16s prediction).
+        decoy_rid = ops.next_request_id(base)
+        resp = ops.schedule(decoy_rid, input_len=16384, output_len=2)
+        if resp.code != 200 or not resp.success:
+            return False, f"decoy schedule failed: {resp.error_message}"
+        fired.append((decoy_rid, resp))
+        decoy_name = addr_map.get(ops.role_addr(resp, "PREFILL"), "")
+        if decoy_name not in prefill_names:
+            return False, f"decoy went to unknown worker {decoy_name}"
+
+        # Engine-side proof the decoy is really parked there.
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            info = ops.snapshot_by_name().get(decoy_name, {})
+            if info.get("waiting", 0) + info.get("running", 0) >= 1:
+                break
+            time.sleep(0.1)
+
+        target = next(n for n in prefill_names if n != decoy_name)
+        # -- decoy engine fast again; REAL gate on the target.
+        ops.set_perf(decoy_name, prefill_fixed_ms=100.0)
+        ops.set_queue_depth(target, 2)
+
+        # -- two slow seeds fill the gate (pending=2), ~5s window.  The
+        #    decoy's ~16s ledger prediction keeps its engine's score high,
+        #    so the seeds land on the target deterministically.
+        for _ in range(2):
+            rid = ops.next_request_id(base)
+            resp = ops.schedule(rid, input_len=1024, output_len=2)
+            if resp.code != 200 or not resp.success:
+                return False, f"seed schedule failed: {resp.error_message}"
+            fired.append((rid, resp))
+
+        # Engine-side proof the gate is really full before the wave starts.
+        deadline = time.monotonic() + 6.0
+        gate_full = False
+        while time.monotonic() < deadline:
+            info = ops.snapshot_by_name().get(target, {})
+            if info.get("waiting", 0) + info.get("running", 0) >= 2:
+                gate_full = True
+                break
+            time.sleep(0.1)
+        if not gate_full:
+            return False, f"seeds never filled the gate on {target} (engine side)"
+
+        # -- wave: 6 serial requests against the full gate.
+        wave = []
+        for _ in range(6):
+            rid = ops.next_request_id(base)
+            addr, err = ops.run_one_request(
+                rid, output_len=2, stream_timeout_s=STREAM_TIMEOUT_S
+            )
+            wave.append((addr_map.get(addr, addr), err))
+
+        def is_explicit_rejection(err: str) -> bool:
+            low = err.lower()
+            return "queue depth" in low or "dispatch" in low or "8510" in err
+
+        completed = [w for w in wave if w[1] is None]
+        rejected = [w for w in wave if w[1] and is_explicit_rejection(w[1])]
+        unmatched = [w for w in wave if w not in completed and w not in rejected]
+
+        # Share-shift observation (not a hard band): where did the traffic
+        # that DID get through land, and how many hit the gate?
+        shift = Counter(name for name, _ in completed)
+
+        # P6: every request reached a visible terminal state — completed
+        # or explicitly gate-rejected; anything else (hang, timeout, silent
+        # loss) is a completeness violation at every grade.
+        report.invariant(
+            "P6",
+            not unmatched,
+            detail=f"unmatched={[(n, e) for n, e in unmatched][:2]}",
+        )
+        return report.finish(
+            f"target={target}(gate=2), decoy={decoy_name}, "
+            f"wave: completed={len(completed)}, gate_rejected={len(rejected)}, "
+            f"unmatched={len(unmatched)}, "
+            f"shift={json.dumps(dict(shift), sort_keys=True)}, "
+            f"rejected_errs={sorted({e for _, e in rejected})[:2]}, "
+            f"grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        # Restore perf + clear the gate BEFORE draining: once the target is
+        # fast again its seeds finish quickly and the drain converges fast.
+        try:
+            for name in prefill_names:
+                ops.set_perf(name, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+        if target:
+            try:
+                ops.set_queue_depth(target, 0)
+            except Exception:
+                pass
+        # Drainage (inherited S4 lesson): fire-and-forget requests must be
+        # consumed to terminal state or their master-side inflight/ledger
+        # entries poison later cases.
+        for rid, resp in fired:
+            try:
+                ops.start_stream(resp, rid).wait_end(20.0)
+            except Exception:
+                try:
+                    ops.cancel(rid, resp)
+                except Exception:
+                    pass
+        try:
+            AssertUtils.inflight_clean(_master_http(ops), 30.0)
+        except Exception:
+            pass
 
 
 # ===========================================================================
