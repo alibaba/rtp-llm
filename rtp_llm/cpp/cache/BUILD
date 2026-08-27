@@ -183,6 +183,7 @@ cc_library(
     deps = [
         ":cache_types",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/cache/events:kv_cache_event",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
         "//rtp_llm/cpp/utils:profiling_scope",
@@ -371,6 +372,7 @@ cc_library(
         ":cache_core",
         ":cp_slot_mapper",
         ":prefill_cache_hit_metrics_reporter",
+        "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",

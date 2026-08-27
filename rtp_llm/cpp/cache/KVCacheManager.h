@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -168,6 +169,8 @@ public:
 
 private:
     void initConnectorCoordinator();
+    void initCacheEventPublisher();
+    void stopCacheEventPublisher();
     void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
@@ -184,6 +187,7 @@ private:
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
+    const bool                         warmup_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
@@ -195,6 +199,8 @@ private:
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+    KVCacheEventPublisherPtr           cache_event_publisher_;
+    SharedBlockCachePtr                publisher_shared_cache_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;
