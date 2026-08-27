@@ -25,6 +25,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -240,6 +241,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         when(consistencyService.isNeedConsistency()).thenReturn(false);
         activeRequestCounter = new ActiveRequestCounter();
         latencyRecorder = new ServerScheduleLatencyRecorder();
+        org.flexlb.cache.match.CacheAwareService cacheAwareService =
+                mock(org.flexlb.cache.match.CacheAwareService.class, withSettings().stubOnly());
+        when(cacheAwareService.prepareBlockCacheKeys(
+                org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
         FlexlbServiceImpl service = new FlexlbServiceImpl(
                 routeService,
                 consistencyService,
@@ -250,7 +256,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 reporter,
                 latencyRecorder,
                 mock(PrioritySchedulerReporter.class, withSettings().stubOnly()),
-                mock(org.flexlb.cache.match.CacheAwareService.class, withSettings().stubOnly()),
+                cacheAwareService,
                 mock(org.flexlb.service.optimizer.OptimizerClient.class, withSettings().stubOnly()));
 
         int grpcPort;

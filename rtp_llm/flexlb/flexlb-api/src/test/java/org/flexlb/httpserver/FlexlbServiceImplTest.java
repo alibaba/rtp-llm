@@ -27,6 +27,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
@@ -58,6 +59,7 @@ class FlexlbServiceImplTest {
     private ConfigService configService;
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private CacheAwareService cacheAwareService;
     private ActiveRequestCounter.RequestToken requestToken;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
@@ -72,6 +74,9 @@ class FlexlbServiceImplTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
+        cacheAwareService = mock(CacheAwareService.class);
+        when(cacheAwareService.prepareBlockCacheKeys(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
 
         configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
@@ -90,7 +95,7 @@ class FlexlbServiceImplTest {
                 batchSchedulerReporter,
                 serverLatencyRecorder,
                 mock(PrioritySchedulerReporter.class),
-                mock(CacheAwareService.class),
+                cacheAwareService,
                 mock(OptimizerClient.class)
         );
 
@@ -560,6 +565,10 @@ class FlexlbServiceImplTest {
                 capturedRequest.getGenerateTimeout());
         assertEquals(capturedCtx.getStartTime() + 3_600_000L,
                 capturedCtx.getRequestExpiresAtMs());
+        InOrder localRouteOrder = org.mockito.Mockito.inOrder(
+                cacheAwareService, routeService);
+        localRouteOrder.verify(cacheAwareService).prepareBlockCacheKeys(capturedCtx);
+        localRouteOrder.verify(routeService).route(capturedCtx);
     }
 
     @Test

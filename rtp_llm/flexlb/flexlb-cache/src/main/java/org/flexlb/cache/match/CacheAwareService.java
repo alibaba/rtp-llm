@@ -6,8 +6,10 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.hash.RequestBlockHashService;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheHitFeedback;
@@ -26,16 +28,19 @@ public class CacheAwareService {
     private final CacheMatchQueryOrchestrator queryOrchestrator;
     private final LocalStandbyComparisonService comparisonService;
     private final CacheMetadataUpdateOrchestrator updateOrchestrator;
+    private final RequestBlockHashService requestBlockHashService;
 
     public CacheAwareService(
             CacheMetricsReporter cacheMetricsReporter,
             CacheMatchQueryOrchestrator queryOrchestrator,
             LocalStandbyComparisonService comparisonService,
-            CacheMetadataUpdateOrchestrator updateOrchestrator) {
+            CacheMetadataUpdateOrchestrator updateOrchestrator,
+            RequestBlockHashService requestBlockHashService) {
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.queryOrchestrator = queryOrchestrator;
         this.comparisonService = comparisonService;
         this.updateOrchestrator = updateOrchestrator;
+        this.requestBlockHashService = requestBlockHashService;
     }
 
     public CacheMatchResult findMatchingEngines(CacheMatchQuery query) {
@@ -60,7 +65,10 @@ public class CacheAwareService {
         return updateOrchestrator.updateFromWorkerStatus(workerStatus);
     }
 
-    /** Reserved for metadata sources, such as local standby, introduced later. */
+    public CompletableFuture<Void> prepareBlockCacheKeys(BalanceContext context) {
+        return requestBlockHashService.prepareBlockCacheKeys(context).toFuture();
+    }
+
     public void updateFromRoutedRequest(
             Request request, List<ServerStatus> selectedWorkers) {
         updateOrchestrator.updateFromRoutedRequest(request, selectedWorkers);
