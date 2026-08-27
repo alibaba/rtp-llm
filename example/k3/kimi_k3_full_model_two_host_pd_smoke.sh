@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Recommended one-command startup from a controller with SSH access to both
-# hosts (the driver enters lhc_GPU and launches both roles concurrently):
+# hosts (the driver enters lhc_GPU, waits for Decode readiness, then launches
+# Prefill):
 #
 # Merge-gate requirement: always use SMOKE_SUITE=all for the final 93-layer
 # accuracy/cache acceptance run. The flow suite is only a four-layer RDMA
@@ -22,9 +23,10 @@
 #    python3 ./example/k3/kimi_k3_full_model_two_host_pd_smoke_driver.py
 #
 # Manual role startup remains available for debugging. Run from the RTP-LLM
-# repository root inside lhc_GPU; both roles may now be started concurrently:
+# repository root inside lhc_GPU. Start Decode first and wait for its health
+# endpoint before starting Prefill, matching the controller driver:
 #
-# 1. Start the Decode role (either role may now be launched first):
+# 1. Start the Decode role:
 #    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
 #    SP_CHECKPOINT_PATH=/ssd/2/kimi-k3-eagle3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
@@ -46,7 +48,8 @@
 # Lightweight two-host Kimi K3 full-model (93-layer) PD smoke.
 #
 # Run this same role script inside lhc_GPU on both hosts. There is no committed
-# machine address; the optional driver accepts all SSH/host paths at runtime.
+# machine address; the optional driver accepts all SSH/host paths at runtime
+# and enforces Decode-ready-before-Prefill ordering.
 # The validated profile always enables Barex RDMA on both roles; this smoke is
 # intentionally not a TCP/cache-store fallback test.
 # Merge-gate runs must use SMOKE_SUITE=all; it is the only supported suite.
@@ -99,6 +102,12 @@ Important optional variables:
                             defaults to 128 for exact-cache seed/hit answers
   SMOKE_MTP_CHUNK_MAX_TOKENS
                             defaults to 128 for MTP chunk-Prefill coverage
+  SMOKE_RDMA_PREWARM_ATTEMPTS
+                            defaults to 3 bounded batch-sized prewarm attempts
+  SMOKE_RDMA_PREWARM_BACKOFF_S
+                            defaults to 5 seconds between failed attempts
+  SMOKE_RDMA_PREWARM_SETTLE_S
+                            defaults to 2 seconds after a successful prewarm
   SMOKE_SUITE               all (default) or flow
                             flow: four-layer-friendly multi-round RDMA flow
                                   check without semantic-answer assertions
@@ -254,6 +263,9 @@ smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
+smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
+smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
+smoke_rdma_prewarm_settle_s="${SMOKE_RDMA_PREWARM_SETTLE_S:-2}"
 for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
@@ -266,6 +278,14 @@ done
     || die "SMOKE_BLOCK_SIZE must be divisible by the cuLA checkpoint step 64"
 [[ "${smoke_chunkwise_rdma}" == "0" || "${smoke_chunkwise_rdma}" == "1" ]] \
     || die "SMOKE_CHUNKWISE_RDMA must be 0 or 1"
+[[ "${smoke_rdma_prewarm_attempts}" =~ ^[0-9]+$ ]] \
+    || die "SMOKE_RDMA_PREWARM_ATTEMPTS must be a non-negative integer"
+for seconds_value in \
+    "${smoke_rdma_prewarm_backoff_s}" \
+    "${smoke_rdma_prewarm_settle_s}"; do
+    [[ "${seconds_value}" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        || die "RDMA prewarm backoff/settle values must be non-negative numbers"
+done
 
 service_pid=
 listener_pid=
@@ -697,6 +717,9 @@ python3 "${case_runner}" \
     --identity-max-tokens "${identity_max_tokens}" \
     --single-exact-max-tokens "${single_exact_max_tokens}" \
     --mtp-chunk-max-tokens "${mtp_chunk_max_tokens}" \
+    --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}" \
+    --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \
+    --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \
     --timeout "${request_timeout}"
 
 notify_decode PASS "smoke-suite-${smoke_suite}-validated"

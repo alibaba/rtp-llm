@@ -26,11 +26,60 @@ def make_args() -> argparse.Namespace:
         identity_max_tokens=256,
         single_exact_max_tokens=128,
         mtp_chunk_max_tokens=128,
+        rdma_prewarm_attempts=0,
+        rdma_prewarm_backoff_s=0,
+        rdma_prewarm_settle_s=0,
         timeout=900,
     )
 
 
 class KimiK3FullModelPdCasesTest(unittest.TestCase):
+    def test_rdma_prewarm_retries_then_fills_batch_sized_pool(self) -> None:
+        args = make_args()
+        args.rdma_prewarm_attempts = 2
+        runner = Runner(args)
+        records = [
+            {
+                "name": f"rdma_prewarm_2_{idx}",
+                "input_len": 100 + idx,
+            }
+            for idx in range(args.batch_size)
+        ]
+
+        with (
+            mock.patch.object(runner, "health") as health,
+            mock.patch.object(
+                runner,
+                "request_cases",
+                side_effect=[SmokeFailure("first connect failed"), records],
+            ) as request_cases,
+        ):
+            runner.prewarm_rdma_pool()
+
+        self.assertEqual(health.call_count, 2)
+        self.assertEqual(request_cases.call_count, 2)
+        self.assertEqual(
+            [attempt["passed"] for attempt in runner.rdma_prewarm_attempts],
+            [False, True],
+        )
+        successful = runner.rdma_prewarm_attempts[-1]
+        self.assertEqual(len(successful["case_names"]), args.batch_size)
+
+    def test_rdma_prewarm_exhaustion_is_a_smoke_failure(self) -> None:
+        args = make_args()
+        args.rdma_prewarm_attempts = 2
+        runner = Runner(args)
+        with (
+            mock.patch.object(runner, "health"),
+            mock.patch.object(
+                runner,
+                "request_cases",
+                side_effect=SmokeFailure("connect failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(SmokeFailure, "failed after 2 attempts"):
+                runner.prewarm_rdma_pool()
+
     def test_all_suite_defines_dedicated_semantic_and_mtp_budgets(self) -> None:
         runner = Runner(make_args())
         stages: dict[str, list[Case]] = {}
