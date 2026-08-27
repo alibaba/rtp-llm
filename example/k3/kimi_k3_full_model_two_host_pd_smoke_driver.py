@@ -71,6 +71,16 @@ def parse_args() -> argparse.Namespace:
         "--container", default=env_default("SMOKE_CONTAINER", "lhc_GPU")
     )
     parser.add_argument(
+        "--prefill-container",
+        default=env_default("PREFILL_SMOKE_CONTAINER"),
+        help="Prefill container name; defaults to --container",
+    )
+    parser.add_argument(
+        "--decode-container",
+        default=env_default("DECODE_SMOKE_CONTAINER"),
+        help="Decode container name; defaults to --container",
+    )
+    parser.add_argument(
         "--container-user",
         default=env_default("SMOKE_CONTAINER_USER", "luohaocheng.lhc"),
     )
@@ -134,6 +144,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    args.prefill_container = args.prefill_container or args.container
+    args.decode_container = args.decode_container or args.container
 
     required = (
         "prefill_ssh_target",
@@ -225,6 +237,7 @@ def role_launch_parts(
     runtime = (
         args.prefill_container_runtime if is_prefill else args.decode_container_runtime
     )
+    container = args.prefill_container if is_prefill else args.decode_container
     role_environment = {
         "CHECKPOINT_PATH": checkpoint,
         "SP_CHECKPOINT_PATH": sp_checkpoint,
@@ -240,7 +253,7 @@ def role_launch_parts(
     env_command = ["env"]
     env_command.extend(f"{key}={value}" for key, value in role_environment.items())
     env_command.extend((ROLE_SCRIPT, role))
-    return repo_root, runtime, args.container, env_command
+    return repo_root, runtime, container, env_command
 
 
 def build_remote_command(args: argparse.Namespace, role: str) -> str:
