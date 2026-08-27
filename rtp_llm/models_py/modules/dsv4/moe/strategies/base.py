@@ -30,6 +30,13 @@ class MoeCfg:
     local_expert_end: int
     max_tokens_per_rank: int
     tp_size: int = 1
+    # Physical MoE TP/CP topology.  ``tp_size`` above is retained for the
+    # attention-facing V4 config, which is intentionally 1 when prefill CP
+    # repurposes the physical TP group as the sequence-parallel group.
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    cp_size: int = 1
+    cp_enabled: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -64,7 +71,7 @@ class RoutedExpertsStrategy(nn.Module):
     """
 
     # Registered names currently include mega, mega_se, mega_fused,
-    # grouped_fp4, local_loop, and deepep.
+    # grouped_fp4, sm120_fused_moe, local_loop, and deepep.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -268,6 +275,7 @@ def select_strategy(
                         "mega_fused",
                         "mega_se",
                         "deepep",
+                        "sm120_fused_moe",
                     ):
                         raise RuntimeError(
                             "DSV4 EP MoE requires a distributed strategy. "
@@ -291,12 +299,19 @@ def select_strategy(
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
         if mega_cls is not None and mega_cls.can_handle(cfg):
             return mega_cls
+        sm120_cls = next(
+            (c for c in _STRATEGY_PRIORITY if c.name == "sm120_fused_moe"),
+            None,
+        )
+        if sm120_cls is not None and sm120_cls.can_handle(cfg):
+            return sm120_cls
         deepep_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "deepep"), None)
         if deepep_cls is not None and deepep_cls.can_handle(cfg):
             return deepep_cls
 
         raise RuntimeError(
-            "DSV4 EP MoE requires either MegaMoE or DeepEP dispatch/combine. "
+            "DSV4 EP MoE requires MegaMoE, SM120 FusedMoe, or DeepEP "
+            "dispatch/combine. "
             f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
             "Neither distributed strategy is available in this runtime."
         )

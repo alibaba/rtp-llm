@@ -58,6 +58,12 @@ class PureCpRouterBase(FusedMoeDataRouter):
     No padding is needed because CP guarantees equal token counts across ranks.
     """
 
+    # The generic FP8/DeepGEMM executors consume expert ids remapped to the
+    # rank-local expert shard.  SM120's executor owns that remap because it
+    # also serves the non-collective decode path, so the no-quant adapter below
+    # can reuse this router's communication without applying it twice.
+    remap_expert_ids = True
+
     @classmethod
     def router_type(cls):
         return RouterType.PURE_TP
@@ -115,11 +121,17 @@ class PureCpRouterBase(FusedMoeDataRouter):
 
         expert_x, expert_x_scale = self._do_quant(a1_full)
 
-        adjusted_topk_ids, num_recv_tokens_per_expert = (
-            recompute_topk_ids_sum_expert_count(
-                topk_ids_full, self.expert_start_id, self.expert_num_per_rank
+        if self.remap_expert_ids:
+            adjusted_topk_ids, num_recv_tokens_per_expert = (
+                recompute_topk_ids_sum_expert_count(
+                    topk_ids_full, self.expert_start_id, self.expert_num_per_rank
+                )
             )
-        )
+        else:
+            # Keep global ids for executors that perform the rank-local mask and
+            # remap themselves (the DSV4 SM120 MXFP4 executor).
+            adjusted_topk_ids = topk_ids_full
+            num_recv_tokens_per_expert = None
 
         return ExpertForwardPayload(
             expert_x,
@@ -164,3 +176,26 @@ class PureCpRouterFp8PerBlock(PureCpRouterBase):
             )
         else:
             return trt_fp8_quantize_128(a1, False)
+
+
+class PureCpRouterNoQuant(PureCpRouterBase):
+    """Pure CP communication router for executors that quantize internally.
+
+    This keeps the all-gather/reduce-scatter implementation in the common
+    factory path while leaving activation quantization and global-expert-id
+    remapping to the executor.  DSV4 SM120 uses this variant because its
+    GroupedFP4 executor performs MXFP8 quantization on SM120.
+    """
+
+    remap_expert_ids = False
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        resolver = MoeConfigResolver()
+        checker.check(resolver.get_quant_method(config) is None)
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return a1, None

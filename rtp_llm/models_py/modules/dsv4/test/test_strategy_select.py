@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.dsv4.moe.strategies import (
     MegaMoEStrategy,
     MegaMoEStrategySE,
     MoeCfg,
+    Sm120FusedMoeStrategy,
     _has_fp8_fp4_grouped_kernel,
     select_strategy,
 )
@@ -145,8 +146,31 @@ class StrategySelectTest(unittest.TestCase):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
     def test_ep_gt1_no_mega_uses_deepep(self):
-        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            Sm120FusedMoeStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=True
+        ):
             self.assertIs(select_strategy(_cfg(ep_size=4)), DeepEPStrategy)
+
+    def test_sm120_ep_gt1_uses_explicit_fused_moe_strategy(self):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe."
+            "torch.cuda.is_available",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe."
+            "torch.cuda.get_device_capability",
+            return_value=(12, 0),
+        ):
+            self.assertIs(
+                select_strategy(_cfg(ep_size=4)),
+                Sm120FusedMoeStrategy,
+            )
 
     # --- forced override ---------------------------------------------------
 
@@ -266,7 +290,11 @@ class StrategySelectTest(unittest.TestCase):
             self.assertEqual(_resolve_forced(None), (None, False))
 
     def test_legacy_negation_ep_gt1_uses_deepep(self):
-        with _env(DSV4_USE_MEGA_MOE="0"):
+        with _env(DSV4_USE_MEGA_MOE="0"), mock.patch.object(
+            Sm120FusedMoeStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=True
+        ):
             self.assertIs(select_strategy(_cfg(ep_size=4)), DeepEPStrategy)
 
     def test_legacy_force_nonstrict_falls_through_when_incapable(self):
