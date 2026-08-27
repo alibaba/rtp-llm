@@ -352,8 +352,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
             const auto& resource = (*full_disk)[path_index][group_set_id];
             ASSERT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
             ASSERT_EQ(resource.getTopTier(), Tier::DISK);
-            disk_blocks[path_index][group_set_id] = resource.disk_slot;
-            EXPECT_EQ(disk_pools[group_set_id]->treeRefCount(resource.disk_slot), 1u);
+            disk_blocks[path_index][group_set_id] = resource.disk_block;
+            EXPECT_EQ(disk_pools[group_set_id]->treeRefCount(resource.disk_block), 1u);
         }
     }
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -423,7 +423,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         size_t removed = 0;
         for (size_t path_index = 0; path_index < disk_delete_baseline->size(); ++path_index) {
-            const BlockIdxType block = (*disk_delete_baseline)[path_index][group_set_id].disk_slot;
+            const BlockIdxType block = (*disk_delete_baseline)[path_index][group_set_id].disk_block;
             if (!disk_pools[group_set_id]->isAllocated(block)) {
                 ++removed;
             }
@@ -459,7 +459,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
         const auto& resource = (*retry_disk)[0][group_set_id];
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
         EXPECT_EQ(resource.getTopTier(), Tier::DISK);
-        EXPECT_EQ(disk_pools[group_set_id]->treeRefCount(resource.disk_slot), 1u);
+        EXPECT_EQ(disk_pools[group_set_id]->treeRefCount(resource.disk_block), 1u);
         EXPECT_FALSE(host_pools[group_set_id]->isAllocated(retry_host_sources[group_set_id]));
         EXPECT_EQ(disk_pools[group_set_id]->freeBlocksNum(), freed_disk_blocks[group_set_id] - 1);
         EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockTreeRefType::CACHE),

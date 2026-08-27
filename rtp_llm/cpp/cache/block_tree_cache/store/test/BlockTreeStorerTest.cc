@@ -344,7 +344,7 @@ TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) 
     const GroupSetResource& resource = find.back()->group_set_resources[0];
     ASSERT_TRUE(resource.hasTier(Tier::DISK));
     EXPECT_TRUE(resource.device_blocks.empty()) << "the request forbade L1, so nothing may be published there";
-    const BlockIdxType disk_block = resource.disk_slot;
+    const BlockIdxType disk_block = resource.disk_block;
 
     BlockTreeMatchResult              result       = env.cache->match({100});
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);

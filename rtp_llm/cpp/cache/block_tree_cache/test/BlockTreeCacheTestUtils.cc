@@ -998,7 +998,7 @@ void FullSWAEnvironment::expectPayloads() const {
                 }
             } else if (resource.hasTier(Tier::DISK)) {
                 std::vector<uint8_t> data(disk_pools[group_id]->payloadBytes());
-                ASSERT_EQ(disk_pools[group_id]->read(resource.disk_slot, data.data(), data.size()), BlockIOStatus::OK);
+                ASSERT_EQ(disk_pools[group_id]->read(resource.disk_block, data.data(), data.size()), BlockIOStatus::OK);
                 const size_t device_pool_begin = group_id == 0 ? 0 : 2;
                 const size_t device_pool_count = group_id == 0 ? 2 : 1;
                 for (size_t local = 0; local < device_pool_count; ++local) {

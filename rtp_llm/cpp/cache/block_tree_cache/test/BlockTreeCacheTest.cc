@@ -2286,7 +2286,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsRootAndLiveTreeHoldsAcrossAllPhysicalTi
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> lower_tier_resources(2, std::vector<GroupSetResource>(1));
     lower_tier_resources[0][0].host_block = host_block;
-    lower_tier_resources[1][0].disk_slot  = disk_block;
+    lower_tier_resources[1][0].disk_block  = disk_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, lower_tier_resources));
 
     EXPECT_EQ(device_pools[0]->freeBlocksNum(), device_free_before[0] - 1);
@@ -2399,7 +2399,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     std::vector<std::vector<GroupSetResource>> host_resources(1, std::vector<GroupSetResource>(1));
     host_resources[0][0].host_block = host_block;
     std::vector<std::vector<GroupSetResource>> disk_resources(1, std::vector<GroupSetResource>(1));
-    disk_resources[0][0].disk_slot = disk_block;
+    disk_resources[0][0].disk_block = disk_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, device_resources));
     ASSERT_TRUE(insertGroupSetResources(*cache, {200}, host_resources));
     ASSERT_TRUE(insertGroupSetResources(*cache, {300}, disk_resources));
@@ -2449,7 +2449,7 @@ TEST_F(BlockTreeCacheTest, LoadContextOutlivesHostAndDiskCacheShutdown) {
         if (source_tier == Tier::HOST) {
             resources[0][0].host_block = source_block;
         } else {
-            resources[0][0].disk_slot = source_block;
+            resources[0][0].disk_block = source_block;
         }
         ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
 

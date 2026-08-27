@@ -502,7 +502,7 @@ TEST(BlockTreeTest, InsertAcceptsHostAndDiskIncomingResources) {
         if (tier == Tier::HOST) {
             resource.host_block = 7;
         } else {
-            resource.disk_slot = 8;
+            resource.disk_block = 8;
         }
 
         const BlockTreeInsertResult result = tree.insertNode({100}, {{resource}}, /*collect_path=*/false);

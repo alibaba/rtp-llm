@@ -151,7 +151,7 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
     if (source_tier == Tier::HOST) {
         resources[0][0].host_block = source_block;
     } else {
-        resources[0][0].disk_slot = source_block;
+        resources[0][0].disk_block = source_block;
     }
     const BlockTreeInsertResult insert_result =
         cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false);
@@ -953,7 +953,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
             EXPECT_EQ(group_set_resource.host_block, source_block);
             EXPECT_EQ(group->hostPool()->treeRefCount(source_block), source_ref_before);
         } else {
-            EXPECT_EQ(group_set_resource.disk_slot, source_block);
+            EXPECT_EQ(group_set_resource.disk_block, source_block);
             EXPECT_EQ(group->diskPool()->treeRefCount(source_block), source_ref_before);
         }
         coordinator->commit_callback_ = std::move(original_commit);
