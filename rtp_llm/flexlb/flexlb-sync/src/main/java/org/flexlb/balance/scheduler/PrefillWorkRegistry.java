@@ -721,6 +721,11 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
         return true;
     }
 
+    boolean ownsRequestUnderLock(long requestId) {
+        requireLock();
+        return requests.containsKey(requestId);
+    }
+
     public enum ActiveReplaceStatus {
         COMMITTED,
         CONFLICT
@@ -1157,16 +1162,18 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
     }
 
     private void rollbackDirectRegistration(RequestEntry entry) {
+        boolean removed;
         lock.lock();
         try {
             if (!entry.isDirect()) {
                 throw new IllegalStateException(
                         "DIRECT rollback capability lost its exact owner");
             }
-            requests.remove(entry.requestId, entry);
+            removed = requests.remove(entry.requestId, entry);
         } finally {
             lock.unlock();
         }
+        notifyCapacityAvailable(removed);
     }
 
     /**
@@ -1568,8 +1575,11 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             for (int index = 0; index < predictionUpdates.size(); index++) {
                 predictionUpdates.get(index).apply();
             }
-            unknownEngineRequestCount =
+            long nextUnknownEngineRequestCount =
                     activeObservations.unknownEngineRequestCount;
+            capacityReleased |= nextUnknownEngineRequestCount
+                    < unknownEngineRequestCount;
+            unknownEngineRequestCount = nextUnknownEngineRequestCount;
             try {
                 committedPublication.run();
             } catch (Throwable failure) {

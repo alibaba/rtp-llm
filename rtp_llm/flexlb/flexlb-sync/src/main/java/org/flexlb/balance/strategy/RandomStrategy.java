@@ -70,34 +70,38 @@ public class RandomStrategy implements LoadBalanceStrategy {
         // detach or same-address replacement still linearizes exactly.
         int size = candidateAddresses.size();
         int startIndex = ThreadLocalRandom.current().nextInt(size);
-        for (int offset = 0; offset < size; offset++) {
-            String address = candidateAddresses.get((startIndex + offset) % size);
-            WorkerEndpoint.GenerationPin pin =
-                    engineWorkerStatus.captureModelWorkerEndpoint(roleType, address);
-            if (pin == null) {
-                continue;
-            }
-            try {
-                RoutingCandidate selected = snapshotIfAvailable(
-                        config, roleType, group, pin);
-                if (selected == null) {
+        int passes = config.isQueue() && capacityManaged(roleType) ? 2 : 1;
+        for (int pass = 0; pass < passes; pass++) {
+            boolean allowTemporarilyFull = pass != 0;
+            for (int offset = 0; offset < size; offset++) {
+                String address = candidateAddresses.get((startIndex + offset) % size);
+                WorkerEndpoint.GenerationPin pin =
+                        engineWorkerStatus.captureModelWorkerEndpoint(roleType, address);
+                if (pin == null) {
                     continue;
                 }
+                try {
+                    RoutingCandidate selected = snapshotCandidate(
+                            config, roleType, group, pin, allowTemporarilyFull);
+                    if (selected == null) {
+                        continue;
+                    }
 
-                WorkerEndpoint selectedWorker = selected.endpoint();
-                logger.debug("Selected worker ip: {}, httpPort: {}",
-                        selectedWorker.getIp(), selectedWorker.getHttpPort());
+                    WorkerEndpoint selectedWorker = selected.endpoint();
+                    logger.debug("Selected worker ip: {}, httpPort: {}",
+                            selectedWorker.getIp(), selectedWorker.getHttpPort());
 
-                // buildSelectedRole takes ownership immediately and either
-                // returns a SelectedRole or closes the exact pin on failure.
-                WorkerEndpoint.GenerationPin selectedPin = pin;
-                pin = null;
-                return buildSelectedRole(
-                        selectedPin, selected,
-                        roleType, balanceContext, config);
-            } finally {
-                if (pin != null) {
-                    pin.close();
+                    // buildSelectedRole takes ownership immediately and either
+                    // returns a SelectedRole or closes the exact pin on failure.
+                    WorkerEndpoint.GenerationPin selectedPin = pin;
+                    pin = null;
+                    return buildSelectedRole(
+                            selectedPin, selected,
+                            roleType, balanceContext, config);
+                } finally {
+                    if (pin != null) {
+                        pin.close();
+                    }
                 }
             }
         }
@@ -110,11 +114,18 @@ public class RandomStrategy implements LoadBalanceStrategy {
             DecodeEndpoint.DecodeRoutingView decodeView,
             WorkerStatus.TopologySnapshot topology) {}
 
-    private RoutingCandidate snapshotIfAvailable(
+    private static boolean capacityManaged(RoleType roleType) {
+        return roleType == RoleType.PREFILL
+                || roleType == RoleType.PDFUSION
+                || roleType == RoleType.DECODE;
+    }
+
+    private RoutingCandidate snapshotCandidate(
             FlexlbConfig config,
             RoleType roleType,
             String group,
-            WorkerEndpoint.GenerationPin pin) {
+            WorkerEndpoint.GenerationPin pin,
+            boolean allowTemporarilyFull) {
         WorkerEndpoint ep = pin.endpoint();
         if (ep == null) {
             return null;
@@ -131,10 +142,12 @@ public class RandomStrategy implements LoadBalanceStrategy {
             DecodeEndpoint.DecodeRoutingView view = decodeEndpoint.routingView();
             boolean available = !(resourceMeasure instanceof DecodeResourceMeasure measure)
                     || measure.isResourceAvailable(view);
-            return available ? new RoutingCandidate(ep, view, topology) : null;
+            return available || allowTemporarilyFull
+                    ? new RoutingCandidate(ep, view, topology) : null;
         }
         if (ep instanceof PrefillEndpoint prefillEndpoint
                 && resourceMeasure instanceof PrefillResourceMeasure measure
+                && !allowTemporarilyFull
                 && !measure.isResourceAvailable(
                         prefillEndpoint.admissionPendingRequestCount())) {
             return null;

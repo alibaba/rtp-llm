@@ -1,10 +1,14 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.admission.AdmissionFailure;
+import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointGenerationRetiredException;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillGenerationRuntime.PreparedOffer;
 import org.flexlb.balance.endpoint.PrefillGenerationRuntime.QueueSnapshot;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionPlacementPort;
 import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
@@ -47,79 +51,215 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
     }
 
     @Override
-    public DecodePlacement placeReservedDecode(
+    public PreparedDecodePlacement prepareDecodePlacement(
             BalanceContext context,
             CompletableFuture<Response> future,
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation) {
-        if (context.getRequestId() != reservation.requestId()) {
-            throw new IllegalArgumentException(
-                    "Decode reservation belongs to another request");
+            DecodeEndpoint endpoint) {
+        DecodeEndpoint.PlacementHandoff decodeHandoff =
+                endpoint.tryAcquirePlacementHandoff();
+        if (decodeHandoff == null) {
+            return null;
         }
 
-        ServerStatus decode = buildReservedDecodeStatus(
-                context, endpoint, reservation);
-        if (decode == null) {
-            return failReservedDecode(
-                    endpoint,
-                    reservation,
-                    "Decode generation retired before canonical placement");
-        }
-
-        SelectedRole prefillSelection;
+        WorkerEndpoint.GenerationPin prefillPin = null;
+        PreparedOffer preparedOffer = null;
         try {
-            prefillSelection = endpointSelector.select(
-                    context, RoleType.PREFILL, decode.getGroup());
-        } catch (RuntimeException | Error failure) {
-            endpoint.rollbackExact(reservation);
-            throw failure;
-        }
-        if (prefillSelection == null) {
-            return failReservedDecode(
-                    endpoint,
-                    reservation,
-                    "no Prefill worker for reserved Decode placement");
-        }
-
-        Response routeResponse = new Response();
-        try {
-            routeResponse.setSuccess(true);
-            routeResponse.setServerStatus(List.of(
-                    prefillSelection.serverStatus(), decode));
-        } catch (RuntimeException | Error failure) {
-            prefillSelection.close();
-            endpoint.rollbackExact(reservation);
-            throw failure;
-        }
-
-        QueueRouteAdmission admission;
-        try (prefillSelection) {
-            admission = QueueRouteAdmission.prepareExistingDecode(
-                    prefillSelection,
-                    endpoint,
-                    reservation,
-                    decode,
-                    routeResponse);
-        } catch (EndpointGenerationRetiredException retired) {
-            return new DecodePlacement.Failed(new AdmissionFailure(
-                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                    retired.getMessage()));
-        }
-
-        try (admission) {
-            BatchItem item = admission.buildItem(
-                    context, future, System.currentTimeMillis());
-            context.setRouteSubmittedNanos(System.nanoTime());
-            if (!admission.commitTo(inflight, item, true)) {
-                return new DecodePlacement.Failed(
-                        AdmissionFailure.resourceExhausted());
+            WorkerStatus.TopologySnapshot decodeTopology =
+                    endpoint.getStatus().topologySnapshot();
+            SelectedRole prefillSelection = endpointSelector.select(
+                    context, RoleType.PREFILL, decodeTopology.group());
+            if (prefillSelection == null) {
+                return null;
             }
-            ServerStatus prefill = item.prefill();
-            context.setScheduledPrefillEndpoint(
-                    prefill.getServerIp() + ":" + prefill.getHttpPort());
-            reportPlacement(context, item, "reserved Decode");
-            return new DecodePlacement.Committed();
+            try (prefillSelection) {
+                ServerStatus prefillStatus = RequestLifecycleCoordinator.copyOf(
+                        prefillSelection.serverStatus());
+                if (prefillStatus.getRequestId() != context.getRequestId()) {
+                    throw new IllegalStateException(
+                            "Prefill selection belongs to another request");
+                }
+                prefillPin = prefillSelection.takeGenerationPin();
+                if (!(prefillPin.endpoint() instanceof PrefillEndpoint prefill)) {
+                    throw new IllegalStateException(
+                            "Decode eviction requires a Prefill endpoint");
+                }
+                try {
+                    preparedOffer = prefill.prepareOfferPinned(
+                            prefillPin,
+                            context.getRequestId(),
+                            context.getPriority());
+                } catch (EndpointGenerationRetiredException retired) {
+                    return null;
+                }
+                if (preparedOffer == null) {
+                    return null;
+                }
+                PreparedDecodePlacement prepared =
+                        new PreparedDecodePlacementImpl(
+                                context,
+                                future,
+                                endpoint,
+                                decodeHandoff,
+                                prefill,
+                                prefillStatus,
+                                preparedOffer);
+                decodeHandoff = null;
+                preparedOffer = null;
+                return prepared;
+            }
+        } finally {
+            try {
+                if (preparedOffer != null) {
+                    preparedOffer.close();
+                }
+            } finally {
+                try {
+                    if (prefillPin != null) {
+                        prefillPin.close();
+                    }
+                } finally {
+                    if (decodeHandoff != null) {
+                        decodeHandoff.close();
+                    }
+                }
+            }
+        }
+    }
+
+    private final class PreparedDecodePlacementImpl
+            implements PreparedDecodePlacement {
+        private final BalanceContext context;
+        private final CompletableFuture<Response> future;
+        private final DecodeEndpoint decodeEndpoint;
+        private final PrefillEndpoint prefillEndpoint;
+        private final ServerStatus prefillStatus;
+        private DecodeEndpoint.PlacementHandoff decodeHandoff;
+        private PreparedOffer preparedOffer;
+
+        private PreparedDecodePlacementImpl(
+                BalanceContext context,
+                CompletableFuture<Response> future,
+                DecodeEndpoint decodeEndpoint,
+                DecodeEndpoint.PlacementHandoff decodeHandoff,
+                PrefillEndpoint prefillEndpoint,
+                ServerStatus prefillStatus,
+                PreparedOffer preparedOffer) {
+            this.context = context;
+            this.future = future;
+            this.decodeEndpoint = decodeEndpoint;
+            this.decodeHandoff = decodeHandoff;
+            this.prefillEndpoint = prefillEndpoint;
+            this.prefillStatus = prefillStatus;
+            this.preparedOffer = preparedOffer;
+        }
+
+        @Override
+        public boolean seal() {
+            return requireOpen().seal();
+        }
+
+        @Override
+        public DecodePlacement commit(
+                DecodeEndpoint.ReservationHandle reservation,
+                AdmissionMutation exactMutation) {
+            PreparedOffer offer = requireOpen();
+            DecodeEndpoint.PlacementHandoff handoff = decodeHandoff;
+            boolean committed = false;
+            try {
+                if (reservation == null
+                        || reservation.requestId() != context.getRequestId()
+                        || reservation.endpointGenerationId()
+                                != handoff.generationId()) {
+                    return failed(
+                            "Decode reservation does not belong to prepared placement");
+                }
+                ServerStatus decode = buildReservedDecodeStatus(
+                        context, decodeEndpoint, handoff, reservation);
+                if (decode == null
+                        || decodeEndpoint.markQueuedExact(handoff, reservation)
+                                == DecodeEndpoint.MarkQueuedResult.NOT_OWNED) {
+                    return failed(
+                            "Decode reservation ownership changed before placement");
+                }
+
+                Response routeResponse = new Response();
+                routeResponse.setSuccess(true);
+                routeResponse.setServerStatus(List.of(prefillStatus, decode));
+                BatchItem item = new BatchItem(
+                        context,
+                        future,
+                        routeResponse,
+                        RequestLifecycleCoordinator.copyOf(prefillStatus),
+                        decode,
+                        prefillEndpoint,
+                        decodeEndpoint,
+                        reservation,
+                        System.currentTimeMillis());
+                if (!inflight.commitInflight(
+                        item,
+                        true,
+                        exactMutation,
+                        () -> {
+                            offer.commit(item);
+                            return true;
+                        })) {
+                    return new DecodePlacement.Failed(
+                            unavailable(
+                                    "canonical request ownership changed before placement"));
+                }
+
+                committed = true;
+                preparedOffer = null;
+                decodeHandoff = null;
+                handoff.close();
+                publishCommittedPlacementMetadata(
+                        context, item, "reserved Decode");
+                return new DecodePlacement.Committed();
+            } catch (RuntimeException placementFailure) {
+                Logger.warn(
+                        "Prepared Decode placement failed: request_id={}",
+                        context.getRequestId(), placementFailure);
+                return failed(
+                        "canonical Decode placement failed: "
+                                + placementFailure.getMessage());
+            } finally {
+                if (!committed) {
+                    if (reservation != null) {
+                        decodeEndpoint.rollbackExact(reservation);
+                    }
+                    close();
+                }
+            }
+        }
+
+        private PreparedOffer requireOpen() {
+            PreparedOffer offer = preparedOffer;
+            if (offer == null) {
+                throw new IllegalStateException(
+                        "prepared Decode placement was already consumed");
+            }
+            if (decodeHandoff == null) {
+                throw new IllegalStateException(
+                        "prepared Decode generation handoff was already consumed");
+            }
+            return offer;
+        }
+
+        @Override
+        public void close() {
+            PreparedOffer offer = preparedOffer;
+            preparedOffer = null;
+            try {
+                if (offer != null) {
+                    offer.close();
+                }
+            } finally {
+                DecodeEndpoint.PlacementHandoff handoff = decodeHandoff;
+                decodeHandoff = null;
+                if (handoff != null) {
+                    handoff.close();
+                }
+            }
         }
     }
 
@@ -193,7 +333,8 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
 
         @Override
         public PrefillEvictionCommit commit(
-                List<DeliveryItem> exactVictims) {
+                List<DeliveryItem> exactVictims,
+                AdmissionMutation exactMutation) {
             if (attempted || admission == null) {
                 throw new IllegalStateException(
                         "Prefill eviction admission was already consumed");
@@ -203,11 +344,16 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
                     PreparedEvictionCommits.forVictims(exactVictims);
             QueueRouteAdmission.ReplacementCommit result =
                     admission.commitReplacingQueuedVictims(
-                            inflight, item, true, exactVictims);
+                            inflight,
+                            item,
+                            true,
+                            exactMutation,
+                            exactVictims);
             PrefillEvictionCommit commit = prepared.resolve(result.status());
             if (commit.status() == PrefillEvictionStatus.COMMITTED) {
                 admission = null;
-                publishCommittedPlacementMetadata(context, item);
+                publishCommittedPlacementMetadata(
+                        context, item, "Prefill eviction");
             }
             return commit;
         }
@@ -252,17 +398,19 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
     /** Optional route metadata cannot hide an already committed replacement. */
     private void publishCommittedPlacementMetadata(
             BalanceContext context,
-            BatchItem item) {
+            BatchItem item,
+            String kind) {
         try {
             context.setRouteSubmittedNanos(System.nanoTime());
             ServerStatus prefill = item.prefill();
             context.setScheduledPrefillEndpoint(
                     prefill.getServerIp() + ":" + prefill.getHttpPort());
-            reportPlacement(context, item, "Prefill eviction");
+            reportPlacement(context, item, kind);
         } catch (Throwable metadataFailure) {
             try {
                 Logger.warn(
-                        "Committed Prefill replacement metadata was isolated: request_id={}",
+                        "Committed {} metadata was isolated: request_id={}",
+                        kind,
                         context.getRequestId(),
                         metadataFailure);
             } catch (Throwable ignoredLoggingFailure) {
@@ -289,26 +437,17 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
         }
     }
 
-    private static DecodePlacement failReservedDecode(
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation,
-            String message) {
-        endpoint.rollbackExact(reservation);
-        return new DecodePlacement.Failed(new AdmissionFailure(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                message));
-    }
-
     private static ServerStatus buildReservedDecodeStatus(
             BalanceContext context,
             DecodeEndpoint endpoint,
+            DecodeEndpoint.PlacementHandoff handoff,
             DecodeEndpoint.ReservationHandle reservation) {
         WorkerStatus worker = endpoint.getStatus();
         if (reservation.requestId() != context.getRequestId()
                 || reservation.endpointGenerationId()
                         != worker.getGenerationId()
-                || endpoint.isRetired()) {
+                || reservation.endpointGenerationId()
+                        != handoff.generationId()) {
             return null;
         }
         WorkerStatus.TopologySnapshot topology = worker.topologySnapshot();
@@ -324,5 +463,16 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
         status.setGroup(topology.group());
         status.setRequestId(context.getRequestId());
         return status;
+    }
+
+    private static DecodePlacement failed(String message) {
+        return new DecodePlacement.Failed(unavailable(message));
+    }
+
+    private static AdmissionFailure unavailable(String message) {
+        return new AdmissionFailure(
+                StrategyErrorType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+                message);
     }
 }

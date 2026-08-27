@@ -1,6 +1,7 @@
 package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.admission.AdmissionFailure;
+import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillGenerationRuntime.QueueSnapshot;
@@ -14,11 +15,10 @@ import java.util.concurrent.CompletableFuture;
 /** Canonical placement boundary for eviction-backed request admission. */
 public interface EvictionPlacementPort {
 
-    DecodePlacement placeReservedDecode(
+    PreparedDecodePlacement prepareDecodePlacement(
             BalanceContext context,
             CompletableFuture<Response> future,
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.ReservationHandle reservation);
+            DecodeEndpoint endpoint);
 
     PrefillEvictionAdmission preparePrefillEviction(
             BalanceContext context,
@@ -32,12 +32,27 @@ public interface EvictionPlacementPort {
         }
     }
 
+    interface PreparedDecodePlacement extends AutoCloseable {
+
+        /** Seal the exact Prefill seat immediately before Decode victim PNR. */
+        boolean seal();
+
+        DecodePlacement commit(
+                DecodeEndpoint.ReservationHandle reservation,
+                AdmissionMutation exactMutation);
+
+        @Override
+        void close();
+    }
+
     interface PrefillEvictionAdmission extends AutoCloseable {
         PriorityRequestEnvelope envelope();
 
         QueueSnapshot queueSnapshot();
 
-        PrefillEvictionCommit commit(List<DeliveryItem> exactVictims);
+        PrefillEvictionCommit commit(
+                List<DeliveryItem> exactVictims,
+                AdmissionMutation exactMutation);
 
         @Override
         void close();

@@ -69,18 +69,18 @@ class DefaultRouterTest {
     @ParameterizedTest
     @EnumSource(value = RoleType.class, names = {
             "PREFILL", "DECODE", "PDFUSION", "VIT"})
-    void missingRequiredRoleUsesThatRolesPublicFailureCode(RoleType role) {
+    void missingRequiredRoleReturnsGenericDeferredCapacity(RoleType role) {
         when(modelMeta.requiredRoles()).thenReturn(List.of(role));
         DefaultRouter router = router();
         BalanceContext context = context(11L);
         when(selector.select(context, role, null)).thenReturn(null);
 
-        QueueRoutingResult.Rejected rejected = assertInstanceOf(
-                QueueRoutingResult.Rejected.class,
+        QueueRoutingResult.Deferred deferred = assertInstanceOf(
+                QueueRoutingResult.Deferred.class,
                 router.routeForQueue(context));
 
-        assertEquals(role.getErrorType().getErrorCode(),
-                rejected.response().getCode());
+        assertEquals(role, deferred.role());
+        assertEquals(null, deferred.group());
     }
 
     @Test
@@ -172,12 +172,12 @@ class DefaultRouterTest {
         when(selector.select(context, RoleType.VIT, "g1"))
                 .thenReturn(null);
 
-        QueueRoutingResult.Rejected rejected = assertInstanceOf(
-                QueueRoutingResult.Rejected.class,
+        QueueRoutingResult.Deferred deferred = assertInstanceOf(
+                QueueRoutingResult.Deferred.class,
                 router.routeForQueue(context));
 
-        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(),
-                rejected.response().getCode());
+        assertEquals(RoleType.VIT, deferred.role());
+        assertEquals("g1", deferred.group());
         verify(prefill.selection).close();
     }
 

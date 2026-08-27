@@ -15,6 +15,8 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.ClientCalls;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
@@ -22,6 +24,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.QueueRoutingResult;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
@@ -32,6 +35,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.consistency.MasterElectService;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
@@ -71,6 +75,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.management.ManagementFactory;
 import java.math.BigInteger;
 import java.net.ServerSocket;
 import java.nio.file.Files;
@@ -94,6 +99,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
@@ -185,6 +191,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static final int[] STANDARD_ENGINE_MATRIX_TARGET_QPS =
             parseTargetQps(System.getProperty(
                     "flexlb.perf.engine-matrix-target-qps", "1000,2000,5000,10000"));
+    private static final int PLACEMENT_ROUTE_PREFILL_ENGINES =
+            Integer.getInteger("flexlb.perf.placement-route-prefill-engines", 750);
+    private static final int PLACEMENT_ROUTE_DECODE_ENGINES =
+            Integer.getInteger("flexlb.perf.placement-route-decode-engines", 750);
+    private static final int PLACEMENT_ROUTE_OPERATIONS =
+            Integer.getInteger("flexlb.perf.placement-route-operations", 4_096);
+    private static final int PLACEMENT_ROUTE_WARMUP =
+            Integer.getInteger("flexlb.perf.placement-route-warmup", 512);
     private static final MasterElectService STANDALONE_MASTER_ELECT_SERVICE =
             new MasterElectService() {
                 @Override
@@ -752,6 +766,207 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     "NON_BATCH must leave engine batch records empty");
             assertEquals(0L, totalDispatchReasons,
                     "NON_BATCH must not report a batch dispatch reason");
+        }
+    }
+
+    @Test
+    @Order(3)
+    @Timeout(value = 180, unit = TimeUnit.SECONDS)
+    void placementRouteCostIsBoundedForHealthyAndAllFullFleet() {
+        assertTrue(PLACEMENT_ROUTE_PREFILL_ENGINES > 0);
+        assertTrue(PLACEMENT_ROUTE_DECODE_ENGINES > 0);
+        assertTrue(PLACEMENT_ROUTE_OPERATIONS > 0);
+        provisionLogicalPlacementEndpoints(
+                PLACEMENT_ROUTE_PREFILL_ENGINES,
+                PLACEMENT_ROUTE_DECODE_ENGINES);
+
+        PlacementRouteCost healthy = measurePlacementRoutes(
+                false, 70_000_000L);
+
+        RoutingConfig.DecodeAvailabilityConfig availability = config
+                .getRouter().getRoles().getDecode().getAvailability();
+        Long previousMaxEngineRequests = availability.getMaxEngineRequests();
+        List<DecodePlacementHold> holds = new ArrayList<>();
+        try {
+            availability.setMaxEngineRequests(1L);
+            long holdRequestId = 80_000_000L;
+            for (DecodeEndpoint endpoint
+                    : endpointRegistry.snapshotDecodeEndpoints().values()) {
+                WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration();
+                assertTrue(pin != null,
+                        "placement benchmark endpoint retired during setup");
+                try {
+                    DecodeEndpoint.QueuedPreparation preparation =
+                            endpoint.tryPrepareQueuedPinned(
+                                    pin,
+                                    holdRequestId++,
+                                    1L,
+                                    1L,
+                                    0,
+                                    new DecodeEndpoint.AdmissionCapacity(
+                                            1L, 100L));
+                    assertEquals(
+                            DecodeEndpoint.QueuedPreparationStatus.PREPARED,
+                            preparation.status());
+                    holds.add(new DecodePlacementHold(
+                            endpoint, pin, preparation.reservation()));
+                } catch (RuntimeException | Error failure) {
+                    pin.close();
+                    throw failure;
+                }
+            }
+            assertEquals(PLACEMENT_ROUTE_DECODE_ENGINES, holds.size());
+            PlacementRouteCost allFull = measurePlacementRoutes(
+                    true, 90_000_000L);
+
+            System.out.printf(
+                    "FlexLB placement route performance: prefill=%d decode=%d "
+                            + "operations=%d healthy_p95_ms=%.3f "
+                            + "healthy_cpu_ns_per_route=%d "
+                            + "healthy_allocated_bytes_per_route=%d "
+                            + "all_full_p95_ms=%.3f "
+                            + "all_full_cpu_ns_per_route=%d "
+                            + "all_full_allocated_bytes_per_route=%d%n",
+                    PLACEMENT_ROUTE_PREFILL_ENGINES,
+                    PLACEMENT_ROUTE_DECODE_ENGINES,
+                    PLACEMENT_ROUTE_OPERATIONS,
+                    healthy.p95Nanos() / 1_000_000.0,
+                    healthy.cpuNanosPerRoute(),
+                    healthy.allocatedBytesPerRoute(),
+                    allFull.p95Nanos() / 1_000_000.0,
+                    allFull.cpuNanosPerRoute(),
+                    allFull.allocatedBytesPerRoute());
+
+            assertPlacementRouteCeilings("healthy", healthy);
+            assertPlacementRouteCeilings("all-full", allFull);
+        } finally {
+            for (int index = holds.size() - 1; index >= 0; index--) {
+                holds.get(index).close();
+            }
+            availability.setMaxEngineRequests(previousMaxEngineRequests);
+        }
+    }
+
+    private void provisionLogicalPlacementEndpoints(
+            int prefillCount, int decodeCount) {
+        while (endpointRegistry.getEndpointCount(RoleType.PREFILL)
+                < prefillCount) {
+            addLogicalPrefillEndpoint(
+                    endpointRegistry.getEndpointCount(RoleType.PREFILL));
+        }
+        while (endpointRegistry.getEndpointCount(RoleType.DECODE)
+                < decodeCount) {
+            addLogicalDecodeEndpoint(
+                    endpointRegistry.getEndpointCount(RoleType.DECODE));
+        }
+        assertEquals(prefillCount,
+                endpointRegistry.getEndpointCount(RoleType.PREFILL));
+        assertEquals(decodeCount,
+                endpointRegistry.getEndpointCount(RoleType.DECODE));
+    }
+
+    private PlacementRouteCost measurePlacementRoutes(
+            boolean expectAllFull, long firstRequestId) {
+        BalanceContext[] warmup = placementContexts(
+                PLACEMENT_ROUTE_WARMUP, firstRequestId);
+        for (BalanceContext context : warmup) {
+            routePlacementOnce(context, expectAllFull);
+        }
+
+        BalanceContext[] measured = placementContexts(
+                PLACEMENT_ROUTE_OPERATIONS,
+                firstRequestId + PLACEMENT_ROUTE_WARMUP);
+        java.lang.management.ThreadMXBean threadBean =
+                ManagementFactory.getThreadMXBean();
+        if (threadBean.isCurrentThreadCpuTimeSupported()
+                && !threadBean.isThreadCpuTimeEnabled()) {
+            threadBean.setThreadCpuTimeEnabled(true);
+        }
+        boolean measuresCpu = threadBean.isCurrentThreadCpuTimeSupported()
+                && threadBean.isThreadCpuTimeEnabled();
+        com.sun.management.ThreadMXBean allocationBean =
+                threadBean instanceof com.sun.management.ThreadMXBean bean
+                        ? bean : null;
+        if (allocationBean != null
+                && allocationBean.isThreadAllocatedMemorySupported()
+                && !allocationBean.isThreadAllocatedMemoryEnabled()) {
+            allocationBean.setThreadAllocatedMemoryEnabled(true);
+        }
+        boolean measuresAllocation = allocationBean != null
+                && allocationBean.isThreadAllocatedMemoryEnabled();
+        long threadId = Thread.currentThread().threadId();
+        long cpuBefore = measuresCpu
+                ? threadBean.getCurrentThreadCpuTime() : 0L;
+        long allocatedBefore = measuresAllocation
+                ? allocationBean.getThreadAllocatedBytes(threadId) : 0L;
+        long[] latencies = new long[measured.length];
+        for (int index = 0; index < measured.length; index++) {
+            long started = System.nanoTime();
+            routePlacementOnce(measured[index], expectAllFull);
+            latencies[index] = System.nanoTime() - started;
+        }
+        long cpuAfter = measuresCpu
+                ? threadBean.getCurrentThreadCpuTime() : 0L;
+        long allocatedAfter = measuresAllocation
+                ? allocationBean.getThreadAllocatedBytes(threadId) : 0L;
+        Arrays.sort(latencies);
+        return new PlacementRouteCost(
+                percentileNanos(latencies, 0.95),
+                measuresCpu
+                        ? Math.max(0L, cpuAfter - cpuBefore) / measured.length
+                        : -1L,
+                measuresAllocation
+                        ? Math.max(0L, allocatedAfter - allocatedBefore)
+                                / measured.length
+                        : -1L);
+    }
+
+    private BalanceContext[] placementContexts(int count, long firstRequestId) {
+        BalanceContext[] contexts = new BalanceContext[count];
+        for (int index = 0; index < count; index++) {
+            contexts[index] = createBalanceContext(firstRequestId + index);
+        }
+        return contexts;
+    }
+
+    private void routePlacementOnce(
+            BalanceContext context, boolean expectAllFull) {
+        QueueRoutingResult result = router.routeForQueue(context);
+        if (expectAllFull) {
+            QueueRoutingResult.Deferred deferred = assertInstanceOf(
+                    QueueRoutingResult.Deferred.class, result);
+            assertEquals(RoleType.DECODE, deferred.role(),
+                    "the all-full fixture must block on Decode capacity");
+            return;
+        }
+        QueueRoutingResult.Admitted admitted = assertInstanceOf(
+                QueueRoutingResult.Admitted.class, result);
+        admitted.admission().close();
+    }
+
+    private static void assertPlacementRouteCeilings(
+            String mode, PlacementRouteCost cost) {
+        long maximumP95Nanos = Long.getLong(
+                "flexlb.perf.placement-route-max-p95-ns", 20_000_000L);
+        long maximumCpuNanos = Long.getLong(
+                "flexlb.perf.placement-route-max-cpu-ns", 20_000_000L);
+        long maximumAllocatedBytes = Long.getLong(
+                "flexlb.perf.placement-route-max-allocated-bytes",
+                4L * 1_024L * 1_024L);
+        assertTrue(cost.p95Nanos() <= maximumP95Nanos,
+                () -> mode + " route p95 " + cost.p95Nanos()
+                        + " ns exceeds " + maximumP95Nanos + " ns");
+        if (cost.cpuNanosPerRoute() >= 0L) {
+            assertTrue(cost.cpuNanosPerRoute() <= maximumCpuNanos,
+                    () -> mode + " route CPU " + cost.cpuNanosPerRoute()
+                            + " ns/op exceeds " + maximumCpuNanos + " ns/op");
+        }
+        if (cost.allocatedBytesPerRoute() >= 0L) {
+            assertTrue(cost.allocatedBytesPerRoute() <= maximumAllocatedBytes,
+                    () -> mode + " route allocation "
+                            + cost.allocatedBytesPerRoute()
+                            + " bytes/op exceeds " + maximumAllocatedBytes
+                            + " bytes/op");
         }
     }
 
@@ -1449,6 +1664,26 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private record TrafficResult(double qps, double p50Ms, double p90Ms,
                                  double p95Ms, double p99Ms,
                                  List<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responses) {
+    }
+
+    private record PlacementRouteCost(
+            long p95Nanos,
+            long cpuNanosPerRoute,
+            long allocatedBytesPerRoute) {
+    }
+
+    private record DecodePlacementHold(
+            DecodeEndpoint endpoint,
+            WorkerEndpoint.GenerationPin pin,
+            DecodeEndpoint.ReservationHandle reservation) {
+
+        private void close() {
+            try {
+                endpoint.rollbackExact(reservation);
+            } finally {
+                pin.close();
+            }
+        }
     }
 
     private record BatchSummary(int batchCount, int maxBatchSize, double averageBatchSize,

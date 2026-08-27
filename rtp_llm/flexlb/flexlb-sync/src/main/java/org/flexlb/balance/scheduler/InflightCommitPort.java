@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.admission.AdmissionMutation;
+
 /** Narrow exact-slot commit capability used by route placement. */
 interface InflightCommitPort {
 
@@ -29,5 +31,6 @@ interface InflightCommitPort {
     boolean commitInflight(
             BatchItem item,
             boolean priorityAdmission,
+            AdmissionMutation exactMutation,
             ActivePublication publication);
 }

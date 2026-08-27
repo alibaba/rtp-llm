@@ -31,12 +31,16 @@ class RequestOrchestratorsTest {
     void shutdownOwnsOneStrictCloseOrder() {
         RequestShutdownOrchestrator.Lifecycle lifecycle =
                 mock(RequestShutdownOrchestrator.Lifecycle.class);
+        RequestShutdownOrchestrator.Placement placement =
+                mock(RequestShutdownOrchestrator.Placement.class);
         EndpointRegistry registry = mock(EndpointRegistry.class);
         when(lifecycle.closeAdmissionAndAwaitMutations()).thenReturn(true);
 
-        new RequestShutdownOrchestrator(lifecycle, registry).shutdown();
+        new RequestShutdownOrchestrator(
+                lifecycle, registry, placement).shutdown();
 
-        InOrder order = inOrder(lifecycle, registry);
+        InOrder order = inOrder(placement, lifecycle, registry);
+        order.verify(placement).closePlacement();
         order.verify(lifecycle).closeAdmissionAndAwaitMutations();
         order.verify(lifecycle).closeOutstandingAndTerminalize();
         order.verify(lifecycle).closeExpiration();

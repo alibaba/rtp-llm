@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -19,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -113,6 +115,45 @@ class RequestLifecycleCoordinatorTest {
                 future.join().getCode());
         assertEquals(RequestLifecycleState.CANCELLED,
                 lifecycle.getRequestState(301L, 0L).state());
+    }
+
+    @Test
+    void exactMutationCanBindPostPnrResourcesAfterCancellationWasDeferred() {
+        CompletableFuture<Response> future = lifecycle.register(context(302L), 4);
+        AdmissionMutation mutation = lifecycle.claimAdmissionMutation(302L, future);
+        assertNotNull(mutation);
+        assertTrue(mutation.seal(),
+                "the exact open mutation must linearize before its PNR");
+
+        lifecycle.cancelRequest(302L, 0L, CancelReason.DEADLINE_EXCEEDED);
+        AtomicInteger releases = new AtomicInteger();
+
+        assertTrue(lifecycle.bindAdmissionResources(
+                302L, future, mutation, releases::incrementAndGet, 100L));
+        assertFalse(future.isDone());
+        assertEquals(0, releases.get());
+
+        mutation.close();
+
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                future.join().getCode());
+        assertEquals(1, releases.get(),
+                "the canonical timeout cleanup must release the exact permit once");
+    }
+
+    @Test
+    void cancellationBeforeSealPreventsDestructiveAdmissionCommit() {
+        CompletableFuture<Response> future = lifecycle.register(context(303L), 4);
+        AdmissionMutation mutation = lifecycle.claimAdmissionMutation(303L, future);
+        assertNotNull(mutation);
+
+        lifecycle.cancelRequest(303L, 0L, CancelReason.DEADLINE_EXCEEDED);
+
+        assertFalse(mutation.seal(),
+                "a deadline that wins first must prevent the destructive PNR");
+        mutation.close();
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                future.join().getCode());
     }
 
     @Test

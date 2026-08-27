@@ -377,6 +377,7 @@
                                 <configuration combine.self="override">
                                     <includes>
                                         <include>**/WorkerBatcherPerformanceTest.java</include>
+                                        <include>**/RequestSchedulerDeferredRetryTest.java</include>
                                     </includes>
                                     <groups>performance-regression</groups>
                                     <forkCount>1</forkCount>

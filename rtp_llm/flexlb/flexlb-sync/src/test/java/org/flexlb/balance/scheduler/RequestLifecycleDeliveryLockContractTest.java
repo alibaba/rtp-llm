@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
@@ -9,6 +10,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -90,6 +92,7 @@ class RequestLifecycleDeliveryLockContractTest {
                     lifecycle.commitInflight(
                             registered.item(),
                             false,
+                            admission.exact(),
                             () -> {
                                 actionEntered.countDown();
                                 assertFalse(Thread.holdsLock(slot));
@@ -128,11 +131,108 @@ class RequestLifecycleDeliveryLockContractTest {
         boolean[] publicationCalled = new boolean[1];
 
         assertFalse(lifecycle.commitInflight(
-                registered.item(), false, () -> {
+                registered.item(), false, mock(AdmissionMutation.class), () -> {
                     publicationCalled[0] = true;
                     return true;
                 }));
         assertFalse(publicationCalled[0]);
+    }
+
+    @Test
+    void exactSealedMutationPublishesAfterDeadlineCrossesItsPnr() {
+        Registered registered = registerItem(107L);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             registered.item().requestId(),
+                             registered.future())) {
+            assertNotNull(admission);
+            assertTrue(admission.exact().seal());
+            lifecycle.cancelRequest(
+                    registered.item().requestId(),
+                    0L,
+                    CancelReason.DEADLINE_EXCEEDED);
+
+            assertTrue(lifecycle.commitInflight(
+                    registered.item(),
+                    true,
+                    admission.exact(),
+                    () -> true),
+                    "the exact sealed mutation must finish canonical publication");
+            assertFalse(registered.future().isDone(),
+                    "the deadline remains deferred until exact ownership resolves");
+        }
+
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                registered.future().join().getCode());
+    }
+
+    @Test
+    void unsealedMutationCannotBypassTheOrdinaryDeadlineGate() {
+        Registered registered = registerItem(109L);
+        boolean[] publicationCalled = new boolean[1];
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             registered.item().requestId(),
+                             registered.future())) {
+            assertNotNull(admission);
+            lifecycle.cancelRequest(
+                    registered.item().requestId(),
+                    0L,
+                    CancelReason.DEADLINE_EXCEEDED);
+
+            assertFalse(lifecycle.commitInflight(
+                    registered.item(),
+                    false,
+                    admission.exact(),
+                    () -> {
+                        publicationCalled[0] = true;
+                        return true;
+                    }));
+            assertFalse(publicationCalled[0]);
+        }
+
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(),
+                registered.future().join().getCode());
+    }
+
+    @Test
+    void exactSealedMutationPublishesWhileShutdownWaitsForIt()
+            throws Exception {
+        Registered registered = registerItem(108L);
+        RequestLifecycleCoordinator.AdmissionScope admission =
+                lifecycle.beginAdmission(
+                        registered.item().requestId(), registered.future());
+        assertNotNull(admission);
+        assertTrue(admission.exact().seal());
+        ExecutorService shutdown = Executors.newSingleThreadExecutor();
+        try {
+            Future<Boolean> shutdownOwner =
+                    shutdown.submit(lifecycle::closeAdmissionAndAwaitMutations);
+            awaitCondition(lifecycle::isShuttingDown);
+            assertFalse(shutdownOwner.isDone(),
+                    "shutdown must wait for the sealed transaction");
+
+            assertTrue(lifecycle.commitInflight(
+                    registered.item(),
+                    true,
+                    admission.exact(),
+                    () -> true),
+                    "shutdown cannot reject an exact transaction past PNR");
+
+            admission.close();
+            assertTrue(shutdownOwner.get(5, TimeUnit.SECONDS));
+            lifecycle.closeOutstandingAndTerminalize();
+            lifecycle.closeExpiration();
+            lifecycle.closePublisher();
+        } finally {
+            admission.close();
+            shutdown.shutdownNow();
+        }
+
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(),
+                registered.future().get(5, TimeUnit.SECONDS).getCode());
     }
 
     @Test
@@ -146,7 +246,7 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.future())) {
             assertNotNull(admission);
             assertFalse(lifecycle.commitInflight(
-                    registered.item(), true, () -> false));
+                    registered.item(), true, admission.exact(), () -> false));
             synchronized (slot) {
                 assertNull(slot.activeItem());
                 assertFalse(slot.wasPriorityAdmission());
@@ -169,7 +269,7 @@ class RequestLifecycleDeliveryLockContractTest {
             IllegalStateException actual = assertThrows(
                     IllegalStateException.class,
                     () -> lifecycle.commitInflight(
-                            registered.item(), false, () -> {
+                            registered.item(), false, admission.exact(), () -> {
                                 throw expected;
                             }));
             assertSame(expected, actual);
@@ -190,7 +290,7 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.future())) {
             assertNotNull(admission);
             assertTrue(lifecycle.commitInflight(
-                    registered.item(), false, () -> {
+                    registered.item(), false, admission.exact(), () -> {
                         preparedBeforeResolution[0] = lifecycle.prepareIfOwned(
                                 registered.item(), () -> Boolean.TRUE)
                                 .isPresent();
@@ -220,7 +320,7 @@ class RequestLifecycleDeliveryLockContractTest {
             try {
                 Future<Boolean> publication = operations.submit(() ->
                         lifecycle.commitInflight(
-                                registered.item(), false, () -> {
+                                registered.item(), false, admission.exact(), () -> {
                                     publicationEntered.countDown();
                                     await(releasePublication);
                                     return false;
@@ -270,7 +370,7 @@ class RequestLifecycleDeliveryLockContractTest {
             try {
                 Future<Boolean> publication = operations.submit(() ->
                         lifecycle.commitInflight(
-                                registered.item(), false, () -> {
+                                registered.item(), false, admission.exact(), () -> {
                                     queuePublished.countDown();
                                     await(returnFromPublication);
                                     return true;
@@ -308,7 +408,7 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.future())) {
             assertNotNull(admission);
             assertTrue(lifecycle.commitInflight(
-                    registered.item(), false, () -> true));
+                    registered.item(), false, admission.exact(), () -> true));
         }
         RequestSlot slot = lifecycle.requestSlot(registered.item().requestId());
         CountDownLatch transferEntered = new CountDownLatch(1);
@@ -415,7 +515,7 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.future())) {
             assertNotNull(admission);
             assertTrue(lifecycle.commitInflight(
-                    registered.item(), false, () -> true));
+                    registered.item(), false, admission.exact(), () -> true));
         }
     }
 

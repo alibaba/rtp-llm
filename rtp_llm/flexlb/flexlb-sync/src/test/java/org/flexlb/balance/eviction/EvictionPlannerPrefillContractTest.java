@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  * <ul>
  *   <li>Eviction NEVER touches an equal-or-higher priority request (strict &lt;).</li>
  *   <li>Priority-0 requests are NEVER victims (even though 0 &lt; anything numerically).</li>
- *   <li>Exactly {@code deficit = queueSize + 1 − capacity} victims are chosen.</li>
+ *   <li>A saturated valid snapshot plans one 1:1 victim; an over-limit snapshot waits.</li>
  *   <li>Victims are the lowest priority first; among equal priority the NEWEST
  *       arrival first (protecting older, longer-waited requests).</li>
  *   <li>Insufficient candidates → null + typed reason, NEVER a partial set.</li>
@@ -44,7 +44,24 @@ class EvictionPlannerPrefillContractTest {
     private static PrefillEvictionProposal plan(
             PriorityRequestEnvelope envelope, int capacity,
             List<DeliveryItem> items, Map<String, String> failures) {
-        QueueSnapshot queue = new QueueSnapshot(EP, 1L, capacity, items);
+        return plan(envelope, capacity, items.size(), Long.MAX_VALUE,
+                items, failures);
+    }
+
+    private static PrefillEvictionProposal plan(
+            PriorityRequestEnvelope envelope, int capacity,
+            long pending, long maxPending,
+            List<DeliveryItem> items, Map<String, String> failures) {
+        return plan(envelope, capacity, items.size(), pending, maxPending,
+                items, failures);
+    }
+
+    private static PrefillEvictionProposal plan(
+            PriorityRequestEnvelope envelope, int capacity,
+            long waiting, long pending, long maxPending,
+            List<DeliveryItem> items, Map<String, String> failures) {
+        QueueSnapshot queue = new QueueSnapshot(
+                EP, 1L, capacity, waiting, pending, maxPending, items);
         return EvictionPlanner.planPrefillQueue(envelope, List.of(queue), failures);
     }
 
@@ -78,41 +95,37 @@ class EvictionPlannerPrefillContractTest {
 
         @Test
         void noPriorityItemsDoNotCountTowardCandidates() {
-            // capacity=1, 3 items but two are priority-0. deficit=3.
-            // Only 1 true candidate (P30) < deficit → infeasible.
             Map<String, String> failures = new HashMap<>();
             PrefillEvictionProposal p = plan(
-                    incoming(70), 1,
+                    incoming(70), 3,
                     List.of(item(1L, 0, 100L), item(2L, 30, 100L), item(3L, 0, 100L)),
                     failures);
-            assertNull(p);
-            assertEquals("insufficient_lower_priority_candidates", failures.get(EP));
+            assertEquals(List.of(2L), victimIds(p),
+                    "priority-0 items must not enter the victim candidate set");
         }
     }
 
     // ─── Deficit boundary ───────────────────────────────────────────────
 
     @Nested
-    @DisplayName("Deficit = queueSize + 1 − capacity")
+    @DisplayName("One-for-one replacement boundary")
     class DeficitBoundary {
 
         @Test
-        void exactlyEnoughCandidatesForTheDeficitAreAllEvicted() {
-            // capacity=1, 2 items → deficit=2, both are candidates → both evicted.
+        void aSaturatedQueuePlansExactlyOneVictim() {
             Map<String, String> failures = new HashMap<>();
             PrefillEvictionProposal p = plan(
-                    incoming(70), 1,
+                    incoming(70), 2,
                     List.of(item(1L, 30, 100L), item(2L, 30, 200L)), failures);
-            assertEquals(2, p.victims().size());
+            assertEquals(1, p.victims().size());
         }
 
         @Test
-        void oneCandidateShortOfTheDeficitIsInfeasible() {
-            // capacity=1, 2 items but only 1 lower → deficit 2 > 1 candidates.
+        void saturatedQueueWithoutLowerPriorityVictimIsInfeasible() {
             Map<String, String> failures = new HashMap<>();
             PrefillEvictionProposal p = plan(
-                    incoming(70), 1,
-                    List.of(item(1L, 30, 100L), item(2L, 70, 100L)), failures);
+                    incoming(70), 2,
+                    List.of(item(1L, 70, 100L), item(2L, 80, 100L)), failures);
             assertNull(p, "insufficient candidates must yield no plan at all");
             assertEquals("insufficient_lower_priority_candidates", failures.get(EP));
         }
@@ -128,12 +141,82 @@ class EvictionPlannerPrefillContractTest {
         }
 
         @Test
-        void anUnboundedQueueIsInfeasible() {
+        void anUnboundedQueueWithPendingCapacityNeedsNoVictim() {
             Map<String, String> failures = new HashMap<>();
             PrefillEvictionProposal p = plan(
                     incoming(70), 0, List.of(item(1L, 30, 100L)), failures);
             assertNull(p);
-            assertEquals("queue_unbounded", failures.get(EP));
+            assertEquals("queue_not_full", failures.get(EP));
+        }
+
+        @Test
+        void pendingAtItsCapRequiresOneVictimEvenWhenQueueIsNotFull() {
+            Map<String, String> failures = new HashMap<>();
+            PrefillEvictionProposal p = plan(
+                    incoming(70), 5, 2L, 2L,
+                    List.of(item(1L, 30, 100L)), failures);
+
+            assertEquals(List.of(1L), victimIds(p));
+        }
+
+        @Test
+        void pendingAboveItsCapWaitsInsteadOfPlanningAReplacement() {
+            Map<String, String> failures = new HashMap<>();
+            PrefillEvictionProposal p = plan(
+                    incoming(70), 1, 3L, 2L,
+                    List.of(item(1L, 30, 100L)), failures);
+
+            assertNull(p);
+            assertEquals("over_limit_wait", failures.get(EP));
+        }
+
+        @Test
+        void waitingAboveItsCapWaitsInsteadOfPlanningMultipleVictims() {
+            Map<String, String> failures = new HashMap<>();
+            PrefillEvictionProposal p = plan(
+                    incoming(70), 1, 2L, 2L, 10L,
+                    List.of(
+                            item(1L, 20, 100L),
+                            item(2L, 30, 200L)),
+                    failures);
+
+            assertNull(p,
+                    "the endpoint 1:1 replacement CAS cannot commit a multi-victim plan");
+            assertEquals("over_limit_wait", failures.get(EP));
+        }
+
+        @Test
+        void queueAndPendingDeficitsShareTheSameVictim() {
+            Map<String, String> failures = new HashMap<>();
+            PrefillEvictionProposal p = plan(
+                    incoming(70), 2, 3L, 3L,
+                    List.of(item(1L, 30, 100L), item(2L, 40, 100L)),
+                    failures);
+
+            assertEquals(List.of(1L), victimIds(p));
+        }
+
+        @Test
+        void preparedHoldCountsTowardWaitingDeficitButOnlyActiveCanBeVictim() {
+            Map<String, String> failures = new HashMap<>();
+            PrefillEvictionProposal p = plan(
+                    incoming(70), 2, 2L, 2L, 10L,
+                    List.of(item(1L, 30, 100L)), failures);
+
+            assertEquals(List.of(1L), victimIds(p),
+                    "one hold plus one ACTIVE item already consumes both seats");
+        }
+
+        @Test
+        void holdOnlySaturationWaitsWhenThereIsNoExactActiveVictim() {
+            Map<String, String> failures = new HashMap<>();
+            PrefillEvictionProposal p = plan(
+                    incoming(70), 1, 1L, 1L, 10L,
+                    List.of(), failures);
+
+            assertNull(p);
+            assertEquals("insufficient_lower_priority_candidates",
+                    failures.get(EP));
         }
     }
 
@@ -145,26 +228,23 @@ class EvictionPlannerPrefillContractTest {
 
         @Test
         void lowestPriorityCandidatesAreEvictedFirst() {
-            // capacity=2, 3 items → deficit=2. P50,P30,P40 → evict P30,P40.
             Map<String, String> failures = new HashMap<>();
             PrefillEvictionProposal p = plan(
-                    incoming(70), 2,
+                    incoming(70), 3,
                     List.of(item(1L, 50, 100L), item(2L, 30, 100L), item(3L, 40, 100L)),
                     failures);
-            assertEquals(List.of(2L, 3L), victimIds(p),
-                    "the lowest priority candidates are evicted first");
+            assertEquals(List.of(2L), victimIds(p),
+                    "the lowest priority candidate is the single 1:1 victim");
         }
 
         @Test
         void amongEqualPriorityTheNewestArrivalIsEvictedFirst() {
-            // capacity=1, 3 items → deficit=3. Two P30 with different arrival.
-            // Newer (id2, arr200) before older (id1, arr100).
             Map<String, String> failures = new HashMap<>();
             PrefillEvictionProposal p = plan(
-                    incoming(70), 1,
+                    incoming(70), 3,
                     List.of(item(1L, 30, 100L), item(2L, 30, 200L), item(3L, 40, 50L)),
                     failures);
-            assertEquals(List.of(2L, 1L, 3L), victimIds(p),
+            assertEquals(List.of(2L), victimIds(p),
                     "protect the older request among equal priority");
         }
     }

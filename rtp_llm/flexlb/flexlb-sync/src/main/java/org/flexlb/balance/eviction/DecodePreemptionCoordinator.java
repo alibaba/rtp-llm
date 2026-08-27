@@ -1,5 +1,6 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionClaim;
@@ -35,9 +36,32 @@ public final class DecodePreemptionCoordinator {
         CONTROL_FAILED
     }
 
-    public record ExecutionResult(ResultCode code, String detail) {
+    public record ExecutionResult(
+            ResultCode code,
+            String detail,
+            DecodeEndpoint.ReservationHandle incoming) {
+
+        public ExecutionResult {
+            if (code == null
+                    || (code == ResultCode.COMMITTED) != (incoming != null)) {
+                throw new IllegalArgumentException(
+                        "only a committed Decode preemption carries incoming ownership");
+            }
+        }
+
+        public ExecutionResult(ResultCode code, String detail) {
+            this(code, detail, null);
+        }
+
         static ExecutionResult of(ResultCode code, String detail) {
             return new ExecutionResult(code, detail);
+        }
+
+        static ExecutionResult committed(
+                String detail,
+                DecodeEndpoint.ReservationHandle incoming) {
+            return new ExecutionResult(
+                    ResultCode.COMMITTED, detail, incoming);
         }
     }
 
@@ -50,7 +74,8 @@ public final class DecodePreemptionCoordinator {
                           List<DecodeRequestSnapshot> victims,
                           long cancelAckTimeoutMs,
                           long cancelCompletionTimeoutMs,
-                          BooleanSupplier admissionOpen,
+                          AdmissionMutation admissionMutation,
+                          BooleanSupplier placementSeal,
                           String detail) {
         public Request {
             if (endpoint == null || victims == null || victims.isEmpty()) {
@@ -66,8 +91,13 @@ public final class DecodePreemptionCoordinator {
             if (victims.stream().anyMatch(victim -> !victim.phase().requiresEngineCancel())) {
                 throw new IllegalArgumentException("coordinator accepts only Engine-Cancel victims");
             }
-            if (admissionOpen == null) {
-                throw new IllegalArgumentException("admission gate is required");
+            if (admissionMutation == null) {
+                throw new IllegalArgumentException(
+                        "exact admission mutation is required");
+            }
+            if (placementSeal == null) {
+                throw new IllegalArgumentException(
+                        "exact placement seal is required");
             }
         }
     }
@@ -131,24 +161,55 @@ public final class DecodePreemptionCoordinator {
                 }
             }
 
-            DecodeEndpoint.PreemptionBeginResult begin =
+            DecodeEndpoint.PreemptionBegin begin =
                     request.endpoint().beginPriorityPreemption(
                             token, victimReservations,
                             request.incomingRequestId(), request.incomingKvTokens(),
                             request.incomingExpectedKvTokens(), request.incomingPriority(),
                             request.capacity());
-            if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
-                ResultCode code = begin
+            if (begin.status()
+                    != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
+                ResultCode code = begin.status()
                         == DecodeEndpoint.PreemptionBeginResult.ENDPOINT_RETIRED
                         ? ResultCode.CONTROL_FAILED : ResultCode.CONFLICT;
                 return CompletableFuture.completedFuture(capability.abort(
-                        code, "begin_" + begin.name().toLowerCase()));
+                        code, "begin_" + begin.status().name().toLowerCase()));
             }
-            capability.endpointBegun();
+            capability.endpointBegun(begin.incoming());
             if (!attempt.claimAll()) {
                 return CompletableFuture.completedFuture(capability.abort(
                         ResultCode.CONTROL_FAILED,
                         "attempt_claim_linearization_failed"));
+            }
+
+            // Capture every terminal future while the transaction is still
+            // fully reversible. Continuations are attached only after the
+            // exact PNR seal and cancel-in-flight transition.
+            List<ClaimedTerminal> claimedTerminals =
+                    new ArrayList<>(victims.size());
+            for (ClaimedVictim owned : capability.claims()) {
+                CompletableFuture<VictimTerminal> terminal =
+                        owned.claim().terminal();
+                if (terminal == null) {
+                    return CompletableFuture.completedFuture(capability.abort(
+                            ResultCode.CONTROL_FAILED,
+                            "victim_terminal_missing:" + owned.requestId()));
+                }
+                claimedTerminals.add(new ClaimedTerminal(owned, terminal));
+            }
+
+            // The exact slot lock decides deadline/cancel versus the first
+            // destructive Cancel side effect. Everything before this point is
+            // rolled back by AttemptCapability.abort().
+            if (!request.admissionMutation().seal()) {
+                return CompletableFuture.completedFuture(capability.abort(
+                        ResultCode.CONFLICT,
+                        "admission_closed_before_cancel_pnr"));
+            }
+            if (!request.placementSeal().getAsBoolean()) {
+                return CompletableFuture.completedFuture(capability.abort(
+                        ResultCode.CONFLICT,
+                        "placement_revoked_before_cancel_pnr"));
             }
 
             if (!request.endpoint().markPriorityCancelInFlight(token)) {
@@ -174,20 +235,27 @@ public final class DecodePreemptionCoordinator {
             // side effect. The exact claim remains the only lookup key.
             List<TerminalSettlement> terminalSettlements =
                     new ArrayList<>(victims.size());
-            for (ClaimedVictim owned : capability.claims()) {
-                CompletableFuture<Boolean> completion = owned.claim().terminal()
-                        .handle((terminal, failure) -> failure == null
-                                && capability.recordTerminal(owned, terminal));
+            for (ClaimedTerminal captured : claimedTerminals) {
+                CompletableFuture<Boolean> completion = captured.terminal()
+                        .handle((victimTerminal, failure) -> failure == null
+                                && capability.recordTerminal(
+                                        captured.owned(), victimTerminal));
                 terminalSettlements.add(
-                        new TerminalSettlement(owned, completion));
+                        new TerminalSettlement(
+                                captured.owned(), completion));
             }
 
             List<CompletableFuture<EngineCancelChannel.CancelOutcome>>
                     acknowledgements = new ArrayList<>(victims.size());
+            long acknowledgementDeadlineNanos = System.nanoTime()
+                    + TimeUnit.MILLISECONDS.toNanos(
+                            Math.max(1, request.cancelAckTimeoutMs()));
             for (ClaimedVictim owned : capability.claims()) {
                 if (capability.outboundStarted(owned)) {
                     acknowledgements.add(cancel(
-                            owned.victim(), request.cancelAckTimeoutMs()));
+                            owned.victim(),
+                            request.cancelAckTimeoutMs(),
+                            acknowledgementDeadlineNanos));
                 } else {
                     acknowledgements.add(CompletableFuture.completedFuture(
                             EngineCancelChannel.CancelOutcome.failed()));
@@ -356,17 +424,26 @@ public final class DecodePreemptionCoordinator {
 
     private static <T> CompletableFuture<T> withDeadline(
             CompletableFuture<T> source, long deadlineNanos) {
+        Objects.requireNonNull(source, "source");
         long remainingNanos = Math.max(1, deadlineNanos - System.nanoTime());
-        CompletableFuture<T> timeout = new CompletableFuture<>();
+        CompletableFuture<T> bounded = new CompletableFuture<>();
+        source.whenComplete((value, failure) -> {
+            if (failure == null) {
+                bounded.complete(value);
+            } else {
+                bounded.completeExceptionally(failure);
+            }
+        });
         CompletableFuture.delayedExecutor(remainingNanos, TimeUnit.NANOSECONDS)
-                .execute(() -> timeout.completeExceptionally(
-                        new TimeoutException("victim terminal deadline exceeded")));
-        return source.applyToEither(timeout, value -> value);
+                .execute(() -> bounded.completeExceptionally(
+                        new TimeoutException("preemption phase deadline exceeded")));
+        return bounded;
     }
 
     private CompletableFuture<EngineCancelChannel.CancelOutcome> cancel(
             PreemptionAttempt.Victim victim,
-            long timeoutMs) {
+            long timeoutMs,
+            long deadlineNanos) {
         try {
             CompletableFuture<EngineCancelChannel.CancelOutcome> stage =
                     cancelChannel.cancel(
@@ -375,7 +452,8 @@ public final class DecodePreemptionCoordinator {
                 return CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelOutcome.failed());
             }
-            return stage.handle((outcome, failure) -> failure == null
+            return withDeadline(stage, deadlineNanos)
+                    .handle((outcome, failure) -> failure == null
                             && outcome != null
                     ? outcome : EngineCancelChannel.CancelOutcome.failed());
         } catch (RuntimeException | Error failure) {
@@ -399,6 +477,11 @@ public final class DecodePreemptionCoordinator {
     private record TerminalSettlement(
             ClaimedVictim owned,
             CompletableFuture<Boolean> completion) {
+    }
+
+    private record ClaimedTerminal(
+            ClaimedVictim owned,
+            CompletableFuture<VictimTerminal> terminal) {
     }
 
     private record PendingTerminal(
@@ -452,6 +535,7 @@ public final class DecodePreemptionCoordinator {
         private final PreemptionAttempt attempt;
         private final List<ClaimedVictim> claims = new ArrayList<>();
         private boolean endpointBegun;
+        private DecodeEndpoint.ReservationHandle incoming;
         private boolean committed;
         private boolean closed;
         private String cleanupFailure;
@@ -489,8 +573,16 @@ public final class DecodePreemptionCoordinator {
             return claims;
         }
 
-        private void endpointBegun() {
+        private void endpointBegun(
+                DecodeEndpoint.ReservationHandle exactIncoming) {
+            if (exactIncoming == null
+                    || exactIncoming.requestId()
+                            != request.incomingRequestId()) {
+                throw new IllegalArgumentException(
+                        "preemption begin returned another incoming reservation");
+            }
             endpointBegun = true;
+            incoming = exactIncoming;
         }
 
         private boolean outboundStarted(ClaimedVictim owned) {
@@ -546,14 +638,13 @@ public final class DecodePreemptionCoordinator {
 
         private ExecutionResult finish(boolean hasNotFound) {
             if (attempt.allVictimsTerminal()
-                    && request.admissionOpen().getAsBoolean()
                     && request.endpoint().commitPriorityPreemption(
                             attempt.token())
                     && attempt.markCommitted()) {
                 committed = true;
                 closed = true;
-                return ExecutionResult.of(
-                        ResultCode.COMMITTED, "committed");
+                return ExecutionResult.committed(
+                        "committed", incoming);
             }
             boolean cleanSingleNotFound = hasNotFound
                     && attempt.victims().size() == 1

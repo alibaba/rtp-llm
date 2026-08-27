@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.DeliveryLifecyclePort;
 import org.flexlb.balance.delivery.DeliveryStrategy;
@@ -18,6 +19,26 @@ import java.util.Map;
  * request state nor queue implementation types cross this boundary.</p>
  */
 public interface PrefillGenerationRuntime {
+
+    /**
+     * Exact, one-shot hold on this generation's queue and pending seats.
+     * Closing an uncommitted hold releases only that hold.
+     */
+    interface PreparedOffer extends AutoCloseable {
+
+        /**
+         * Make this hold non-revocable before an irreversible cross-role step.
+         * Repeated calls return {@code true} while the live hold remains sealed;
+         * {@code false} means it was revoked or has already been consumed.
+         */
+        boolean seal();
+
+        /** Convert this hold into the exact canonical ACTIVE item. */
+        void commit(DeliveryItem exactItem);
+
+        @Override
+        void close();
+    }
 
     /** Sole construction boundary for a generation runtime. */
     @FunctionalInterface
@@ -41,11 +62,18 @@ public interface PrefillGenerationRuntime {
             PrefillWorkLedger ledger) {
     }
 
-    /** Immutable queue state materialized under the runtime's queue lock. */
+    /**
+     * Immutable queue state materialized under the runtime's queue lock.
+     * {@code waitingCount} includes ACTIVE items and live prepared holds;
+     * {@code items} contains only canonical ACTIVE identities.
+     */
     record QueueSnapshot(
             String endpointId,
             long queueVersion,
             int queueCapacity,
+            long waitingCount,
+            long pendingCount,
+            long maxPendingRequests,
             List<DeliveryItem> items) {
         public QueueSnapshot {
             if (queueVersion < 0L) {
@@ -56,8 +84,20 @@ public interface PrefillGenerationRuntime {
                 throw new IllegalArgumentException(
                         "queueCapacity must be non-negative");
             }
+            if (waitingCount < 0L
+                    || pendingCount < 0L
+                    || maxPendingRequests <= 0L) {
+                throw new IllegalArgumentException(
+                        "waiting/pending counts must be non-negative with a positive maximum");
+            }
             items = List.copyOf(items);
+            if (waitingCount < items.size()
+                    || pendingCount < waitingCount) {
+                throw new IllegalArgumentException(
+                        "waiting must cover ACTIVE items and pending must cover waiting");
+            }
         }
+
     }
 
     enum QueueReplacementStatus {
@@ -83,6 +123,19 @@ public interface PrefillGenerationRuntime {
     /** Publish one exact item after the endpoint facade validates its pin. */
     boolean offer(DeliveryItem exactItem);
 
+    /**
+     * Hold one queue/pending seat before cross-role admission. A {@code null}
+     * result means capacity is temporarily full and no lower-priority OPEN
+     * hold is eligible for replacement.
+     */
+    PreparedOffer prepareOffer(long requestId, int priority);
+
+    /** Stable generation-local wake source for queue/pending offer capacity. */
+    CapacityBoundary.Availability offerAvailability();
+
+    /** Monotonic generation-local epoch advanced whenever an offer seat frees. */
+    long offerCapacityEpoch();
+
     /** Remove only the supplied canonical ACTIVE identity. */
     boolean removeQueued(DeliveryItem exactItem, String reason);
 
@@ -94,6 +147,9 @@ public interface PrefillGenerationRuntime {
     QueueSnapshot captureQueueSnapshot();
 
     int queueSize();
+
+    /** Canonical pending count, including uncommitted prepared offers. */
+    long pendingRequestCount();
 
     Map<Integer, Integer> queueSizeByPriority();
 

@@ -414,7 +414,7 @@ class DecodeEngineFenceProtectionTest {
                 expectedKv,
                 priority,
                 new DecodeEndpoint.AdmissionCapacity(
-                        Math.max(1, endpoint.getTotalLoad()), 0));
+                        Math.max(1, endpoint.getTotalLoad()), 0)).status();
     }
 
     private static TaskInfo task(long requestId, TaskPhase phase, long inputLength) {

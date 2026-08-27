@@ -64,9 +64,11 @@ public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
                 .getPrefill().getCacheAffinity();
         CacheAffinityPolicy.Decision affinity = null;
         if (cacheAffinity != null) {
+            boolean hasAvailable = survivors.hasAvailable();
             long referenceHitTokens = 0L;
             for (int i = 0; i < survivors.size(); i++) {
-                if (survivors.projectedTtftMs(i) == minProjectedTtftMs) {
+                if ((!hasAvailable || survivors.resourceAvailable(i))
+                        && survivors.projectedTtftMs(i) == minProjectedTtftMs) {
                     referenceHitTokens = Math.max(
                             referenceHitTokens, survivors.cacheHit(i));
                 }
@@ -78,7 +80,8 @@ public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
                     minProjectedTtftMs,
                     referenceHitTokens,
                     seqLen,
-                    cacheAffinity.getMaxExtraTtftMs(),
+                    remainingCacheAffinityBudgetMs(
+                            balanceContext, cacheAffinity.getMaxExtraTtftMs()),
                     cacheAffinity.getMinPrefixHitPercent());
         }
 
@@ -126,15 +129,17 @@ public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
      */
     private static List<Integer> shortestCandidateIndexes(
             CandidateSet candidates, int configuredCount) {
-        int count = Math.min(
-                Math.max(1, configuredCount), candidates.size());
+        boolean hasAvailable = candidates.hasAvailable();
         List<Integer> indexes = new ArrayList<>(candidates.size());
         for (int i = 0; i < candidates.size(); i++) {
-            indexes.add(i);
+            if (!hasAvailable || candidates.resourceAvailable(i)) {
+                indexes.add(i);
+            }
         }
         indexes.sort(Comparator
                 .comparingLong((Integer index) -> candidates.projectedTtftMs(index))
                 .thenComparingInt(Integer::intValue));
+        int count = Math.min(Math.max(1, configuredCount), indexes.size());
         return indexes.subList(0, count);
     }
 
@@ -181,10 +186,18 @@ public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
     private static LiveCandidate findLiveLru(
             CandidateSet candidates,
             CacheAffinityPolicy.Decision affinity) {
+        int first = affinity.preferredIndex(0);
+        long bestHit = candidates.cacheHit(first);
+        long bestTtftMs = candidates.projectedTtftMs(first);
         LiveCandidate selected = null;
         for (int i = 0; i < affinity.preferredCount(); i++) {
+            int index = affinity.preferredIndex(i);
+            if (candidates.cacheHit(index) != bestHit
+                    || candidates.projectedTtftMs(index) != bestTtftMs) {
+                break;
+            }
             selected = chooseLiveLru(
-                    candidates, affinity.preferredIndex(i), selected);
+                    candidates, index, selected);
         }
         return selected;
     }

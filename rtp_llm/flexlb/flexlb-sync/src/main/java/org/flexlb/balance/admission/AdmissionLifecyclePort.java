@@ -14,6 +14,7 @@ public interface AdmissionLifecyclePort {
     boolean bindAdmissionResources(
             long requestId,
             CompletableFuture<?> exactFuture,
+            AdmissionMutation exactMutation,
             Runnable releasePermit,
             long acceptanceTimeoutMs);
 }

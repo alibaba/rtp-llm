@@ -147,8 +147,13 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 final int selectedIndex;
                 if (modeledSelection) {
                     // Numeric TTFT policies see only candidates with a complete model.
+                    boolean hasAvailable = selectedCandidates.hasAvailable();
                     long minProjectedTtftMs = Long.MAX_VALUE;
                     for (int i = 0; i < selectedCandidates.size(); i++) {
+                        if (hasAvailable
+                                && !selectedCandidates.resourceAvailable(i)) {
+                            continue;
+                        }
                         long projectedTtftMs = selectedCandidates.projectedTtftMs(i);
                         if (projectedTtftMs < minProjectedTtftMs) {
                             minProjectedTtftMs = projectedTtftMs;
@@ -215,10 +220,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
      * into an availability failure.
      */
     private static int selectUnmodeledCandidate(CandidateSet candidates) {
+        boolean hasAvailable = candidates.hasAvailable();
         int selectedIndex = -1;
         long selectedPending = Long.MAX_VALUE;
         long selectedTime = Long.MAX_VALUE;
         for (int i = 0; i < candidates.size(); i++) {
+            if (hasAvailable && !candidates.resourceAvailable(i)) {
+                continue;
+            }
             RouteProjection.Candidate candidate = candidates.candidate(i);
             if (!candidate.engineWorkUnmodeled()) {
                 throw new IllegalStateException(
@@ -265,9 +274,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return selectBaselineCandidate(survivors, minProjectedTtftMs, config);
         }
 
+        boolean hasAvailable = survivors.hasAvailable();
         long referenceHitTokens = 0L;
         for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.projectedTtftMs(i) == minProjectedTtftMs) {
+            if ((!hasAvailable || survivors.resourceAvailable(i))
+                    && survivors.projectedTtftMs(i) == minProjectedTtftMs) {
                 referenceHitTokens = Math.max(referenceHitTokens, survivors.cacheHit(i));
             }
         }
@@ -278,7 +289,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 minProjectedTtftMs,
                 referenceHitTokens,
                 seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
+                remainingCacheAffinityBudgetMs(
+                        balanceContext, cacheAffinity.getMaxExtraTtftMs()),
                 cacheAffinity.getMinPrefixHitPercent());
 
         int selectedIndex;
@@ -331,10 +343,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                     Math.max(0L, random.getMinimumToleranceMs()));
         }
         long ttftCutoffMs = saturatingAdd(minProjectedTtftMs, tieThreshold);
+        boolean hasAvailable = survivors.hasAvailable();
         int selectedIndex = -1;
         int tiedCount = 0;
         for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.projectedTtftMs(i) <= ttftCutoffMs
+            if ((!hasAvailable || survivors.resourceAvailable(i))
+                    && survivors.projectedTtftMs(i) <= ttftCutoffMs
                     && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
                 selectedIndex = i;
             }
@@ -449,14 +463,17 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             private final String endpointAddress;
             private WorkerEndpoint.GenerationPin pin;
             private final RouteProjection.Candidate projection;
+            private final boolean resourceAvailable;
 
             private Entry(
                     String endpointAddress,
                     WorkerEndpoint.GenerationPin pin,
-                    RouteProjection.Candidate projection) {
+                    RouteProjection.Candidate projection,
+                    boolean resourceAvailable) {
                 this.endpointAddress = endpointAddress;
                 this.pin = pin;
                 this.projection = projection;
+                this.resourceAvailable = resourceAvailable;
             }
 
             private String endpointAddress() {
@@ -489,17 +506,19 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 throw new IllegalArgumentException(
                         "Prefill candidate requires Prefill endpoint pin");
             }
-            entries.add(new Entry(endpointAddress, pin, null));
+            entries.add(new Entry(endpointAddress, pin, null, false));
         }
 
         private void addCandidate(
                 String endpointAddress,
                 WorkerEndpoint.GenerationPin pin,
-                RouteProjection.Candidate projection) {
+                RouteProjection.Candidate projection,
+                boolean resourceAvailable) {
             entries.add(new Entry(
                     endpointAddress,
                     pin,
-                    projection));
+                    projection,
+                    resourceAvailable));
         }
 
         protected RouteProjection.Candidate candidate(int index) {
@@ -530,6 +549,19 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return candidate(index).incomingPrefillMs();
         }
 
+        protected boolean resourceAvailable(int index) {
+            return entries.get(index).resourceAvailable;
+        }
+
+        protected boolean hasAvailable() {
+            for (int i = 0; i < entries.size(); i++) {
+                if (resourceAvailable(i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         protected int size() {
             return entries.size();
         }
@@ -537,11 +569,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         private void moveCandidateTo(
                 int index,
                 CandidateSet target,
-                RouteProjection.Candidate projection) {
+                RouteProjection.Candidate projection,
+                boolean resourceAvailable) {
             Entry source = entries.get(index);
             WorkerEndpoint.GenerationPin pin = requirePin(index);
             target.addCandidate(
-                    source.endpointAddress(), pin, projection);
+                    source.endpointAddress(), pin, projection, resourceAvailable);
             source.pin = null;
         }
 
@@ -630,14 +663,21 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                             Integer::sum);
                     continue;
                 }
-                if (!resourceMeasure.isResourceAvailable(projection.requiredPendingCount())) {
+                // QUEUE takes an endpoint-owned capacity hold only after
+                // cache/TTFT selection. Filtering here would erase a hot
+                // worker merely because its binding seats are momentarily full.
+                boolean resourceAvailable = resourceMeasure.isResourceAvailable(
+                        projection.requiredPendingCount());
+                if (!config.isQueue() && !resourceAvailable) {
                     rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
                     continue;
                 }
                 if (modeledProjection) {
-                    eligible.moveCandidateTo(i, modeled, projection);
+                    eligible.moveCandidateTo(
+                            i, modeled, projection, resourceAvailable);
                 } else {
-                    eligible.moveCandidateTo(i, unmodeled, projection);
+                    eligible.moveCandidateTo(
+                            i, unmodeled, projection, resourceAvailable);
                 }
                 // One routing request may inspect hundreds of endpoints. Keep the
                 // per-candidate diagnostic at TRACE so enabling ordinary DEBUG
@@ -672,12 +712,26 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             throw failure;
         }
 
-        if (modeled.size() != 0) {
+        if (modeled.hasAvailable()
+                || modeled.size() != 0 && !unmodeled.hasAvailable()) {
             unmodeled.close();
             return rejectOutliers(modeled, config, rejections);
         }
         modeled.close();
         return new FilterResult(unmodeled, rejections);
+    }
+
+    /** Cache affinity spends one request-scoped budget across every reselect. */
+    protected static long remainingCacheAffinityBudgetMs(
+            BalanceContext context, long configuredBudgetMs) {
+        long budgetMs = Math.max(0L, configuredBudgetMs);
+        long startedAtMs = context.getEnqueueTime();
+        if (startedAtMs <= 0L) {
+            return budgetMs;
+        }
+        long elapsedMs = Math.max(
+                0L, System.currentTimeMillis() - startedAtMs);
+        return Math.max(0L, budgetMs - elapsedMs);
     }
 
     private FilterResult rejectOutliers(
@@ -700,7 +754,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         int knownDrainCount = 0;
         long sumPendingCount = 0L;
         int feasibleSize = feasible.size();
+        int availableCount = 0;
         for (int i = 0; i < feasibleSize; i++) {
+            if (!feasible.resourceAvailable(i)) {
+                continue;
+            }
+            availableCount++;
             RouteProjection.Candidate projection = feasible.candidate(i);
             OptionalLong projectedDrainMs = projection.projectedDrainMs();
             if (projectedDrainMs.isPresent()) {
@@ -711,9 +770,12 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             sumPendingCount = saturatingAdd(
                     sumPendingCount, projection.requiredPendingCount());
         }
+        if (availableCount == 0) {
+            return new FilterResult(feasible, rejections);
+        }
 
         long avgDrainMs = knownDrainCount == 0 ? 0L : sumDrainMs / knownDrainCount;
-        long avgPendingCount = sumPendingCount / feasible.size();
+        long avgPendingCount = sumPendingCount / availableCount;
 
         // Round 2: hotspot / drain-imbalance filter using the same projections.
         CandidateSet survivors = new CandidateSet(feasibleSize);
@@ -721,9 +783,15 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long leastDrainMs = Long.MAX_VALUE;
         int leastPendingIndex = -1;
         long leastPendingCount = Long.MAX_VALUE;
+        int availableSurvivors = 0;
         try (feasible) {
             for (int i = 0; i < feasibleSize; i++) {
                 RouteProjection.Candidate projection = feasible.candidate(i);
+                if (!feasible.resourceAvailable(i)) {
+                    feasible.moveCandidateTo(
+                            i, survivors, projection, false);
+                    continue;
+                }
                 OptionalLong projectedDrainMs = projection.projectedDrainMs();
                 long pendingCount = projection.requiredPendingCount();
 
@@ -750,17 +818,19 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                     continue;
                 }
 
-                feasible.moveCandidateTo(i, survivors, projection);
+                feasible.moveCandidateTo(i, survivors, projection, true);
+                availableSurvivors++;
             }
 
-            if (survivors.size() == 0) {
+            if (availableSurvivors == 0) {
                 int fallbackIndex = leastLoadedIndex >= 0
                         ? leastLoadedIndex : leastPendingIndex;
                 if (fallbackIndex >= 0) {
                     feasible.moveCandidateTo(
                             fallbackIndex,
                             survivors,
-                            feasible.candidate(fallbackIndex));
+                            feasible.candidate(fallbackIndex),
+                            true);
                 }
             }
         } catch (RuntimeException | Error failure) {

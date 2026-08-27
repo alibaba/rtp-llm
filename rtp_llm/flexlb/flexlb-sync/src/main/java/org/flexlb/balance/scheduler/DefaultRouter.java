@@ -65,13 +65,12 @@ public class DefaultRouter implements Router {
         }
         try (PinnedRouting routing = selectAll(context, requiredRoles)) {
             if (!routing.success()) {
-                return new QueueRoutingResult.Rejected(
-                        buildFailureResponse(routing.failedRole()));
+                return new QueueRoutingResult.Deferred(
+                        routing.failedRole(), routing.failedGroup());
             }
             Response response = buildSuccessResponse(routing.serverStatuses());
-            return new QueueRoutingResult.Admitted(
-                    QueueRouteAdmission.prepare(
-                            context, routing.selections(), response));
+            return QueueRouteAdmission.prepare(
+                    context, routing.selections(), response);
         }
     }
 
@@ -91,7 +90,7 @@ public class DefaultRouter implements Router {
         String policyGroup = groupDecision.group();
         String group = policyGroup;
         if (groupDecision.hasGroup()) {
-            Logger.info(
+            Logger.debug(
                     "Group routing policy selected group, requestId: {}, policy: {}, group: {}",
                     context.getRequestId(),
                     groupDecision.policyName(),
@@ -103,8 +102,10 @@ public class DefaultRouter implements Router {
                 SelectedRole selection = endpointSelector.select(
                         context, role, group);
                 if (selection == null) {
-                    Logger.warn("Failed to select {} worker", role.getCode());
-                    return new PinnedRouting(selected, role);
+                    Logger.debug(
+                            "No bindable {} worker in this routing attempt",
+                            role.getCode());
+                    return new PinnedRouting(selected, role, group);
                 }
                 try {
                     selected.add(selection);
@@ -116,7 +117,7 @@ public class DefaultRouter implements Router {
                     group = selection.serverStatus().getGroup();
                 }
             }
-            return new PinnedRouting(selected, null);
+            return new PinnedRouting(selected, null, null);
         } catch (RuntimeException | Error failure) {
             closeSelections(selected, failure);
             throw failure;
@@ -344,12 +345,15 @@ public class DefaultRouter implements Router {
     private static final class PinnedRouting implements AutoCloseable {
         private final List<SelectedRole> selections;
         private final RoleType failedRole;
+        private final String failedGroup;
 
         private PinnedRouting(
                 List<SelectedRole> selections,
-                RoleType failedRole) {
+                RoleType failedRole,
+                String failedGroup) {
             this.selections = selections;
             this.failedRole = failedRole;
+            this.failedGroup = failedGroup;
         }
 
         private boolean success() {
@@ -358,6 +362,10 @@ public class DefaultRouter implements Router {
 
         private RoleType failedRole() {
             return failedRole;
+        }
+
+        private String failedGroup() {
+            return failedGroup;
         }
 
         private List<SelectedRole> selections() {

@@ -124,12 +124,17 @@ final class RequestSlot extends RequestLifecycle {
      */
     boolean tryBindItemForPublication(
             BatchItem candidate,
-            boolean priority) {
+            boolean priority,
+            AdmissionMutation exactMutation,
+            boolean admissionClosed) {
         requireSlotLock("request item publication begin");
+        SlotAdmissionMutation owned = admissionMutation;
         if (!ownsActiveGeneration()
-                || !isOpen()
+                || future.isDone()
                 || item != null
-                || admissionMutation == null
+                || owned == null
+                || owned != exactMutation
+                || ((!admissionOpen || admissionClosed) && !owned.sealed)
                 || candidate.requestId() != requestId
                 || candidate.future() != future) {
             return false;
@@ -345,6 +350,30 @@ final class RequestSlot extends RequestLifecycle {
         return exact;
     }
 
+    boolean ownsAdmissionMutation(AdmissionMutation exact) {
+        requireSlotLock("admission mutation ownership lookup");
+        return ownsActiveGeneration()
+                && admissionMutation != null
+                && admissionMutation == exact;
+    }
+
+    boolean sealAdmissionMutation(AdmissionMutation exact) {
+        requireSlotLock("admission mutation seal");
+        if (!ownsAdmissionMutation(exact)) {
+            return false;
+        }
+        SlotAdmissionMutation owned = (SlotAdmissionMutation) exact;
+        if (owned.sealed) {
+            return true;
+        }
+        if (!admissionOpen) {
+            return false;
+        }
+        owned.sealed = true;
+        assertInvariant();
+        return true;
+    }
+
     AdmissionMutationCompletion completeAdmissionMutation(
             AdmissionMutation exact) {
         requireSlotLock("admission mutation completion");
@@ -462,6 +491,7 @@ final class RequestSlot extends RequestLifecycle {
 
     private final class SlotAdmissionMutation implements AdmissionMutation {
         private final AtomicBoolean resolved = new AtomicBoolean();
+        private boolean sealed;
         private DeferredTerminal pendingTerminal;
         private PendingPrefillRetirement pendingPrefillRetirement;
 
@@ -485,6 +515,14 @@ final class RequestSlot extends RequestLifecycle {
                         "admission mutation observed another Prefill generation"
                                 + " for request " + requestId);
             }
+        }
+
+        @Override
+        public boolean seal() {
+            if (resolved.get()) {
+                return false;
+            }
+            return admissionMutationSink.seal(RequestSlot.this, this);
         }
 
         @Override
@@ -621,6 +659,7 @@ final class RequestSlot extends RequestLifecycle {
      *         lifecycle race; null when the slot retained the capability
      */
     AdmissionCleanup bindAdmissionResources(
+            AdmissionMutation exactMutation,
             Runnable releaseAction,
             long acceptanceTimeoutMs) {
         requireSlotLock("admission resource binding");
@@ -633,11 +672,16 @@ final class RequestSlot extends RequestLifecycle {
             throw new IllegalStateException(
                     "admission resources already installed for " + requestId);
         }
+        if (!ownsAdmissionMutation(exactMutation)) {
+            throw new IllegalStateException(
+                    "admission mutation no longer owns request " + requestId);
+        }
         AdmissionResources exact = new AdmissionResources(
                 releaseAction, acceptanceTimeoutMs);
-        if (!ownsActiveGeneration() || !isOpen()) {
-            return new AdmissionCleanup(exact, null);
-        }
+        // A deadline or cancel that races after a destructive admission PNR
+        // closes admissionOpen but is deliberately deferred by this exact
+        // mutation. Retain the resources so mutation completion can publish
+        // or cancel them through the canonical RequestSlot owner.
         admissionResources = exact;
         if (engineOwnership == EngineOwnership.DECODE_OWNED) {
             AdmissionCleanup cleanup = detachAdmissionCleanup(true);
@@ -2689,6 +2733,8 @@ interface PublicationLease extends AutoCloseable {
 
 /** Narrow continuation for a slot-created exact admission mutation token. */
 interface AdmissionMutationSink {
+    boolean seal(RequestSlot slot, AdmissionMutation exact);
+
     void complete(RequestSlot slot, AdmissionMutation exact);
 
     void terminate(

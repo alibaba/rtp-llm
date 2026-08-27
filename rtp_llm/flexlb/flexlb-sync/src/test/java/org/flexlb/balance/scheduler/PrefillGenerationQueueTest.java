@@ -8,6 +8,7 @@ import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
+import org.flexlb.balance.endpoint.PrefillWorkLedger;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.FlexlbConfig;
@@ -29,8 +30,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -144,6 +147,250 @@ class PrefillGenerationQueueTest {
         assertEquals(List.of(canonical),
                 runtime.captureQueueSnapshot().items());
         assertTrue(runtime.removeQueued(canonical, "canonical identity"));
+    }
+
+    @Test
+    void preparedOfferHoldsBothSeatsAndCloseSignalsFreedCapacity() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        SchedulingTestConfig.useQueueCapacity(config)
+                .setMaxWaitingRequestsPerPrefillWorker(1);
+        WorkerBatcher runtime = runningRuntime();
+        CapacityBoundary.Availability availability = runtime.offerAvailability();
+        AtomicInteger signals = new AtomicInteger();
+        availability.addListener(signals::incrementAndGet);
+
+        long before = runtime.offerCapacityEpoch();
+        try (PrefillGenerationRuntime.PreparedOffer prepared =
+                     runtime.prepareOffer(31L, 50)) {
+            assertEquals(1L, runtime.pendingRequestCount());
+            assertFalse(availability.isAvailable());
+            PrefillGenerationRuntime.QueueSnapshot held =
+                    runtime.captureQueueSnapshot();
+            assertEquals(1L, held.waitingCount());
+            assertTrue(held.items().isEmpty());
+            assertNull(runtime.prepareOffer(32L, 50));
+            assertFalse(runtime.offer(item(
+                    33L, 50, Long.MAX_VALUE,
+                    System.currentTimeMillis(), 128L)));
+        }
+
+        assertTrue(availability.isAvailable());
+        assertTrue(runtime.offerCapacityEpoch() > before);
+        assertEquals(1, signals.get());
+        assertSame(availability, runtime.offerAvailability());
+    }
+
+    @Test
+    void fullProbeRefreshesExternalPendingPressureBeforeReleaseSignal() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        CapacityBoundary.Availability availability = runtime.offerAvailability();
+        AtomicInteger signals = new AtomicInteger();
+        availability.addListener(signals::incrementAndGet);
+        long before = runtime.offerCapacityEpoch();
+
+        assertTrue(availability.isAvailable());
+        try (PrefillWorkLedger.DirectRegistration registration =
+                     runtime.ownedLedger().tryRegisterDirect(35L, 1L)) {
+            assertNotNull(registration);
+            assertNull(runtime.prepareOffer(36L, 50));
+            assertFalse(availability.isAvailable(),
+                    "the failed capacity probe must publish the external ledger pressure");
+            assertEquals(before, runtime.offerCapacityEpoch(),
+                    "capacity consumption is not a release");
+        }
+
+        assertTrue(availability.isAvailable());
+        assertTrue(runtime.offerCapacityEpoch() > before);
+        assertEquals(1, signals.get());
+    }
+
+    @Test
+    void preparedOfferCommitIsExactOneShotAndCapacityNeutral() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        BatchItem exact = item(
+                41L, 50, Long.MAX_VALUE,
+                System.currentTimeMillis(), 128L);
+        PrefillGenerationRuntime.PreparedOffer prepared =
+                runtime.prepareOffer(41L, 50);
+        long heldEpoch = runtime.offerCapacityEpoch();
+
+        assertTrue(prepared.seal());
+        assertTrue(prepared.seal());
+        prepared.commit(exact);
+
+        assertEquals(heldEpoch, runtime.offerCapacityEpoch());
+        assertEquals(1L, runtime.pendingRequestCount());
+        assertEquals(List.of(exact), runtime.captureQueueSnapshot().items());
+        assertThrows(IllegalStateException.class, () -> prepared.commit(exact));
+        prepared.close();
+        assertEquals(1L, runtime.pendingRequestCount());
+        assertTrue(runtime.removeQueued(exact, "test committed hold release"));
+        assertEquals(0L, runtime.pendingRequestCount());
+    }
+
+    @Test
+    void preparedOfferRejectsAnotherRequestWithoutConsumingItsHold() {
+        WorkerBatcher runtime = runningRuntime();
+        try (PrefillGenerationRuntime.PreparedOffer prepared =
+                     runtime.prepareOffer(51L, 50)) {
+            BatchItem wrong = item(
+                    52L, 50, Long.MAX_VALUE,
+                    System.currentTimeMillis(), 128L);
+            assertTrue(prepared.seal());
+            assertThrows(IllegalArgumentException.class,
+                    () -> prepared.commit(wrong));
+            assertEquals(1L, runtime.pendingRequestCount());
+        }
+        assertEquals(0L, runtime.pendingRequestCount());
+    }
+
+    @Test
+    void priorityFullReplacesLatestLowestOpenHoldWithoutCapacitySignal() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(2L);
+        SchedulingTestConfig.useQueueCapacity(config)
+                .setMaxWaitingRequestsPerPrefillWorker(2);
+        WorkerBatcher runtime = runningRuntime();
+        AtomicInteger signals = new AtomicInteger();
+        runtime.offerAvailability().addListener(signals::incrementAndGet);
+        PrefillGenerationRuntime.PreparedOffer olderLow =
+                runtime.prepareOffer(101L, 20);
+        PrefillGenerationRuntime.PreparedOffer latestLow =
+                runtime.prepareOffer(102L, 20);
+        long fullEpoch = runtime.offerCapacityEpoch();
+
+        PrefillGenerationRuntime.PreparedOffer incoming =
+                runtime.prepareOffer(103L, 80);
+
+        assertNotNull(olderLow);
+        assertNotNull(latestLow);
+        assertNotNull(incoming);
+        assertTrue(olderLow.seal());
+        assertFalse(latestLow.seal());
+        assertTrue(incoming.seal());
+        assertEquals(2L, runtime.pendingRequestCount());
+        assertEquals(2L, runtime.captureQueueSnapshot().waitingCount());
+        assertEquals(fullEpoch, runtime.offerCapacityEpoch());
+        assertEquals(0, signals.get());
+
+        latestLow.close();
+        assertEquals(2L, runtime.pendingRequestCount());
+        olderLow.close();
+        incoming.close();
+        assertEquals(0L, runtime.pendingRequestCount());
+        assertEquals(2, signals.get());
+    }
+
+    @Test
+    void fifoFullDoesNotReplaceOpenHold() {
+        SchedulingTestConfig.useFifoQueue(config);
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        try (PrefillGenerationRuntime.PreparedOffer first =
+                     runtime.prepareOffer(111L, 20)) {
+            assertNull(runtime.prepareOffer(112L, 80));
+            assertTrue(first.seal());
+        }
+    }
+
+    @Test
+    void priorityFullDoesNotReplaceEqualPriorityOpenHold() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        try (PrefillGenerationRuntime.PreparedOffer first =
+                     runtime.prepareOffer(121L, 50)) {
+            assertNull(runtime.prepareOffer(122L, 50));
+            assertTrue(first.seal());
+        }
+    }
+
+    @Test
+    void priorityFullDoesNotReplaceSealedHold() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        try (PrefillGenerationRuntime.PreparedOffer first =
+                     runtime.prepareOffer(131L, 20)) {
+            assertTrue(first.seal());
+            assertNull(runtime.prepareOffer(132L, 80));
+            assertTrue(first.seal());
+        }
+    }
+
+    @Test
+    void preparedOfferCommitRequiresSealAndPreservesOpenHold() {
+        WorkerBatcher runtime = runningRuntime();
+        BatchItem exact = item(
+                141L, 50, Long.MAX_VALUE,
+                System.currentTimeMillis(), 128L);
+        PrefillGenerationRuntime.PreparedOffer prepared =
+                runtime.prepareOffer(141L, 50);
+
+        assertThrows(IllegalStateException.class, () -> prepared.commit(exact));
+        assertEquals(1L, runtime.pendingRequestCount());
+        assertTrue(prepared.seal());
+        prepared.commit(exact);
+        assertFalse(prepared.seal());
+        assertEquals(List.of(exact), runtime.captureQueueSnapshot().items());
+        assertTrue(runtime.removeQueued(exact, "test sealed commit release"));
+    }
+
+    @Test
+    void pendingCapCanReplaceTheExactWorstActiveWithStrictlyHigherPriority() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        BatchItem victim = item(61L, 50, Long.MAX_VALUE, 1L, 128L);
+        BatchItem incoming = item(62L, 80, Long.MAX_VALUE, 2L, 128L);
+        assertTrue(runtime.offer(victim));
+
+        PrefillGenerationRuntime.QueueSnapshot snapshot =
+                runtime.captureQueueSnapshot();
+        assertEquals(1L, snapshot.pendingCount());
+        assertEquals(1L, snapshot.maxPendingRequests());
+        assertTrue(snapshot.items().size() < snapshot.queueCapacity());
+        assertEquals(PrefillGenerationRuntime.QueueReplacementStatus.SUCCESS,
+                runtime.replaceQueued(List.of(victim), incoming).status());
+        assertEquals(List.of(incoming), runtime.captureQueueSnapshot().items());
+    }
+
+    @Test
+    void pendingCapDoesNotReplaceEqualPriority() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        BatchItem victim = item(71L, 50, Long.MAX_VALUE, 1L, 128L);
+        BatchItem incoming = item(72L, 50, Long.MAX_VALUE, 2L, 128L);
+        assertTrue(runtime.offer(victim));
+
+        assertEquals(PrefillGenerationRuntime.QueueReplacementStatus.DECLINED,
+                runtime.replaceQueued(List.of(victim), incoming).status());
+        assertEquals(List.of(victim), runtime.captureQueueSnapshot().items());
+    }
+
+    @Test
+    void pendingCapWithoutAnActiveVictimDeclinesReplacement() {
+        config.getRouter().getRoles().getPrefill()
+                .getAvailability().setMaxPendingRequests(1L);
+        WorkerBatcher runtime = runningRuntime();
+        try (PrefillWorkLedger.DirectRegistration registration =
+                     runtime.ownedLedger().tryRegisterDirect(81L, 1L)) {
+            registration.commit();
+        }
+
+        assertEquals(1L, runtime.pendingRequestCount());
+        assertTrue(runtime.captureQueueSnapshot().items().isEmpty());
+        assertEquals(PrefillGenerationRuntime.QueueReplacementStatus.DECLINED,
+                runtime.replaceQueued(
+                        List.of(),
+                        item(82L, 80, Long.MAX_VALUE, 2L, 128L)).status());
     }
 
     private WorkerBatcher runningRuntime() {

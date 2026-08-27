@@ -90,7 +90,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.expiration = new RequestExpirationOrchestrator(
                 lifecycle, registry);
         this.shutdown = new RequestShutdownOrchestrator(
-                lifecycle, registry);
+                lifecycle, registry, scheduler);
     }
 
     public RequestScheduler scheduler() {
@@ -180,8 +180,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 SelectedRole selected = select(pin, status);
                 selections.add(selected);
             }
-            return new QueueRoutingResult.Admitted(
-                    QueueRouteAdmission.prepare(context, selections, response));
+            return QueueRouteAdmission.prepare(context, selections, response);
         } finally {
             for (SelectedRole selection : selections) {
                 selection.close();

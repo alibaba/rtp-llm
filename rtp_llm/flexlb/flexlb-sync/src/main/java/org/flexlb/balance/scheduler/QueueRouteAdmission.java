@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointGenerationRetiredException;
@@ -38,7 +39,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         this.ownedRoute = Objects.requireNonNull(ownedRoute, "ownedRoute");
     }
 
-    static QueueRouteAdmission prepare(
+    static QueueRoutingResult prepare(
             BalanceContext context,
             List<SelectedRole> selectedRoles,
             Response response) {
@@ -82,21 +83,12 @@ public final class QueueRouteAdmission implements AutoCloseable {
                         throw new IllegalStateException(
                                 "queue route requires at most one exact Decode selection");
                     }
-                    long sequenceLength = Math.max(
-                            0L, context.getRequest().getSeqLen());
-                    long expectedKv = context.getConfig()
-                            .decodeKvReservationTokens(
-                                    sequenceLength,
-                                    context.getRequest().getMaxNewTokens(),
-                                    selected.decodeTotalKv());
+                    // Decode capacity is prepared only inside RequestScheduler's
+                    // exact-resource scheduling turn.  Keeping selection here
+                    // side-effect free closes the FULL-to-wait-lane handoff race
+                    // without serializing the expensive selector scan.
                     decodeEndpoint = decode;
                     decodePin = pin;
-                    decodeReservation = decode.reserveQueuedPinned(
-                            pin,
-                            context.getRequestId(),
-                            sequenceLength,
-                            expectedKv,
-                            context.getPriority());
                     decodeStatus = status;
                     continue;
                 }
@@ -109,17 +101,18 @@ public final class QueueRouteAdmission implements AutoCloseable {
                 throw new IllegalStateException(
                         "queue route has no Prefill endpoint generation");
             }
-            return new QueueRouteAdmission(
-                    requestId,
-                    response,
-                    new OwnedRoute(
-                            prefillEndpoint,
-                            prefillPin,
-                            prefillStatus,
-                            decodeEndpoint,
-                            decodePin,
-                            decodeReservation,
-                            decodeStatus));
+            return new QueueRoutingResult.Admitted(
+                    new QueueRouteAdmission(
+                            requestId,
+                            response,
+                            new OwnedRoute(
+                                    prefillEndpoint,
+                                    prefillPin,
+                                    prefillStatus,
+                                    decodeEndpoint,
+                                    decodePin,
+                                    decodeReservation,
+                                    decodeStatus)));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
@@ -130,6 +123,16 @@ public final class QueueRouteAdmission implements AutoCloseable {
                 throw failure;
             }
         }
+    }
+
+    private static DecodeEndpoint.AdmissionCapacity decodeCapacity(
+            BalanceContext context) {
+        var availability = context.getConfig().getRouter().getRoles()
+                .getDecode().getAvailability();
+        Long configuredLimit = availability.getMaxEngineRequests();
+        return new DecodeEndpoint.AdmissionCapacity(
+                configuredLimit == null ? 0L : configuredLimit,
+                availability.getMaxKvUsagePercent());
     }
 
     /**
@@ -206,6 +209,41 @@ public final class QueueRouteAdmission implements AutoCloseable {
         return response;
     }
 
+    /**
+     * Atomically check live Decode placement capacity and reserve it for this
+     * exact selected generation.  The scheduler invokes this only while it
+     * owns the selected P/D resource turn; a full result owns nothing.
+     */
+    public DecodePrepareStatus prepareDecode(BalanceContext context) {
+        if (context.getRequestId() != requestId) {
+            throw new IllegalArgumentException(
+                    "queue admission cannot prepare another request");
+        }
+        OwnedRoute route = requireOwned();
+        if (route.decodeEndpoint() == null || route.decodeReservation() != null) {
+            return DecodePrepareStatus.PREPARED;
+        }
+        long sequenceLength = Math.max(0L, context.getRequest().getSeqLen());
+        long expectedKv = context.getConfig().decodeKvReservationTokens(
+                sequenceLength,
+                context.getRequest().getMaxNewTokens(),
+                route.decodeEndpoint().realKvTotal());
+        DecodeEndpoint.QueuedPreparation preparation =
+                route.decodeEndpoint().tryPrepareQueuedPinned(
+                        route.decodePin(),
+                        requestId,
+                        sequenceLength,
+                        expectedKv,
+                        context.getPriority(),
+                        decodeCapacity(context));
+        if (preparation.status()
+                == DecodeEndpoint.QueuedPreparationStatus.CAPACITY_FULL) {
+            return DecodePrepareStatus.CAPACITY_FULL;
+        }
+        ownedRoute = route.withDecodeReservation(preparation.reservation());
+        return DecodePrepareStatus.PREPARED;
+    }
+
     public BatchItem buildItem(
             BalanceContext context,
             CompletableFuture<Response> future,
@@ -215,6 +253,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     "queue admission cannot build another request");
         }
         OwnedRoute route = requireOwned();
+        if (route.decodeEndpoint() != null && route.decodeReservation() == null) {
+            throw new IllegalStateException(
+                    "queue admission has no prepared Decode reservation");
+        }
         return new BatchItem(
                 context,
                 future,
@@ -232,17 +274,49 @@ public final class QueueRouteAdmission implements AutoCloseable {
      * only after the registrar has dropped the slot monitor and WorkerBatcher
      * has dropped its queue lock.
      */
-    public boolean commitTo(
+    public CommitStatus commitTo(
             InflightCommitPort registrar,
             BatchItem item,
-            boolean priorityAdmission) {
+            boolean priorityAdmission,
+            AdmissionMutation exactMutation) {
         OwnedRoute route = requireOwned();
-        return commitPublication(
-                route,
-                registrar,
-                item,
-                priorityAdmission,
-                () -> tryOfferPinned(route, item));
+        PrefillGenerationRuntime.PreparedOffer prepared;
+        try {
+            prepared = route.prefillEndpoint().prepareOfferPinned(
+                    route.prefillPin(), requestId, item.priority());
+        } catch (EndpointGenerationRetiredException retired) {
+            return CommitStatus.STALE;
+        }
+        if (prepared == null) {
+            return CommitStatus.PREFILL_FULL;
+        }
+        try (prepared) {
+            boolean committed;
+            boolean[] revoked = new boolean[1];
+            try {
+                committed = registrar.commitInflight(
+                        item,
+                        priorityAdmission,
+                        exactMutation,
+                        () -> {
+                            if (!prepared.seal()) {
+                                revoked[0] = true;
+                                return false;
+                            }
+                            prepared.commit(item);
+                            return true;
+                        });
+            } catch (EndpointGenerationRetiredException retired) {
+                return CommitStatus.STALE;
+            }
+            if (!committed) {
+                return revoked[0]
+                        ? CommitStatus.PREFILL_FULL
+                        : CommitStatus.REQUEST_CLOSED;
+            }
+            finishCommitted(route);
+            return CommitStatus.COMMITTED;
+        }
     }
 
     /** Execute one admission-owned endpoint mutation and ACTIVE publication. */
@@ -251,6 +325,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             InflightCommitPort registrar,
             BatchItem item,
             boolean priorityAdmission,
+            AdmissionMutation exactMutation,
             InflightCommitPort.ActivePublication activePublication) {
         if (requireOwned() != route) {
             throw new IllegalStateException(
@@ -259,6 +334,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         boolean committed = registrar.commitInflight(
                 item,
                 priorityAdmission,
+                exactMutation,
                 activePublication);
         if (committed) {
             finishCommitted(route);
@@ -271,6 +347,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             InflightCommitPort registrar,
             BatchItem item,
             boolean priorityAdmission,
+            AdmissionMutation exactMutation,
             List<DeliveryItem> exactVictims) {
         OwnedRoute route = requireOwned();
         PreparedReplacement prepared = PreparedReplacement.prepare(exactVictims);
@@ -281,6 +358,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                 registrar,
                 item,
                 priorityAdmission,
+                exactMutation,
                 () -> {
                     PrefillGenerationRuntime.QueueReplacement result =
                             route.prefillEndpoint().replaceQueued(
@@ -294,9 +372,16 @@ public final class QueueRouteAdmission implements AutoCloseable {
         return prepared.resolve(committed, replacement[0]);
     }
 
-    private static boolean tryOfferPinned(OwnedRoute route, BatchItem item) {
-        return route.prefillEndpoint().offerPinned(
-                route.prefillPin(), item);
+    public enum CommitStatus {
+        COMMITTED,
+        PREFILL_FULL,
+        STALE,
+        REQUEST_CLOSED
+    }
+
+    public enum DecodePrepareStatus {
+        PREPARED,
+        CAPACITY_FULL
     }
 
     public enum ReplacementStatus {
@@ -416,5 +501,22 @@ public final class QueueRouteAdmission implements AutoCloseable {
             WorkerEndpoint.GenerationPin decodePin,
             DecodeEndpoint.ReservationHandle decodeReservation,
             ServerStatus decodeStatus) {
+
+        private OwnedRoute withDecodeReservation(
+                DecodeEndpoint.ReservationHandle reservation) {
+            if (decodeEndpoint == null || decodePin == null || decodeStatus == null
+                    || decodeReservation != null || reservation == null) {
+                throw new IllegalStateException(
+                        "Decode reservation cannot be attached to this route");
+            }
+            return new OwnedRoute(
+                    prefillEndpoint,
+                    prefillPin,
+                    prefillStatus,
+                    decodeEndpoint,
+                    decodePin,
+                    reservation,
+                    decodeStatus);
+        }
     }
 }

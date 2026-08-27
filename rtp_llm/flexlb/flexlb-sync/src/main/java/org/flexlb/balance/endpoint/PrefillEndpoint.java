@@ -24,6 +24,60 @@ import java.util.function.LongPredicate;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
+    /** Cross-thread owner of one runtime offer and its exact generation. */
+    private static final class GenerationPreparedOffer
+            implements PrefillGenerationRuntime.PreparedOffer {
+        private final PrefillGenerationRuntime.PreparedOffer offer;
+        private final EndpointGenerationLifecycle.HandoffPermit handoff;
+        private boolean open = true;
+
+        private GenerationPreparedOffer(
+                PrefillGenerationRuntime.PreparedOffer offer,
+                EndpointGenerationLifecycle.HandoffPermit handoff) {
+            this.offer = offer;
+            this.handoff = handoff;
+        }
+
+        @Override
+        public synchronized boolean seal() {
+            if (!open) {
+                return false;
+            }
+            if (offer.seal()) {
+                return true;
+            }
+            closeOwnedResources();
+            return false;
+        }
+
+        @Override
+        public synchronized void commit(DeliveryItem exactItem) {
+            if (!open) {
+                throw new IllegalStateException(
+                        "prepared Prefill offer was already consumed");
+            }
+            open = false;
+            try (handoff; offer) {
+                offer.commit(exactItem);
+            }
+        }
+
+        @Override
+        public synchronized void close() {
+            if (!open) {
+                return;
+            }
+            closeOwnedResources();
+        }
+
+        private void closeOwnedResources() {
+            open = false;
+            try (handoff; offer) {
+                // Closing the resources rolls back the hold, then the generation.
+            }
+        }
+    }
+
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private final PrefillTimePredictor predictor;
     private final PrefillGenerationRuntime runtime;
@@ -122,6 +176,41 @@ public class PrefillEndpoint extends WorkerEndpoint {
             DeliveryItem exactItem) {
         requirePinnedGeneration(exactPin);
         return runtime.offer(exactItem);
+    }
+
+    /** Hold this exact generation's queue/pending seat before role commit. */
+    public PrefillGenerationRuntime.PreparedOffer prepareOfferPinned(
+            GenerationPin exactPin,
+            long requestId,
+            int priority) {
+        requirePinnedGeneration(exactPin);
+        EndpointGenerationLifecycle.HandoffPermit handoff =
+                tryAcquireGenerationHandoff();
+        if (handoff == null) {
+            throw new EndpointGenerationRetiredException(
+                    "Prefill generation retired before prepared offer");
+        }
+        PrefillGenerationRuntime.PreparedOffer prepared;
+        try {
+            prepared = runtime.prepareOffer(requestId, priority);
+        } catch (RuntimeException | Error failure) {
+            handoff.close();
+            throw failure;
+        }
+        if (prepared == null) {
+            handoff.close();
+            return null;
+        }
+        return new GenerationPreparedOffer(prepared, handoff);
+    }
+
+    /** Stable generation-local signal used by an endpoint wait lane. */
+    public CapacityBoundary.Availability offerAvailability() {
+        return runtime.offerAvailability();
+    }
+
+    public long offerCapacityEpoch() {
+        return runtime.offerCapacityEpoch();
     }
 
     /** Remove only the supplied canonical ACTIVE queue identity. */
@@ -478,7 +567,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Canonical pending ownership used by the hard admission threshold. */
     public long admissionPendingRequestCount() {
-        return workLedger.pendingRequestCount();
+        return runtime.pendingRequestCount();
     }
 
     public int getInflightBatchCount() {

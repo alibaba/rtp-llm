@@ -6,6 +6,7 @@ import org.flexlb.balance.admission.AdmissionLifecyclePort;
 import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.eviction.EvictionPlacementPort.DecodePlacement;
+import org.flexlb.balance.eviction.EvictionPlacementPort.PreparedDecodePlacement;
 import org.flexlb.balance.eviction.EvictionPlacementPort.PrefillEvictionAdmission;
 import org.flexlb.balance.eviction.EvictionPlacementPort.PrefillEvictionCommit;
 import org.flexlb.balance.eviction.EvictionPlacementPort.PrefillEvictionStatus;
@@ -203,13 +204,11 @@ public class EvictionManager implements AdmissionFallback {
         }
         PlannedDecodeEviction planned =
                 planDecodeEviction(ctx, config, preemption);
-        if (planned == null
-                || !bindAdmissionPermit(ctx, future, config)) {
+        if (planned == null) {
             return false;
         }
-
-        commitDecodeEviction(ctx, future, planned, config, preemption);
-        return true;
+        return commitDecodeEviction(
+                ctx, future, planned, config, preemption);
     }
 
     private enum PrefillAdmissionOutcome {
@@ -243,26 +242,52 @@ public class EvictionManager implements AdmissionFallback {
             QueueSnapshot snapshot = admission.queueSnapshot();
             PrefillEvictionProposal proposal =
                     planPrefillEviction(envelope, snapshot);
-            if (proposal == null
-                    || !bindAdmissionPermit(ctx, future, config)) {
+            if (proposal == null) {
                 return PrefillAdmissionOutcome.DECLINED_NO_EVICTION;
             }
-            PrefillEvictionCommit commit = commitPrefillEviction(
-                    ctx, admission, proposal);
-            if (commit.status() != PrefillEvictionStatus.COMMITTED) {
-                mutation.terminate(admissionError(
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                        "exact Prefill eviction plan was not committed: "
-                                + commit.status().name().toLowerCase()));
+            AdmissionPermit permit = reserveAdmissionPermit(ctx, config);
+            if (permit == null) {
+                return PrefillAdmissionOutcome.DECLINED_NO_EVICTION;
             }
-            return PrefillAdmissionOutcome.TAKEN_OVER;
+            PrefillEvictionCommit commit;
+            try {
+                if (!mutation.seal()) {
+                    return PrefillAdmissionOutcome.DECLINED_NO_EVICTION;
+                }
+                commit = admission.commit(proposal.victims(), mutation);
+                if (commit.status() != PrefillEvictionStatus.COMMITTED) {
+                    reportEvictionCommit(
+                            envelope.priority(),
+                            envelope.requestId(),
+                            "prefill_queue_full",
+                            commit.status().name().toLowerCase());
+                    return PrefillAdmissionOutcome.DECLINED_NO_EVICTION;
+                }
+                if (!bindAdmissionPermit(
+                        ctx, future, mutation, permit, config)) {
+                    finishCommittedPrefillEviction(
+                            ctx, envelope, proposal, commit);
+                    mutation.terminate(admissionError(
+                            StrategyErrorType.RESOURCE_EXHAUSTED,
+                            AdmissionRejectReason.RESOURCE_EXHAUSTED,
+                            "Prefill admission ownership disappeared after commit"));
+                    return PrefillAdmissionOutcome.TAKEN_OVER;
+                }
+                permit = null;
+                finishCommittedPrefillEviction(
+                        ctx, envelope, proposal, commit);
+                return PrefillAdmissionOutcome.TAKEN_OVER;
+            } finally {
+                if (permit != null) {
+                    permit.release();
+                }
+            }
         }
     }
 
-    private boolean bindAdmissionPermit(BalanceContext ctx,
-                                        CompletableFuture<Response> future,
-                                        FlexlbConfig config) {
+    private AdmissionPermit reserveAdmissionPermit(
+            BalanceContext ctx,
+            FlexlbConfig config) {
         int limit = config.queueScheduler().getLifecycle()
                 .getMaxDeliveredNotAcceptedRequestsGlobal();
         AdmissionPermit permit = tryReserveAdmissionPermit(limit);
@@ -271,12 +296,21 @@ public class EvictionManager implements AdmissionFallback {
                     "[eviction-manager] admission permit unavailable:"
                             + " request_id={} active={} limit={}",
                     ctx.getRequestId(), activeAdmissionCount(), limit);
-            return false;
+            return null;
         }
+        return permit;
+    }
+
+    private boolean bindAdmissionPermit(
+            BalanceContext ctx,
+            CompletableFuture<Response> future,
+            AdmissionMutation mutation,
+            AdmissionPermit permit,
+            FlexlbConfig config) {
         long timeoutMs = config.queueScheduler().getLifecycle()
                 .getDeliveredNotAcceptedTimeoutMs();
         if (!admissionLifecycle.bindAdmissionResources(
-                ctx.getRequestId(), future, permit, timeoutMs)) {
+                ctx.getRequestId(), future, mutation, permit, timeoutMs)) {
             permit.release();
             return false;
         }
@@ -305,21 +339,13 @@ public class EvictionManager implements AdmissionFallback {
         return proposal;
     }
 
-    /** Apply the exact proposal captured from the route-owned queue. */
-    private PrefillEvictionCommit commitPrefillEviction(
+    /** Settle victims only after replacement PNR and exact resource binding. */
+    private void finishCommittedPrefillEviction(
             BalanceContext ctx,
-            PrefillEvictionAdmission admission,
-            PrefillEvictionProposal proposal) {
-        PriorityRequestEnvelope envelope = admission.envelope();
-        PrefillEvictionCommit replacement = admission.commit(
-                proposal.victims());
-        if (replacement.status() != PrefillEvictionStatus.COMMITTED) {
-            reportEvictionCommit(envelope.priority(), envelope.requestId(),
-                    "prefill_queue_full", replacement.status().name().toLowerCase());
-            return replacement;
-        }
-
-        for (DeliveryItem victim : replacement.removed()) {
+            PriorityRequestEnvelope envelope,
+            PrefillEvictionProposal proposal,
+            PrefillEvictionCommit committed) {
+        for (DeliveryItem victim : committed.removed()) {
             settlePrefillVictim(envelope, victim, proposal.endpointId());
         }
 
@@ -338,7 +364,6 @@ public class EvictionManager implements AdmissionFallback {
                 proposal.victims().size(),
                 proposal.rawCost(),
                 proposal.endpointId());
-        return replacement;
     }
 
     /**
@@ -470,7 +495,7 @@ public class EvictionManager implements AdmissionFallback {
     }
 
     /** Commit exactly the immutable plan selected before takeover. */
-    private void commitDecodeEviction(
+    private boolean commitDecodeEviction(
             BalanceContext ctx,
             CompletableFuture<Response> future,
             PlannedDecodeEviction planned,
@@ -488,80 +513,131 @@ public class EvictionManager implements AdmissionFallback {
         DecodeEndpoint.AdmissionCapacity capacity =
                 decodeAdmissionCapacity(config, target.concurrencyLimit());
 
-        // Ownership is homogeneous by planner invariant: Master-queued victims
-        // use a local transaction; Engine-may-have-seen/accepted/running
-        // victims use the tokenized Cancel coordinator.
-        if (proposal.requiresEngineCancel()) {
-            startEngineCancelPreemption(ctx, future, preemption, proposal,
-                    decodeEp, seqLen, expectedKvTokens, capacity);
-            return;
-        }
-
-        List<DecodeEndpoint.ReservationHandle> reservedVictims =
-                new ArrayList<>(proposal.victims().size());
-        for (DecodeRequestSnapshot victim : proposal.victims()) {
-            reservedVictims.add(new DecodeEndpoint.ReservationHandle(
-                    decodeEp.getStatus().getGenerationId(),
-                    victim.requestId(),
-                    victim.reservationToken()));
-        }
-
-        // The victim mutation and incoming placement form one generation
-        // commit. Cancel/deadline either close before any victim is touched,
-        // or observe the incoming request after the complete handoff.
         AdmissionMutation mutation =
                 admissionLifecycle.claimAdmissionMutation(
                         ctx.getRequestId(), future);
         if (mutation == null) {
-            return;
+            return false;
         }
-        try (mutation) {
-          DecodeEndpoint.LocalEvictionResult eviction =
-                  decodeEp.tryEvictLocalReservationsAndReserveIncoming(
-                          reservedVictims, ctx.getRequestId(), seqLen, expectedKvTokens,
-                          ctx.getPriority(), capacity);
-          if (eviction != DecodeEndpoint.LocalEvictionResult.COMMITTED) {
-              reportEvictionCommit(ctx.getPriority(), ctx.getRequestId(),
-                      proposal.evictionCase(), "conflict");
+        AdmissionPermit permit = reserveAdmissionPermit(ctx, config);
+        if (permit == null) {
+            mutation.close();
+            return false;
+        }
+        PreparedDecodePlacement prepared = null;
+        DecodeEndpoint.ReservationHandle untransferredIncoming = null;
+        try {
+            prepared = placementPort.prepareDecodePlacement(
+                    ctx, future, decodeEp);
+            if (prepared == null) {
+                return false;
+            }
+
+            // Ownership is homogeneous by planner invariant: Master-queued
+            // victims use one local CAS; Engine-owned victims use Cancel.
+            if (proposal.requiresEngineCancel()) {
+                startEngineCancelPreemption(
+                        ctx, future, preemption, proposal,
+                        decodeEp, seqLen, expectedKvTokens, capacity,
+                        mutation, permit, prepared, config);
+                mutation = null;
+                permit = null;
+                prepared = null;
+                return true;
+            }
+            if (!mutation.seal() || !prepared.seal()) {
+                return false;
+            }
+
+            List<DecodeEndpoint.ReservationHandle> reservedVictims =
+                    new ArrayList<>(proposal.victims().size());
+            for (DecodeRequestSnapshot victim : proposal.victims()) {
+                reservedVictims.add(new DecodeEndpoint.ReservationHandle(
+                        decodeEp.getStatus().getGenerationId(),
+                        victim.requestId(),
+                        victim.reservationToken()));
+            }
+            DecodeEndpoint.LocalEvictionCommit eviction =
+                    decodeEp.tryEvictLocalReservationsAndReserveIncoming(
+                            reservedVictims,
+                            ctx.getRequestId(),
+                            seqLen,
+                            expectedKvTokens,
+                            ctx.getPriority(),
+                            capacity);
+            if (eviction.status()
+                    != DecodeEndpoint.LocalEvictionResult.COMMITTED) {
+                reportEvictionCommit(ctx.getPriority(), ctx.getRequestId(),
+                        proposal.evictionCase(), "conflict");
                 Logger.debug(
                         "[eviction-manager] Decode eviction conflict: request_id={} "
                                 + "planned={} worker={} result={}",
                         ctx.getRequestId(),
                         reservedVictims.size(),
                         proposal.endpointId(),
-                        eviction);
-              mutation.terminate(admissionError(
-                      StrategyErrorType.RESOURCE_EXHAUSTED,
-                      AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                      "exact Decode eviction plan changed before commit"));
-              return;
-          }
+                        eviction.status());
+                return false;
+            }
+            untransferredIncoming = eviction.incoming();
 
-            // Shadow accounting already reversed atomically; drive each victim
-            // terminal before publishing the incoming item. Reserved-only
-            // victims were never seen by the engine — retryable 8400.
-            for (DecodeRequestSnapshot victim : proposal.victims()) {
-                finishDecodeVictim(ctx, victim,
-                        "decode_reserved", proposal);
-            }
-            reportCommittedLocalDecodeEviction(ctx, proposal);
-            recordDecodePlanObservability(ctx, proposal);
-            DecodeEndpoint.ReservationHandle incoming =
-                    decodeEp.reservationHandle(ctx.getRequestId());
-            if (incoming == null) {
+            if (!bindAdmissionPermit(
+                    ctx, future, mutation, permit, config)) {
+                finishCommittedLocalDecodeEviction(ctx, proposal);
                 mutation.terminate(admissionError(
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                        "Decode reservation disappeared before canonical placement"));
-                return;
+                        StrategyErrorType.ADMISSION_UNAVAILABLE,
+                        AdmissionRejectReason.UNSPECIFIED,
+                        "Decode admission ownership disappeared after commit"));
+                return true;
             }
-            DecodePlacement placement = placementPort.placeReservedDecode(
-                    ctx, future, decodeEp, incoming);
+            permit = null;
+
+            // Transfer exact incoming ownership to canonical publication before
+            // any victim callback can fail or re-enter scheduler code.
+            DecodeEndpoint.ReservationHandle incoming = untransferredIncoming;
+            DecodePlacement placement;
+            try {
+                placement = prepared.commit(incoming, mutation);
+            } catch (RuntimeException placementFailure) {
+                Logger.error(
+                        "[eviction-manager] local Decode placement failed:"
+                                + " request_id={} error={}",
+                        ctx.getRequestId(), placementFailure.getMessage(),
+                        placementFailure);
+                placement = null;
+            }
+            if (placement instanceof DecodePlacement.Committed) {
+                untransferredIncoming = null;
+            }
+
+            // Shadow accounting already reversed atomically. Reserved-only
+            // victims were never seen by the engine — retryable 8400.
+            finishCommittedLocalDecodeEviction(ctx, proposal);
             if (placement instanceof DecodePlacement.Failed failed) {
                 AdmissionFailure failure = failed.failure();
                 mutation.terminate(admissionError(
                         failure.errorType(), failure.reason(), failure.message()));
-                return;
+                return true;
+            }
+            if (placement == null) {
+                mutation.terminate(admissionError(
+                        StrategyErrorType.ADMISSION_UNAVAILABLE,
+                        AdmissionRejectReason.UNSPECIFIED,
+                        "canonical Decode placement returned no ownership result"));
+                return true;
+            }
+            return true;
+        } finally {
+            if (untransferredIncoming != null) {
+                decodeEp.rollbackExact(untransferredIncoming);
+            }
+            if (prepared != null) {
+                prepared.close();
+            }
+            if (permit != null) {
+                permit.release();
+            }
+            if (mutation != null) {
+                mutation.close();
             }
         }
     }
@@ -613,6 +689,17 @@ public class EvictionManager implements AdmissionFallback {
                 proposal.endpointId());
     }
 
+    private void finishCommittedLocalDecodeEviction(
+            BalanceContext ctx,
+            DecodeEvictionProposal proposal) {
+        for (DecodeRequestSnapshot victim : proposal.victims()) {
+            finishDecodeVictim(
+                    ctx, victim, "decode_reserved", proposal);
+        }
+        reportCommittedLocalDecodeEviction(ctx, proposal);
+        recordDecodePlanObservability(ctx, proposal);
+    }
+
     /** §19.1 plan observability for the decode eviction path. */
     private static void recordDecodePlanObservability(BalanceContext ctx,
                                                       DecodeEvictionProposal proposal) {
@@ -638,7 +725,11 @@ public class EvictionManager implements AdmissionFallback {
                                              DecodeEndpoint decodeEp,
                                              long seqLen,
                                              long expectedKvTokens,
-                                             DecodeEndpoint.AdmissionCapacity capacity) {
+                                             DecodeEndpoint.AdmissionCapacity capacity,
+                                             AdmissionMutation mutation,
+                                             AdmissionPermit permit,
+                                             PreparedDecodePlacement prepared,
+                                             FlexlbConfig config) {
         String detail = "preempted by higher-priority request " + ctx.getRequestId();
         EngineCancellationConfig cancellation = requiredEngineCancellation(preemption);
         DecodePreemptionCoordinator.Request request =
@@ -649,100 +740,109 @@ public class EvictionManager implements AdmissionFallback {
                         capacity,
                         proposal.victims(), cancellation.getAckTimeoutMs(),
                         cancellation.getCompletionTimeoutMs(),
-                        () -> admissionLifecycle.isAdmissionOpen(
-                                ctx.getRequestId(), future), detail);
+                        mutation, prepared::seal, detail);
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> execution;
-        AdmissionMutation mutation =
-                admissionLifecycle.claimAdmissionMutation(
-                        ctx.getRequestId(), future);
-        if (mutation == null) {
-            return;
-        }
-        try {
-            reportCancelRequests(ctx, proposal);
-            // execute() performs the victim-claim and sends every Cancel
-            // before returning. The mutation claim keeps an incoming
-            // Cancel pending until this asynchronous attempt settles.
-            execution = preemptionCoordinator.execute(request);
-        } catch (RuntimeException | Error startFailure) {
-            mutation.close();
-            throw startFailure;
+        reportCancelRequests(ctx, proposal);
+        // execute() claims every victim and starts every Cancel before return.
+        execution = preemptionCoordinator.execute(request);
+        if (execution == null) {
+            execution = CompletableFuture.completedFuture(null);
         }
 
         execution.whenComplete(
-                (result, error) -> {
-                    try (mutation) {
-                        Response terminal;
-                        try {
-                            terminal = enginePreemptionTerminal(
-                                    ctx, future, proposal,
-                                    decodeEp, result, error);
-                        } catch (RuntimeException | Error callbackError) {
-                            Logger.error(
-                                    "[eviction-manager] cancel completion failed:"
-                                            + " request_id={} error={}",
-                                    ctx.getRequestId(), callbackError.getMessage(),
-                                    callbackError);
-                            terminal = admissionError(
-                                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                                    "Decode eviction placement failed: "
-                                            + callbackError.getMessage());
-                        }
-                        if (terminal != null) {
-                            mutation.terminate(terminal);
-                        }
-                    }
-                });
+                (result, error) -> finishEngineCancelPreemption(
+                        ctx, future, proposal, decodeEp,
+                        result, error, mutation, permit, prepared, config));
     }
 
-    /** Convert one typed coordinator result into commit or one terminal response. */
-    private Response enginePreemptionTerminal(
+    /** Complete one asynchronous Cancel attempt without terminalizing control pressure. */
+    private void finishEngineCancelPreemption(
             BalanceContext ctx,
             CompletableFuture<Response> future,
             DecodeEvictionProposal proposal,
             DecodeEndpoint decodeEp,
             DecodePreemptionCoordinator.ExecutionResult result,
-            Throwable error) {
-        if (error != null || result == null) {
-            reportCancelTimeout(ctx, proposal.endpointId());
-            Logger.error(
-                    "[eviction-manager] cancel coordinator returned no typed result:"
-                            + " request_id={} worker={}",
-                    ctx.getRequestId(), proposal.endpointId(), error);
-            return admissionError(
-                    StrategyErrorType.RESOURCE_EXHAUSTED,
-                    AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                    "Decode eviction control failed before commit");
-        }
-        if (result.code() == DecodePreemptionCoordinator.ResultCode.COMMITTED) {
-            DecodeEndpoint.ReservationHandle reservation =
-                    decodeEp.reservationHandle(ctx.getRequestId());
-            if (reservation == null) {
-                return admissionError(
-                        StrategyErrorType.RESOURCE_EXHAUSTED,
-                        AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                        "Decode reservation disappeared before placement");
+            Throwable error,
+            AdmissionMutation mutation,
+            AdmissionPermit permit,
+            PreparedDecodePlacement prepared,
+            FlexlbConfig config) {
+        boolean decodeCommitted = result != null
+                && result.code()
+                        == DecodePreemptionCoordinator.ResultCode.COMMITTED;
+        boolean permitBound = false;
+        DecodeEndpoint.ReservationHandle untransferredIncoming =
+                decodeCommitted ? result.incoming() : null;
+        try {
+            if (!decodeCommitted) {
+                if (error != null || result == null
+                        || result.code()
+                                == DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED) {
+                    reportCancelTimeout(ctx, proposal.endpointId());
+                }
+                Logger.debug(
+                        "[eviction-manager] Decode control attempt deferred:"
+                                + " request_id={} worker={} result={} error={}",
+                        ctx.getRequestId(),
+                        proposal.endpointId(),
+                        result == null ? "missing" : result.code(),
+                        error == null ? "none" : error.getMessage());
+                return;
+            }
+
+            permitBound = bindAdmissionPermit(
+                    ctx, future, mutation, permit, config);
+            if (!permitBound) {
+                mutation.terminate(admissionError(
+                        StrategyErrorType.ADMISSION_UNAVAILABLE,
+                        AdmissionRejectReason.UNSPECIFIED,
+                        "Decode admission ownership disappeared after commit"));
+                return;
+            }
+            DecodeEndpoint.ReservationHandle incoming = untransferredIncoming;
+            DecodePlacement placement = prepared.commit(incoming, mutation);
+            if (placement instanceof DecodePlacement.Committed) {
+                untransferredIncoming = null;
+            }
+            if (placement instanceof DecodePlacement.Failed failed) {
+                AdmissionFailure failure = failed.failure();
+                mutation.terminate(admissionError(
+                        failure.errorType(), failure.reason(), failure.message()));
+                return;
+            }
+            if (placement == null) {
+                mutation.terminate(admissionError(
+                        StrategyErrorType.ADMISSION_UNAVAILABLE,
+                        AdmissionRejectReason.UNSPECIFIED,
+                        "canonical Decode placement returned no ownership result"));
+                return;
             }
             reportCommittedEnginePreemption(ctx, proposal);
             recordDecodePlanObservability(ctx, proposal);
-            DecodePlacement placement = placementPort.placeReservedDecode(
-                    ctx, future, decodeEp, reservation);
-            if (placement instanceof DecodePlacement.Failed failed) {
-                AdmissionFailure failure = failed.failure();
-                return admissionError(
-                        failure.errorType(), failure.reason(), failure.message());
+        } catch (RuntimeException | Error callbackError) {
+            Logger.error(
+                    "[eviction-manager] cancel completion failed:"
+                            + " request_id={} error={}",
+                    ctx.getRequestId(), callbackError.getMessage(),
+                    callbackError);
+            if (decodeCommitted) {
+                mutation.terminate(admissionError(
+                        StrategyErrorType.ADMISSION_UNAVAILABLE,
+                        AdmissionRejectReason.UNSPECIFIED,
+                        "Decode eviction placement failed: "
+                                + callbackError.getMessage()));
             }
-            return null;
+        } finally {
+            if (untransferredIncoming != null) {
+                decodeEp.rollbackExact(untransferredIncoming);
+            }
+            prepared.close();
+            if (!permitBound) {
+                permit.release();
+            }
+            mutation.close();
         }
-        if (result.code() == DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED) {
-            reportCancelTimeout(ctx, proposal.endpointId());
-        }
-        return admissionError(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED,
-                result.detail());
     }
 
     /** Metrics never participate in the committed reservation handoff. */

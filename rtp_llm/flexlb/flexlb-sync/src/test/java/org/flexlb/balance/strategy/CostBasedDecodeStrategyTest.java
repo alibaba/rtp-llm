@@ -373,7 +373,72 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
-    void fifoQueueCanPlaceBehindTransientKvPressure_whilePriorityKeepsAdmissionGate() {
+    void queueAlwaysPrefersAvailableTierOverTemporarilyFullWorkers() {
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        WorkerStatus available = createWorkerStatus("127.0.0.1");
+        WorkerStatus full = createWorkerStatus("127.0.0.2");
+        setKv(available, 1_000L, 900L);
+        setKv(full, 1_000L, 100L);
+        decodeMap.put("127.0.0.1:8080", available);
+        decodeMap.put("127.0.0.2:8080", full);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(measure.isResourceAvailable(any())).thenAnswer(invocation -> {
+            DecodeEndpoint.DecodeRoutingView view = invocation.getArgument(0);
+            return view.workerStatus().fields().availableKvCacheTokens() > 500L;
+        });
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new EngineWorkerStatus(registry), factory);
+
+        Request request = new Request();
+        request.setRequestId(3_100L);
+        request.setSeqLen(100L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        try (SelectedRole selected = strategy.select(
+                context, RoleType.DECODE, null)) {
+            Assertions.assertNotNull(selected);
+            Assertions.assertEquals(
+                    "127.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
+    void directModeStillRejectsWhenEveryDecodeWorkerIsFull() {
+        configService.loadBalanceConfig().setScheduler(
+                new DirectSchedulerConfig());
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        WorkerStatus full = createWorkerStatus("127.0.0.1");
+        decodeMap.put("127.0.0.1:8080", full);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(measure.isResourceAvailable(any())).thenReturn(false);
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new EngineWorkerStatus(registry), factory);
+
+        Request request = new Request();
+        request.setRequestId(3_200L);
+        request.setSeqLen(100L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        Assertions.assertNull(strategy.select(
+                context, RoleType.DECODE, null));
+    }
+
+    @Test
+    void queueCanPlaceBehindTransientDecodePressureForFifoAndPriority() {
         Map<String, WorkerStatus> decodeMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
@@ -414,8 +479,9 @@ class CostBasedDecodeStrategyTest {
         request.setRequestId(4L);
         ServerStatus priorityResult = selectStatus(
                 strategy, context, RoleType.DECODE, null);
-        Assertions.assertNull(priorityResult,
-                "PRIORITY must preserve the inclusive admission gate for preemption/classification");
+        Assertions.assertNotNull(priorityResult,
+                "PRIORITY ordering belongs to the queue/eviction layer, not route admission");
+        Assertions.assertEquals("127.0.0.1", priorityResult.getServerIp());
     }
 
     private static void setKv(

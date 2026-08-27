@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.DeliveryLifecyclePort;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.EndpointGenerationRetiredException;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
 import org.flexlb.balance.endpoint.PrefillWorkLedger;
@@ -19,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -53,6 +55,155 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         STOPPED
     }
 
+    private enum PreparedOfferState {
+        OPEN,
+        SEALED,
+        REVOKED,
+        COMMITTED,
+        CLOSED,
+        RETIRED
+    }
+
+    /** Exact generation-local pending/waiting seat. */
+    private final class PreparedOfferImpl implements PreparedOffer {
+        private final long requestId;
+        private final int priority;
+        private final long sequence;
+        /** Guarded by queueLock. */
+        private PreparedOfferState state = PreparedOfferState.OPEN;
+
+        private PreparedOfferImpl(long requestId, int priority, long sequence) {
+            this.requestId = requestId;
+            this.priority = priority;
+            this.sequence = sequence;
+        }
+
+        @Override
+        public boolean seal() {
+            queueLock.lock();
+            try {
+                if (state == PreparedOfferState.OPEN) {
+                    requireOwnedPreparedOffer(this);
+                    state = PreparedOfferState.SEALED;
+                    return true;
+                }
+                if (state == PreparedOfferState.SEALED) {
+                    requireOwnedPreparedOffer(this);
+                    return true;
+                }
+                return false;
+            } finally {
+                queueLock.unlock();
+            }
+        }
+
+        @Override
+        public void commit(DeliveryItem exactItem) {
+            if (!(exactItem instanceof BatchItem item)) {
+                throw new IllegalArgumentException(
+                        "prepared Prefill offer requires a BatchItem");
+            }
+            if (item.requestId() != requestId
+                    || item.prefillEp() != prefillEndpoint
+                    || item.priority() != priority) {
+                throw new IllegalArgumentException(
+                        "prepared Prefill offer does not match exact request/generation");
+            }
+
+            boolean capacityFreed = false;
+            RuntimeException failure = null;
+            queueLock.lock();
+            try {
+                requireSealedPreparedOffer(this);
+                if (runtimeState != RuntimeState.RUNNING || stopped) {
+                    releasePreparedOfferUnderLock(
+                            this, PreparedOfferState.RETIRED);
+                    capacityFreed = refreshOfferCapacityUnderLock();
+                    failure = retiredGeneration();
+                } else if (!ctx.publishActiveIndexUnderLock(item)) {
+                    releasePreparedOfferUnderLock(
+                            this, PreparedOfferState.CLOSED);
+                    capacityFreed = refreshOfferCapacityUnderLock();
+                    failure = new IllegalStateException(
+                            "prepared Prefill request conflicts with canonical owner request_id="
+                                    + requestId);
+                } else {
+                    PreparedOfferImpl removed = preparedOffers.remove(requestId);
+                    if (removed != this) {
+                        throw new IllegalStateException(
+                                "prepared Prefill offer lost its exact hold request_id="
+                                        + requestId);
+                    }
+                    state = PreparedOfferState.COMMITTED;
+                    // hold -> ACTIVE keeps both capacity counts unchanged.
+                    refreshOfferCapacityUnderLock();
+                    stateChanged.signal();
+                }
+            } finally {
+                queueLock.unlock();
+            }
+            notifyOfferCapacity(capacityFreed);
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        @Override
+        public void close() {
+            boolean capacityFreed = false;
+            queueLock.lock();
+            try {
+                if (state != PreparedOfferState.OPEN
+                        && state != PreparedOfferState.SEALED) {
+                    return;
+                }
+                releasePreparedOfferUnderLock(
+                        this, PreparedOfferState.CLOSED);
+                capacityFreed = refreshOfferCapacityUnderLock();
+            } finally {
+                queueLock.unlock();
+            }
+            notifyOfferCapacity(capacityFreed);
+        }
+    }
+
+    /** Stable listener identity for the lifetime of this endpoint generation. */
+    private final class OfferAvailability
+            implements CapacityBoundary.Availability {
+        private final CopyOnWriteArraySet<Runnable> listeners =
+                new CopyOnWriteArraySet<>();
+
+        @Override
+        public boolean isAvailable() {
+            return offerCapacityAvailable;
+        }
+
+        @Override
+        public void addListener(Runnable listener) {
+            listeners.add(java.util.Objects.requireNonNull(listener, "listener"));
+        }
+
+        @Override
+        public void removeListener(Runnable listener) {
+            listeners.remove(listener);
+        }
+
+        private void signal() {
+            for (Runnable listener : listeners) {
+                try {
+                    listener.run();
+                } catch (Throwable failure) {
+                    try {
+                        Logger.error("WorkerBatcher[{}] offer-capacity listener failed",
+                                key, failure);
+                    } catch (Throwable ignoredLoggingFailure) {
+                        // Capacity has already been released.
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * PRIORITY queue order: delegates to
      * {@link PriorityOrdering#STRICT} (priority desc → enqueue-seq asc for
@@ -83,6 +234,9 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     private final DeliveryStrategy deliveryStrategy;
     private final DeliveryLifecyclePort deliveryLifecycle;
     private final PriorityBlockingQueue<BatchItem> queue;
+    private final boolean priorityOrdering;
+    private final long maximumPendingRequests;
+    private final int maximumWaitingRequests;
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
      * delivery and drain. It is exposed in diagnostic snapshots.
@@ -95,6 +249,16 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
      * every ordering mode has the same mutation guarantees.
      */
     private final ReentrantLock queueLock = new ReentrantLock();
+    /** Live OPEN/SEALED cross-role offer holds, guarded by {@link #queueLock}. */
+    private final Map<Long, PreparedOfferImpl> preparedOffers = new HashMap<>();
+    /** Unique hold order used only to choose the latest equal-priority OPEN hold. */
+    private long nextPreparedOfferSequence;
+    private final AtomicLong offerCapacityEpoch = new AtomicLong();
+    private final OfferAvailability offerAvailability = new OfferAvailability();
+    private volatile boolean offerCapacityAvailable;
+    /** Last canonical seat use observed under {@link #queueLock}. */
+    private long observedPendingSeatUse;
+    private long observedWaitingSeatUse;
     /** Canonical request ownership guarded exclusively by {@link #queueLock}. */
     private final PrefillWorkRegistry workRegistry;
     /**
@@ -133,9 +297,13 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         this.key = key;
         this.prefillEndpoint = prefillEp;
         boolean queueScheduling = config.isQueue();
-        boolean priorityOrdering = config.isPriorityOrdering();
+        this.priorityOrdering = config.isPriorityOrdering();
         this.deliveryStrategy = deliveryStrategy;
         this.deliveryLifecycle = deliveryLifecycle;
+        this.maximumPendingRequests = config.getRouter().getRoles()
+                .getPrefill().getAvailability().getMaxPendingRequests();
+        this.maximumWaitingRequests = config.queueScheduler().getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker();
         Comparator<BatchItem> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         Comparator<GroupPlanner.Item> projectionOrder =
@@ -174,6 +342,12 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         try {
             workerThread.start();
             runtimeState = RuntimeState.RUNNING;
+            queueLock.lock();
+            try {
+                refreshOfferCapacityUnderLock();
+            } finally {
+                queueLock.unlock();
+            }
         } catch (RuntimeException | Error startFailure) {
             Throwable cleanupFailure = stopAndDrain(
                     startFailure,
@@ -193,7 +367,94 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         if (runtimeState != RuntimeState.RUNNING || stopped) {
             return false;
         }
-        return enqueue(item, ctx.maxQueueCapacity()) == OfferResult.OFFERED;
+        return enqueue(item) == OfferResult.OFFERED;
+    }
+
+    @Override
+    public PreparedOffer prepareOffer(long requestId, int priority) {
+        if (requestId < 0L) {
+            throw new IllegalArgumentException("requestId must be non-negative");
+        }
+        queueLock.lock();
+        try {
+            if (runtimeState != RuntimeState.RUNNING || stopped) {
+                throw retiredGeneration();
+            }
+            if (preparedOffers.containsKey(requestId)
+                    || workRegistry.ownsRequestUnderLock(requestId)) {
+                throw new IllegalStateException(
+                        "Prefill request already has a canonical owner request_id="
+                                + requestId);
+            }
+            if (!hasOfferCapacityUnderLock()) {
+                PreparedOffer replacement =
+                        replaceOpenPreparedOfferUnderLock(requestId, priority);
+                // Pending ownership may also grow through endpoint status or
+                // DIRECT ledger reconciliation.  A failed/full probe is the
+                // QUEUE boundary which must publish that pressure before the
+                // corresponding release can advance the epoch and wake a lane.
+                refreshOfferCapacityUnderLock();
+                return replacement;
+            }
+            PreparedOfferImpl prepared = newPreparedOffer(requestId, priority);
+            preparedOffers.put(requestId, prepared);
+            refreshOfferCapacityUnderLock();
+            return prepared;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /** A full PRIORITY worker may transfer exactly one revocable hold seat. */
+    private PreparedOfferImpl replaceOpenPreparedOfferUnderLock(
+            long requestId,
+            int priority) {
+        assert queueLock.isHeldByCurrentThread()
+                : "prepared offer replacement requires queueLock";
+        if (!priorityOrdering) {
+            return null;
+        }
+        PreparedOfferImpl victim = null;
+        for (PreparedOfferImpl candidate : preparedOffers.values()) {
+            if (candidate.state != PreparedOfferState.OPEN) {
+                continue;
+            }
+            if (victim == null
+                    || candidate.priority < victim.priority
+                    || candidate.priority == victim.priority
+                    && candidate.sequence > victim.sequence) {
+                victim = candidate;
+            }
+        }
+        if (victim == null || priority <= victim.priority) {
+            return null;
+        }
+        if (!preparedOffers.remove(victim.requestId, victim)) {
+            throw new IllegalStateException(
+                    "prepared Prefill replacement lost its exact victim");
+        }
+        victim.state = PreparedOfferState.REVOKED;
+        PreparedOfferImpl incoming = newPreparedOffer(requestId, priority);
+        preparedOffers.put(requestId, incoming);
+        // One live hold replaced one live hold: no capacity epoch or signal.
+        return incoming;
+    }
+
+    private PreparedOfferImpl newPreparedOffer(long requestId, int priority) {
+        assert queueLock.isHeldByCurrentThread()
+                : "prepared offer creation requires queueLock";
+        return new PreparedOfferImpl(
+                requestId, priority, nextPreparedOfferSequence++);
+    }
+
+    @Override
+    public CapacityBoundary.Availability offerAvailability() {
+        return offerAvailability;
+    }
+
+    @Override
+    public long offerCapacityEpoch() {
+        return offerCapacityEpoch.get();
     }
 
     private enum OfferResult {
@@ -202,27 +463,29 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         STOPPED
     }
 
-    private OfferResult enqueue(BatchItem item, int maximumQueueSize) {
+    private OfferResult enqueue(BatchItem item) {
         queueLock.lock();
         try {
-            return enqueueUnderLock(item, maximumQueueSize);
+            return enqueueUnderLock(item);
         } finally {
             queueLock.unlock();
         }
     }
 
     /** Caller holds {@link #queueLock}. */
-    private OfferResult enqueueUnderLock(
-            BatchItem item, int maximumQueueSize) {
+    private OfferResult enqueueUnderLock(BatchItem item) {
         if (stopped) {
             return OfferResult.STOPPED;
         }
-        if (maximumQueueSize > 0 && queue.size() >= maximumQueueSize) {
+        if (!hasOfferCapacityUnderLock()) {
+            refreshOfferCapacityUnderLock();
             return OfferResult.FULL;
         }
-        if (!ctx.publishActiveIndexUnderLock(item)) {
+        if (preparedOffers.containsKey(item.requestId())
+                || !ctx.publishActiveIndexUnderLock(item)) {
             return OfferResult.STOPPED;
         }
+        refreshOfferCapacityUnderLock();
         stateChanged.signal();
         return OfferResult.OFFERED;
     }
@@ -230,6 +493,107 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     @Override
     public int queueSize() {
         return queue.size();
+    }
+
+    @Override
+    public long pendingRequestCount() {
+        queueLock.lock();
+        try {
+            return effectivePendingSeatUseUnderLock();
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private boolean hasOfferCapacityUnderLock() {
+        assert queueLock.isHeldByCurrentThread()
+                : "offer capacity requires queueLock";
+        return effectivePendingSeatUseUnderLock() < maximumPendingRequests
+                && (maximumWaitingRequests <= 0
+                || effectiveWaitingSeatUseUnderLock() < maximumWaitingRequests);
+    }
+
+    private long effectivePendingSeatUseUnderLock() {
+        assert queueLock.isHeldByCurrentThread()
+                : "pending projection requires queueLock";
+        return saturatingAdd(
+                workRegistry.pendingRequestCount(), preparedOffers.size());
+    }
+
+    private long effectiveWaitingSeatUseUnderLock() {
+        assert queueLock.isHeldByCurrentThread()
+                : "waiting projection requires queueLock";
+        return saturatingAdd(queue.size(), preparedOffers.size());
+    }
+
+    /** Refresh the lock-free availability view and detect an actual seat release. */
+    private boolean refreshOfferCapacityUnderLock() {
+        assert queueLock.isHeldByCurrentThread()
+                : "offer capacity refresh requires queueLock";
+        long pending = effectivePendingSeatUseUnderLock();
+        long waiting = effectiveWaitingSeatUseUnderLock();
+        boolean capacityFreed = pending < observedPendingSeatUse
+                || waiting < observedWaitingSeatUse;
+        observedPendingSeatUse = pending;
+        observedWaitingSeatUse = waiting;
+        boolean available = runtimeState == RuntimeState.RUNNING
+                && !stopped
+                && pending < maximumPendingRequests
+                && (maximumWaitingRequests <= 0
+                || waiting < maximumWaitingRequests);
+        offerCapacityAvailable = available;
+        if (capacityFreed) {
+            offerCapacityEpoch.updateAndGet(
+                    epoch -> epoch == Long.MAX_VALUE ? epoch : epoch + 1L);
+        }
+        return capacityFreed && available;
+    }
+
+    private void notifyOfferCapacity(boolean capacityFreedAndAvailable) {
+        if (capacityFreedAndAvailable) {
+            offerAvailability.signal();
+        }
+    }
+
+    private void requireOwnedPreparedOffer(PreparedOfferImpl prepared) {
+        assert queueLock.isHeldByCurrentThread()
+                : "prepared offer validation requires queueLock";
+        if (preparedOffers.get(prepared.requestId) != prepared) {
+            throw new IllegalStateException(
+                    "prepared Prefill offer lost its exact hold request_id="
+                            + prepared.requestId);
+        }
+    }
+
+    private void requireSealedPreparedOffer(PreparedOfferImpl prepared) {
+        assert queueLock.isHeldByCurrentThread()
+                : "prepared offer validation requires queueLock";
+        if (prepared.state == PreparedOfferState.RETIRED) {
+            throw retiredGeneration();
+        }
+        if (prepared.state != PreparedOfferState.SEALED) {
+            throw new IllegalStateException(
+                    "prepared Prefill offer must be sealed before commit request_id="
+                            + prepared.requestId);
+        }
+        requireOwnedPreparedOffer(prepared);
+    }
+
+    private void releasePreparedOfferUnderLock(
+            PreparedOfferImpl prepared,
+            PreparedOfferState terminalState) {
+        requireOwnedPreparedOffer(prepared);
+        preparedOffers.remove(prepared.requestId, prepared);
+        prepared.state = terminalState;
+    }
+
+    private EndpointGenerationRetiredException retiredGeneration() {
+        return new EndpointGenerationRetiredException(
+                "Prefill generation retired before offer endpoint=" + key);
+    }
+
+    private static long saturatingAdd(long left, long right) {
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
     }
 
     /**
@@ -262,7 +626,18 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
 
     @Override
     public RouteProjection.Inputs captureRouteProjectionInputs() {
-        return ctx.captureRouteProjectionInputs(this::admissionBlockUnderLock);
+        queueLock.lock();
+        try {
+            RouteProjection.Inputs inputs =
+                    ctx.captureRouteProjectionInputs(this::admissionBlockUnderLock);
+            return new RouteProjection.Inputs(
+                    inputs.queue(),
+                    inputs.work(),
+                    saturatingAdd(
+                            inputs.pendingRequestCount(), preparedOffers.size()));
+        } finally {
+            queueLock.unlock();
+        }
     }
 
     /** Immutable delivery semantics used by a pure route projection. */
@@ -381,6 +756,11 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
                 queueLock.lock();
                 queueLocked = true;
                 ctx.stopAcceptingUnderLock();
+                for (PreparedOfferImpl prepared : preparedOffers.values()) {
+                    prepared.state = PreparedOfferState.RETIRED;
+                }
+                preparedOffers.clear();
+                refreshOfferCapacityUnderLock();
                 try {
                     unsubscribeFromBlockedCapacity();
                 } catch (Throwable subscriptionFailure) {
@@ -527,17 +907,20 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         assert item.prefillEp() == prefillEndpoint
                 : "queued item belongs to another Prefill generation";
         boolean removed;
+        boolean capacityFreed = false;
         queueLock.lock();
         try {
             removed = runtimeState == RuntimeState.RUNNING
                     && !stopped
                     && ctx.removeUnderLock(item);
             if (removed) {
+                capacityFreed = refreshOfferCapacityUnderLock();
                 stateChanged.signal();
             }
         } finally {
             queueLock.unlock();
         }
+        notifyOfferCapacity(capacityFreed);
         if (removed) {
             try {
                 Logger.debug(
@@ -566,21 +949,29 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
                 return new QueueReplacement(
                         QueueReplacementStatus.DECLINED);
             }
-            int maximumQueueSize = ctx.maxQueueCapacity();
-            int victimsRequiredNow = maximumQueueSize <= 0
-                    ? 0
-                    : Math.max(0, queue.size() + 1 - maximumQueueSize);
-            if (victimsRequiredNow == 0
-                    || victims.size() != victimsRequiredNow) {
+            long pending = effectivePendingSeatUseUnderLock();
+            long waiting = effectiveWaitingSeatUseUnderLock();
+            if (pending > maximumPendingRequests
+                    || maximumWaitingRequests > 0
+                    && waiting > maximumWaitingRequests) {
                 return new QueueReplacement(
                         QueueReplacementStatus.DECLINED);
             }
-            int postSwapSize = queue.size() - victims.size() + 1;
-            if (postSwapSize < 0
-                    || (maximumQueueSize > 0
-                    && postSwapSize > maximumQueueSize)) {
+            boolean saturated = pending == maximumPendingRequests
+                    || maximumWaitingRequests > 0
+                    && waiting == maximumWaitingRequests;
+            BatchItem worst = worstActiveUnderLock();
+            if (!saturated
+                    || victims.size() != 1
+                    || worst == null
+                    || victims.get(0) != worst
+                    || incomingItem.priority() <= worst.priority()) {
                 return new QueueReplacement(
                         QueueReplacementStatus.DECLINED);
+            }
+            if (preparedOffers.containsKey(incomingItem.requestId())) {
+                return new QueueReplacement(
+                        QueueReplacementStatus.CONFLICT);
             }
             PrefillWorkRegistry.ActiveReplaceStatus replacement =
                     workRegistry.replaceActiveExact(victims, incomingItem);
@@ -597,6 +988,16 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         }
     }
 
+    private BatchItem worstActiveUnderLock() {
+        BatchItem worst = null;
+        for (BatchItem item : queue) {
+            if (worst == null || PRIORITY_QUEUE_ORDER.compare(item, worst) > 0) {
+                worst = item;
+            }
+        }
+        return worst;
+    }
+
     @Override
     @SuppressWarnings("unchecked")
     public QueueSnapshot captureQueueSnapshot() {
@@ -609,6 +1010,9 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
                     key,
                     queueVersion.get(),
                     ctx.maxQueueCapacity(),
+                    effectiveWaitingSeatUseUnderLock(),
+                    effectivePendingSeatUseUnderLock(),
+                    maximumPendingRequests,
                     items);
         } finally {
             queueLock.unlock();
@@ -648,6 +1052,16 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         }
 
         BatcherCycleResult result = groupPolicy.processQueue(ctx);
+        // The policy may terminalize an ACTIVE item without a ledger lease.
+        // Reconcile offer seats before the worker enters its next wait.
+        boolean offerCapacityFreed;
+        queueLock.lock();
+        try {
+            offerCapacityFreed = refreshOfferCapacityUnderLock();
+        } finally {
+            queueLock.unlock();
+        }
+        notifyOfferCapacity(offerCapacityFreed);
         if (result instanceof BatcherCycleResult.CapacityBlocked blocked) {
             awaitBlockedHeadCapacity(blocked);
         } else if (result
@@ -774,14 +1188,17 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
 
     /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
     public void signalDeliveryCapacityAvailable() {
+        boolean offerCapacityFreed;
         queueLock.lock();
         try {
+            offerCapacityFreed = refreshOfferCapacityUnderLock();
             if (capacityBlockedHead != null) {
                 stateChanged.signal();
             }
         } finally {
             queueLock.unlock();
         }
+        notifyOfferCapacity(offerCapacityFreed);
     }
 
     /** Wake decisions whose advisory worker-status or predictor input changed. */

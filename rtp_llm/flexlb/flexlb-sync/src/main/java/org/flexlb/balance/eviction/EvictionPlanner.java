@@ -77,14 +77,21 @@ public final class EvictionPlanner {
                                                    QueueSnapshot queue,
                                                    Map<String, String> failures) {
         int hardLimit = queue.queueCapacity();
-        if (hardLimit <= 0) {
-            failures.put(queue.endpointId(), "queue_unbounded");
+        if (queue.pendingCount() > queue.maxPendingRequests()
+                || hardLimit > 0
+                && queue.waitingCount() > hardLimit) {
+            failures.put(queue.endpointId(), "over_limit_wait");
             return null;
         }
 
-        // 9.1: how many slots must be freed for the incoming request to fit.
-        int queueDeficit = queue.items().size() + 1 - hardLimit;
-        if (queueDeficit <= 0) {
+        // Prepared holds consume waiting seats but are not eviction victims.
+        // One exact ACTIVE victim can free both a waiting and a pending seat.
+        int queueDeficit = hardLimit > 0
+                && queue.waitingCount() == hardLimit ? 1 : 0;
+        int pendingDeficit = queue.pendingCount() == queue.maxPendingRequests()
+                ? 1 : 0;
+        int victimCount = Math.max(queueDeficit, pendingDeficit);
+        if (victimCount == 0) {
             failures.put(queue.endpointId(), "queue_not_full");
             return null;
         }
@@ -97,13 +104,13 @@ public final class EvictionPlanner {
                 candidates.add(item);
             }
         }
-        if (candidates.size() < queueDeficit) {
+        if (candidates.size() < victimCount) {
             failures.put(queue.endpointId(), "insufficient_lower_priority_candidates");
             return null;
         }
 
         candidates.sort(CANDIDATE_ORDER);
-        List<DeliveryItem> victims = candidates.subList(0, queueDeficit);
+        List<DeliveryItem> victims = candidates.subList(0, victimCount);
 
         // 9.3: retain the scalar cost for diagnostics; structured priority
         // harm is the absolute comparison dimension.

@@ -1263,6 +1263,54 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void preparedOfferCommitsAcrossThreadWhileRetirementWaits()
+            throws Exception {
+        BatchItem item = createBatchItem(8_301L, 128L, 0L);
+        PrefillGenerationRuntime.PreparedOffer prepared;
+        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
+            assertNotNull(pin);
+            prepared = endpoint.prepareOfferPinned(
+                    pin, item.requestId(), item.priority());
+        }
+        assertNotNull(prepared);
+        assertTrue(prepared.seal());
+
+        endpoint.close();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            executor.submit(() -> prepared.commit(item))
+                    .get(2, TimeUnit.SECONDS);
+            endpoint.awaitRetirement();
+            assertEquals(0L, endpoint.admissionPendingRequestCount());
+        } finally {
+            prepared.close();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void preparedOfferClosesAcrossThreadAndUnblocksRetirement()
+            throws Exception {
+        PrefillGenerationRuntime.PreparedOffer prepared;
+        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
+            assertNotNull(pin);
+            prepared = endpoint.prepareOfferPinned(pin, 8_401L, 50);
+        }
+        assertNotNull(prepared);
+
+        endpoint.close();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            executor.submit(prepared::close).get(2, TimeUnit.SECONDS);
+            endpoint.awaitRetirement();
+            assertEquals(0L, endpoint.admissionPendingRequestCount());
+        } finally {
+            prepared.close();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void closePreservesRegisteredLifecycleAndRejectsNewBatchReservations() {
         BatchItem item = createBatchItem(1L, 500, 200);
         registerBatch(

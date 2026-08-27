@@ -101,6 +101,15 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
     private final AdmissionMutationSink admissionMutationSink =
             new AdmissionMutationSink() {
                 @Override
+                public boolean seal(
+                        RequestSlot slot, AdmissionMutation exact) {
+                    synchronized (slot) {
+                        return isCurrentSlot(slot)
+                                && slot.sealAdmissionMutation(exact);
+                    }
+                }
+
+                @Override
                 public void complete(
                         RequestSlot slot, AdmissionMutation exact) {
                     completeAdmissionMutation(slot, exact);
@@ -352,9 +361,11 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
     public boolean commitInflight(
             BatchItem item,
             boolean priorityAdmission,
+            AdmissionMutation exactMutation,
             InflightCommitPort.ActivePublication publication) {
         Objects.requireNonNull(publication, "publication");
-        if (shuttingDown.get() || item == null || item.future().isDone()) {
+        Objects.requireNonNull(exactMutation, "exactMutation");
+        if (item == null || item.future().isDone()) {
             return false;
         }
         RequestSlot slot = requestSlots.get(item.requestId());
@@ -364,7 +375,10 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         synchronized (slot) {
             if (!isCurrentSlot(slot)
                     || !slot.tryBindItemForPublication(
-                            item, priorityAdmission)) {
+                            item,
+                            priorityAdmission,
+                            exactMutation,
+                            shuttingDown.get())) {
                 return false;
             }
         }
@@ -408,6 +422,27 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         }
     }
 
+    /**
+     * True while this exact generation still needs a placement.  Unlike an
+     * admission claim this observation deliberately remains true while an
+     * asynchronous fallback owns the admission mutation.
+     */
+    boolean isWaitingForPlacement(
+            long requestId, CompletableFuture<?> future) {
+        if (shuttingDown.get()) {
+            return false;
+        }
+        RequestSlot slot = requestSlots.get(requestId);
+        if (slot == null || !slot.ownsFuture(future)) {
+            return false;
+        }
+        synchronized (slot) {
+            return isCurrentSlot(slot)
+                    && slot.isOpen()
+                    && slot.activeItem() == null;
+        }
+    }
+
     @Override
     public AdmissionMutation claimAdmissionMutation(
             long requestId, CompletableFuture<?> future) {
@@ -445,6 +480,10 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
 
         private AdmissionScope(AdmissionMutation exact) {
             this.exact = exact;
+        }
+
+        AdmissionMutation exact() {
+            return exact;
         }
 
         @Override
@@ -648,6 +687,7 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
     public boolean bindAdmissionResources(
             long requestId,
             CompletableFuture<?> future,
+            AdmissionMutation exactMutation,
             Runnable releasePermit,
             long acceptanceTimeoutMs) {
         if (acceptanceTimeoutMs < 0) {
@@ -659,11 +699,12 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         }
         RequestSlot.AdmissionCleanup immediateRelease;
         synchronized (entry) {
-            if (!isCurrentSlot(entry) || !entry.isOpen()) {
+            if (!isCurrentSlot(entry)
+                    || !entry.ownsAdmissionMutation(exactMutation)) {
                 return false;
             }
             immediateRelease = entry.bindAdmissionResources(
-                    releasePermit, acceptanceTimeoutMs);
+                    exactMutation, releasePermit, acceptanceTimeoutMs);
         }
         releaseAdmissionCleanup(immediateRelease);
         return true;

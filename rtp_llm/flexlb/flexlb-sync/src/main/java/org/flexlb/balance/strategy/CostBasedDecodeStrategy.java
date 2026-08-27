@@ -56,10 +56,10 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 (RoutingConfig.KvUsageWeightedRandomConfig) config.getRouter().getRoles()
                         .getDecode().getSelector();
 
-        // FIFO queues may wait for transient Decode pressure to drain. A
-        // PRIORITY queue deliberately retains the inclusive KV gate because
-        // route failure is what enters its typed admission/preemption path.
-        boolean softQueuePlacement = config.isQueue() && !config.isPriorityOrdering();
+        // Queue placement owns only a soft Decode reservation. The dispatcher
+        // acquires the hard engine/KV permit immediately before delivery, so
+        // transient pressure must not reject either FIFO or PRIORITY routes.
+        boolean softQueuePlacement = config.isQueue();
         ResourceMeasureIndicatorEnum indicator =
                 config.resourceMeasureFor(roleType);
         for (int attempt = 0; attempt < SNAPSHOT_CAPTURE_ATTEMPTS; attempt++) {
@@ -290,11 +290,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return new EndpointFilterResult<>(
                     snapshots, Map.of("NO_REGISTERED", 1), 0);
         }
-        if (softQueuePlacement) {
-            return new EndpointFilterResult<>(
-                    snapshots, Map.of(), registered);
-        }
-
         ArrayList<EndpointRegistry.DecodeRoutingSnapshot> filtered = null;
         int unavailable = 0;
         for (int index = 0; index < registered; index++) {
@@ -317,6 +312,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return new EndpointFilterResult<>(
                     snapshots, Map.of(), registered);
         }
+        if (filtered.isEmpty() && softQueuePlacement) {
+            return new EndpointFilterResult<>(
+                    snapshots,
+                    Map.of("TEMPORARILY_FULL", unavailable),
+                    registered);
+        }
         return new EndpointFilterResult<>(
                 Collections.unmodifiableList(filtered),
                 Map.of("RESOURCE_UNAVAILABLE", unavailable),
@@ -336,6 +337,9 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         List<WorkerEndpoint.GenerationPin> captured =
                 engineWorkerStatus.captureModelWorkerEndpoints(roleType, group);
         List<DecodeCandidate> result = new ArrayList<>(captured.size());
+        List<DecodeCandidate> temporarilyFull =
+                softQueuePlacement
+                        ? new ArrayList<>(captured.size()) : List.of();
         int unavailable = 0;
         try {
             for (int index = 0; index < captured.size(); index++) {
@@ -346,11 +350,14 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                     continue;
                 }
                 DecodeEndpoint.DecodeRoutingView view = de.routingView();
-                boolean available = softQueuePlacement
-                        || measure.isResourceAvailable(view);
+                boolean available = measure.isResourceAvailable(view);
                 if (!available) {
                     unavailable++;
-                    pin.close();
+                    if (softQueuePlacement) {
+                        temporarilyFull.add(new DecodeCandidate(pin, de, view));
+                    } else {
+                        pin.close();
+                    }
                     captured.set(index, null);
                     continue;
                 }
@@ -359,6 +366,9 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             }
         } catch (Throwable failure) {
             for (DecodeCandidate candidate : result) {
+                candidate.close();
+            }
+            for (DecodeCandidate candidate : temporarilyFull) {
                 candidate.close();
             }
             for (WorkerEndpoint.GenerationPin pin : captured) {
@@ -373,9 +383,18 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return new EndpointFilterResult<>(
                     result, Map.of("NO_REGISTERED", 1), 0);
         }
+        if (result.isEmpty() && softQueuePlacement) {
+            result.addAll(temporarilyFull);
+        } else {
+            for (DecodeCandidate candidate : temporarilyFull) {
+                candidate.close();
+            }
+        }
         Map<String, Integer> rejections = unavailable == 0
                 ? Map.of()
-                : Map.of("RESOURCE_UNAVAILABLE", unavailable);
+                : Map.of(result.isEmpty()
+                        ? "RESOURCE_UNAVAILABLE" : "TEMPORARILY_FULL",
+                        unavailable);
         return new EndpointFilterResult<>(result, rejections, registered);
     }
 

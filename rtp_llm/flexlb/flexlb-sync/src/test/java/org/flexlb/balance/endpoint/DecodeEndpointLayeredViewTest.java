@@ -17,6 +17,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -248,7 +249,7 @@ class DecodeEndpointLayeredViewTest {
                         exact.endpointGenerationId(),
                         exact.requestId(),
                         exact.reservationToken() + 1L);
-        DecodeEndpoint.PreemptionBeginResult result =
+        DecodeEndpoint.PreemptionBegin result =
                 endpoint.beginPriorityPreemption(
                         101L,
                         List.of(stale),
@@ -258,7 +259,9 @@ class DecodeEndpointLayeredViewTest {
                         70,
                         new DecodeEndpoint.AdmissionCapacity(1, 100));
 
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE, result);
+        assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE,
+                result.status());
+        assertNull(result.incoming());
         assertFalse(confirmedView(1L).claimedForPreemption());
         assertFalse(endpoint.layeredAdmissionView().reserved().containsKey(9L));
     }
@@ -473,7 +476,7 @@ class DecodeEndpointLayeredViewTest {
                 expectedKv,
                 priority,
                 new DecodeEndpoint.AdmissionCapacity(
-                        Math.max(1, endpoint.getTotalLoad()), 100));
+                        Math.max(1, endpoint.getTotalLoad()), 100)).status();
     }
 
     private static TaskInfo runningTask(long requestId, TaskPhase phase, long inputLength) {

@@ -3,7 +3,11 @@ package org.flexlb.balance.strategy;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
+import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DirectSchedulerConfig;
@@ -42,6 +46,7 @@ class RandomStrategyTest {
 
     private RandomStrategy randomStrategy;
     private DecodeResourceMeasure resourceMeasure;
+    private PrefillResourceMeasure prefillResourceMeasure;
     private EndpointRegistry endpointRegistry;
     private ConfigService configService;
     private FlexlbConfig config;
@@ -53,10 +58,18 @@ class RandomStrategyTest {
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         endpointRegistry = StrategyTestSupport.endpointRegistry(configService);
         resourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
-        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasureFactory.getMeasure(
+                org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE))
+                .thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasureFactory.getMeasure(
+                org.flexlb.enums.ResourceMeasureIndicatorEnum.PREFILL_PENDING_REQUESTS))
+                .thenReturn(prefillResourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(
                 Mockito.any(DecodeEndpoint.DecodeRoutingView.class))).thenReturn(true);
+        Mockito.when(prefillResourceMeasure.isResourceAvailable(Mockito.anyLong()))
+                .thenReturn(true);
         randomStrategy = new RandomStrategy(
                 new EngineWorkerStatus(endpointRegistry),
                 resourceMeasureFactory);
@@ -372,6 +385,55 @@ class RandomStrategyTest {
     }
 
     @Test
+    void queueAlwaysPrefersImmediatelyAvailableCapacityForPrefillAndDecode() {
+        PrefillEndpoint fullPrefill = addPrefill("127.0.1.1");
+        addCommittedWork(fullPrefill, 91_001L);
+        addPrefill("127.0.1.2");
+        Mockito.when(prefillResourceMeasure.isResourceAvailable(Mockito.anyLong()))
+                .thenAnswer(call -> ((Number) call.getArgument(0)).longValue() == 0L);
+
+        addDecode("127.0.2.1", 1_000L);
+        addDecode("127.0.2.2", 2_000L);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any()))
+                .thenAnswer(call -> ((DecodeEndpoint.DecodeRoutingView)
+                        call.getArgument(0)).totalKv() == 2_000L);
+
+        assertEquals("127.0.1.2", selectStatus(
+                context(91_101L), RoleType.PREFILL, null).getServerIp());
+        assertEquals("127.0.2.2", selectStatus(
+                context(91_102L), RoleType.DECODE, null).getServerIp());
+    }
+
+    @Test
+    void queueCanReturnATemporarilyFullPrefillAndDecode() {
+        PrefillEndpoint fullPrefill = addPrefill("127.0.3.1");
+        addCommittedWork(fullPrefill, 92_001L);
+        addDecode("127.0.4.1", 1_000L);
+        Mockito.when(prefillResourceMeasure.isResourceAvailable(Mockito.anyLong()))
+                .thenReturn(false);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any()))
+                .thenReturn(false);
+
+        assertNotNull(selectStatus(context(92_101L), RoleType.PREFILL, null));
+        assertNotNull(selectStatus(context(92_102L), RoleType.DECODE, null));
+    }
+
+    @Test
+    void directRejectsAllFullPrefillAndDecodeCandidates() {
+        PrefillEndpoint fullPrefill = addPrefill("127.0.5.1");
+        addCommittedWork(fullPrefill, 93_001L);
+        addDecode("127.0.6.1", 1_000L);
+        Mockito.when(prefillResourceMeasure.isResourceAvailable(Mockito.anyLong()))
+                .thenReturn(false);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any()))
+                .thenReturn(false);
+        config.setScheduler(new DirectSchedulerConfig());
+
+        assertNull(selectStatus(context(93_101L), RoleType.PREFILL, null));
+        assertNull(selectStatus(context(93_102L), RoleType.DECODE, null));
+    }
+
+    @Test
     void decode_random_should_return_exact_capacity_in_direct_and_queue_modes() {
         WorkerStatus worker = createWorkerStatus(
                 "127.0.0.4", RoleType.DECODE, null, true, 1_000L, 1_000L);
@@ -465,6 +527,41 @@ class RandomStrategyTest {
     private WorkerStatus createWorkerStatus(String ip) {
         return createWorkerStatus(
                 ip, RoleType.PREFILL, null, true, 0L, 0L);
+    }
+
+    private PrefillEndpoint addPrefill(String ip) {
+        WorkerStatus status = createWorkerStatus(ip);
+        String address = ip + ":8080";
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap()
+                .put(address, status);
+        return (PrefillEndpoint) registerPrefill(address, status);
+    }
+
+    private DecodeEndpoint addDecode(String ip, long totalKv) {
+        WorkerStatus status = createWorkerStatus(
+                ip, RoleType.DECODE, null, true, totalKv, totalKv);
+        String address = ip + ":8080";
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+                .put(address, status);
+        return (DecodeEndpoint) registerDecode(address, status);
+    }
+
+    private static void addCommittedWork(
+            PrefillEndpoint endpoint, long requestId) {
+        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration();
+             PrefillWorkLedger.DirectRegistration registration =
+                     endpoint.registerDirectRequest(pin, requestId, 1L)) {
+            registration.commit();
+        }
+    }
+
+    private BalanceContext context(long requestId) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(128L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        return context;
     }
 
     private WorkerStatus createWorkerStatus(
