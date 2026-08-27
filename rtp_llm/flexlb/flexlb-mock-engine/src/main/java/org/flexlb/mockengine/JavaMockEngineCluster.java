@@ -58,6 +58,18 @@ public final class JavaMockEngineCluster {
     static final int DEFAULT_DECODE_MAX_CONCURRENCY = 132;
     /** CLI flag for unique per-engine loopback advertisement IPs (default on). */
     static final String UNIQUE_ENGINE_IPS_FLAG = "--unique-engine-ips";
+    /**
+     * Default per-frame poll timeout for the client-facing response pump
+     * (generate_stream / fetch_response). Must cover the LONGEST possible
+     * gap between consecutive frames on one stream. The dominant gap is the
+     * decode execution between the prefill first-token frame and the decode
+     * terminal frame: with the production trace's max output_len (20 000
+     * tokens) and the slowest decode step in the performance curve (25.1 ms
+     * at batch 256), that gap reaches ~502 s — the legacy hard-coded 60 s
+     * truncated e2e for long-output requests. 600 s leaves headroom over
+     * the 502 s worst case. Configurable via --response-poll-timeout-ms.
+     */
+    static final long DEFAULT_RESPONSE_POLL_TIMEOUT_MS = 600_000L;
 
     private JavaMockEngineCluster() {
     }
@@ -219,6 +231,7 @@ public final class JavaMockEngineCluster {
                 engineName, declaredHost(config, engineIndex), roleName, roleType, grpcPort,
                 services, scheduler, performance, cacheCapacity, stats,
                 config.totalKvTokens, config.decodeMaxConcurrency);
+        service.setResponsePollTimeoutMs(config.responsePollTimeoutMs);
         services.put(grpcPort, service);
         try {
             Server server = NettyServerBuilder.forPort(grpcPort)
@@ -595,6 +608,12 @@ public final class JavaMockEngineCluster {
         private final AtomicLong completedCount = new AtomicLong();
         private final AtomicLong cancelledCount = new AtomicLong();
         private final ExecutorService responseExecutor;
+        /**
+         * Per-frame poll timeout for this engine's response pump. Overrides via
+         * {@link #setResponsePollTimeoutMs(long)} (set from Config at startEngine
+         * time; tests inject short timeouts to exercise the timeout path).
+         */
+        private volatile long responsePollTimeoutMs = DEFAULT_RESPONSE_POLL_TIMEOUT_MS;
 
         /** Test/default constructor: derives engine name from role+port, default KV capacity. */
         FastRpcService(String roleName,
@@ -878,13 +897,46 @@ public final class JavaMockEngineCluster {
 
             // Use a separate executor for blocking poll to avoid starving the
             // completion scheduler which is responsible for producing responses.
+            // Loop poll until a finished=true frame or timeout, so the mock can
+            // emit a first-token frame (finished=false) at prefill completion
+            // and a terminal frame (finished=true) at decode completion. Client
+            // measures ttft from the first frame and total from the finished
+            // frame; without the loop both metrics collapse to a single
+            // timestamp.
             responseExecutor.execute(() -> {
                 try {
-                    EngineRpcService.GenerateOutputsPB output = queue.poll(60, TimeUnit.SECONDS);
-                    if (output != null) {
+                    boolean anyDelivered = false;
+                    while (true) {
+                        EngineRpcService.GenerateOutputsPB output =
+                                queue.poll(responsePollTimeoutMs, TimeUnit.MILLISECONDS);
+                        if (output == null) {
+                            // Timeout with no frame — mirror the pre-change
+                            // behavior of completing the stream. If nothing was
+                            // ever delivered the client sees zero outputs and
+                            // reports empty_response.
+                            break;
+                        }
                         observer.onNext(output);
+                        anyDelivered = true;
+                        boolean terminal = false;
+                        EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();
+                        for (int j = 0; j < flatten.getFinishedCount(); j++) {
+                            if (flatten.getFinished(j)) {
+                                terminal = true;
+                                break;
+                            }
+                        }
+                        if (terminal) {
+                            break;
+                        }
                     }
                     observer.onCompleted();
+                    // anyDelivered is intentionally unread beyond diagnostics —
+                    // the client already treats a stream with zero onNext as
+                    // empty_response via its own null firstFrameNanos check.
+                    if (!anyDelivered) {
+                        // no-op branch, kept explicit for reader clarity
+                    }
                 } catch (InterruptedException e) {
                     observer.onError(e);
                 }
@@ -913,19 +965,57 @@ public final class JavaMockEngineCluster {
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
 
-            // Use a separate executor for blocking poll to avoid starving the
-            // completion scheduler which is responsible for producing responses.
+            // Loop poll until a finished=true frame or timeout — same pump as
+            // generateStreamCall. Under the BATCH dispatcher the client polls
+            // FetchResponse against the ORIGINAL PREFILL engine (startDecode
+            // handed the prefill-side queue to the Decode engine), so the stream
+            // carries TWO frames per request: a first-token frame (finished=false)
+            // offered at prefill completion and a terminal frame (finished=true)
+            // offered at decode completion. Polling exactly ONE frame collapsed
+            // the stream after the first-token frame, making the client's ttft
+            // and e2e identical by construction (verified: run 20260827_112212
+            // per-second ttft_p50==e2e_p50 everywhere) and truncating e2e for
+            // every request that actually spent decode time. The loop keeps the
+            // empty_response semantics: zero frames delivered before the timeout
+            // still completes the stream without error.
             responseExecutor.execute(() -> {
                 try {
-                    EngineRpcService.GenerateOutputsPB output = queue.poll(60, TimeUnit.SECONDS);
-                    if (output != null) {
+                    while (true) {
+                        EngineRpcService.GenerateOutputsPB output =
+                                queue.poll(responsePollTimeoutMs, TimeUnit.MILLISECONDS);
+                        if (output == null) {
+                            break;
+                        }
                         observer.onNext(output);
+                        boolean terminal = false;
+                        EngineRpcService.FlattenOutputPB flatten = output.getFlattenOutput();
+                        for (int j = 0; j < flatten.getFinishedCount(); j++) {
+                            if (flatten.getFinished(j)) {
+                                terminal = true;
+                                break;
+                            }
+                        }
+                        if (terminal) {
+                            break;
+                        }
                     }
                     observer.onCompleted();
                 } catch (InterruptedException e) {
                     observer.onError(e);
                 }
             });
+        }
+
+        /**
+         * Override the response-pump per-frame poll timeout (mainly for tests
+         * exercising the timeout path; production sets it from
+         * {@code --response-poll-timeout-ms} at startEngine time).
+         */
+        void setResponsePollTimeoutMs(long responsePollTimeoutMs) {
+            if (responsePollTimeoutMs < 1) {
+                throw new IllegalArgumentException("response poll timeout must be >= 1 ms");
+            }
+            this.responsePollTimeoutMs = responsePollTimeoutMs;
         }
 
         /**
@@ -1455,7 +1545,21 @@ public final class JavaMockEngineCluster {
                     if (!alreadyCancelled && !faultConfig.isNoRespond()) {
                         decodeStarted = startDecode(shape, batchId);
                     }
-                    if (!decodeStarted) {
+                    if (decodeStarted) {
+                        // Emit a first-token frame (finished=false) so the
+                        // client stream loop records firstFrameNanos at prefill
+                        // completion. The terminal frame (finished=true) is
+                        // emitted later by scheduleDecodeCompletionInternal
+                        // after decodeMs elapses. Without this frame ttft and
+                        // total collapse to the same nanos value (single-frame
+                        // stream), even though the engine really spent decodeMs
+                        // producing outputs.
+                        LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
+                                responseQueues.get(requestId);
+                        if (queue != null) {
+                            queue.offer(buildOutput(shape, false));
+                        }
+                    } else {
                         if (!alreadyCancelled) {
                             completedCount.incrementAndGet();
                             requestStates.put(requestId, "completed");
@@ -2523,6 +2627,12 @@ public final class JavaMockEngineCluster {
          * behavior (every engine declares Config.host).
          */
         boolean uniqueEngineIps = true;
+        /**
+         * Per-frame poll timeout for generate_stream / fetch_response pumps
+         * ({@code --response-poll-timeout-ms}, default
+         * {@link #DEFAULT_RESPONSE_POLL_TIMEOUT_MS}).
+         */
+        long responsePollTimeoutMs = DEFAULT_RESPONSE_POLL_TIMEOUT_MS;
 
         static Config parse(String[] args) {
             Config config = new Config();
@@ -2559,6 +2669,7 @@ public final class JavaMockEngineCluster {
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
                     case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
+                    case "--response-poll-timeout-ms" -> config.responsePollTimeoutMs = Long.parseLong(value);
                     case UNIQUE_ENGINE_IPS_FLAG -> config.uniqueEngineIps =
                             parseBooleanFlag(value, UNIQUE_ENGINE_IPS_FLAG);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
@@ -2584,6 +2695,9 @@ public final class JavaMockEngineCluster {
             }
             if (config.statsIntervalMs < 1) {
                 throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
+            }
+            if (config.responsePollTimeoutMs < 1_000) {
+                throw new IllegalArgumentException("--response-poll-timeout-ms must be >= 1000");
             }
             return config;
         }
