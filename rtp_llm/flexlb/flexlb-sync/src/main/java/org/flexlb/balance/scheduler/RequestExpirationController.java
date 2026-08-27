@@ -124,7 +124,13 @@ final class RequestExpirationController implements AutoCloseable {
         ExpirationTimer.MaintenanceResult result =
                 timer.maintainNow(exactSweeper);
         if (result.staleReduced() > 0) {
-            reporter.reportInflightTtlExpired(result.staleReduced());
+            // Scheduler-ledger eviction: report through the split-by-ledger
+            // series (role=SCHEDULER + engineIp="scheduler" + reason) so it
+            // is no longer mislabelled as a PREFILL endpoint series. This
+            // architecture has a single stale-inflight exit, so the reason
+            // bucket is always "ttl".
+            reporter.reportSchedulerInflightTtlExpired(
+                    "ttl", result.staleReduced());
             Logger.info(
                     "event=scheduler_inflight_ttl_eviction evicted={} scanned={}",
                     result.staleReduced(), result.scannedSlots());

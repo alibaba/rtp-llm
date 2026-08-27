@@ -1421,6 +1421,30 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         return live;
     }
 
+    /**
+     * Age (ms) of the oldest live request slot, 0 when the ledger is empty.
+     * Single traversal mirroring {@link #liveRequestCount}: per-entry
+     * {@code createdAtMs()} reads the lifecycle snapshot under the same
+     * slot monitor the stale sweep uses, so a slot being reduced never
+     * produces a torn read.
+     */
+    @Override
+    public long oldestLiveSlotAgeMs() {
+        long oldest = Long.MAX_VALUE;
+        long now = System.currentTimeMillis();
+        for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+            RequestSlot slot = candidate.getValue();
+            synchronized (slot) {
+                if (requestSlots.get(candidate.getKey()) == slot
+                        && slot.isLiveGeneration()) {
+                    oldest = Math.min(oldest, slot.createdAtMs());
+                }
+            }
+        }
+        return oldest == Long.MAX_VALUE ? 0L
+                : Math.max(0L, now - oldest);
+    }
+
 
     /**
      * Weakly-consistent immutable view of all scheduler-owned live request

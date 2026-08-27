@@ -418,6 +418,96 @@ class CostBasedDecodeStrategyTest {
                 "PRIORITY must preserve the inclusive admission gate for preemption/classification");
     }
 
+    @Test
+    void hotspotFilterUsesOthersAverageExcludingSelf() {
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus hotStatus = createWorkerStatus("127.0.0.1");
+        setKv(hotStatus, 10_000, 10_000);
+        WorkerStatus coolStatus = createWorkerStatus("127.0.0.2");
+        setKv(coolStatus, 10_000, 10_000);
+        decodeMap.put("127.0.0.1:8080", hotStatus);
+        decodeMap.put("127.0.0.2:8080", coolStatus);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeEndpoint hot = registry.getDecode("127.0.0.1:8080");
+        DecodeEndpoint cool = registry.getDecode("127.0.0.2:8080");
+        // engineLoad = confirmedRunning + max(0, inflight - queued).
+        // reservePinned builds non-queued inflight, so loads become [4, 1]
+        // (kv reservations stay 0 so the imbalance axis is inert and the
+        // test isolates the hotspot axis). With the old self-inclusive
+        // average the threshold was 3.0 * (4+1)/2 = 7.5 — load 4 can
+        // mathematically never exceed it, so the old formula provably
+        // never filtered this fleet. The leave-one-out baseline
+        // (others avg = 1, threshold = 3) must reject the hot engine.
+        for (int i = 0; i < 4; i++) {
+            reservePinned(hot, 100L + i, 0, 0, 50);
+        }
+        reservePinned(cool, 200L, 0, 0, 50);
+
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
+        allowDecodeSelection(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new EngineWorkerStatus(registry), factory);
+
+        Request request = new Request();
+        request.setSeqLen(1);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        for (int i = 0; i < 30; i++) {
+            request.setRequestId(300L + i);
+            ServerStatus status = selectStatus(
+                    strategy, context, RoleType.DECODE, null);
+            Assertions.assertTrue(status.isSuccess());
+            Assertions.assertEquals("127.0.0.2", status.getServerIp(),
+                    "hot engine (load 4 vs others-avg 1) must be outlier-filtered");
+        }
+    }
+
+    @Test
+    void singleCandidateSkipsOutlierRejection() {
+        Map<String, WorkerStatus> decodeMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        setKv(worker, 10_000, 10_000);
+        decodeMap.put("127.0.0.1:8080", worker);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
+        // n == 1: there are no "other" engines to be an outlier against —
+        // rejecting the only candidate could only yield NO_AVAILABLE_WORKER
+        // with nothing to gain, so even an extreme load must stay selectable.
+        for (int i = 0; i < 6; i++) {
+            reservePinned(endpoint, 400L + i, 0, 0, 50);
+        }
+
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
+        allowDecodeSelection(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new EngineWorkerStatus(registry), factory);
+
+        Request request = new Request();
+        request.setSeqLen(1);
+        request.setRequestId(500L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = selectStatus(
+                strategy, context, RoleType.DECODE, null);
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("127.0.0.1", status.getServerIp(),
+                "a lone engine has no 'others' to be an outlier against and must stay selectable");
+    }
+
     private static void setKv(
             WorkerStatus worker, long totalKv, long availableKv) {
         StrategyTestSupport.publish(worker, StrategyTestSupport.response(
@@ -433,6 +523,19 @@ class CostBasedDecodeStrategyTest {
             int priority) {
         try (var pin = endpoint.tryPinGeneration()) {
             endpoint.reserveQueuedPinned(
+                    pin, requestId, kvTokens, expectedKvTokens, priority);
+        }
+    }
+
+    /** Non-queued inflight reservation: each call raises engineLoad by one. */
+    private static void reservePinned(
+            DecodeEndpoint endpoint,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority) {
+        try (var pin = endpoint.tryPinGeneration()) {
+            endpoint.reservePinned(
                     pin, requestId, kvTokens, expectedKvTokens, priority);
         }
     }

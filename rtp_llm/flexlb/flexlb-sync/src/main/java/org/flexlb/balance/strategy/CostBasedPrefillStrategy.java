@@ -712,10 +712,20 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                     sumPendingCount, projection.requiredPendingCount());
         }
 
-        long avgDrainMs = knownDrainCount == 0 ? 0L : sumDrainMs / knownDrainCount;
-        long avgPendingCount = sumPendingCount / feasible.size();
-
         // Round 2: hotspot / drain-imbalance filter using the same projections.
+        // Outlier baselines are leave-one-out: each engine is judged against
+        // the average of the OTHER feasible engines, never one that includes
+        // itself. A self-inclusive average lets a busy engine drag its own
+        // baseline up with it — with n engines the threshold becomes
+        // multiplier * (own + rest)/n, so for small fleets (n=2,3) a genuinely
+        // overloaded engine mathematically cannot exceed it and the filter
+        // never fires. feasibleSize == 1 (or an all-zero others average)
+        // skips the relative checks: with no "others" to be an outlier
+        // against, rejecting the only candidate could only yield
+        // NO_AVAILABLE_WORKER with nothing to gain (the least-loaded fallback
+        // below would rescue it anyway). The drain baseline averages only the
+        // projections that exist, so its leave-one-out denominator is
+        // knownDrainCount - 1, not feasibleSize - 1.
         CandidateSet survivors = new CandidateSet(feasibleSize);
         int leastLoadedIndex = -1;
         long leastDrainMs = Long.MAX_VALUE;
@@ -737,17 +747,28 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                     leastPendingIndex = i;
                 }
 
-                if (hotspotMultiplier > 0 && avgPendingCount > 0
-                        && pendingCount > avgPendingCount * hotspotMultiplier) {
-                    rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
-                    continue;
-                }
-                if (imbalanceMultiplier > 0 && avgDrainMs > 0
-                        && projectedDrainMs.isPresent()
-                        && projectedDrainMs.getAsLong()
-                        > avgDrainMs * imbalanceMultiplier) {
-                    rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
-                    continue;
+                if (feasibleSize > 1) {
+                    long othersAvgPendingCount =
+                            (sumPendingCount - Math.max(0L, pendingCount))
+                                    / (feasibleSize - 1);
+                    if (hotspotMultiplier > 0 && othersAvgPendingCount > 0
+                            && pendingCount
+                                    > othersAvgPendingCount * hotspotMultiplier) {
+                        rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
+                        continue;
+                    }
+                    if (imbalanceMultiplier > 0 && projectedDrainMs.isPresent()
+                            && knownDrainCount > 1) {
+                        long othersAvgDrainMs =
+                                (sumDrainMs - projectedDrainMs.getAsLong())
+                                        / (knownDrainCount - 1);
+                        if (othersAvgDrainMs > 0
+                                && projectedDrainMs.getAsLong()
+                                        > othersAvgDrainMs * imbalanceMultiplier) {
+                            rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
+                            continue;
+                        }
+                    }
                 }
 
                 feasible.moveCandidateTo(i, survivors, projection);
