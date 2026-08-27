@@ -1052,17 +1052,39 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3,
                             "kv_cache_kernel_block_id must be 3-D (group, batch, blocks)");
-    const size_t group = inputs.kv_cache_kernel_block_id.size(0);
 
-    // Re-alias _device_by_group / _device from the freshly-gathered tensor.
-    // Slices are zero-copy views, no new allocation. Same logic as
-    // setupKVCacheForAttentionInputs but applied in place to attention_inputs_.
-    attention_inputs_.kv_cache_kernel_block_id_device_by_group.clear();
-    attention_inputs_.kv_cache_kernel_block_id_device_by_group.reserve(group);
-    for (size_t g = 0; g < group; ++g) {
-        attention_inputs_.kv_cache_kernel_block_id_device_by_group.push_back(inputs.kv_cache_kernel_block_id[g]);
+    if (cache_manager_ && cache_manager_->kdaShadowRegistry()
+        && attention_inputs_.kda_shadow_group_id >= 0) {
+        // Rebuild the same cache-table view used by the initial attention-input
+        // preparation.  A plain re-alias to the freshly gathered tensor is not
+        // sufficient for K3 Decode KTP: setupKVCacheForAttentionInputs also
+        // replaces the KDA group with the READY shadow-registry rows and points
+        // the singular compatibility table at the owner-local MLA group.  Losing
+        // either override here makes CUDA Graph replay read owner-local KDA rows
+        // (and group 0 for MLA), which only appears correct while a request stays
+        // inside its first cache page.
+        d2d_copies_.clear();
+        setupKVCacheForAttentionInputs(attention_inputs_, inputs);
+
+        // setupKVCacheForAttentionInputs stages the rebuilt KDA shadow table in
+        // pinned host memory.  Flush that H2D copy before the graph runner mirrors
+        // the table into its persistent capture buffers.
+        {
+            RTP_LLM_PROFILE_SCOPE("py_model.updateKVCacheKernelBlockId(fused_h2d)");
+            fusedCopy(d2d_copies_);
+        }
+    } else {
+        // Generic hybrid-cache fast path: re-alias zero-copy group views from
+        // the freshly gathered tensor.
+        const size_t group = inputs.kv_cache_kernel_block_id.size(0);
+        attention_inputs_.kv_cache_kernel_block_id_device_by_group.clear();
+        attention_inputs_.kv_cache_kernel_block_id_device_by_group.reserve(group);
+        for (size_t g = 0; g < group; ++g) {
+            attention_inputs_.kv_cache_kernel_block_id_device_by_group.push_back(inputs.kv_cache_kernel_block_id[g]);
+        }
+        attention_inputs_.kv_cache_kernel_block_id_device =
+            attention_inputs_.kv_cache_kernel_block_id_device_by_group[0];
     }
-    attention_inputs_.kv_cache_kernel_block_id_device = attention_inputs_.kv_cache_kernel_block_id_device_by_group[0];
 
     // CUDA-graph case: refresh the captured held buffers + FlashInfer plan
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
