@@ -35,14 +35,17 @@ class ModelServiceConfigurationTest {
     }
 
     @Test
-    void loadsAndValidatesEndpointDiscoveryConfiguration() {
+    void loadsAndValidatesEndpointDiscoveryTopology() {
         withModelConfig(staticModelConfig())
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     ModelMetaConfig config = context.getBean(ModelMetaConfig.class);
-                    var endpoint = config.getServiceRoute("test-service").getAllEndpoints().getFirst();
-                    assertThat(endpoint.getDiscovery().getType()).isEqualTo(ServiceDiscoveryType.STATIC_ENV);
-                    assertThat(endpoint.getDiscovery().getHosts()).containsExactly("127.0.0.1:8080");
+                    var endpoint = config.getServiceRoute("test-service")
+                            .getAllEndpoints().getFirst();
+                    assertThat(endpoint.getDiscovery().getType())
+                            .isEqualTo(ServiceDiscoveryType.STATIC_ENV);
+                    assertThat(endpoint.getDiscovery().getHosts())
+                            .containsExactly("127.0.0.1:8080");
                     assertThat(endpoint.getWorkerStatusPort()).isEqualTo(18002);
                 });
     }
@@ -58,7 +61,8 @@ class ModelServiceConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage("endpoint discovery must be configured for address: service-a");
+                            .hasRootCauseMessage(
+                                    "endpoint discovery must be configured for address: service-a");
                 });
     }
 
@@ -75,14 +79,15 @@ class ModelServiceConfigurationTest {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
                             .hasRootCauseMessage(
-                                    "No service discovery provider available for type: dashscope, address: v-test");
+                                    "No service discovery provider available for type: "
+                                            + "dashscope, address: v-test");
                 });
     }
 
     @Test
-    void loadsEnabledKvcmConfiguration() {
+    void loadsKvcmTopology() {
         String config = """
-                {"service_id":"test-service","kvcm":{"enabled":true,"address":"kvcm-service",
+                {"service_id":"test-service","kvcm":{"address":"kvcm-service",
                 "port":7381,
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}},
                 "role_endpoints":[{"group":"default",
@@ -93,22 +98,22 @@ class ModelServiceConfigurationTest {
         withModelConfig(config)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    var route = context.getBean(ModelMetaConfig.class).getServiceRoute("test-service");
-                    assertThat(route.isKvcmEnabled()).isTrue();
+                    var route = context.getBean(ModelMetaConfig.class)
+                            .getServiceRoute("test-service");
+                    assertThat(route.getKvcm()).isNotNull();
                     assertThat(route.getKvcm().getPort()).isEqualTo(7381);
                     assertThat(route.getAllEndpoints()).hasSize(1);
                 });
     }
 
     @Test
-    void loadsEnabledOptimizerTraceConfiguration() {
+    void loadsOptimizerTopology() {
         withModelConfig(modelConfig(validOptimizerConfig()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
                             .getServiceRoute("test-service")
                             .getOptimizer();
-                    assertThat(optimizer.isEnabled()).isTrue();
                     assertThat(optimizer.getAddress()).isEqualTo("optimizer-service");
                     assertThat(optimizer.getPort()).isEqualTo(9090);
                     assertThat(optimizer.getPath()).isEqualTo("/custom/optimizer");
@@ -119,9 +124,10 @@ class ModelServiceConfigurationTest {
     }
 
     @Test
-    void appliesOptimizerTraceDefaults() {
+    void appliesOptimizerTopologyDefaults() {
         withModelConfig(modelConfig(
-                validOptimizerConfig().replace(",\"port\":9090,\"path\":\"/custom/optimizer\"", "")))
+                validOptimizerConfig().replace(
+                        ",\"port\":9090,\"path\":\"/custom/optimizer\"", "")))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     OptimizerConfig optimizer = context.getBean(ModelMetaConfig.class)
@@ -133,86 +139,17 @@ class ModelServiceConfigurationTest {
     }
 
     @Test
-    void ignoresOptimizerFieldsWhenDisabled() {
-        withModelConfig(modelConfig("{\"enabled\":false}"))
-                .run(context -> assertThat(context).hasNotFailed());
-    }
-
-    @Test
-    void allowsEnabledOptimizerWithoutInstanceId() {
-        withModelConfig(modelConfig(validOptimizerConfig()))
-                .run(context -> assertThat(context).hasNotFailed());
-    }
-
-    @Test
-    void rejectsEnabledOptimizerWithInvalidPathOrDiscovery() {
+    void rejectsOptimizerWithInvalidPathOrDiscovery() {
         assertOptimizerRejected(
-                validOptimizerConfig().replace("\"path\":\"/custom/optimizer\"",
+                validOptimizerConfig().replace(
+                        "\"path\":\"/custom/optimizer\"",
                         "\"path\":\"custom/optimizer\""),
                 "MODEL_SERVICE_CONFIG online_optimizer.path must start with '/'");
         assertOptimizerRejected(
-                validOptimizerConfig().replace("\"hosts\":[\"127.0.0.1:8082\"]",
+                validOptimizerConfig().replace(
+                        "\"hosts\":[\"127.0.0.1:8082\"]",
                         "\"hosts\":[]"),
                 "static-env discovery hosts must be configured for address: optimizer-service");
-    }
-
-    @Test
-    void loadsLocalStandbyConfiguration() {
-        String config = """
-                {"service_id":"test-service","kvcm":{"enabled":true,"address":"kvcm-service",
-                "heartbeat_failure_threshold":4,"query_failure_threshold":5,
-                "max_query_retry_count":2,"recovery_success_threshold":2,
-                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]},
-                "local_standby":{"auto_switch":true,"block_size":4096,
-                "ttl_ms":300000,"minimum_ttl_ms":120000,
-                "ttl_reduction_start_ratio":0.75,"maximum_entries":1000000,
-                "capacity_multiplier":1.3,
-                "async_queue_capacity":8192,"hash_thread_count":6,
-                "hash_queue_capacity":2048}},
-                "role_endpoints":[{"group":"default",
-                "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
-                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
-                """;
-
-        withModelConfig(config)
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    var kvcm = context.getBean(ModelMetaConfig.class)
-                            .getServiceRoute("test-service")
-                            .getKvcm();
-                    var standby = kvcm.getLocalStandby();
-                    assertThat(standby.isAutoSwitch()).isTrue();
-                    assertThat(standby.getBlockSize()).isEqualTo(4096);
-                    assertThat(standby.getMinimumTtlMs()).isEqualTo(120000);
-                    assertThat(standby.getTtlReductionStartRatio()).isEqualTo(0.75);
-                    assertThat(standby.getCapacityMultiplier()).isEqualTo(1.3);
-                    assertThat(standby.getHashThreadCount()).isEqualTo(6);
-                    assertThat(standby.getHashQueueCapacity()).isEqualTo(2048);
-                    assertThat(kvcm.getHeartbeatFailureThreshold()).isEqualTo(4);
-                    assertThat(kvcm.getQueryFailureThreshold()).isEqualTo(5);
-                    assertThat(kvcm.getMaxQueryRetryCount()).isEqualTo(2);
-                    assertThat(kvcm.getRecoverySuccessThreshold()).isEqualTo(2);
-                });
-    }
-
-    @Test
-    void rejectsInvalidDynamicTtlConfiguration() {
-        String config = """
-                {"service_id":"test-service","kvcm":{"enabled":true,"address":"kvcm-service",
-                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]},
-                "local_standby":{"ttl_ms":1000,"minimum_ttl_ms":2000}},
-                "role_endpoints":[{"group":"default",
-                "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
-                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
-                """;
-
-        withModelConfig(config)
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage(
-                                    "MODEL_SERVICE_CONFIG kvcm.local_standby contains invalid values");
-                });
     }
 
     private String staticModelConfig() {
@@ -250,7 +187,7 @@ class ModelServiceConfigurationTest {
 
     private String validOptimizerConfig() {
         return """
-                {"enabled":true,"address":"optimizer-service","port":9090,"path":"/custom/optimizer",
+                {"address":"optimizer-service","port":9090,"path":"/custom/optimizer",
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8082"]}}
                 """;
     }

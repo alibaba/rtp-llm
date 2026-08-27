@@ -1936,7 +1936,6 @@ class MockEngineCluster:
         decode = ",".join(s.ip_port for s in self.states if s.role == "decode")
         model_service_config = {
             "service_id": "aigc.text-generation.generation.engine_service",
-            "load_balance": True,
             "role_endpoints": [
                 {
                     "group": "mock",

@@ -7,7 +7,6 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.Test;
@@ -16,6 +15,8 @@ import reactor.core.publisher.Mono;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
+import static org.flexlb.cache.CacheMatchTestConfigurations.localSync;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -37,7 +38,7 @@ class RequestBlockHashServiceTest {
                     configResolver,
                     executor,
                     localStandbyHashService,
-                    new CacheMatchConfiguration(new ModelMetaConfig()));
+                    localSync(new ModelMetaConfig()));
 
     @Test
     void prefersProvidedBlockCacheKeys() {
@@ -253,16 +254,13 @@ class RequestBlockHashServiceTest {
     }
 
     private CacheMatchConfiguration configurationWithLocalStandby(long blockSize) {
-        LocalStandbyConfig standby = new LocalStandbyConfig();
-        standby.setBlockSize(blockSize);
-        KvcmConfig kvcm = new KvcmConfig();
-        kvcm.setEnabled(true);
-        kvcm.setLocalStandby(standby);
+        KvcmConfig kvcmTopology = new KvcmConfig();
         ServiceRoute route = new ServiceRoute();
         route.setServiceId("test-service");
-        route.setKvcm(kvcm);
+        route.setKvcm(kvcmTopology);
         ModelMetaConfig config = new ModelMetaConfig();
         config.putServiceRoute(route.getServiceId(), route);
-        return new CacheMatchConfiguration(config);
+        return kvcm(config,
+                runtime -> runtime.getLocalStandby().setBlockSize(blockSize));
     }
 }

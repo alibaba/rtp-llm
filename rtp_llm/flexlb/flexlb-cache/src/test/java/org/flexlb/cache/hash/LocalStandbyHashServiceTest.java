@@ -5,7 +5,6 @@ import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.Test;
@@ -13,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.Mockito.mock;
@@ -23,7 +23,7 @@ class LocalStandbyHashServiceTest {
     void calculatesAndPublishesStandbyHashAsynchronously() throws Exception {
         LocalStandbyHashService hashService =
                 new LocalStandbyHashService(
-                        new CacheMatchConfiguration(modelMetaConfig()),
+                        configuration(),
                         mock(FlexMonitor.class),
                         new VllmBlockHashStrategy());
         Request request = new Request();
@@ -48,7 +48,7 @@ class LocalStandbyHashServiceTest {
     void usesConfiguredStrategyForStandbyHash() throws Exception {
         LocalStandbyHashService hashService =
                 new LocalStandbyHashService(
-                        new CacheMatchConfiguration(modelMetaConfig()),
+                        configuration(),
                         mock(FlexMonitor.class),
                         new SglangBlockHashStrategy());
         Request request = new Request();
@@ -74,7 +74,7 @@ class LocalStandbyHashServiceTest {
     void publishesSglangEagleBigramHashesAndOnlyFullPages() throws Exception {
         LocalStandbyHashService hashService =
                 new LocalStandbyHashService(
-                        new CacheMatchConfiguration(modelMetaConfig()),
+                        configuration(),
                         mock(FlexMonitor.class),
                         new SglangBlockHashStrategy());
         Request request = new Request();
@@ -96,14 +96,8 @@ class LocalStandbyHashServiceTest {
         }
     }
 
-    private ModelMetaConfig modelMetaConfig() {
-        LocalStandbyConfig standby = new LocalStandbyConfig();
-        standby.setHashThreadCount(1);
-        standby.setHashQueueCapacity(4);
-
+    private CacheMatchConfiguration configuration() {
         KvcmConfig kvcm = new KvcmConfig();
-        kvcm.setEnabled(true);
-        kvcm.setLocalStandby(standby);
 
         ServiceRoute route = new ServiceRoute();
         route.setServiceId("test-service");
@@ -111,6 +105,9 @@ class LocalStandbyHashServiceTest {
 
         ModelMetaConfig config = new ModelMetaConfig();
         config.putServiceRoute(route.getServiceId(), route);
-        return config;
+        return kvcm(config, runtime -> {
+            runtime.getLocalStandby().setHashThreadCount(1);
+            runtime.getLocalStandby().setHashQueueCapacity(4);
+        });
     }
 }

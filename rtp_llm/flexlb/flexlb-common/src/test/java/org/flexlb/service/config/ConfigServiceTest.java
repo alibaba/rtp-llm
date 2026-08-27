@@ -2,6 +2,9 @@ package org.flexlb.service.config;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.KvcmCacheMatchingConfig;
+import org.flexlb.config.LocalSyncCacheMatchingConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.enums.LogLevel;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -82,10 +85,14 @@ class ConfigServiceTest {
     }
 
     @Test
-    void failsFastForMissingEmptyOrInvalidInitialContent() {
-        assertInvalidInitialContent(null, "must not be blank");
-        assertInvalidInitialContent("  ", "must not be blank");
-        assertInvalidInitialContent("{}", "at least one FlexlbConfig field");
+    void treatsMissingOrEmptyInitialContentAsNoOp() {
+        assertEmptyInitialContentIsNoOp(null);
+        assertEmptyInitialContentIsNoOp("  ");
+        assertEmptyInitialContentIsNoOp("{}");
+    }
+
+    @Test
+    void failsFastForInvalidInitialContent() {
         assertInvalidInitialContent("[]", "must be a JSON object");
         assertInvalidInitialContent(
                 "{\"scheduler\":{\"type\":\"INVALID\"}}",
@@ -176,6 +183,89 @@ class ConfigServiceTest {
     }
 
     @Test
+    void taggedUnionTypeChangesReplaceTheWholeBranch() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                """
+                        {
+                          "cacheMatching": {
+                            "type": "KVCM",
+                            "requestTimeoutMs": 900,
+                            "leaderRefreshIntervalMs": 20000
+                          }
+                        }
+                        """);
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+
+        source.emit("{\"cacheMatching\":{\"requestTimeoutMs\":750}}");
+        KvcmCacheMatchingConfig patched = (KvcmCacheMatchingConfig)
+                service.loadBalanceConfig().getCacheMatching();
+        assertThat(patched.getRequestTimeoutMs()).isEqualTo(750);
+        assertThat(patched.getLeaderRefreshIntervalMs()).isEqualTo(20_000);
+
+        source.emit("{\"cacheMatching\":{\"type\":\"LOCAL_SYNC\"}}");
+        assertThat(service.loadBalanceConfig().getCacheMatching())
+                .isInstanceOf(LocalSyncCacheMatchingConfig.class);
+
+        source.emit("{\"cacheMatching\":{\"type\":\"KVCM\"}}");
+        KvcmCacheMatchingConfig replaced = (KvcmCacheMatchingConfig)
+                service.loadBalanceConfig().getCacheMatching();
+        assertThat(replaced.getRequestTimeoutMs())
+                .isEqualTo(KvcmCacheMatchingConfig.DEFAULT_REQUEST_TIMEOUT_MS);
+        assertThat(replaced.getLeaderRefreshIntervalMs())
+                .isEqualTo(KvcmCacheMatchingConfig.DEFAULT_LEADER_REFRESH_INTERVAL_MS);
+    }
+
+    @Test
+    void arraysReplaceAsAWholeAndJsonNullIsRejected() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                """
+                        {
+                          "scheduler": {
+                            "type": "QUEUE",
+                            "ordering": {
+                              "type": "PRIORITY",
+                              "preemption": {
+                                "allowedVictimStages": [
+                                  "PREFILL_QUEUED",
+                                  "DECODE_RESERVED"
+                                ]
+                              }
+                            }
+                          },
+                          "dispatcher": {"type": "NON_BATCH"}
+                        }
+                        """);
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+
+        source.emit("""
+                {
+                  "scheduler": {
+                    "ordering": {
+                      "preemption": {
+                        "allowedVictimStages": ["PREFILL_QUEUED"]
+                      }
+                    }
+                  }
+                }
+                """);
+        assertThat(service.loadBalanceConfig().priorityOrdering()
+                .getPreemption().getAllowedVictimStages())
+                .containsExactly(VictimStage.PREFILL_QUEUED);
+
+        FlexlbConfig lastKnownGood = service.loadBalanceConfig();
+        source.emit("{\"router\":{\"availabilityHysteresisPercent\":null}}");
+        assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
+    }
+
+    @Test
     void notifiesListenerWithCurrentAndRuntimeConfigurations() {
         FakeConfigSource source = new FakeConfigSource(
                 "Nacos",
@@ -194,7 +284,7 @@ class ConfigServiceTest {
     }
 
     @Test
-    void rejectsInvalidRuntimeUpdatesAndKeepsLastKnownGoodSnapshot() {
+    void ignoresEmptyRuntimeUpdatesAndRejectsInvalidOnes() {
         FakeConfigSource source = new FakeConfigSource(
                 "Nacos",
                 200,
@@ -210,6 +300,25 @@ class ConfigServiceTest {
         assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
         source.emit("{\"unknownField\":1}");
         assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
+    }
+
+    @Test
+    void doesNotNotifyListenersForEmptyRuntimeUpdates() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                "{\"router\":{\"availabilityHysteresisPercent\":9}}");
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        List<Long> updates = new ArrayList<>();
+        service.addUpdateListener(config -> updates.add(
+                config.getRouter().getAvailabilityHysteresisPercent()));
+
+        source.emit("");
+        source.emit("{}");
+
+        assertThat(updates).containsExactly(9L);
     }
 
     @Test
@@ -258,6 +367,21 @@ class ConfigServiceTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasStackTraceContaining(expectedMessage);
         assertThat(source.closed).isTrue();
+    }
+
+    private void assertEmptyInitialContentIsNoOp(String content) {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, content);
+
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of(
+                        "FLEXLB_CONFIG",
+                        "{\"router\":{\"availabilityHysteresisPercent\":17}}")),
+                source));
+
+        assertThat(service.loadBalanceConfig().getRouter()
+                .getAvailabilityHysteresisPercent()).isEqualTo(17);
+        service.close();
+        configService = null;
     }
 
     private static final class FakeConfigSource implements ConfigSource {

@@ -5,7 +5,6 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.OptimizerConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
@@ -58,49 +57,16 @@ public class ModelServiceConfiguration {
     }
 
     private void validateKvcm(KvcmConfig kvcm, RoutingServiceDiscovery serviceDiscovery) {
-        if (kvcm == null || !kvcm.isEnabled()) {
+        if (kvcm == null) {
             return;
         }
-        if (kvcm.getRequestTimeoutMs() <= 0 || kvcm.getLeaderRefreshIntervalMs() <= 0) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG kvcm timeouts must be greater than zero");
-        }
-        if (kvcm.getHeartbeatFailureThreshold() <= 0
-                || kvcm.getQueryFailureThreshold() <= 0
-                || kvcm.getRecoverySuccessThreshold() <= 0) {
-            throw new IllegalArgumentException(
-                    "MODEL_SERVICE_CONFIG kvcm health thresholds must be greater than zero");
-        }
-        validateLocalStandby(kvcm.getLocalStandby());
         serviceDiscovery.validate(kvcm.toEndpoint());
-    }
-
-    private void validateLocalStandby(LocalStandbyConfig localStandby) {
-        if (localStandby == null) {
-            return;
-        }
-        if (localStandby.getBlockSize() < 0
-                || localStandby.getBlockSize() > Integer.MAX_VALUE
-                || localStandby.getTtlMs() <= 0
-                || localStandby.getMinimumTtlMs() <= 0
-                || localStandby.getMinimumTtlMs() > localStandby.getTtlMs()
-                || !Double.isFinite(localStandby.getTtlReductionStartRatio())
-                || localStandby.getTtlReductionStartRatio() <= 0
-                || localStandby.getTtlReductionStartRatio() >= 1
-                || localStandby.getMaximumEntries() <= 0
-                || !Double.isFinite(localStandby.getCapacityMultiplier())
-                || localStandby.getCapacityMultiplier() < 1.0
-                || localStandby.getAsyncQueueCapacity() <= 0
-                || localStandby.getHashThreadCount() <= 0
-                || localStandby.getHashQueueCapacity() <= 0) {
-            throw new IllegalArgumentException(
-                    "MODEL_SERVICE_CONFIG kvcm.local_standby contains invalid values");
-        }
     }
 
     private void validateOptimizer(
             OptimizerConfig optimizer,
             RoutingServiceDiscovery serviceDiscovery) {
-        if (optimizer == null || !optimizer.isEnabled()) {
+        if (optimizer == null) {
             return;
         }
         if (StringUtils.isBlank(optimizer.getPath())) {
@@ -114,12 +80,6 @@ public class ModelServiceConfiguration {
         if (optimizer.getPath().indexOf('?') >= 0 || optimizer.getPath().indexOf('#') >= 0) {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG online_optimizer.path must not contain query or fragment");
-        }
-        if (optimizer.getDiscovery() != null
-                && optimizer.getDiscovery().getPollIntervalMs() <= 0) {
-            throw new IllegalArgumentException(
-                    "MODEL_SERVICE_CONFIG online_optimizer.discovery.poll_interval_ms "
-                            + "must be greater than zero");
         }
         serviceDiscovery.validate(optimizer.toEndpoint());
     }

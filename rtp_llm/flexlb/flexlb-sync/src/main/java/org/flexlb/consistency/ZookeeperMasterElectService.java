@@ -14,13 +14,13 @@ import org.apache.curator.framework.recipes.leader.Participant;
 import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.utils.CloseableUtils;
-import org.flexlb.config.LBConsistencyConfig;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.env.Environment;
@@ -47,8 +47,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     private static final String MASTER_NAMESPACE = "whale-master";
     private static final String MASTER_LEADER_PATH = "/master_lb_leader/";
-    @Setter
-    private LBConsistencyConfig lbConsistencyConfig;
+    private final ZookeeperConsistencyConfig consistencyConfig;
     private final GeneralHttpNettyService generalHttpNettyService;
     private final EngineHealthReporter engineHealthReporter;
     private final Environment environment;
@@ -72,21 +71,25 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     public ZookeeperMasterElectService(GeneralHttpNettyService generalHttpNettyService,
                                        EngineHealthReporter engineHealthReporter,
-                                       Environment environment) {
+                                       Environment environment,
+                                       ConfigService configService) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
         this.generalHttpNettyService = generalHttpNettyService;
         this.engineHealthReporter = engineHealthReporter;
         this.environment = environment;
+        this.consistencyConfig = configService.loadBalanceConfig().getConsistency()
+                instanceof ZookeeperConsistencyConfig zookeeper
+                ? zookeeper
+                : null;
 
         init();
     }
 
     public void init() {
-        initializeLBConsistencyConfig();
-        if (!lbConsistencyConfig.isNeedConsistency()) {
-            LOGGER.warn("Consistency is not required for LBConsistencyConfig.");
+        if (consistencyConfig == null) {
+            LOGGER.warn("ZooKeeper consistency is disabled.");
             return;
         }
         initializeRoleId();
@@ -118,22 +121,13 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         port = Integer.parseInt(portStr);
     }
 
-    private void initializeLBConsistencyConfig() {
-        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
-        LOGGER.warn("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-        lbConsistencyConfig = configStr == null
-                ? new LBConsistencyConfig()
-                : JsonUtils.toObject(configStr, LBConsistencyConfig.class);
-    }
-
     private void initializeZookeeperClient() {
         try {
-            LBConsistencyConfig.ZookeeperConfig zookeeperConfig = lbConsistencyConfig.getZookeeperConfig();
             client = CuratorFrameworkFactory.builder()
                     .namespace(MASTER_NAMESPACE)
-                    .connectString(zookeeperConfig.getZkHost())
-                    .sessionTimeoutMs(zookeeperConfig.getZkTimeoutMs())
-                    .connectionTimeoutMs(zookeeperConfig.getZkTimeoutMs())
+                    .connectString(consistencyConfig.getConnectString())
+                    .sessionTimeoutMs(consistencyConfig.getSessionTimeoutMs())
+                    .connectionTimeoutMs(consistencyConfig.getConnectionTimeoutMs())
                     .retryPolicy(new ExponentialBackoffRetry(1000, 3))
                     .build();
             client.start();
@@ -152,7 +146,10 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     private void scheduleMasterUpdateTask() {
         LBStatusConsistencyService.SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(
-                this::updateLatestMaster, 0, 5, TimeUnit.SECONDS);
+                this::updateLatestMaster,
+                0,
+                consistencyConfig.getMasterRefreshIntervalMs(),
+                TimeUnit.MILLISECONDS);
     }
 
     /**

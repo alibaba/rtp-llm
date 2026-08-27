@@ -3,11 +3,12 @@ package org.flexlb.consistency;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.config.LBConsistencyConfig;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConsistencyConfig;
+import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
@@ -33,15 +34,17 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
     private final Environment environment;
-    private LBConsistencyConfig lbConsistencyConfig;
+    private final ConsistencyConfig consistencyConfig;
     private String serverPort;
     private String roleId;
     private String localHostIp;
 
     public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
-                                      Environment environment) {
+                                      Environment environment,
+                                      ConfigService configService) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
         this.environment = environment;
+        this.consistencyConfig = configService.loadBalanceConfig().getConsistency();
         this.init();
     }
 
@@ -62,13 +65,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         roleId = System.getenv("HIPPO_ROLE");
         if (StringUtils.isBlank(roleId)) {
             throw new RuntimeException("HIPPO_ROLE env is blank");
-        }
-        String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
-        log.info("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-        if (configStr == null) {
-            lbConsistencyConfig = new LBConsistencyConfig();
-        } else {
-            lbConsistencyConfig = JsonUtils.toObject(configStr, LBConsistencyConfig.class);
         }
         if (!isNeedConsistency()) {
             log.warn("LBStatusConsistencyService is not need.");
@@ -107,7 +103,7 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     @Override
     public boolean isNeedConsistency() {
-        return lbConsistencyConfig.isNeedConsistency();
+        return consistencyConfig instanceof ZookeeperConsistencyConfig;
     }
 
     @Override

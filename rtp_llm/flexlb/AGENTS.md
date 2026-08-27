@@ -72,8 +72,8 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
   --spring.profiles.active=test
 ```
 
-运行模型服务时需要 `MODEL_SERVICE_CONFIG`；`FLEXLB_CONFIG` 可省略并使用有效默认值；
-`FLEXLB_SYNC_CONSISTENCY_CONFIG` 为可选的 ZooKeeper 主选举配置。字段说明见
+运行模型服务时需要 `MODEL_SERVICE_CONFIG`；`FLEXLB_CONFIG` 可省略并使用有效默认值。
+ZooKeeper 主选举通过 `FLEXLB_CONFIG.consistency` 配置；不存在独立的一致性行为环境变量。字段说明见
 [06-configuration-and-observability](docs/architecture/06-configuration-and-observability.md)。
 
 JVM args required for Java 21 module system（见 pom.xml spring-boot-maven-plugin 配置）。

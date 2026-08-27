@@ -1,8 +1,6 @@
 package org.flexlb.sync.synchronizer;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.cache.match.CacheAwareService;
@@ -18,8 +16,6 @@ import org.flexlb.sync.runner.EngineSyncRunner;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.IdUtils;
-import org.flexlb.util.JsonUtils;
-import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -71,16 +67,9 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
 
-        // Get environment variable
-        String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
-        if (StringUtils.isEmpty(modelConfig)) {
-            Logger.warn("prefill load balancer env:MODEL_CONFIG is empty");
-            throw new RuntimeException("master load balancer env:MODEL_CONFIG is empty");
+        for (ServiceRoute serviceRoute : modelMetaConfig.getServiceRoutes()) {
+            modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
         }
-        ServiceRoute serviceRoute = JsonUtils.toObject(modelConfig, new TypeReference<>() {
-        });
-        modelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
-        modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
     }
 
     public void syncEngineStatus() {

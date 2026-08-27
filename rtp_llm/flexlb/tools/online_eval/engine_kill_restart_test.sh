@@ -145,7 +145,7 @@ else
 fi
 
 # -- Model service config (constant JSON) ----------------------------------
-readonly MODEL_SERVICE_CONFIG_JSON='{"service_id":"aigc.text-generation.generation.engine_service","load_balance":true,"role_endpoints":[{"group":"mock","prefill_endpoint":{"address":"mock.prefill.hosts.address","protocol":"http","path":"/"},"decode_endpoint":{"address":"mock.decode.hosts.address","protocol":"http","path":"/"}}]}'
+readonly MODEL_SERVICE_CONFIG_JSON='{"service_id":"aigc.text-generation.generation.engine_service","role_endpoints":[{"group":"mock","prefill_endpoint":{"address":"mock.prefill.hosts.address","protocol":"http","path":"/"},"decode_endpoint":{"address":"mock.decode.hosts.address","protocol":"http","path":"/"}}]}'
 
 # -- Load client parameters ------------------------------------------------
 LOAD_CLIENT_LIMIT="${LOAD_CLIENT_LIMIT:-0}"

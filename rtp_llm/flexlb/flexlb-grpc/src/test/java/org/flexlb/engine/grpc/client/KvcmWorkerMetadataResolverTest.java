@@ -1,6 +1,8 @@
 package org.flexlb.engine.grpc.client;
 
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
@@ -92,7 +94,6 @@ class KvcmWorkerMetadataResolverTest {
         group.setPrefillEndpoint(endpoint);
 
         KvcmConfig kvcm = new KvcmConfig();
-        kvcm.setEnabled(true);
         kvcm.setNamespace(namespace);
 
         ServiceRoute route = new ServiceRoute();
@@ -106,6 +107,8 @@ class KvcmWorkerMetadataResolverTest {
     }
 
     private CacheMatchConfiguration configuration(String namespace) {
-        return new CacheMatchConfiguration(modelMetaConfig(namespace));
+        FlexlbConfig flexlbConfig = new FlexlbConfig();
+        flexlbConfig.setCacheMatching(new KvcmCacheMatchingConfig());
+        return new CacheMatchConfiguration(modelMetaConfig(namespace), flexlbConfig);
     }
 }

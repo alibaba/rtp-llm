@@ -34,6 +34,7 @@ public class OptimizerAddressResolver {
     private final String address;
     private final Endpoint endpoint;
     private final int port;
+    private final long pollIntervalMs;
     private final ScheduledExecutorService refreshScheduler =
             Executors.newSingleThreadScheduledExecutor(
                     new NamedThreadFactory("optimizer-discovery-refresh"));
@@ -43,10 +44,19 @@ public class OptimizerAddressResolver {
     private volatile List<String> resolvedAddresses = Collections.emptyList();
 
     public OptimizerAddressResolver(ServiceDiscovery serviceDiscovery, Endpoint endpoint, int port) {
+        this(serviceDiscovery, endpoint, port, 1000L);
+    }
+
+    public OptimizerAddressResolver(
+            ServiceDiscovery serviceDiscovery,
+            Endpoint endpoint,
+            int port,
+            long pollIntervalMs) {
         this.serviceDiscovery = serviceDiscovery;
         this.endpoint = endpoint;
         this.address = endpoint.getAddress();
         this.port = port;
+        this.pollIntervalMs = pollIntervalMs;
     }
 
     public void start() {
@@ -58,7 +68,6 @@ public class OptimizerAddressResolver {
             return;
         }
         if (isDynamicDiscovery()) {
-            long pollIntervalMs = endpoint.getDiscovery().getPollIntervalMs();
             try {
                 refreshScheduler.scheduleWithFixedDelay(
                         this::refreshSafely,

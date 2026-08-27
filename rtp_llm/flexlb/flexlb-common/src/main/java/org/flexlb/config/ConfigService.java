@@ -11,7 +11,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.service.config.ConfigSource;
-import org.flexlb.util.JsonUtils;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
@@ -21,6 +20,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -49,6 +49,33 @@ public class ConfigService {
             .build();
 
     private static final List<ConfigSource> CONFIG_SOURCES = new ArrayList<>();
+    private static final Set<String> MODEL_BEHAVIOR_FIELDS = Set.of(
+            "connect_timeout_ms",
+            "connectTimeoutMs",
+            "read_timeout_ms",
+            "readTimeoutMs",
+            "poll_interval_ms",
+            "pollIntervalMs",
+            "max_idle_connections",
+            "maxIdleConnections",
+            "keep_alive_duration_ms",
+            "keepAliveDurationMs",
+            "request_timeout_ms",
+            "requestTimeoutMs",
+            "leader_refresh_interval_ms",
+            "leaderRefreshIntervalMs",
+            "heartbeat_failure_threshold",
+            "heartbeatFailureThreshold",
+            "query_failure_threshold",
+            "queryFailureThreshold",
+            "max_query_retry_count",
+            "maxQueryRetryCount",
+            "recovery_success_threshold",
+            "recoverySuccessThreshold",
+            "p2p_host_count",
+            "p2pHostCount",
+            "local_standby",
+            "localStandby");
 
     private final AtomicReference<FlexlbConfig> currentConfig;
     private final ServiceRoute modelServiceConfig;
@@ -117,7 +144,12 @@ public class ConfigService {
 
     static ServiceRoute parseModelServiceConfig(String document) {
         try {
-            return JsonUtils.toObject(document, ServiceRoute.class);
+            JsonNode tree = STRICT_MAPPER.readTree(document);
+            rejectJsonNull(tree, "$", MODEL_SERVICE_CONFIG_ENV);
+            rejectModelBehaviorFields(tree, "$", null);
+            return STRICT_MAPPER.treeToValue(tree, ServiceRoute.class);
+        } catch (ConfigValidationException error) {
+            throw error;
         } catch (Exception error) {
             throw new ConfigValidationException(MODEL_SERVICE_CONFIG_ENV,
                     "Invalid MODEL_SERVICE_CONFIG JSON: " + error.getMessage(), error);
@@ -192,7 +224,13 @@ public class ConfigService {
     private void receiveConfigUpdate(ConfigSource source, String content) {
         synchronized (updateLock) {
             try {
-                FlexlbConfig updated = mergeConfig(currentConfig.get(), content, source.name());
+                FlexlbConfig previous = currentConfig.get();
+                FlexlbConfig updated = mergeConfig(previous, content, source.name());
+                if (updated == previous) {
+                    log.info("Ignored empty FlexLB configuration update from {} source",
+                            source.name());
+                    return;
+                }
                 currentConfig.set(updated);
                 notifyUpdateListeners(updated);
                 logEffectiveConfig(updated);
@@ -208,6 +246,9 @@ public class ConfigService {
     private static FlexlbConfig mergeConfig(
             FlexlbConfig baseConfig, String content, String sourceName) {
         ObjectNode overrides = parseOverrides(content, sourceName);
+        if (overrides.isEmpty()) {
+            return baseConfig;
+        }
         ObjectNode merged = STRICT_MAPPER.valueToTree(baseConfig);
         deepMerge(merged, overrides);
         try {
@@ -222,7 +263,7 @@ public class ConfigService {
 
     private static ObjectNode parseOverrides(String content, String sourceName) {
         if (content == null || content.isBlank()) {
-            throw new IllegalArgumentException(sourceName + " configuration must not be blank");
+            return STRICT_MAPPER.createObjectNode();
         }
         try {
             JsonNode parsed = STRICT_MAPPER.readTree(content);
@@ -231,11 +272,6 @@ public class ConfigService {
                 throw new IllegalArgumentException(
                         sourceName + " configuration must be a JSON object");
             }
-            if (overrides.isEmpty()) {
-                throw new IllegalArgumentException(sourceName
-                        + " configuration must contain at least one FlexlbConfig field");
-            }
-            STRICT_MAPPER.treeToValue(overrides, FlexlbConfig.class);
             return overrides;
         } catch (IllegalArgumentException error) {
             throw error;
@@ -295,14 +331,48 @@ public class ConfigService {
         }
     }
 
+    private static void rejectModelBehaviorFields(
+            JsonNode node,
+            String path,
+            String parentField) {
+        if (node == null || !node.isContainerNode()) {
+            return;
+        }
+        if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) {
+                rejectModelBehaviorFields(
+                        node.get(index), path + "[" + index + "]", parentField);
+            }
+            return;
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            String name = field.getKey();
+            String fieldPath = path + "." + name;
+            boolean rootBehavior = "$".equals(path) && "load_balance".equals(name);
+            boolean enableBehavior = "enabled".equals(name)
+                    && ("kvcm".equals(parentField) || "optimizer".equals(parentField));
+            if (rootBehavior || enableBehavior || MODEL_BEHAVIOR_FIELDS.contains(name)) {
+                throw new ConfigValidationException(
+                        MODEL_SERVICE_CONFIG_ENV,
+                        fieldPath + " is a FlexLB behavior field; configure it in FLEXLB_CONFIG");
+            }
+            rejectModelBehaviorFields(field.getValue(), fieldPath, name);
+        }
+    }
+
     private static void logEffectiveConfig(FlexlbConfig config) {
         String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
         String ordering = config.isDirect() ? "N/A"
                 : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
         String dispatcher = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, dispatcher={}, "
-                        + "prefillSelector={}, decodeSelector={}, groupRules={}",
+                        + "cacheMatching={}, consistency={}, prefillSelector={}, decodeSelector={}, groupRules={}",
                 config.getSchemaVersion(), scheduler, ordering, dispatcher,
+                config.getCacheMatching().getClass().getSimpleName(),
+                config.getConsistency().getClass().getSimpleName(),
                 config.getRouter().getRoles().getPrefill().getSelector()
                         .getClass().getSimpleName(),
                 config.getRouter().getRoles().getDecode().getSelector()

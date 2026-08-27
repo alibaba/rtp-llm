@@ -1,6 +1,7 @@
 package org.flexlb.engine.grpc.client;
 
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.core.GrpcTarget;
@@ -39,11 +40,12 @@ class KvcmGrpcClientTest {
     void returnsP2pAwareMatches() {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         KvcmConfig config = new KvcmConfig();
-        config.setEnabled(true);
-        config.setLeaderRefreshIntervalMs(60_000);
-        config.setMaxQueryRetryCount(0);
+        KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
+        runtimeConfig.setLeaderRefreshIntervalMs(60_000);
+        runtimeConfig.setMaxQueryRetryCount(0);
         when(configuration.isKvcmEnabled()).thenReturn(true);
         when(configuration.getKvcmConfig()).thenReturn(config);
+        when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
 
         KvcmMetaServiceClient metaServiceClient = mock(KvcmMetaServiceClient.class);
         KvcmLeaderResolver leaderResolver = mock(KvcmLeaderResolver.class);

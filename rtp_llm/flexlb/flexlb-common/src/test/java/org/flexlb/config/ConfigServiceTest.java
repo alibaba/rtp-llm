@@ -48,7 +48,6 @@ class ConfigServiceTest {
                 ConfigService.MODEL_SERVICE_CONFIG_ENV, """
                         {
                           "service_id":"test-service",
-                          "load_balance":true,
                           "role_endpoints":[]
                         }
                         """));
@@ -65,6 +64,31 @@ class ConfigServiceTest {
                         ConfigService.MODEL_SERVICE_CONFIG_ENV, "not-json")));
 
         assertTrue(error.getMessage().contains("'MODEL_SERVICE_CONFIG'"));
+    }
+
+    @Test
+    void rejects_flexlb_behavior_inside_model_service_config() {
+        ConfigValidationException kvcmError = assertThrows(ConfigValidationException.class,
+                () -> ConfigService.parseModelServiceConfig("""
+                        {
+                          "service_id":"test-service",
+                          "role_endpoints":[],
+                          "kvcm":{"enabled":true,"address":"127.0.0.1"}
+                        }
+                        """));
+        assertTrue(kvcmError.getMessage().contains("FLEXLB_CONFIG"));
+        assertTrue(kvcmError.getMessage().contains("$.kvcm.enabled"));
+
+        ConfigValidationException legacyError = assertThrows(ConfigValidationException.class,
+                () -> ConfigService.parseModelServiceConfig("""
+                        {
+                          "service_id":"test-service",
+                          "load_balance":true,
+                          "role_endpoints":[]
+                        }
+                        """));
+        assertTrue(legacyError.getMessage().contains("FLEXLB_CONFIG"));
+        assertTrue(legacyError.getMessage().contains("$.load_balance"));
     }
 
     @Test
@@ -191,7 +215,49 @@ class ConfigServiceTest {
                       "requestTraceLogEnabled": false,
                       "theoryLog": {"path": "/tmp/flexlb-theory.log"}
                     }
-                  }
+                  },
+                  "serviceDiscovery": {
+                    "connectTimeoutMs": 600,
+                    "readTimeoutMs": 700,
+                    "pollIntervalMs": 1200,
+                    "maxIdleConnections": 6,
+                    "keepAliveDurationMs": 240000
+                  },
+                  "cacheMatching": {
+                    "type": "KVCM",
+                    "requestTimeoutMs": 800,
+                    "leaderRefreshIntervalMs": 15000,
+                    "heartbeatFailureThreshold": 4,
+                    "queryFailureThreshold": 12,
+                    "maxQueryRetryCount": 2,
+                    "recoverySuccessThreshold": 5,
+                    "p2pHostCount": 3,
+                    "localStandby": {
+                      "autoSwitch": false,
+                      "blockSize": 64,
+                      "ttlMs": 400000,
+                      "minimumTtlMs": 120000,
+                      "ttlReductionStartRatio": 0.75,
+                      "maximumEntries": 3000000,
+                      "capacityMultiplier": 12,
+                      "asyncQueueCapacity": 120000,
+                      "hashThreadCount": 6,
+                      "hashQueueCapacity": 130000
+                    }
+                  },
+                  "optimizer": {
+                    "enabled": true,
+                    "discoveryPollIntervalMs": 1500
+                  },
+                  "consistency": {
+                    "type": "ZOOKEEPER",
+                    "connectString": "zk-1:2181,zk-2:2181",
+                    "sessionTimeoutMs": 31000,
+                    "connectionTimeoutMs": 32000,
+                    "masterRefreshIntervalMs": 6000
+                  },
+                  "blockHashStrategy": "SGLANG",
+                  "enableFallback": true
                 }
                 """);
 
@@ -218,6 +284,16 @@ class ConfigServiceTest {
         assertEquals(128L, config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
+        assertEquals(600, config.getServiceDiscovery().getConnectTimeoutMs());
+        KvcmCacheMatchingConfig kvcm = assertInstanceOf(
+                KvcmCacheMatchingConfig.class, config.getCacheMatching());
+        assertEquals(800, kvcm.getRequestTimeoutMs());
+        assertEquals(64, kvcm.getLocalStandby().getBlockSize());
+        assertTrue(config.getOptimizer().isEnabled());
+        ZookeeperConsistencyConfig consistency = assertInstanceOf(
+                ZookeeperConsistencyConfig.class, config.getConsistency());
+        assertEquals("zk-1:2181,zk-2:2181", consistency.getConnectString());
+        assertTrue(config.isEnableFallback());
     }
 
     @Test
