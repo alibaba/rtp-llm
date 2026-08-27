@@ -114,13 +114,12 @@ bool P2PConnectorWorker::writeByLayerTag(int                                   l
 }
 
 ErrorInfo
-P2PConnectorWorker::sendKVCache(int64_t                                              request_id,
-                                const std::string&                                   unique_key,
-                                int64_t                                              deadline_ms,
-                                const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-                                int64_t                                              request_deadline_ms) {
-    return prefill_->sendKVCache(
-        request_id, unique_key, deadline_ms, decode_transfer_servers, request_deadline_ms);
+P2PConnectorWorker::sendKVCache(int64_t                   request_id,
+                                const std::string&        unique_key,
+                                int64_t                   deadline_ms,
+                                const P2PWorkerRoutePlan& worker_plan,
+                                int64_t                   request_deadline_ms) {
+    return prefill_->sendKVCache(request_id, unique_key, deadline_ms, worker_plan, request_deadline_ms);
 }
 
 void P2PConnectorWorker::completeNoTransfer(int64_t request_id,
@@ -129,12 +128,11 @@ void P2PConnectorWorker::completeNoTransfer(int64_t request_id,
     prefill_->completeNoTransfer(request_id, deadline_ms, request_deadline_ms);
 }
 
-ErrorInfo P2PConnectorWorker::read(int64_t                                               request_id,
-                                   const std::string&                                    unique_key,
-                                   int64_t                                               deadline_ms,
-                                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                   int                                                   remote_tp_size) {
-    return decode_->read(request_id, unique_key, deadline_ms, layer_cache_buffers, remote_tp_size);
+ErrorInfo P2PConnectorWorker::read(int64_t                   request_id,
+                                   const std::string&        unique_key,
+                                   int64_t                   deadline_ms,
+                                   const P2PWorkerRoutePlan& worker_plan) {
+    return decode_->read(request_id, unique_key, deadline_ms, worker_plan);
 }
 
 bool P2PConnectorWorker::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {

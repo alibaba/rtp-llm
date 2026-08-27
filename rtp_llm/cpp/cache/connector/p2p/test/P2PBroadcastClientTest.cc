@@ -147,8 +147,8 @@ TEST_F(P2PBroadcastClientTest, BroadcastPerRankAllowsEmptyLocalProjection) {
     ASSERT_TRUE(result->success());
     EXPECT_EQ(servers_[0]->service()->getLastBroadcastTpRequest().layer_blocks_size(), 1);
     EXPECT_EQ(servers_[1]->service()->getLastBroadcastTpRequest().layer_blocks_size(), 0);
-    EXPECT_FALSE(servers_[0]->service()->getLastBroadcastTpRequest().allow_empty_projection());
-    EXPECT_TRUE(servers_[1]->service()->getLastBroadcastTpRequest().allow_empty_projection());
+    EXPECT_EQ(servers_[0]->service()->getLastBroadcastTpRequest().routes_size(), 0);
+    EXPECT_EQ(servers_[1]->service()->getLastBroadcastTpRequest().routes_size(), 0);
 }
 
 TEST_F(P2PBroadcastClientTest, BroadcastPerRankRejectsMismatchedWorkerCount) {

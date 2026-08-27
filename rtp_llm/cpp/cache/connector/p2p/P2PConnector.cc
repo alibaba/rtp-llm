@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 
+#include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
+
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -421,8 +423,30 @@ bool P2PConnector::executeHandleRead(int64_t                                 req
     for (const auto& peer_worker : p2p_request.peer_workers()) {
         decode_transfer_servers.emplace_back(peer_worker.ip(), peer_worker.cache_store_port());
     }
+    // 解出本 prefill worker 自己那份 route。peer_index 在此解析成具体端点，worker 不再自选目标。
+    P2PWorkerRoutePlan worker_plan;
+    worker_plan.plan_digest = p2p_request.plan_digest();
+    for (const auto& route_pb : p2p_request.routes()) {
+        const auto     local = RouteCodec::decode(route_pb);
+        P2PWorkerRoute worker_route;
+        worker_route.route_id  = local.route_id;
+        worker_route.cache_tag = local.cache_tag;
+        worker_route.partition = local.partition;
+        worker_route.slice     = local.slice;
+        if (local.peer_index < 0 || static_cast<size_t>(local.peer_index) >= decode_transfer_servers.size()) {
+            ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                 "HANDLE_READ route peer_index out of range: " + std::to_string(local.peer_index));
+            RTP_LLM_LOG_WARNING("executeHandleRead rejected: %s", error_info.ToString().c_str());
+            setP2PResponse(response, error_info);
+            return false;
+        }
+        worker_route.dst_ip   = decode_transfer_servers[local.peer_index].first;
+        worker_route.dst_port = decode_transfer_servers[local.peer_index].second;
+        worker_plan.routes.push_back(std::move(worker_route));
+    }
+
     ErrorInfo error_info = worker_->sendKVCache(
-        request_id, unique_key, deadline_ms, decode_transfer_servers, p2p_request.request_deadline_ms());
+        request_id, unique_key, deadline_ms, worker_plan, p2p_request.request_deadline_ms());
     if (config_.tp_rank != 0) {
         const int64_t request_deadline_ms =
             p2p_request.request_deadline_ms() > 0 ? p2p_request.request_deadline_ms() : deadline_ms;
@@ -461,18 +485,27 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         return reject_read("READ request deadline has expired");
     }
 
-    const bool has_layer_blocks = p2p_request.layer_blocks_size() > 0;
-    if (!has_layer_blocks
-        && (!p2p_request.allow_empty_projection() || config_.worker_config.cp_size <= 1)) {
-        return reject_read("READ request has no layer blocks");
-    }
-    if (has_layer_blocks && p2p_request.allow_empty_projection()) {
-        return reject_read("READ request mixes layer blocks with empty-projection marker");
+    // 「routes 为空」是权威的「本 worker 无任务」信号，取代了 allow_empty_projection。
+    if (p2p_request.routes_size() == 0) {
+        RTP_LLM_LOG_DEBUG("executeRead: no routes for this worker, request_id=%ld, unique_key=%s",
+                          request_id,
+                          unique_key.c_str());
+        setP2PResponseOk(response);
+        return true;
     }
 
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    std::set<std::string>                          layer_tag_keys;
-    for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
+    P2PWorkerRoutePlan worker_plan;
+    worker_plan.plan_digest = p2p_request.plan_digest();
+    std::set<std::string> route_layer_tag_keys;
+    for (const auto& route_pb : p2p_request.routes()) {
+        const auto     local = RouteCodec::decode(route_pb);
+        P2PWorkerRoute worker_route;
+        worker_route.route_id  = local.route_id;
+        worker_route.cache_tag = local.cache_tag;
+        worker_route.partition = local.partition;
+        worker_route.slice     = local.slice;
+
+        for (const auto& layer_block_pb : route_pb.layer_blocks()) {
         auto layer_id           = layer_block_pb.layer_id();
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
@@ -499,9 +532,11 @@ bool P2PConnector::executeRead(int64_t                                 request_i
             == layer.group_tags.end()) {
             return reject_read("READ request cache tag is not owned by layer");
         }
-        const std::string layer_tag_key = std::to_string(layer_id) + ":" + layer_block_pb.cache_tag();
-        if (!layer_tag_keys.insert(layer_tag_key).second) {
-            return reject_read("READ request contains duplicate layer/tag");
+        // route 内的 (layer, tag) 唯一；跨 route 允许重复（同一层不同 route 写不同字节区间）。
+        const std::string layer_tag_key = std::to_string(local.route_id) + "@" + std::to_string(layer_id) + ":"
+                                          + layer_block_pb.cache_tag();
+        if (!route_layer_tag_keys.insert(layer_tag_key).second) {
+            return reject_read("READ request contains duplicate layer/tag within one route");
         }
         for (const auto block_id : block_ids) {
             if (block_id < 0) {
@@ -516,10 +551,14 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         for (size_t i = 0; i < cache_keys.size(); i++) {
             layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
         }
-        layer_cache_buffers.push_back(layer_cache_buffer);
+            worker_route.layer_buffers.push_back(layer_cache_buffer);
+        }
+        if (worker_route.layer_buffers.empty()) {
+            return reject_read("READ route has no layer blocks");
+        }
+        worker_plan.routes.push_back(std::move(worker_route));
     }
-    int       remote_tp_size = (p2p_request.remote_tp_size() > 0) ? p2p_request.remote_tp_size() : 1;
-    ErrorInfo error_info     = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers, remote_tp_size);
+    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, worker_plan);
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,

@@ -365,7 +365,6 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplic
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("explicit-empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
-    p2p_request->set_allow_empty_projection(true);
 
     FunctionResponsePB response;
     EXPECT_TRUE(cp_connector->executeFunction(request, response));
@@ -383,7 +382,6 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExp
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("expired-empty-read");
     p2p_request->set_deadline_ms(currentTimeMs() - 1);
-    p2p_request->set_allow_empty_projection(true);
 
     FunctionResponsePB response;
     EXPECT_FALSE(cp_connector->executeFunction(request, response));

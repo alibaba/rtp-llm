@@ -588,17 +588,15 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
-    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill).
-    // Superseded by `routes` once the transfer plan drives execution; kept while both paths
-    // coexist (see the phased rollout in docs/backend/p2p_transfer_plan_orchestration.md).
-    int32 remote_tp_size = 8;
+    // Removed: remote_tp_size (8) - its only consumer was
+    // P2PConnectorWorkerDecode::calculateRecvPartitionCount, which the transfer plan replaced.
+    // Removed: allow_empty_projection (10) - an empty `routes` list is now the authoritative
+    // "this worker has nothing to do" signal.
+    reserved 8, 10;
+    reserved "remote_tp_size", "allow_empty_projection";
     // Original user-request deadline. deadline_ms remains the physical
     // transfer deadline used by this broadcast and its worker operation.
     int64 request_deadline_ms = 9;
-    // True only when rank0 intentionally projected an empty CP-local block set
-    // for this worker. Ordinary empty READ requests remain malformed.
-    // Superseded by "routes is empty" once the transfer plan drives execution.
-    bool allow_empty_projection = 10;
 
     // This worker's slice of the transfer plan. Empty means no work for this worker.
     // Additive for now: carried alongside the legacy fields so the plan can be shadow-

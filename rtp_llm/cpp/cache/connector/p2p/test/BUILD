@@ -38,7 +38,6 @@ cc_test(
         "main.cc",
         "P2PBroadcastClientTest.cc",
         "PrefillLoadCallerTest.cc",
-        "AsymmetricTpUtilTest.cc",
         "ComputedLayerCacheBufferTest.cc",
         "LayerCacheBufferUtilFilterTest.cc",
         "StoreWaitContextTest.cc",

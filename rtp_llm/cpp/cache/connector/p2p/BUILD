@@ -71,7 +71,6 @@ cc_library(
     srcs = [
         "P2PBroadcastClient.cc",
         "PrefillLoadCaller.cc",
-        "AsymmetricTpUtil.cc",
         "ComputedLayerCacheBuffer.cc",
         "P2PConnectorResourceStore.cc",
         "StoreWaitContext.cc",
@@ -79,7 +78,6 @@ cc_library(
     hdrs = [
         "P2PBroadcastClient.h",
         "PrefillLoadCaller.h",
-        "AsymmetricTpUtil.h",
         "ComputedLayerCacheBuffer.h",
         "P2PConnectorResourceStore.h",
         "StoreWaitContext.h",

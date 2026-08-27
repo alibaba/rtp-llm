@@ -4,8 +4,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/p2p/AsymmetricTpUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerRoute.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "autil/LoopThread.h"
@@ -33,11 +33,11 @@ public:
         return lease_cleanup_thread_ != nullptr;
     }
 
-    ErrorInfo read(int64_t                                               request_id,
-                   const std::string&                                    unique_key,
-                   int64_t                                               deadline_ms,
-                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                   int                                                   remote_tp_size = 1);
+    /// @brief 按编排层下发的 route 注册 recv task。worker 不再推导 partition 数或键集。
+    ErrorInfo read(int64_t                   request_id,
+                   const std::string&        unique_key,
+                   int64_t                   deadline_ms,
+                   const P2PWorkerRoutePlan& worker_plan);
 
     bool cancelRead(const std::string& unique_key, int64_t request_deadline_ms = 0);
 
@@ -45,9 +45,6 @@ public:
     // Returns false if no lease is found (lease already cleaned up = transfers done).
     bool
     queryLeaseStatus(const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped);
-
-private:
-    int calculateRecvPartitionCount(int remote_tp_size) const;
 
 private:
     struct ReadTaskGroup {
@@ -69,12 +66,11 @@ private:
         std::string error_msg;
     };
 
-    ErrorInfo buildRecvTasks(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                             int                                                   recv_partition_count,
-                             const std::string&                                    unique_key,
-                             int64_t                                               deadline_ms,
-                             const std::shared_ptr<ReadTaskGroup>&                 task_group,
-                             int&                                                  total_block_count) const;
+    ErrorInfo buildRecvTasks(const P2PWorkerRoutePlan&             worker_plan,
+                             const std::string&                    unique_key,
+                             int64_t                               deadline_ms,
+                             const std::shared_ptr<ReadTaskGroup>& task_group,
+                             int&                                  total_block_count) const;
 
     /// 等待 recv 完成、cancel，或到达 return_deadline_ms（D - return_before）；到达 steal 时刻时从 store steal 各
     /// partition key。
