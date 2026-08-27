@@ -187,6 +187,7 @@ build:cuda13 --define=use_remote_kv_cache=false
 build:cuda13 --action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9,9.0,10.0"
 build:cuda13 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="8.0,8.6,8.9,9.0,10.0"
 build:cuda13_sm120 --config=cuda13
+build:cuda13_sm120 --define=using_cuda13_sm120=true
 build:cuda13_sm120 --action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:cuda13_sm120 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="12.0"
 build:cuda13 --copt="-DENABLE_FP4=1"

@@ -16,6 +16,8 @@ def _canonical_cuda_device(device_id: Optional[Union[int, torch.device]]) -> int
     if device_id is None:
         return torch.cuda.current_device()
     if isinstance(device_id, torch.device):
+        if device_id.type != "cuda":
+            raise ValueError(f"expected a CUDA device, got {device_id}")
         if device_id.index is None:
             return torch.cuda.current_device()
         return device_id.index
@@ -30,14 +32,14 @@ def _get_sm_for_device(device_id: int) -> Tuple[int, int]:
 
 def is_sm90(device_id: Optional[Union[int, torch.device]] = None) -> bool:
     """SM 9.x Hopper (H100 / H200 / H800 / H20)."""
-    if not is_cuda():
+    if not is_cuda() or _is_explicit_non_cuda_device(device_id):
         return False
     return get_sm(device_id)[0] == 9
 
 
 def is_sm10x(device_id: Optional[Union[int, torch.device]] = None) -> bool:
     """SM 10.x datacenter Blackwell (B200 / GB200)."""
-    if not is_cuda():
+    if not is_cuda() or _is_explicit_non_cuda_device(device_id):
         return False
     return get_sm(device_id)[0] == 10
 
@@ -59,13 +61,26 @@ def get_sm(device_id: Optional[Union[int, torch.device]] = None) -> Tuple[int, i
 
 def is_sm12x(device_id: Optional[Union[int, torch.device]] = None) -> bool:
     """SM 12.x consumer Blackwell (RTX PRO 5000 / 6000, RTX 5090)."""
-    if not is_cuda():
+    if not is_cuda() or _is_explicit_non_cuda_device(device_id):
         return False
     return get_sm(device_id)[0] == 12
 
 
+def is_sm120(device_id: Optional[Union[int, torch.device]] = None) -> bool:
+    """Exact SM 12.0 device supported by the SM120 blockwise kernels."""
+    if not is_cuda() or _is_explicit_non_cuda_device(device_id):
+        return False
+    return get_sm(device_id) == (12, 0)
+
+
 def is_blackwell(device_id: Optional[Union[int, torch.device]] = None) -> bool:
     """Blackwell-class: SM 10.x datacenter (B200/GB200) or SM 12.x consumer."""
-    if not is_cuda():
+    if not is_cuda() or _is_explicit_non_cuda_device(device_id):
         return False
     return get_sm(device_id)[0] in (10, 12)
+
+
+def _is_explicit_non_cuda_device(
+    device_id: Optional[Union[int, torch.device]],
+) -> bool:
+    return isinstance(device_id, torch.device) and device_id.type != "cuda"

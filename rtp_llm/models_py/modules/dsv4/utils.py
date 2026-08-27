@@ -83,7 +83,13 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
     assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
+    # DeepGEMM's packed int32 UE8M0 contract is unsupported on consumer
+    # Blackwell.  Keep the compact checkpoint scale for the SM120 CUTLASS
+    # blockwise backend; only data-center architectures use the DeepGEMM
+    # TMA-aligned packed representation.
+    from rtp_llm.models_py.utils.arch import is_sm120
+
+    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
         s = _repack_v4_fp8_scale_to_int32(s)
     local = {"_w": w, "_s": s}
     linear = LinearFactory.create_linear_from_weights(
@@ -99,7 +105,9 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     """Backwards-compat bridge over ``_v4_fp8_linear`` for flat dict callers."""
     w = weights[weight_key]
     s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
+    from rtp_llm.models_py.utils.arch import is_sm120
+
+    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)

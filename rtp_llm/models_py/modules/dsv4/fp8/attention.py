@@ -397,7 +397,12 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     TMA-aligned packed layout when needed. Framework descriptor path may
     deliver the scale already packed (dtype int32) — we no-op then."""
     assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
+    # DeepGEMM's packed int32 UE8M0 contract is unsupported on consumer
+    # Blackwell. Keep the compact raw UE8M0 scale for the SM120 CUTLASS
+    # blockwise backend, which decodes it to float32 at construction time.
+    from rtp_llm.models_py.utils.arch import is_sm120
+
+    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
         s = _repack_v4_fp8_scale_to_int32(s)
     # LinearFactory.create_linear_from_weights consumes a (weights_dict,
     # weight_key, scale_key) triple — feed it a one-shot dict so the
@@ -421,7 +426,9 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     packed form so subsequent callers don't repack."""
     w = weights[weight_key]
     s = weights[scale_key]
-    if s.dtype == torch.float8_e8m0fnu:
+    from rtp_llm.models_py.utils.arch import is_sm120
+
+    if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
         s = _repack_v4_fp8_scale_to_int32(s)
         weights[scale_key] = s
     return _v4_fp8_linear(w, s)
