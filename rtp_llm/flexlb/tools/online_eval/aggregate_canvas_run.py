@@ -1101,13 +1101,19 @@ if isinstance(mock_payload, dict) and mock_payload.get("final_snapshot_source"):
 if isinstance(master_json, dict) and master_json.get("slo_integrity"):
     integrity["slo_integrity"] = master_json["slo_integrity"]
 
+_run_params = run_meta.get("params") or {}
+if "fetch_output_stream" in _run_params:
+    _fos_raw = str(_run_params["fetch_output_stream"]).strip()
+    fetch_output_stream = _fos_raw not in ("0", "false", "False", "no")
+else:
+    # legacy runs recorded the inverted switch as schedule_only
+    _legacy = str(_run_params.get("schedule_only", "0")).strip()
+    fetch_output_stream = _legacy not in ("1", "true", "True")
+
 out = {
     "meta": {
         "run_dir": os.path.basename(run_dir),
-        "schedule_only": str(
-            (run_meta.get("params") or {}).get("schedule_only", "0")
-        ).strip()
-        in ("1", "true", "True"),
+        "fetch_output_stream": fetch_output_stream,
     },
     "summary": {
         "total_requests": summary.get("total_requests"),

@@ -12,7 +12,7 @@
 
 - 测试日期：2026-07-17
 - 调度模式：`batch`
-- 客户端模式：`SCHEDULE_ONLY=1`
+- 客户端模式：`FETCH_OUTPUT_STREAM=0`（客户端不读输出流）
 - 凑批算法：`fixed_window`
 - 固定凑批等待：10 ms
 - 最大 batch size：32

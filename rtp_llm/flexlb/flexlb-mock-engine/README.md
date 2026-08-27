@@ -168,8 +168,7 @@ entirely through environment variables (`Config.fromEnv`):
 | TIMEOUT_MS | 3600000 | Global run timeout in ms |
 | SLA_TTFT_MS | 500.0 | TTFT SLA threshold for the report |
 | ZERO_OUTPUT_POLICY | skip | Zero-output trace rows: skip / one / default100 |
-| SCHEDULE_ONLY | false | Schedule (enqueue) only, skip FetchResponse |
-| FLEXLB_EXPECT_FETCH_RESPONSE | "" | Override fetch-response behavior (0/false/no disables) |
+| FETCH_OUTPUT_STREAM | true | Client reads engine output streams after Schedule; 0 skips the client-side stream read while the engine still executes prefill+decode in full (BATCH dispatcher only) |
 | LOOP | false | Loop the trace |
 | N_CHANNELS | 8 | gRPC channels |
 | EVENT_LOOP_THREADS | 32 | Netty event-loop threads |

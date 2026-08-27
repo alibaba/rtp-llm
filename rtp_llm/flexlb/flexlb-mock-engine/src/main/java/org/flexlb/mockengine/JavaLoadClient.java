@@ -55,6 +55,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * optional engine stream reading for TTFT/total latency, and generates summary.json +
  * per_request.jsonl matching the Python client format.
  *
+ * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
+ * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
+ * the client stops after a successful Schedule RPC; the engine still executes the
+ * request in full (BATCH dispatcher: master enqueued it via EnqueueBatch during the
+ * Schedule RPC). This trims the client's stream-reading network cost from load tests
+ * while keeping engine-side load identical to the read-stream mode.
+ *
  * <p>Configuration is read exclusively from environment variables at startup (no
  * multi-layer override). Run as:
  * <pre>{@code
@@ -475,7 +482,24 @@ public final class JavaLoadClient {
                 result.prefill = roleAddr(scheduleResponse, "PREFILL");
                 result.decode = roleAddr(scheduleResponse, "DECODE");
 
-                if (!config.fetchResponseEnabled) {
+                if (!config.fetchOutputStream) {
+                    // Under a NON_BATCH dispatcher the engine only receives the
+                    // request through the client's own GenerateStreamCall
+                    // (submission and stream reading are the same streaming
+                    // call), so skipping the fetch would mean the request
+                    // never reaches any engine. Fail fast instead of silently
+                    // producing a run with zero engine load.
+                    if (!scheduleResponse.getEnqueuedByMaster()) {
+                        System.err.println(
+                                "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
+                                + "schedule response reports enqueued_by_master=false "
+                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
+                                + "dispatcher the engine only receives requests through the "
+                                + "client's GenerateStreamCall stream, so skipping the fetch "
+                                + "would leave the engine idle. Re-enable stream reading or "
+                                + "switch the master to a BATCH dispatcher.");
+                        System.exit(86);
+                    }
                     result.status = "scheduled";
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                     // Route through tallyResult so the result lands in
@@ -514,7 +538,7 @@ public final class JavaLoadClient {
         }
 
         // Phase 2: engine stream reading (outside semaphore)
-        if (scheduleResponse != null && config.fetchResponseEnabled) {
+        if (scheduleResponse != null && config.fetchOutputStream) {
             try {
                 Double firstFrameNanos = null;
                 Double terminalNanos = null;
@@ -1720,7 +1744,12 @@ public final class JavaLoadClient {
         final long timeoutMs;
         final double slaTtftMs;
         final String zeroOutputPolicy;
-        final boolean scheduleOnly;
+        /** When false the client skips reading engine output streams (FetchResponse/
+         *  GenerateStreamCall phase 2) after a successful Schedule RPC. The engine
+         *  still executes prefill + decode in full — only the client-side read is
+         *  trimmed. Requires a BATCH dispatcher (see the enqueued_by_master
+         *  fail-fast in handleRequest). */
+        final boolean fetchOutputStream;
         final boolean loop;
         final int nChannels;
         final int eventLoopThreads;
@@ -1729,7 +1758,6 @@ public final class JavaLoadClient {
         final boolean skipServerLatency;
         final String model;
         final String apiKey;
-        final boolean fetchResponseEnabled;
         final boolean gradient;
         final int gradientStartSpeed;
         final int gradientMaxSpeed;
@@ -1757,18 +1785,18 @@ public final class JavaLoadClient {
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, scheduleOnly, loop, nChannels,
+                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
+                    skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0,
                     true);
@@ -1778,19 +1806,19 @@ public final class JavaLoadClient {
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, scheduleOnly, loop, nChannels,
+                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
+                    skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
                     0, "replay", 0.0, true);
@@ -1800,11 +1828,11 @@ public final class JavaLoadClient {
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority, int forcePriority, String sendMode, double sendModeQps,
@@ -1823,7 +1851,7 @@ public final class JavaLoadClient {
             this.timeoutMs = timeoutMs;
             this.slaTtftMs = slaTtftMs;
             this.zeroOutputPolicy = zeroOutputPolicy;
-            this.scheduleOnly = scheduleOnly;
+            this.fetchOutputStream = fetchOutputStream;
             this.loop = loop;
             this.nChannels = nChannels;
             this.eventLoopThreads = eventLoopThreads;
@@ -1832,7 +1860,6 @@ public final class JavaLoadClient {
             this.skipServerLatency = skipServerLatency;
             this.model = model;
             this.apiKey = apiKey;
-            this.fetchResponseEnabled = fetchResponseEnabled;
             this.gradient = gradient;
             this.gradientStartSpeed = gradientStartSpeed;
             this.gradientMaxSpeed = gradientMaxSpeed;
@@ -1870,12 +1897,7 @@ public final class JavaLoadClient {
                 int httpPort = Integer.parseInt(targetAddr.substring(colon + 1));
                 grpcTarget = host + ":" + (httpPort + 2);
             }
-            boolean scheduleOnly = envBool("SCHEDULE_ONLY", false);
-            String expectFetchResponse = env("FLEXLB_EXPECT_FETCH_RESPONSE", "");
-            boolean fetchResponseEnabled = !scheduleOnly
-                    && !expectFetchResponse.equalsIgnoreCase("0")
-                    && !expectFetchResponse.equalsIgnoreCase("false")
-                    && !expectFetchResponse.equalsIgnoreCase("no");
+            boolean fetchOutputStream = envBool("FETCH_OUTPUT_STREAM", true);
             return new Config(
                     env("TRACE_FILE", ""),
                     targetAddr,
@@ -1891,7 +1913,7 @@ public final class JavaLoadClient {
                     envLong("TIMEOUT_MS", 3_600_000L),
                     envDouble("SLA_TTFT_MS", 500.0),
                     env("ZERO_OUTPUT_POLICY", "skip"),
-                    scheduleOnly,
+                    fetchOutputStream,
                     envBool("LOOP", false),
                     envInt("N_CHANNELS", 8),
                     envInt("EVENT_LOOP_THREADS", 32),
@@ -1900,7 +1922,6 @@ public final class JavaLoadClient {
                     envBool("SKIP_SERVER_LATENCY", false),
                     env("MODEL", "engine_service"),
                     env("API_KEY", ""),
-                    fetchResponseEnabled,
                     envBool("GRADIENT", false),
                     envInt("GRADIENT_START_SPEED", 10),
                     envInt("GRADIENT_MAX_SPEED", 1000),
@@ -1934,7 +1955,6 @@ public final class JavaLoadClient {
             System.out.println("  TIMEOUT_MS=" + timeoutMs);
             System.out.println("  SLA_TTFT_MS=" + slaTtftMs);
             System.out.println("  ZERO_OUTPUT_POLICY=" + zeroOutputPolicy);
-            System.out.println("  SCHEDULE_ONLY=" + scheduleOnly);
             System.out.println("  LOOP=" + loop);
             System.out.println("  N_CHANNELS=" + nChannels);
             System.out.println("  EVENT_LOOP_THREADS=" + eventLoopThreads);
@@ -1943,7 +1963,7 @@ public final class JavaLoadClient {
             System.out.println("  SKIP_SERVER_LATENCY=" + skipServerLatency);
             System.out.println("  MODEL=" + model);
             System.out.println("  API_KEY=" + (apiKey.isEmpty() ? "<empty>" : "<set>"));
-            System.out.println("  FETCH_RESPONSE_ENABLED=" + fetchResponseEnabled);
+            System.out.println("  FETCH_OUTPUT_STREAM=" + fetchOutputStream);
             System.out.println("  GRADIENT=" + gradient);
             System.out.println("  GRADIENT_START_SPEED=" + gradientStartSpeed);
             System.out.println("  GRADIENT_MAX_SPEED=" + gradientMaxSpeed);

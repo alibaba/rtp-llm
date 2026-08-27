@@ -399,7 +399,14 @@ def main():
     cancel_ts = agg.get("cancel_qps_ts") or []
     integrity = agg.get("integrity") or {}
     batch_size_final = agg.get("batch_size_final") or {}
-    schedule_only = (agg.get("meta") or {}).get("schedule_only")
+    _meta = agg.get("meta") or {}
+    # Newer aggregates report fetch_output_stream (True = client read streams);
+    # legacy ones recorded the inverted switch as schedule_only.
+    fetch_output_stream = (
+        bool(_meta["fetch_output_stream"])
+        if "fetch_output_stream" in _meta
+        else not _meta.get("schedule_only")
+    )
     mock_last = (agg.get("batch") or {}).get("mock_last") or {}
     if not mock_last and slo:
         mock_last = (slo.get("mock") or {}).get("last") or {}
@@ -724,8 +731,8 @@ def main():
     sampling_note = "时间序列 1s 采样（QPS / 延迟）"
     if queue_ts:
         sampling_note += "，队列 " + str(q_step) + "s 采样"
-    # schedule_only 仅在 aggregate meta 明确报告时展示（旧 aggregate 无该键则省略）
-    sched_seg = "SCHEDULE_ONLY=1 · " if schedule_only else ""
+    # fetch_output_stream=False 仅在 aggregate meta 明确报告时展示（旧 aggregate 无该键则省略）
+    sched_seg = "FETCH_OUTPUT_STREAM=0 · " if fetch_output_stream is False else ""
     identity = (
         str(p_engines)
         + "P + "

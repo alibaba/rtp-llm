@@ -94,7 +94,10 @@ MAX_OUTPUT_LEN="${MAX_OUTPUT_LEN:-0}"
 GRADIENT="${GRADIENT:-0}"
 GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
 GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
-SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
+# Client-side output-stream reading: 1 (default) = the load client reads engine
+# output streams after Schedule; 0 = skip client stream reads while the engine
+# still executes prefill+decode in full (BATCH dispatcher only).
+FETCH_OUTPUT_STREAM="${FETCH_OUTPUT_STREAM:-1}"
 # FORCE_PRIORITY pins every replayed request to one Auto-TPM QoS level,
 # overriding both the per-record trace priority and the PRIORITY env default.
 # Defaults to 50 (single-QoS baseline runs): all requests share one priority,
@@ -359,7 +362,7 @@ consolidate_run_outputs_now() {
     --param "load_client_workers=${LOAD_CLIENT_WORKERS}" \
     --param "sla_ttft_ms=${SLA_TTFT_MS}" \
     --param "zero_output_policy=${ZERO_OUTPUT_POLICY}" \
-    --param "schedule_only=${SCHEDULE_ONLY}" \
+    --param "fetch_output_stream=${FETCH_OUTPUT_STREAM}" \
     --param "loop=${LOOP}" \
     --param "gradient=${GRADIENT}" \
     --param "trace_file=${TRACE_FILE}" \
@@ -1233,7 +1236,7 @@ launch_java_load_client() {
       "TIMEOUT_MS=${TIMEOUT_MS}" \
       "SLA_TTFT_MS=${SLA_TTFT_MS}" \
       "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
-      "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
+      "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
       "FORCE_PRIORITY=${FORCE_PRIORITY}" \
       "LOOP=${LOOP}" \
       "SEND_MODE=${SEND_MODE}" \
@@ -1245,7 +1248,6 @@ launch_java_load_client() {
       "SKIP_SERVER_LATENCY=${skip_server_latency}" \
       "MODEL=${MODEL:-}" \
       "API_KEY=${API_KEY:-}" \
-      "FLEXLB_EXPECT_FETCH_RESPONSE=${FLEXLB_EXPECT_FETCH_RESPONSE:-}" \
       "GRADIENT=${GRADIENT}" \
       "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
       "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
@@ -1271,7 +1273,7 @@ launch_java_load_client() {
     "TIMEOUT_MS=${TIMEOUT_MS}" \
     "SLA_TTFT_MS=${SLA_TTFT_MS}" \
     "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
-    "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
+    "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
     "FORCE_PRIORITY=${FORCE_PRIORITY}" \
     "LOOP=${LOOP}" \
     "SEND_MODE=${SEND_MODE}" \
@@ -1283,7 +1285,6 @@ launch_java_load_client() {
     "SKIP_SERVER_LATENCY=${skip_server_latency}" \
     "MODEL=${MODEL:-}" \
     "API_KEY=${API_KEY:-}" \
-    "FLEXLB_EXPECT_FETCH_RESPONSE=${FLEXLB_EXPECT_FETCH_RESPONSE:-}" \
     "GRADIENT=${GRADIENT}" \
     "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
     "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
