@@ -13,8 +13,7 @@ namespace py = pybind11;
 namespace rtp_llm {
 namespace {
 
-static_assert(noexcept(dumpTorchCudaOomDiagnostics("test", std::declval<const std::exception&>())),
-              "OOM diagnostics must never replace the original exception");
+static_assert(noexcept(dumpTorchCudaOomDiagnostics(0)), "OOM diagnostics must never replace the original exception");
 
 TEST(CudaGraphReplayRetryTest, DetectsTorchAndDriverOomErrors) {
     try {
@@ -34,40 +33,24 @@ TEST(CudaGraphReplayRetryTest, CppBridgeCallsPythonAndPreservesOriginalException
         py::initialize_interpreter();
     }
 
-    std::string captured_tag;
-    std::string captured_exception;
-    std::string captured_backtrace;
-    py::object  module;
+    py::object module;
     {
         py::gil_scoped_acquire gil;
-        module                              = py::module_::import("types").attr("ModuleType")("rtp_llm.utils.oom_diag");
-        module.attr("dump_oom_diagnostics") = py::cpp_function(
-            [&](const std::string& tag, const std::string& exception, const std::string& cpp_backtrace) {
-                captured_tag       = tag;
-                captured_exception = exception;
-                captured_backtrace = cpp_backtrace;
-            },
-            py::arg("tag"),
-            py::arg("exception"),
-            py::arg("cpp_backtrace"));
+        module = py::module_::import("types").attr("ModuleType")("rtp_llm.utils.oom_diag");
+        module.attr("dump_oom_diagnostics") =
+            py::cpp_function([](int) { return std::string("/tmp/allocator_dump.log"); }, py::arg("device"));
         py::dict modules                  = py::module_::import("sys").attr("modules");
         modules["rtp_llm.utils.oom_diag"] = module;
     }
 
     const std::exception* inner_exception = nullptr;
     const std::exception* outer_exception = nullptr;
-    std::string           original_backtrace;
     try {
         try {
             C10_THROW_ERROR(OutOfMemoryError, "C++ to Python OOM bridge marker");
         } catch (const std::exception& exception) {
-            inner_exception       = &exception;
-            const auto* c10_error = dynamic_cast<const c10::Error*>(&exception);
-            ASSERT_NE(c10_error, nullptr);
-            if (const auto& backtrace = c10_error->backtrace()) {
-                original_backtrace = backtrace->get();
-            }
-            dumpTorchCudaOomDiagnostics("bridge_test", exception);
+            inner_exception = &exception;
+            EXPECT_EQ(dumpTorchCudaOomDiagnostics(0), "/tmp/allocator_dump.log");
             throw;
         }
     } catch (const std::exception& exception) {
@@ -75,19 +58,12 @@ TEST(CudaGraphReplayRetryTest, CppBridgeCallsPythonAndPreservesOriginalException
     }
 
     EXPECT_EQ(outer_exception, inner_exception);
-    EXPECT_EQ(captured_tag, "bridge_test");
-    EXPECT_NE(captured_exception.find("C++ to Python OOM bridge marker"), std::string::npos);
-    EXPECT_EQ(captured_backtrace, original_backtrace);
 
     {
         py::gil_scoped_acquire gil;
-        module.attr("dump_oom_diagnostics") = py::cpp_function(
-            [](const std::string&, const std::string&, const std::string&) {
-                throw std::runtime_error("injected Python diagnostic failure");
-            },
-            py::arg("tag"),
-            py::arg("exception"),
-            py::arg("cpp_backtrace"));
+        module.attr("dump_oom_diagnostics") =
+            py::cpp_function([](int) -> std::string { throw std::runtime_error("injected Python diagnostic failure"); },
+                             py::arg("device"));
     }
 
     inner_exception = nullptr;
@@ -97,7 +73,7 @@ TEST(CudaGraphReplayRetryTest, CppBridgeCallsPythonAndPreservesOriginalException
             C10_THROW_ERROR(OutOfMemoryError, "original OOM survives diagnostic failure");
         } catch (const std::exception& exception) {
             inner_exception = &exception;
-            dumpTorchCudaOomDiagnostics("bridge_failure_test", exception);
+            EXPECT_TRUE(dumpTorchCudaOomDiagnostics(0).empty());
             throw;
         }
     } catch (const std::exception& exception) {
