@@ -640,10 +640,17 @@ def consolidate(
         stats = parse_mock_stats_file(mock_log_path)
         # Keep the previously captured snapshot when the control plane is
         # unreachable (re-run after the mock cluster exited): the old value is
-        # the only record of the final cluster state.
-        final_snapshot = fetch_final_snapshot(mock_http_port)
+        # the only record of the final cluster state. final_snapshot_source
+        # records WHICH path produced the value so downstream reports can
+        # flag utilization/engine-terminal data as stale (fallback) or absent
+        # (missing) instead of silently trusting it.
+        live_snapshot = fetch_final_snapshot(mock_http_port)
+        final_snapshot = live_snapshot
+        final_snapshot_source = "live"
         if final_snapshot is None:
-            final_snapshot = load_json(mock_json_path).get("final_snapshot")
+            prior_snapshot = load_json(mock_json_path).get("final_snapshot")
+            final_snapshot_source = "fallback" if prior_snapshot else "missing"
+            final_snapshot = prior_snapshot
         # A-split: the per-engine timeline leaves mock.json and becomes its
         # own gzip file — at scale (1250 engines x 120s) the embedded
         # per_engine_timeseries key alone approaches 1GB of pretty-printed
@@ -667,6 +674,7 @@ def consolidate(
             "stats_sample_count": len(stats),
             "stats": stats,
             "final_snapshot": final_snapshot,
+            "final_snapshot_source": final_snapshot_source,
             "endpoints_summary": endpoints_summary(endpoints),
             # G1 per-second per-engine prometheus timeline, A-split into its
             # own gzip file ([{ts, metrics: {name{labels}: value}}] groups).
@@ -698,6 +706,21 @@ def consolidate(
     # ---- master.json / master.log ------------------------------------------
     slo_path = load_client / "slo_batch_analysis.json"
     slo = load_json(slo_path)
+    # SLO freshness gate: slo_batch_analysis.json is regenerable at any time
+    # by re-running analyze_slo_batch.py, so a stale leftover from an older
+    # run would silently poison slo_batch_summary. The analysis is only
+    # trusted when its mtime is >= the run's per_request.jsonl mtime (i.e.
+    # it was produced from THIS run's data).
+    per_request_path = load_client / "per_request.jsonl"
+    slo_integrity = None
+    if slo_path.is_file() and per_request_path.is_file():
+        slo_mtime = slo_path.stat().st_mtime
+        per_request_mtime = per_request_path.stat().st_mtime
+        slo_integrity = {
+            "slo_mtime": slo_mtime,
+            "per_request_mtime": per_request_mtime,
+            "fresh": slo_mtime >= per_request_mtime,
+        }
     master_json_path = run_dir / "master.json"
     # Idempotency considers ONE-SHOT sources only. The slo file can be
     # regenerated at any time by re-running analyze_slo_batch.py after
@@ -736,6 +759,7 @@ def consolidate(
             "master_info_before": load_json(run_dir / "master_info_before.json"),
             "master_info_after": load_json(run_dir / "master_info_after.json"),
             "slo_batch_summary": build_slo_summary(slo) if slo else {},
+            "slo_integrity": slo_integrity,
         }
         write_json_atomic(master_json_path, master_payload)
         report["created"].append("master.json")
@@ -745,6 +769,8 @@ def consolidate(
         existing_master = load_json(master_json_path)
         if existing_master:
             existing_master["slo_batch_summary"] = build_slo_summary(slo)
+            if slo_integrity is not None:
+                existing_master["slo_integrity"] = slo_integrity
             write_json_atomic(master_json_path, existing_master)
             report["created"].append("master.json")
 

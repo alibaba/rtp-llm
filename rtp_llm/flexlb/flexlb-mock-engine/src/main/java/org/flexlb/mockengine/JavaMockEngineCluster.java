@@ -331,7 +331,7 @@ public final class JavaMockEngineCluster {
                         + "prefill_waiting=%d prefill_running=%d "
                         + "prefill_running_reqs=%d max_prefill_waiting=%d decode_waiting=%d decode_running=%d "
                         + "decode_run_min=%d decode_run_max=%d max_decode_waiting=%d "
-                        + "decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
+                        + "decode_admitted=%d decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
                         + "heap_used_mb=%d heap_max_mb=%d "
                         + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d "
                         + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_tombstone=%d%n",
@@ -343,6 +343,7 @@ public final class JavaMockEngineCluster {
                 prefillWindow.p50Ms(), prefillWindow.p95Ms(),
                 prefillWaiting, prefillRunning, prefillRunningReqs, maxPrefillWaiting,
                 decodeWaiting, decodeRunning, decodeRunMin, decodeRunMax, maxDecodeWaiting,
+                stats.decodeAdmitted.sum(),
                 decodeWindow.count(), decodeWindow.p50Ms(), decodeWindow.p95Ms(), decodeWindow.maxMs(),
                 heapUsedMb, heapMaxMb,
                 stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum(),
@@ -1875,6 +1876,7 @@ public final class JavaMockEngineCluster {
                     // this stream already in the count.
                     decodeRunning.put(requestId,
                             new DecodeStream(shape, batchId, responseQueue, decodeStepScheduled));
+                    stats.decodeAdmitted.increment();
                     scheduleDecodeStepLocked();
                 } else {
                     // Concurrency gate hit — park the request in the unbounded
@@ -2031,6 +2033,8 @@ public final class JavaMockEngineCluster {
                 decodeRunning.put(candidateId,
                         new DecodeStream(candidate.shape(), candidate.batchId(),
                                 candidate.responseQueue(), decodeStepScheduled));
+                stats.decodeAdmitted.increment();
+                recordLifecycleRunning(candidateId);
                 lastEnqueueTime.set(System.nanoTime());
             }
         }
@@ -2491,6 +2495,24 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        /**
+         * Mark the epoch-ms moment a decode request actually entered RUNNING
+         * (promoted out of the waiting queue into a running slot). The lifecycle
+         * row is created at enqueue with running_ms == arrived_ms; this rewrites
+         * running_ms to the true admission time so waiting dwell is visible in
+         * the final_snapshot. Lock order decodeQueueLock -> requestLifecycles
+         * matches recordLifecycleStart (also called under decodeQueueLock on
+         * the queued path).
+         */
+        private void recordLifecycleRunning(long requestId) {
+            synchronized (requestLifecycles) {
+                Map<String, Object> lifecycle = requestLifecycles.get(requestId);
+                if (lifecycle != null && "running".equals(lifecycle.get("end_state"))) {
+                    lifecycle.put("running_ms", System.currentTimeMillis());
+                }
+            }
+        }
+
         private void recordRecentExecutionTime(long executionMs) {
             if (executionMs <= 0) {
                 return;
@@ -2670,6 +2692,12 @@ public final class JavaMockEngineCluster {
         final LongAdder cancelCensusAlreadyFinished = new LongAdder();
         final LongAdder cancelCensusUnknown = new LongAdder();
         final LongAdder cancelCensusTombstone = new LongAdder();
+        // Epoch-aligned event counter: cumulative decode RUNNING admissions
+        // (immediate admission + waiting-queue top-up). Differencing against
+        // the stats line's ts_epoch_ms gives per-second "entered running" QPS;
+        // paired with decode_done differencing it separates admission rate
+        // from completion rate on the same epoch axis.
+        final LongAdder decodeAdmitted = new LongAdder();
         // Package-private: DirectPrefillCoalescingTest asserts the coalesced
         // batch structure through these counters (java_mock_stats same source).
         final LongAdder prefillBatches = new LongAdder();

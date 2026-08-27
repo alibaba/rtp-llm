@@ -95,7 +95,14 @@ for f in per_request_files:
                 rows.append(json.loads(line))
             except ValueError:
                 continue
-epoch0 = min((d.get("send_start_epoch_ms", 0) for d in rows), default=0)
+# epoch0 anchor: min over rows that ACTUALLY carry send_start_epoch_ms.
+# The old `d.get(..., 0)` default polluted the min with zeros whenever any
+# row lacked the field, shifting every rebased series earlier; rows with no
+# value are now skipped, and 0 is kept only when NO row has a value.
+_send_ts_values = [
+    d["send_start_epoch_ms"] for d in rows if d.get("send_start_epoch_ms")
+]
+epoch0 = min(_send_ts_values) if _send_ts_values else 0
 per_sec = defaultdict(
     lambda: {
         "arrivals": 0,
@@ -227,6 +234,52 @@ for q in queue_ts:
     q["interval_batches"] = db
     q["interval_avg_batch_size"] = round(dr / db, 2) if db > 0 else 0
     prev_b, prev_r = q["cum_prefill_batches"], q["cum_enqueued_requests"]
+
+# ---- cancel / decode admission per-second rates (epoch-aligned) ----------
+# cancel_rpcs / decode_admitted / decode_done are cluster CUMULATIVE counters
+# on the java_mock_stats line; differencing adjacent samples and normalizing
+# by the sample interval yields per-second rates directly on the absolute-
+# epoch axis (every line already carries ts_epoch_ms). decode_admitted only
+# exists on builds >= this change; older runs keep a flat zero series
+# instead of fabricating data.
+cancel_qps_ts = []
+_stats_anchor = epoch0
+if not _stats_anchor:
+    for kv in mock_stats:
+        try:
+            _v = int(float(kv.get("ts_epoch_ms", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        if _v:
+            _stats_anchor = _v
+            break
+_prev_stat_ts = None
+_prev_cancel = _prev_admitted = _prev_done = None
+for kv in mock_stats:
+    try:
+        ts = int(float(kv.get("ts_epoch_ms", 0) or 0))
+        cancel_cum = int(float(kv.get("cancel_rpcs", 0) or 0))
+        admitted_cum = int(float(kv.get("decode_admitted", 0) or 0))
+        done_cum = int(float(kv.get("decode_done", 0) or 0))
+    except (TypeError, ValueError):
+        continue
+    if not ts:
+        continue
+    if _prev_stat_ts is not None and ts > _prev_stat_ts:
+        interval_s = (ts - _prev_stat_ts) / 1000.0
+        cancel_qps_ts.append(
+            {
+                "t": round((ts - _stats_anchor) / 1000.0, 1),
+                "epoch_ms": ts,
+                "cancel_qps": round((cancel_cum - _prev_cancel) / interval_s, 2),
+                "decode_admitted_qps": round(
+                    (admitted_cum - _prev_admitted) / interval_s, 2
+                ),
+                "decode_done_qps": round((done_cum - _prev_done) / interval_s, 2),
+            }
+        )
+    _prev_stat_ts = ts
+    _prev_cancel, _prev_admitted, _prev_done = cancel_cum, admitted_cum, done_cum
 
 # ---- batch size histogram + dispatch reason from flexlb structured logs ----
 # Legacy flexlb_logs/flexlb.log* first; master.log (the consolidated merge)
@@ -679,6 +732,7 @@ for kv in mock_stats:
         (
             ts,
             (
+                ts,
                 int(float(kv.get("decode_exec_p50", 0) or 0)),
                 int(float(kv.get("decode_exec_p95", 0) or 0)),
                 int(float(kv.get("prefill_exec_p50", 0) or 0)),
@@ -687,8 +741,13 @@ for kv in mock_stats:
         )
     )
 engine_exec_ts = []
-for t, (d50, d95, p50, p95) in rel_axis(exec_pts):
-    row = {"t": t, "decode_exec_p50_ms": d50, "decode_exec_p95_ms": d95}
+for t, (epoch_ms, d50, d95, p50, p95) in rel_axis(exec_pts):
+    row = {
+        "t": t,
+        "epoch_ms": epoch_ms,
+        "decode_exec_p50_ms": d50,
+        "decode_exec_p95_ms": d95,
+    }
     if any_prefill_exec:
         row["prefill_exec_p50_ms"] = p50
         row["prefill_exec_p95_ms"] = p95
@@ -1014,6 +1073,16 @@ if reason_series:
     reason_rate_rows = sorted(rate_by_ts.items())
 dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)]
 
+# consolidate integrity markers (consolidate_run_outputs.py): how the
+# final_snapshot was obtained (live HTTP fetch vs stale fallback) and
+# whether the slo analysis predates this run's per_request data. Empty for
+# pre-integrity consolidations; the generator then stays silent.
+integrity = {}
+if isinstance(mock_payload, dict) and mock_payload.get("final_snapshot_source"):
+    integrity["final_snapshot_source"] = mock_payload["final_snapshot_source"]
+if isinstance(master_json, dict) and master_json.get("slo_integrity"):
+    integrity["slo_integrity"] = master_json["slo_integrity"]
+
 out = {
     "meta": {
         "run_dir": os.path.basename(run_dir),
@@ -1053,6 +1122,8 @@ out = {
     "engine_dist": engine_dist,
     "stage_latency_ts": stage_latency_ts,
     "engine_exec_ts": engine_exec_ts,
+    "cancel_qps_ts": cancel_qps_ts,
+    "integrity": integrity,
     "process_ts": process_ts,
     "inflight_ts": inflight_ts,
     "inflight_age_ts": inflight_age_ts,

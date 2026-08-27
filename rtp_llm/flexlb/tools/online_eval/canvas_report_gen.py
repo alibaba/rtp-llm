@@ -396,6 +396,8 @@ def main():
     batcher_top_engines_ts = agg.get("batcher_top_engines_ts") or []
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
+    cancel_ts = agg.get("cancel_qps_ts") or []
+    integrity = agg.get("integrity") or {}
     batch_size_final = agg.get("batch_size_final") or {}
     schedule_only = (agg.get("meta") or {}).get("schedule_only")
     mock_last = (agg.get("batch") or {}).get("mock_last") or {}
@@ -748,6 +750,29 @@ def main():
     lines.append('      <Text tone="secondary">')
     lines.append("        " + esc_text(identity))
     lines.append("      </Text>")
+    # consolidate 完整性声明：final_snapshot 非 live / slo 陈旧时在报告头
+    # 显式降级声明，避免读者把田数据当作本 run 终态。
+    integrity_notes = []
+    _fss = integrity.get("final_snapshot_source")
+    if _fss and _fss != "live":
+        _fss_label = {
+            "fallback": "回退旧值（fallback）",
+            "missing": "缺失（missing）",
+        }.get(_fss, str(_fss))
+        integrity_notes.append(
+            "final_snapshot 为" + _fss_label + "，引擎利用率/终态不代表本 run"
+        )
+    _si = integrity.get("slo_integrity") or {}
+    if _si and not _si.get("fresh", True):
+        integrity_notes.append(
+            "slo_batch_analysis.json 早于 per_request.jsonl（陈旧残留），SLO/批决策结论不可信"
+        )
+    if integrity_notes:
+        lines.append('      <Text tone="warning">')
+        for _note in integrity_notes:
+            lines.append("        ⚠ 数据完整性: " + esc_text(_note))
+            warnings.append("integrity: " + _note)
+        lines.append("      </Text>")
     lines.append("")
     lines.append("      <Grid columns={6} gap={10}>")
     lines.append(emit_stat(fmt_int_trunc(send_qps), "发送 QPS"))
@@ -812,7 +837,48 @@ def main():
                 domain="[0, " + num(nice_max(err_max * 1.2)) + "]",
             ),
         )
-        lines.extend(emit_grid([qps_chart, fail_chart]))
+        qps_grid = [qps_chart, fail_chart]
+        # 引擎侧事件速率（cancel / decode 进入 running / decode 完成）：
+        # cancel_rpcs / decode_admitted / decode_done 是 mock 集群累计计数，
+        # 聚合端按 epoch 对齐差分；与客户端 QPS 同节呈现。全零也画：
+        # 零 cancel 曲线本身就是「无抢占/取消」的正面证据。
+        if cancel_ts:
+            tcxl = const(
+                "TCXL", str_arr(sparse_cats([r.get("t", 0) for r in cancel_ts]))
+            )
+            cancel_defs = [
+                ("cancel_qps", "cancel（引擎侧）", "danger"),
+                ("decode_admitted_qps", "decode 进入 running", "info"),
+                ("decode_done_qps", "decode 完成", "success"),
+            ]
+            cancel_series = []
+            for k, label, tone in cancel_defs:
+                cancel_series.append(
+                    (
+                        "cx_" + k,
+                        label,
+                        const("cx" + k, num_arr([r.get(k, 0) or 0 for r in cancel_ts])),
+                        tone,
+                    )
+                )
+            cancel_max = max(
+                (max((r.get(k, 0) or 0) for r in cancel_ts) for k, _, _ in cancel_defs),
+                default=0,
+            )
+            qps_grid.append(
+                emit_container(
+                    "每秒引擎侧事件速率：cancel / decode 进入 running / decode 完成",
+                    "x = 压测时间（s，stats 采样轴，epoch 对齐）；y = 每秒事件数（累计计数差分归一）",
+                    emit_chart(
+                        "LineChart",
+                        tcxl,
+                        230,
+                        cancel_series,
+                        domain="[0, " + num(nice_max(cancel_max * 1.2)) + "]",
+                    ),
+                )
+            )
+        lines.extend(emit_grid(qps_grid))
         lines.append("")
 
     # 1. 延迟
