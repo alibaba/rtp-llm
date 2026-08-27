@@ -333,7 +333,8 @@ public final class JavaMockEngineCluster {
                         + "decode_run_min=%d decode_run_max=%d max_decode_waiting=%d "
                         + "decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
                         + "heap_used_mb=%d heap_max_mb=%d "
-                        + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d%n",
+                        + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d "
+                        + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_tombstone=%d%n",
                 System.currentTimeMillis(),
                 stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                 stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
@@ -344,7 +345,9 @@ public final class JavaMockEngineCluster {
                 decodeWaiting, decodeRunning, decodeRunMin, decodeRunMax, maxDecodeWaiting,
                 decodeWindow.count(), decodeWindow.p50Ms(), decodeWindow.p95Ms(), decodeWindow.maxMs(),
                 heapUsedMb, heapMaxMb,
-                stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum());
+                stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum(),
+                stats.cancelCensusTracked.sum(), stats.cancelCensusAlreadyFinished.sum(),
+                stats.cancelCensusUnknown.sum(), stats.cancelCensusTombstone.sum());
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
@@ -1199,6 +1202,15 @@ public final class JavaMockEngineCluster {
                             .build())
                     .setEndTimeMs(System.currentTimeMillis())
                     .setDpRank(0);
+            // Same upstream fix as recordPriorityPreemptionCanceled: the typed
+            // CANCELLED terminal must carry the exact EnqueueBatch identity so
+            // the master's reconcile can correlate the cancel with the batch it
+            // displaced (a terminal without batch_id falls into the batch-
+            // mismatch dead branch and leaks the inflight slot).
+            long cancelLifecycleBatchId = positiveLifecycleBatchId(requestId);
+            if (cancelLifecycleBatchId > 0L) {
+                taskBuilder.setBatchId(cancelLifecycleBatchId);
+            }
             if (priorityPreemption) {
                 taskBuilder.setPriorityPreemptionProgress(
                         EngineRpcService.PriorityPreemptionProgressPB
@@ -1244,10 +1256,15 @@ public final class JavaMockEngineCluster {
                         "priority Cancel is only implemented by the original Prefill");
             }
             if (hasPriorityCancelTombstone(requestId)) {
+                stats.cancelCensusTombstone.increment();
                 return new CancelResult(true, null, true);
             }
             EngineRpcService.TaskInfoPB tracked = runningTasks.get(requestId);
             if (tracked != null) {
+                // A1 leak-attribution census: cancel landed on a request this
+                // engine still actively tracks (the branch that publishes a
+                // typed CANCELLED terminal the master must reconcile).
+                stats.cancelCensusTracked.increment();
                 // P2-2: the authoritative phase is the one cancel() snapshots
                 // under decodeQueueLock when it removes the entry — the pre-lock
                 // read above may be stale (the pending-queue drain can flip
@@ -1279,8 +1296,14 @@ public final class JavaMockEngineCluster {
                 }
             }
             if (alreadyFinished) {
+                // A2 census: cancel raced a terminal that already finished — the
+                // master's reconcile should see the original terminal instead.
+                stats.cancelCensusAlreadyFinished.increment();
                 return new CancelResult(false, null, true);
             }
+            // A2 census: cancel addressed a request this engine never knew —
+            // stale master bookkeeping or a cancelled generation.
+            stats.cancelCensusUnknown.increment();
             return new CancelResult(false, null, false);
         }
 
@@ -1323,6 +1346,9 @@ public final class JavaMockEngineCluster {
                 if (!upstreamPrefillOwners.remove(requestId, expectedPrefill)) {
                     return new CancelResult(false, null, false);
                 }
+                // A1 census (decode-side): a forwarded cancel landed on a
+                // request this Decode actively tracks via ownership.
+                stats.cancelCensusTracked.increment();
                 expectedPrefill.downstreamDecodeOwners.remove(requestId, this);
                 // This is downstream stream cancellation, not a Decode Cancel
                 // RPC.  Preserve ordinary Decode accounting/terminal behavior
@@ -2635,6 +2661,15 @@ public final class JavaMockEngineCluster {
         private final LongAdder generateStreamRpcs = new LongAdder();
         private final LongAdder fetchResponseRpcs = new LongAdder();
         private final LongAdder cancelRpcs = new LongAdder();
+        // Leak-attribution census (Jack A1/A2): how incoming cancel RPCs
+        // distribute across tracked / already-finished / unknown / tombstone.
+        // B1 on the master side should stay close to zero once the cancel
+        // setBatchId fix lands; a sustained B1 ~= tracked count means typed
+        // CANCELLED terminals are still being dropped in reconcile.
+        final LongAdder cancelCensusTracked = new LongAdder();
+        final LongAdder cancelCensusAlreadyFinished = new LongAdder();
+        final LongAdder cancelCensusUnknown = new LongAdder();
+        final LongAdder cancelCensusTombstone = new LongAdder();
         // Package-private: DirectPrefillCoalescingTest asserts the coalesced
         // batch structure through these counters (java_mock_stats same source).
         final LongAdder prefillBatches = new LongAdder();
