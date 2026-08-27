@@ -24,6 +24,7 @@ class MlaKVCacheWriteOp:
         self,
         kv_cache_dtype: KvCacheDataType,
         clear_page_on_boundary: bool = False,
+        parallelism_config: Any = None,
     ) -> None:
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"

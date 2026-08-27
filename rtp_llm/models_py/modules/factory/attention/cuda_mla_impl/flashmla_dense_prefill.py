@@ -309,6 +309,7 @@ class MlaFlashMLAPrefillOp:
         weights: List[Dict[str, torch.Tensor]] | None,
         quant_config: Optional[object] = None,
         kv_cache_dtype: KvCacheDataType = KvCacheDataType.BASE,
+        parallelism_config: Optional[Any] = None,
     ) -> None:
         if weights is None:
             raise ValueError("FlashMLA Prefill requires MLA projection weights")
@@ -352,6 +353,8 @@ class MlaFlashMLAPrefillOp:
         self.kv_lens: List[int] = []
         self._direct_attn_inputs: Optional[Any] = None
         self._direct_block_table_width = 0
+        self.prefix_lens: List[int] = []
+        self.parallelism_config = parallelism_config
 
     def plan(self, mla_params: Any) -> None:
         if isinstance(mla_params, FlashMLADeviceParams):
@@ -403,6 +406,7 @@ class MlaFlashMLAPrefillOp:
         self.max_kv_len = max(self.kv_lens)
         self.total_kv_lens = sum(self.kv_lens)
         self.batch_size = len(self.q_lens)
+        self.prefix_lens = prefix_lens
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
         expected_kv_lens = [
