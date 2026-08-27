@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ROW_SCATTER_READY_ARG,
     ROW_SCATTER_TARGET_ARG,
     CombineForwardPayload,
 )
@@ -215,11 +216,19 @@ def _check_row_scatter_matches_gather(
 
         counts["all_gather"] = 0
         counts["all_reduce"] = 0
-        target = partial_sum.clone()
+        # The buffer reaches finalize from a side stream, as it does in a caller.
+        side_stream = torch.cuda.Stream()
+        side_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side_stream):
+            target = partial_sum.clone()
+        target.record_stream(torch.cuda.current_stream())
+        ready = torch.cuda.Event()
+        ready.record(side_stream)
         scattered = dispatch_and_combine(
             {
                 "original_num_tokens": num_tokens,
                 ROW_SCATTER_TARGET_ARG: target,
+                ROW_SCATTER_READY_ARG: ready,
             }
         )
         assert scattered is target

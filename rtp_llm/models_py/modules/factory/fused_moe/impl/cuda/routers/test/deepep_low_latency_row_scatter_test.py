@@ -15,6 +15,7 @@ import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ROW_SCATTER_READY_ARG,
     ROW_SCATTER_TARGET_ARG,
     CombineForwardPayload,
 )
@@ -44,9 +45,15 @@ def _tp_slice(tp_size, tp_rank, num_tokens):
     return _stub_router(tp_size, tp_rank)._tp_token_slice(num_tokens)
 
 
-def _row_scatter(tp_size, tp_rank, combined_x, target, original_num_tokens):
+def _row_scatter(
+    tp_size, tp_rank, combined_x, target, original_num_tokens, ready_event=None
+):
     return DeepEpLowLatencyRouter._finalize_row_scatter(
-        _stub_router(tp_size, tp_rank), combined_x, target, original_num_tokens
+        _stub_router(tp_size, tp_rank),
+        combined_x,
+        target,
+        original_num_tokens,
+        ready_event,
     )
 
 
@@ -112,6 +119,36 @@ class DeepEpLowLatencyRowScatterTest(TestCase):
                 RAGGED_TOKENS,
             )
 
+    def test_joins_the_producer_before_touching_the_buffer(self):
+        # The trailing rank writes nothing, but the caller still reduces the
+        # whole buffer, so it cannot skip the join either.
+        for tp_rank in (0, TP_SIZE - 1):
+            with self.subTest(tp_rank=tp_rank):
+                _, size = _tp_slice(TP_SIZE, tp_rank, RAGGED_TOKENS)
+                target = torch.zeros(RAGGED_TOKENS, HIDDEN)
+                event = object()
+                waited = []
+
+                def wait_event(seen):
+                    waited.append(seen)
+                    self.assertEqual(
+                        target.abs().sum().item(), 0.0, "wrote before joining"
+                    )
+
+                stream = SimpleNamespace(wait_event=wait_event)
+                with patch("torch.cuda.current_stream", return_value=stream):
+                    _row_scatter(
+                        TP_SIZE,
+                        tp_rank,
+                        torch.ones(size, HIDDEN),
+                        target,
+                        RAGGED_TOKENS,
+                        event,
+                    )
+
+                self.assertEqual(waited, [event])
+                self.assertEqual(target.abs().sum().item() > 0.0, size > 0)
+
     def test_fused_reduction_matches_all_gather_plus_all_reduce(self):
         # Token counts covering: exactly divisible, one ragged tail, and enough
         # tokens missing that trailing ranks dispatch nothing at all.
@@ -170,17 +207,25 @@ class DeepEpLowLatencyFinalizeDispatchTest(TestCase):
                     TP_SIZE, tp_rank, torch.full((size, HIDDEN), 7.0)
                 )
                 target = torch.zeros(RAGGED_TOKENS, HIDDEN)
+                event = object()
+                waited = []
+                stream = SimpleNamespace(wait_event=waited.append)
 
-                with patch(f"{_ROUTER_MODULE}.all_gather") as all_gather:
+                with (
+                    patch(f"{_ROUTER_MODULE}.all_gather") as all_gather,
+                    patch("torch.cuda.current_stream", return_value=stream),
+                ):
                     result = _finalize(
                         router,
                         {
                             "original_num_tokens": RAGGED_TOKENS,
                             ROW_SCATTER_TARGET_ARG: target,
+                            ROW_SCATTER_READY_ARG: event,
                         },
                     )
 
                 all_gather.assert_not_called()
+                self.assertEqual(waited, [event])
                 self.assertIs(result, target)
                 self.assertIsNone(router._handle)
 
