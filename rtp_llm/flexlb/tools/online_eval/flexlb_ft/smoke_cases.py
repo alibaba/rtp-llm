@@ -231,13 +231,45 @@ def t3_multi_request_isolation(ctx: CaseContext):
             responses = list(pool.map(_schedule, rids))
         for i, resp in enumerate(responses):
             if resp.code != 200 or not resp.success:
+                # Drainage discipline (S4 lesson, 2026-08-27 task #63
+                # post-mortem): a sibling that was already scheduled must not
+                # be left behind as an unconsumed entry — under BATCH dispatch
+                # the leaked EnqueueBatch result sits in the engine's fetch
+                # queue and the master's inflight/ledger far past the 30s
+                # stale TTL (fence-quarantine family), poisoning later cases
+                # on the shared env (observed cascade: T3 leak ->
+                # aff_prefix_stickiness / bal_len_mixed /
+                # bal_gate_no_starvation failures in the batch-window full
+                # run, all solo-PASS). Cancel every scheduled sibling before
+                # failing the case; the streams were never opened, so the
+                # master-side cancel is a clean local release on both
+                # dispatch modes.
+                for j, sibling in enumerate(responses):
+                    if j != i and sibling.code == 200 and sibling.success:
+                        try:
+                            ops.cancel(rids[j], sibling)
+                        except Exception:
+                            pass
                 return False, f"schedule failed for rid={rids[i]}: {resp.error_message}"
 
         handles = []
         for rid, resp in zip(rids, responses):
-            input_pb = (
-                None if resp.enqueued_by_master else ops.build_generate_input(rid)
-            )
+            if resp.enqueued_by_master:
+                input_pb = None
+            else:
+                # Shape fidelity (finding-⑥ family, 2026-08-28 task #63
+                # post-mortem): under NON_BATCH dispatch the direct stream's
+                # GenerateInputPB must carry the SAME output_len the
+                # ScheduleRequest carried.  A default-shape rebuild
+                # (output_len=10) finishes B's decode in ~200ms — inside the
+                # cancel-path latency (~150-250ms) — turning the docstring's
+                # "comfortably spanning" cancel window into a coin flip on
+                # every NON_BATCH run (observed: wn full-run + wn solo FAIL
+                # with B completed before the engine-side cancel landed,
+                # while sn flapped run-dependent).  With output_len=200 the
+                # ~4s decode dwarfs the cancel path on both dispatch modes.
+                kwargs = {"output_len": long_output_len} if rid == cancel_rid else {}
+                input_pb = ops.build_generate_input(rid, **kwargs)
             handles.append(ops.start_stream(resp, rid, input_pb=input_pb))
 
         # Wait for the SHORT requests' (A, C) first output only.  In batch
