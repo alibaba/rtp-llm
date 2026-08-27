@@ -15,7 +15,6 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.BooleanSupplier;
 
 /**
  * Sole owner of a selected queue route before ACTIVE publication.
@@ -252,29 +251,15 @@ public final class QueueRouteAdmission implements AutoCloseable {
             InflightCommitPort registrar,
             BatchItem item,
             boolean priorityAdmission,
-            BooleanSupplier activePublication) {
+            InflightCommitPort.ActivePublication activePublication) {
         if (requireOwned() != route) {
             throw new IllegalStateException(
                     "queue admission ownership changed before publication");
         }
-        boolean committed;
-        try {
-            committed = registrar.commitInflight(
-                    item,
-                    priorityAdmission,
-                    activePublication);
-        } catch (RuntimeException | Error failure) {
-            // commitInflight binds the exact item before invoking the queue
-            // mutation.  If that binding survived an exceptional publication,
-            // RequestSlot is already the canonical terminal/cleanup owner; the
-            // admission only releases its short generation pins and must not
-            // roll the reservation back independently.
-            if (registrar.isInflightGeneration(
-                    item.requestId(), item.future())) {
-                finishCommitted(route);
-            }
-            throw failure;
-        }
+        boolean committed = registrar.commitInflight(
+                item,
+                priorityAdmission,
+                activePublication);
         if (committed) {
             finishCommitted(route);
         }

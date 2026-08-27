@@ -41,7 +41,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -353,7 +352,8 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
     public boolean commitInflight(
             BatchItem item,
             boolean priorityAdmission,
-            BooleanSupplier commitAction) {
+            InflightCommitPort.ActivePublication publication) {
+        Objects.requireNonNull(publication, "publication");
         if (shuttingDown.get() || item == null || item.future().isDone()) {
             return false;
         }
@@ -362,23 +362,36 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             return false;
         }
         synchronized (slot) {
-            return isCurrentSlot(slot)
-                    && slot.tryBindItem(
-                            item, priorityAdmission, commitAction);
+            if (!isCurrentSlot(slot)
+                    || !slot.tryBindItemForPublication(
+                            item, priorityAdmission)) {
+                return false;
+            }
         }
-    }
 
-    @Override
-    public boolean isInflightGeneration(
-            long requestId, CompletableFuture<?> future) {
-        RequestSlot entry = requestSlots.get(requestId);
-        if (entry == null || !entry.ownsFuture(future)) {
-            return false;
+        try {
+            // Endpoint publication may acquire its queue lock. It must never
+            // run while the exact RequestSlot monitor is held.
+            if (publication.publish()) {
+                return true;
+            }
+        } catch (RuntimeException | Error failure) {
+            try {
+                synchronized (slot) {
+                    slot.rollbackItemPublication(item);
+                }
+            } catch (RuntimeException | Error resolutionFailure) {
+                if (resolutionFailure != failure) {
+                    failure.addSuppressed(resolutionFailure);
+                }
+            }
+            throw failure;
         }
-        synchronized (entry) {
-            return isCurrentSlot(entry)
-                    && entry.activeItem() != null;
+
+        synchronized (slot) {
+            slot.rollbackItemPublication(item);
         }
+        return false;
     }
 
     @Override

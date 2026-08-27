@@ -18,7 +18,6 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BooleanSupplier;
 
 /**
  * Canonical aggregate root for one exact request generation.
@@ -115,39 +114,43 @@ final class RequestSlot extends RequestLifecycle {
     }
 
     /**
-     * Bind and commit the canonical item as one slot-owned mutation.
+     * Reserve this exact generation for queue publication.
      *
-     * <p>A false or throwing commit action never leaves a half-bound item.
+     * <p>The admission mutation is the logical pin that lets the endpoint
+     * queue publish without retaining this monitor. Binding the canonical
+     * {@code item} is itself the readiness proof: before binding there is no
+     * exact item to deliver; after binding every queue-visible identity is
+     * immediately claimable.
      */
-    boolean tryBindItem(
+    boolean tryBindItemForPublication(
             BatchItem candidate,
-        boolean priority,
-        BooleanSupplier commitAction) {
-        requireSlotLock("request item binding");
+            boolean priority) {
+        requireSlotLock("request item publication begin");
         if (!ownsActiveGeneration()
                 || !isOpen()
                 || item != null
+                || admissionMutation == null
                 || candidate.requestId() != requestId
                 || candidate.future() != future) {
             return false;
         }
         item = candidate;
         priorityAdmission = priority;
-        boolean committed = false;
-        try {
-            committed = commitAction.getAsBoolean();
-            if (committed
-                    && admissionMutation instanceof SlotAdmissionMutation mutation) {
-                mutation.publicationCommitted = true;
-            }
-            return committed;
-        } finally {
-            if (!committed) {
-                item = null;
-                priorityAdmission = false;
-            }
-            assertInvariant();
+        assertInvariant();
+        return true;
+    }
+
+    /** Roll back only the exact binding whose queue publication did not commit. */
+    void rollbackItemPublication(BatchItem exact) {
+        requireSlotLock("request item publication rollback");
+        if (item != exact || admissionMutation == null) {
+            throw new IllegalStateException(
+                    "request item publication ownership changed for "
+                            + requestId);
         }
+        item = null;
+        priorityAdmission = false;
+        assertInvariant();
     }
 
     /** Exact ACTIVE item, or null when this generation no longer owns one. */
@@ -279,17 +282,15 @@ final class RequestSlot extends RequestLifecycle {
 
     /**
      * Whether the exact published queue item may prepare or commit delivery.
-     * A successful queue publication is linearized while this slot lock is
-     * held, so delivery need not wait for the admission scope to release its
-     * remaining short-lived pins.
+     * Binding the canonical item makes it delivery-ready before endpoint
+     * publication, while the admission mutation defers cancellation and
+     * terminal cleanup. Therefore every queue-visible identity is immediately
+     * claimable without nesting the slot monitor and endpoint queue lock.
      */
     boolean canClaimDelivery() {
         requireSlotLock("delivery eligibility");
         RequestLifecycleSnapshot current = snapshot();
-        boolean publicationReady = admissionMutation == null
-                || admissionMutation.publicationCommitted;
         return ownsActiveGeneration()
-                && publicationReady
                 && !future.isDone()
                 && preemption == null
                 && engineFence == null
@@ -332,6 +333,7 @@ final class RequestSlot extends RequestLifecycle {
         requireSlotLock("admission mutation claim");
         if (!ownsActiveGeneration()
                 || !isOpen()
+                || item != null
                 || admissionMutation != null
                 || preemption != null
                 || engineFence != null) {
@@ -460,7 +462,6 @@ final class RequestSlot extends RequestLifecycle {
 
     private final class SlotAdmissionMutation implements AdmissionMutation {
         private final AtomicBoolean resolved = new AtomicBoolean();
-        private boolean publicationCommitted;
         private DeferredTerminal pendingTerminal;
         private PendingPrefillRetirement pendingPrefillRetirement;
 
