@@ -103,6 +103,12 @@ _send_ts_values = [
     d["send_start_epoch_ms"] for d in rows if d.get("send_start_epoch_ms")
 ]
 epoch0 = min(_send_ts_values) if _send_ts_values else 0
+# Rows whose send_start_epoch_ms exists but is 0/None (e.g. fast-rejected
+# priority-0 requests that never stamped the field) cannot be placed on the
+# time axis: bucketing them would land at a bogus huge-negative t (0-epoch0)
+# or, if defaulted to epoch0, spike the t=0 bucket. They are counted and
+# surfaced through the integrity marker instead.
+per_second_unstamped = 0
 per_sec = defaultdict(
     lambda: {
         "arrivals": 0,
@@ -121,7 +127,11 @@ per_sec = defaultdict(
     }
 )
 for d in rows:
-    t = int((d.get("send_start_epoch_ms", epoch0) - epoch0) // 1000)
+    _send_ts = d.get("send_start_epoch_ms")
+    if not _send_ts:
+        per_second_unstamped += 1
+        continue
+    t = int((_send_ts - epoch0) // 1000)
     b = per_sec[t]
     b["arrivals"] += 1
     err = d.get("error") or ""
@@ -236,12 +246,15 @@ for q in queue_ts:
     prev_b, prev_r = q["cum_prefill_batches"], q["cum_enqueued_requests"]
 
 # ---- cancel / decode admission per-second rates (epoch-aligned) ----------
-# cancel_rpcs / decode_admitted / decode_done are cluster CUMULATIVE counters
-# on the java_mock_stats line; differencing adjacent samples and normalizing
-# by the sample interval yields per-second rates directly on the absolute-
-# epoch axis (every line already carries ts_epoch_ms). decode_admitted only
-# exists on builds >= this change; older runs keep a flat zero series
-# instead of fabricating data.
+# cancel_rpcs / decode_admitted are cluster CUMULATIVE counters on the
+# java_mock_stats line; differencing adjacent samples and normalizing by the
+# sample interval yields per-second rates directly on the absolute-epoch
+# axis (every line already carries ts_epoch_ms). decode_done is NOT
+# cumulative: it is a drained per-tick interval count (DecodeWindow is reset
+# on every stats tick), so its per-second rate is the raw value normalized by
+# the interval — differencing it would produce a meaningless second-order
+# delta. decode_admitted only exists on builds >= this change; older runs
+# keep a flat zero series instead of fabricating data.
 cancel_qps_ts = []
 _stats_anchor = epoch0
 if not _stats_anchor:
@@ -254,13 +267,13 @@ if not _stats_anchor:
             _stats_anchor = _v
             break
 _prev_stat_ts = None
-_prev_cancel = _prev_admitted = _prev_done = None
+_prev_cancel = _prev_admitted = None
 for kv in mock_stats:
     try:
         ts = int(float(kv.get("ts_epoch_ms", 0) or 0))
         cancel_cum = int(float(kv.get("cancel_rpcs", 0) or 0))
         admitted_cum = int(float(kv.get("decode_admitted", 0) or 0))
-        done_cum = int(float(kv.get("decode_done", 0) or 0))
+        done_interval = int(float(kv.get("decode_done", 0) or 0))
     except (TypeError, ValueError):
         continue
     if not ts:
@@ -275,11 +288,11 @@ for kv in mock_stats:
                 "decode_admitted_qps": round(
                     (admitted_cum - _prev_admitted) / interval_s, 2
                 ),
-                "decode_done_qps": round((done_cum - _prev_done) / interval_s, 2),
+                "decode_done_qps": round(done_interval / interval_s, 2),
             }
         )
     _prev_stat_ts = ts
-    _prev_cancel, _prev_admitted, _prev_done = cancel_cum, admitted_cum, done_cum
+    _prev_cancel, _prev_admitted = cancel_cum, admitted_cum
 
 # ---- batch size histogram + dispatch reason from flexlb structured logs ----
 # Legacy flexlb_logs/flexlb.log* first; master.log (the consolidated merge)
@@ -373,7 +386,7 @@ if rows:
             d_count[de] += 1
             d_tokens[de] += d.get("output_len", 0) or 0
         t_ms = d.get("send_start_epoch_ms")
-        if t_ms is not None:
+        if t_ms:
             w = int((t_ms - epoch0) // 3000)
             if p:
                 win_p[w][p] += 1
@@ -1078,6 +1091,11 @@ dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)
 # whether the slo analysis predates this run's per_request data. Empty for
 # pre-integrity consolidations; the generator then stays silent.
 integrity = {}
+if per_second_unstamped:
+    # Degradation marker: rows that carry no usable send timestamp (0/None)
+    # are excluded from per_second; report readers must not expect
+    # sum(per_second.arrivals) == total_requests.
+    integrity["per_second_rows_without_send_ts"] = per_second_unstamped
 if isinstance(mock_payload, dict) and mock_payload.get("final_snapshot_source"):
     integrity["final_snapshot_source"] = mock_payload["final_snapshot_source"]
 if isinstance(master_json, dict) and master_json.get("slo_integrity"):

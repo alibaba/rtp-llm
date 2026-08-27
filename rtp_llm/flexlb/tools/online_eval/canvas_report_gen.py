@@ -767,6 +767,13 @@ def main():
         integrity_notes.append(
             "slo_batch_analysis.json 早于 per_request.jsonl（陈旧残留），SLO/批决策结论不可信"
         )
+    _unstamped = integrity.get("per_second_rows_without_send_ts")
+    if _unstamped:
+        integrity_notes.append(
+            "per_second 序列不含 "
+            + fmt_int_trunc(_unstamped)
+            + " 条无发送时间戳的请求行，sum(arrivals) ≠ total_requests"
+        )
     if integrity_notes:
         lines.append('      <Text tone="warning">')
         for _note in integrity_notes:
