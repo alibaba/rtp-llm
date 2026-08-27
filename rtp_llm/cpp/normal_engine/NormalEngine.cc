@@ -642,7 +642,7 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
     step_profiler_.configure(true, trace_name, start_step, num_steps);
 }
 
-void NormalEngine::setHiddenStatesProcessor(pybind11::object handler) {
+void NormalEngine::setPostLayersProcessor(pybind11::object handler) {
     if (parallelism_config.tp_rank != 0) {
         // hidden is replicated across tp ranks after the final all-reduce and
         // only rank 0 owns the streams, so the handler runs on rank 0 only.

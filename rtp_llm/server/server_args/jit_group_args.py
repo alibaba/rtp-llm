@@ -34,15 +34,6 @@ def init_jit_group_args(parser, jit_config):
         help="JIT快照恢复等待秒数，正数或-1（不限时）；不含scope探测时间",
     )
     jit_group.add_argument(
-        "--jit_cache_stale_baton_timeout_s",
-        env_name="JIT_CACHE_STALE_BATON_TIMEOUT_S",
-        bind_to=(jit_config, "jit_cache_stale_baton_timeout_s"),
-        type=_positive_or_unlimited,
-        default=7200,
-        help="JIT编译锁判定为陈旧并回收的秒数，正数或-1（关闭回收）；"
-        "同时适用于显式设置的AITER_JIT_DIR/TORCH_EXTENSIONS_DIR",
-    )
-    jit_group.add_argument(
         "--manage_jit_cache",
         env_name="MANAGE_JIT_CACHE",
         bind_to=(jit_config, "manage_jit_cache"),

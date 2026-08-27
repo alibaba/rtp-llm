@@ -182,18 +182,8 @@ def _prepare_shared_root(root: Path) -> None:
 
 
 @lru_cache(maxsize=1)  # a second call must not read the env this one exports
-def setup_jit_cache_env(
-    stale_baton_timeout_s: float = store.STALE_BATON_S,
-) -> Scope | None:
+def setup_jit_cache_env() -> Scope | None:
     try:
-        # A preset cache variable opts out of redirection/snapshotting, but its
-        # existence-based baton can still survive a killed builder forever.
-        for item in COMPONENTS:
-            if item.name not in ("torch_extensions", "aiter"):
-                continue
-            if value := os.environ.get(item.env_name, "").strip():
-                store.reap_stale_batons(Path(value), stale_baton_timeout_s)
-
         # Test-only override: isolated roots intentionally skip the shared parent.
         override = os.getenv("TEST_JIT_LOCAL_DIR", "").strip()
         local_root = Path(override) if override else LOCAL_JIT_ROOT
@@ -210,7 +200,7 @@ def setup_jit_cache_env(
             os.environ[item.env_name] = str(item.local_dir)
             # Only torch/aiter use existence batons; tvm_ffi's same-named file is flocked.
             if item.name in ("torch_extensions", "aiter"):
-                store.reap_stale_batons(item.local_dir, stale_baton_timeout_s)
+                store.reap_stale_batons(item.local_dir)
         return scope
     except Exception:
         logging.warning("JIT_CACHE_FAIL_OPEN: env setup failed", exc_info=True)
@@ -369,9 +359,7 @@ def start_from_config(config):
         logging.info("JIT cache management disabled by configuration")
         return
     remote = str(config.remote_jit_dir or "").strip()
-    if (
-        scope := setup_jit_cache_env(config.jit_cache_stale_baton_timeout_s)
-    ) is None or not remote:
+    if (scope := setup_jit_cache_env()) is None or not remote:
         return
     manager = JitCacheManager(scope, remote)
     try:

@@ -93,20 +93,25 @@ def create_post_layers_module(
     CustomModule whose handler runs on the generate path (see
     CustomHandler.trigger_mode). Relative .py paths are resolved from the
     checkpoint directory so the processor can be shipped with the model.
-    Unset means the deployment has no handler and the engine code path is
-    unchanged. Any load failure fails startup — a deployment that declares a
-    processor it cannot load must not come up.
+    Unset with no selector means the deployment has no handler and the engine
+    code path is unchanged. Stray selectors and load failures fail startup.
     """
     target = os.environ.get("CUSTOM_OUTPUT_PROCESSOR")
     if not target:
+        configured_selectors = [
+            name
+            for name in (
+                "CUSTOM_OUTPUT_TOKEN_POSITION",
+                "CUSTOM_OUTPUT_TRACKED_TOKEN_ID",
+                "CUSTOM_OUTPUT_EXPECTED_TOKEN_ID",
+            )
+            if os.environ.get(name) is not None
+        ]
+        if configured_selectors:
+            raise RuntimeError(
+                f"{', '.join(configured_selectors)} requires CUSTOM_OUTPUT_PROCESSOR"
+            )
         return None
-
-    mode = os.environ.get("CUSTOM_PROCESSOR_MODE", "eager")
-    if mode not in ("eager", "compiled"):
-        raise RuntimeError(
-            f"CUSTOM_PROCESSOR_MODE={mode} is not implemented, "
-            "only 'eager' and 'compiled' are"
-        )
 
     resolved_target = target
     if target.endswith(".py"):
@@ -137,18 +142,5 @@ def create_post_layers_module(
         raise RuntimeError(
             f"CUSTOM_OUTPUT_PROCESSOR {target} create_custom_module returned None"
         )
-    if mode == "compiled":
-        handler = custom_module.get_handler()
-        if handler.compiled_module() is None:
-            raise RuntimeError(
-                f"CUSTOM_PROCESSOR_MODE=compiled but {target} handler does not "
-                "implement compiled_module()"
-            )
-        # the actual AOT compile runs at handler injection time, after
-        # init(tensor_map) has loaded the real weights — see
-        # CustomHandler.ensure_aoti_package
-        handler._aoti_requested = True
-    logging.info(
-        f"loaded post-layers custom module from {resolved_target}, mode={mode}"
-    )
+    logging.info(f"loaded post-layers custom module from {resolved_target}")
     return custom_module

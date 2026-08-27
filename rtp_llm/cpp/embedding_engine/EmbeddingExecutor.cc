@@ -13,6 +13,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include <stdexcept>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 using namespace std;
 using namespace at::indexing;
@@ -51,6 +52,12 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     for (const auto& name : handler_args) {
         if (!HandlerArgs::set_by_str(handler_args_, name.c_str())) {
             RTP_LLM_LOG_WARNING("unknown handler arg: \"%s\", ignored", name.c_str());
+        }
+    }
+    for (const auto arg : {HandlerArgs::Arg::LAST_HIDDEN_STATES, HandlerArgs::Arg::SELECTED_HIDDEN_STATES}) {
+        if (HandlerArgs::has_arg(handler_args_, arg)) {
+            throw std::runtime_error(std::string("embedding handler arg \"") + HandlerArgs::get_name(arg)
+                                     + "\" is only available on the generate path");
         }
     }
 }

@@ -81,7 +81,7 @@ class GenerateInput:
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
     input_embeddings: Optional[InputEmbeddings] = None
     # Absolute prompt position whose final prefill hidden state is requested.
-    # -1 keeps the legacy last-token custom-output behavior.
+    # -1 selects the last token.
     custom_output_token_position: int = -1
 
     class Config:

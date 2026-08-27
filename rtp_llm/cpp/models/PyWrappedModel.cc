@@ -1290,8 +1290,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.custom_output_indexes =
-                    inputs.custom_output_indexes.narrow(0, prefill_batch_idx, p_micro_batch_size)
-                    - static_cast<int64_t>(sliced_token_idx);
+                    inputs.custom_output_indexes.defined() ?
+                        inputs.custom_output_indexes.narrow(0, prefill_batch_idx, p_micro_batch_size)
+                            - static_cast<int64_t>(sliced_token_idx) :
+                        torch::Tensor();
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
                 micro_model_inputs.request_id   = inputs.request_id.defined() ?
                                                       inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
@@ -1375,8 +1377,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
                 micro_model_inputs.custom_output_indexes =
-                    inputs.custom_output_indexes.narrow(0, prefill_batch_idx, p_micro_batch_size)
-                    - static_cast<int64_t>(sliced_token_idx);
+                    inputs.custom_output_indexes.defined() ?
+                        inputs.custom_output_indexes.narrow(0, prefill_batch_idx, p_micro_batch_size)
+                            - static_cast<int64_t>(sliced_token_idx) :
+                        torch::Tensor();
                 micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
                 micro_model_inputs.request_id   = inputs.request_id.defined() ?
                                                       inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :

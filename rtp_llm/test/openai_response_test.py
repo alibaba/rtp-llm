@@ -2998,6 +2998,17 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         await return_output_ids_test_suite.test_no_stream()
 
+        custom_output = [[-0.67578125]]
+        custom_output_test_suite = self.ExtraOutputsTestSuite(
+            self,
+            GenerateConfig(),
+            lambda *args, **kwargs: GenerateOutput(
+                *args, **{**kwargs, "custom_output": torch.tensor(custom_output)}
+            ),
+            ChatCompletionExtraOutputs(custom_output=custom_output),
+        )
+        await custom_output_test_suite.test_no_stream()
+
     async def test_debug_info_with_output_ids_and_raw_output(self):
         """Test that debug_info includes output_ids and raw_output when debug_info=True (non-streaming)"""
         tokenizer = QwenTestTokenizer(

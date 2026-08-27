@@ -38,7 +38,7 @@ struct GptModelInputs {
     torch::Tensor         input_lengths;            // [batch_size]
     torch::Tensor         sequence_lengths;         // [decoder_batch_size]
     torch::Tensor         lm_output_indexes;        // selected output rows
-    torch::Tensor         custom_output_indexes;    // selected prefill rows, empty means legacy last rows
+    torch::Tensor         custom_output_indexes;    // optional selected prefill rows; undefined uses last rows
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
     torch::Tensor         lm_output_lengths;        // [total_batch_size]

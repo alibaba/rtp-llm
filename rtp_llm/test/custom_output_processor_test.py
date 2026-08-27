@@ -29,38 +29,6 @@ def create_custom_module(config, tokenizer):
     return None
 """
 
-COMPILED_CAPABLE_MODULE = """
-import torch
-
-
-class Handler:
-    def __init__(self):
-        self.mlp = torch.nn.Linear(4, 1)
-
-    def compiled_module(self):
-        return self.mlp
-
-    def extend_forward_args(self):
-        return ["last_hidden_states"]
-
-
-class Module:
-    def __init__(self):
-        self.handler = Handler()
-
-    def get_handler(self):
-        return self.handler
-
-
-def create_custom_module(config, tokenizer):
-    return Module()
-"""
-
-EAGER_ONLY_MODULE = COMPILED_CAPABLE_MODULE.replace(
-    "return self.mlp", "return None"
-)
-
-
 class TriggerProtocolTest(unittest.TestCase):
     def test_default_trigger_is_context(self):
         handler = CustomHandler(None)
@@ -70,15 +38,23 @@ class TriggerProtocolTest(unittest.TestCase):
 
     def test_trigger_values(self):
         self.assertEqual(Trigger.CONTEXT.value, "context")
-        self.assertEqual(Trigger.FINAL_STEP.value, "final_step")
-        self.assertEqual(Trigger.EVERY_STEP.value, "every_step")
 
 
 class CreatePostLayersModuleTest(unittest.TestCase):
     def test_unset_env_returns_none(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CUSTOM_OUTPUT_PROCESSOR", None)
+            os.environ.pop("CUSTOM_OUTPUT_TOKEN_POSITION", None)
+            os.environ.pop("CUSTOM_OUTPUT_TRACKED_TOKEN_ID", None)
+            os.environ.pop("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID", None)
             self.assertIsNone(create_post_layers_module(None, None))
+
+    def test_selector_without_processor_fails(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUSTOM_OUTPUT_PROCESSOR", None)
+            os.environ["CUSTOM_OUTPUT_TOKEN_POSITION"] = "-2"
+            with self.assertRaisesRegex(RuntimeError, "requires CUSTOM_OUTPUT_PROCESSOR"):
+                create_post_layers_module(None, None)
 
     def test_loads_module_from_py_file(self):
         with tempfile.NamedTemporaryFile(
@@ -136,54 +112,6 @@ class CreatePostLayersModuleTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_unknown_mode_fails(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "CUSTOM_OUTPUT_PROCESSOR": "some.module",
-                "CUSTOM_PROCESSOR_MODE": "jit",
-            },
-        ):
-            with self.assertRaisesRegex(RuntimeError, "CUSTOM_PROCESSOR_MODE"):
-                create_post_layers_module(None, None)
-
-    def _write_module(self, source):
-        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp_file:
-            tmp_file.write(source)
-            return tmp_file.name
-
-    def test_compiled_mode_marks_handler_for_aot(self):
-        path = self._write_module(COMPILED_CAPABLE_MODULE)
-        try:
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "CUSTOM_OUTPUT_PROCESSOR": path,
-                    "CUSTOM_PROCESSOR_MODE": "compiled",
-                },
-            ):
-                module = create_post_layers_module(None, None)
-                # compile itself is deferred to injection time (after weight
-                # init); create only validates and marks the handler
-                self.assertTrue(module.get_handler()._aoti_requested)
-        finally:
-            os.unlink(path)
-
-    def test_compiled_mode_without_compiled_module_fails(self):
-        path = self._write_module(EAGER_ONLY_MODULE)
-        try:
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "CUSTOM_OUTPUT_PROCESSOR": path,
-                    "CUSTOM_PROCESSOR_MODE": "compiled",
-                },
-            ):
-                with self.assertRaisesRegex(RuntimeError, "compiled_module"):
-                    create_post_layers_module(None, None)
-        finally:
-            os.unlink(path)
-
     def test_missing_file_fails(self):
         with mock.patch.dict(
             os.environ,
@@ -191,17 +119,6 @@ class CreatePostLayersModuleTest(unittest.TestCase):
         ):
             with self.assertRaises(Exception):
                 create_post_layers_module(None, None)
-
-
-class EnsureAotiPackageTest(unittest.TestCase):
-    def test_not_requested_returns_none(self):
-        self.assertIsNone(CustomHandler(None).ensure_aoti_package())
-
-    def test_requested_without_compiled_module_fails(self):
-        handler = CustomHandler(None)
-        handler._aoti_requested = True
-        with self.assertRaisesRegex(RuntimeError, "compiled_module"):
-            handler.ensure_aoti_package()
 
 
 if __name__ == "__main__":

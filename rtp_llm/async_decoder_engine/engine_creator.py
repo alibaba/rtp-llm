@@ -46,9 +46,8 @@ def create_engine(
         from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 
         if model.custom_module is not None:
-            # v1 of the post-layers handler: no speculative decoding, no PD
-            # disaggregation. Reject the combination at startup instead of
-            # silently not scoring.
+            # The post-layers handler does not support speculative decoding or
+            # PD disaggregation. Reject either combination at startup.
             if propose_model is not None:
                 raise RuntimeError(
                     "CUSTOM_OUTPUT_PROCESSOR does not support speculative decoding yet"

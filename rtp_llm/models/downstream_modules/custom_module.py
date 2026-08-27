@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Union
 
 import torch
 from pydantic import BaseModel
@@ -21,17 +21,9 @@ if TYPE_CHECKING:
 
 
 class Trigger(str, Enum):
-    """When the generate engine invokes CustomHandler.extend_forward.
-
-    CONTEXT: on each request's prefill step, batched over the last-token
-        hidden states of the context streams. The only implemented mode.
-    FINAL_STEP / EVERY_STEP: protocol placeholders, not implemented yet;
-        declaring them fails deployment startup.
-    """
+    """When the generate engine invokes CustomHandler.extend_forward."""
 
     CONTEXT = "context"
-    FINAL_STEP = "final_step"
-    EVERY_STEP = "every_step"
 
 
 class CustomModule(object):
@@ -103,30 +95,6 @@ class CustomHandler(object):
     # engine invokes extend_forward. The embedding engine ignores this.
     def trigger_mode(self) -> Trigger:
         return Trigger.CONTEXT
-
-    # compiled tier (CUSTOM_PROCESSOR_MODE=compiled): the nn.Module the engine
-    # AOT-compiles at startup and runs per step without the Python interpreter.
-    # forward must take the tensors named by extend_forward_args() as
-    # positional args and return what extend_forward would. None means the
-    # handler only supports eager; declaring compiled mode then fails startup.
-    def compiled_module(self) -> Optional[torch.nn.Module]:
-        return None
-
-    # Called by the engine at handler injection time — after init(tensor_map)
-    # has loaded the real weights, so the compiled artifact never bakes in
-    # initialization-time values. Returns the AOTI package path in compiled
-    # mode, None in eager mode. Compile failures propagate: a deployment that
-    # declares compiled mode but cannot compile must not come up.
-    def ensure_aoti_package(self) -> Optional[str]:
-        if not getattr(self, "_aoti_requested", False):
-            return None
-        if getattr(self, "_aoti_package_path", None) is None:
-            from rtp_llm.models.downstream_modules.post_layers_aoti import (
-                compile_post_layers_handler,
-            )
-
-            self._aoti_package_path = compile_post_layers_handler(self, self.config_)
-        return self._aoti_package_path
 
     # extended_forward
     # input_lengths: [batch_size]

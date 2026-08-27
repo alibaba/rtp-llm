@@ -170,11 +170,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     auto   cache_keys_width        = (size_t)shape_hints_ptr[GptModelInputIndex::cacheKeysWidth];
     auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
     auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
-    auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
-    auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
-    auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
-    auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
-    size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
+    auto   combo_position_ids_size    = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
+    auto   custom_output_indexes_size = shape_hints_ptr[GptModelInputIndex::customOutputIndexes];
+    auto   text_tokens_mask_size      = shape_hints_ptr[GptModelInputIndex::textTokensMask];
+    auto   mm_features_locs_size      = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
+    auto   hidden_states_size         = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    size_t request_length             = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<size_t>     dims,
@@ -245,10 +246,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
-        inputs.custom_output_indexes = allocBuf(
-            rtp_llm::DataType::TYPE_INT32,
-            {(size_t)shape_hints_ptr[GptModelInputIndex::customOutputIndexes]},
-            pickAlloc(GptModelInputDeviceBit::kDeviceBitCustomOutputIndexes));
+        if (custom_output_indexes_size) {
+            inputs.custom_output_indexes =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {(size_t)custom_output_indexes_size},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCustomOutputIndexes));
+        }
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
         }

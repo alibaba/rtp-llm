@@ -1099,7 +1099,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
     ASSERT_TRUE(merge_input_status.ok());
     // Flattened hidden rows are [stream1 token0, stream2 token0, stream2 token1].
     // Selecting absolute position 0 for both streams must gather rows 0 and 1,
-    // rather than the legacy last-token rows 0 and 2.
+    // rather than the default last-token rows 0 and 2.
     EXPECT_EQ(toVec<int>(merge_input_status->custom_output_indexes), (std::vector<int>{0, 1}));
 
     MergedOutput merge_outputs;
@@ -1171,7 +1171,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCustomOutputSkipsDecodeRows) {
     EXPECT_EQ(1u, stream_groups.totalDecodeBatchSize());
     TensorHolder holder;
     auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
-    EXPECT_TRUE(merge_input_status.ok());
+    ASSERT_TRUE(merge_input_status.ok());
+    EXPECT_FALSE(merge_input_status->custom_output_indexes.defined());
 
     MergedOutput merge_outputs;
     // one context stream -> one custom_output row

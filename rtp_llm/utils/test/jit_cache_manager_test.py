@@ -203,24 +203,6 @@ class StoreTest(JitCacheTestBase):
             store.reap_stale_batons(self.root)
         self.assertTrue(baton.exists())
 
-    def test_stale_baton_reaper_uses_configured_timeout_and_can_be_disabled(self):
-        reap = self.root / "lock_module_rmsnorm"
-        keep = self.root / "nested" / "lock"
-        keep.parent.mkdir()
-        for path in (reap, keep):
-            path.touch()
-            os.utime(path, (time.time() - 61,) * 2)
-
-        store.reap_stale_batons(self.root, 60)
-        self.assertFalse(reap.exists())
-        self.assertFalse(keep.exists())
-
-        disabled = self.root / "lock_module_rmsnorm"
-        disabled.touch()
-        os.utime(disabled, (time.time() - store.STALE_BATON_S - 1,) * 2)
-        store.reap_stale_batons(self.root, -1)
-        self.assertTrue(disabled.exists())
-
     def test_stale_baton_reaper_does_not_wait_for_peer_lock(self):
         baton = self.root / "lock"
         baton.touch()
@@ -469,21 +451,6 @@ class ScopeTest(JitCacheTestBase):
         torch_ext = next(x for x in scope.components if x.name == "torch_extensions")
         self.assertEqual(os.environ["TORCH_EXTENSIONS_DIR"], str(torch_ext.local_dir))
         self.assertIn(scope.scope_id, os.environ["TORCH_EXTENSIONS_DIR"])
-
-    def test_preset_aiter_dir_reaps_batons_with_configured_timeout(self):
-        preset = self.root / "preset_aiter"
-        baton = preset / "build" / "lock_module_rmsnorm"
-        baton.parent.mkdir(parents=True)
-        baton.touch()
-        os.utime(baton, (time.time() - 61,) * 2)
-        os.environ["AITER_JIT_DIR"] = str(preset)
-
-        with _fake_probes(hip="6.2.41133", arch="gfx942"):
-            scope = jit.setup_jit_cache_env(60)
-
-        self.assertFalse(baton.exists())
-        self.assertNotIn("aiter", {item.name for item in scope.components})
-        self.assertEqual(os.environ["AITER_JIT_DIR"], str(preset))
 
     def test_presetting_every_component_disables_all_redirection(self):
         off = self.root / "off"  # the documented rollback: no root, no ACL, no env
@@ -946,7 +913,6 @@ class BackendTest(JitCacheTestBase):
         configs = mock.Mock()
         configs.jit_config.remote_jit_dir = remote
         configs.jit_config.jit_cache_setup_timeout_s = 5
-        configs.jit_config.jit_cache_stale_baton_timeout_s = 7200
         configs.jit_config.manage_jit_cache = True
         configs.parallelism_config.world_size = world_size
         return configs
@@ -970,7 +936,7 @@ class BackendTest(JitCacheTestBase):
             jit, "setup_jit_cache_env", return_value=mock.Mock()
         ) as setup, mock.patch.object(jit, "JitCacheManager") as manager:
             self.assertIsNone(jit.start_from_config(self.make_configs().jit_config))
-        setup.assert_called_once_with(7200)
+        setup.assert_called_once_with()
         manager.assert_not_called()
 
     def test_manage_jit_cache_false_skips_all_setup(self):

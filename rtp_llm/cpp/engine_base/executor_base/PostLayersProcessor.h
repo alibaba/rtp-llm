@@ -1,41 +1,30 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/engine_base/executor_base/HandlerArgs.h"
 
-namespace torch::inductor {
-class AOTIModelPackageLoader;
-}
-
 namespace rtp_llm {
 
 // Post-layers extension point for the generate path: hands the lm_output-row
 // hidden states of each step to a deployment-registered CustomHandler
-// (rtp_llm.models.downstream_modules.custom_module). v1 implements the
-// CONTEXT trigger only: the handler runs on the prefill step of each request,
-// over the last-token hidden of every context stream in the batch, and its
-// batched output is returned to the caller as GptModelOutputs.custom_output.
+// (rtp_llm.models.downstream_modules.custom_module). The handler runs on the
+// prefill step of each request, over either the last-token hidden states or
+// explicitly selected prompt-token hidden states, and its batched output is
+// returned to the caller as GptModelOutputs.custom_output.
 //
-// The kwargs assembly follows the same HandlerArgs protocol as
-// EmbeddingExecutor::postProcess, so one handler class serves both engines.
+// Argument names come from the same HandlerArgs registry as
+// EmbeddingExecutor::postProcess; this path accepts only its hidden-state
+// subset.
 class PostLayersProcessor {
 public:
-    // defined in the .cc: the AOTI loader member is only forward-declared
-    // here, so implicit ctor/dtor cannot be instantiated by callers
-    PostLayersProcessor();
     ~PostLayersProcessor();
 
     // Parses the handler protocol (extend_forward_args + trigger_mode).
-    // Throws on trigger modes v1 does not implement — a misconfigured
-    // deployment must fail at startup, not degrade silently.
-    // In compiled mode (CUSTOM_PROCESSOR_MODE=compiled) this also triggers
-    // the handler's AOT compile (weights are loaded by injection time) and
-    // loads the AOTInductor package; per-step invocations then run the
-    // package directly, with no Python interpreter on the hot path.
+    // Throws on unsupported protocol so a misconfigured deployment fails at
+    // startup rather than degrading silently.
     void setHandler(pybind11::object handler);
 
     bool hasHandler() const {
@@ -70,8 +59,6 @@ private:
     bool              wants_context_ = false;
     pybind11::object  handler_;
     HandlerArgs::Flag handler_args_{};
-    // non-null in compiled mode; replaces the python call in invokeHandler
-    std::unique_ptr<torch::inductor::AOTIModelPackageLoader> aoti_loader_;
 };
 
 }  // namespace rtp_llm

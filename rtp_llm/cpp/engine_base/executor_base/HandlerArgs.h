@@ -11,8 +11,8 @@ namespace HandlerArgs {
 
 // Argument names a CustomHandler may declare via extend_forward_args().
 // The embedding path (EmbeddingExecutor::postProcess) and the generate path
-// (PostLayersProcessor) assemble kwargs from the same enum, so one handler
-// protocol serves both executors.
+// (PostLayersProcessor) share this name registry, while each validates its
+// supported subset.
 enum class Arg : uint32_t {
     // Assembled by EmbeddingExecutor::postProcess.
     INPUT_LENGTHS,
@@ -38,7 +38,7 @@ const char* get_name(Arg arg);
 bool        has_arg(const Flag& flag, Arg arg);
 
 // Parse extend_forward_args() output into a Flag; unknown names are appended
-// to `unknown` (if given) for the caller to log.
+// to `unknown` (if given) for the caller to handle according to its contract.
 Flag parse(const std::vector<std::string>& names, std::vector<std::string>* unknown = nullptr);
 
 }  // namespace HandlerArgs

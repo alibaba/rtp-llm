@@ -422,6 +422,10 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     const bool   has_multimodal_input     = hasMultimodalContextInput(config_, stream_groups);
     const bool   need_cal_position_id =
         (config_.mm_position_ids_style != PositionIdsStyle::DEFAULT) || config_.has_positional_encoding;
+    const bool   needs_custom_output_indexes =
+        std::any_of(stream_groups.contextStreams().begin(),
+                    stream_groups.contextStreams().end(),
+                    [](const auto& stream) { return stream->generateInput()->custom_output_token_position >= 0; });
 
     static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
     static const auto pinned_i64  = torch::TensorOptions(torch::kInt64).pinned_memory(true);
@@ -432,7 +436,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
-    model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    if (needs_custom_output_indexes) {
+        model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    }
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
 
@@ -599,14 +605,16 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             model_input.trace_ids.push_back(stream->traceId());
             auto             input_tokens = stream->currentExecuteTokens(i);
             std::vector<int> input_masks;
-            const int target_position = stream->generateInput()->custom_output_token_position;
-            RTP_LLM_CHECK_WITH_INFO(target_position < 0 || target_position >= stream->reuseLength(),
-                                    "custom output token at position %d was consumed by prefix cache (reuse=%d)",
-                                    target_position,
-                                    stream->reuseLength());
-            model_input.custom_output_indexes.data_ptr<int32_t>()[prefill_batch_idx] =
-                target_position < 0 ? ctx.token_idx + input_tokens.size() - 1 :
-                                      ctx.token_idx + target_position - stream->prefixLength();
+            if (model_input.custom_output_indexes.defined()) {
+                const int target_position = stream->generateInput()->custom_output_token_position;
+                RTP_LLM_CHECK_WITH_INFO(target_position < 0 || target_position >= stream->reuseLength(),
+                                        "custom output token at position %d was consumed by prefix cache (reuse=%d)",
+                                        target_position,
+                                        stream->reuseLength());
+                model_input.custom_output_indexes.data_ptr<int32_t>()[prefill_batch_idx] =
+                    target_position < 0 ? ctx.token_idx + input_tokens.size() - 1 :
+                                          ctx.token_idx + target_position - stream->prefixLength();
+            }
 
             RETURN_IF_STATUS_ERROR(
                 validateMultimodalProducerContract(stream, input_tokens.size(), config_.is_multimodal, &input_masks));

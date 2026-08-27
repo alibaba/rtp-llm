@@ -3,14 +3,13 @@
 #include <pybind11/stl.h>
 #include <cerrno>
 #include <climits>
+#include <cstdlib>
 #include <stdexcept>
+#include <string>
+#include <vector>
 // torch/extension.h registers the pybind11 casters for at::Tensor; without it
 // handler_.attr(...)(**kwargs).cast<torch::Tensor>() throws "Unregistered type".
 #include <torch/extension.h>
-#include <torch/csrc/inductor/aoti_package/model_package_loader.h>
-#include <string>
-#include <vector>
-#include <cstdlib>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -35,8 +34,6 @@ int parseSelectorEnv(const char* name, bool require_non_negative) {
 }
 
 }  // namespace
-
-PostLayersProcessor::PostLayersProcessor() = default;
 
 PostLayersProcessor::~PostLayersProcessor() {
     if (!handler_) {
@@ -65,12 +62,12 @@ void PostLayersProcessor::setHandler(py::object handler) {
     std::vector<std::string> unknown;
     handler_args_ = HandlerArgs::parse(py::cast<std::vector<std::string>>(handler_.attr("extend_forward_args")()),
                                        &unknown);
-    for (const auto& name : unknown) {
-        RTP_LLM_LOG_WARNING("unknown handler arg: \"%s\", ignored", name.c_str());
+    if (!unknown.empty()) {
+        throw std::runtime_error("unknown post-layers handler arg: \"" + unknown.front() + "\"");
     }
 
-    // v1 assembles last_hidden_states only; a handler declaring args this
-    // path cannot provide must fail startup, not fail every step.
+    // The generate path supports exactly one hidden-state source. A handler
+    // declaring anything else must fail startup, not fail every step.
     for (size_t i = 0; i < HandlerArgs::NUM_ARG_TYPES; ++i) {
         const auto arg = static_cast<HandlerArgs::Arg>(i);
         if (HandlerArgs::has_arg(handler_args_, arg) && arg != HandlerArgs::Arg::LAST_HIDDEN_STATES
@@ -79,13 +76,15 @@ void PostLayersProcessor::setHandler(py::object handler) {
                                      + "\" is not available on the generate path");
         }
     }
-    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES)
-        && HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
+    const bool wants_last     = HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES);
+    const bool wants_selected = HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES);
+    if (wants_last == wants_selected) {
         throw std::runtime_error("post-layers handler must request exactly one hidden-state argument");
     }
-    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
-        const bool has_position = std::getenv("CUSTOM_OUTPUT_TOKEN_POSITION") != nullptr;
-        const bool has_token_id = std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") != nullptr;
+    const bool has_position          = std::getenv("CUSTOM_OUTPUT_TOKEN_POSITION") != nullptr;
+    const bool has_token_id          = std::getenv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID") != nullptr;
+    const bool has_expected_token_id = std::getenv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID") != nullptr;
+    if (wants_selected) {
         if (has_position == has_token_id) {
             throw std::runtime_error(
                 "selected_hidden_states requires exactly one of CUSTOM_OUTPUT_TOKEN_POSITION or "
@@ -96,13 +95,17 @@ void PostLayersProcessor::setHandler(py::object handler) {
         } else {
             parseSelectorEnv("CUSTOM_OUTPUT_TRACKED_TOKEN_ID", true);
         }
-        const bool has_expected_token_id = std::getenv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID") != nullptr;
         if (has_expected_token_id && !has_position) {
             throw std::runtime_error("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID requires CUSTOM_OUTPUT_TOKEN_POSITION");
         }
         if (has_expected_token_id) {
             parseSelectorEnv("CUSTOM_OUTPUT_EXPECTED_TOKEN_ID", true);
         }
+    } else if (has_position || has_token_id || has_expected_token_id) {
+        throw std::runtime_error(
+            "CUSTOM_OUTPUT_TOKEN_POSITION, CUSTOM_OUTPUT_TRACKED_TOKEN_ID and CUSTOM_OUTPUT_EXPECTED_TOKEN_ID "
+            "require a handler declaring selected_hidden_states; last_hidden_states always receives the "
+            "unselected last-token rows");
     }
 
     const auto trigger = py::cast<std::string>(handler_.attr("trigger_mode")());
@@ -111,48 +114,31 @@ void PostLayersProcessor::setHandler(py::object handler) {
                                  + "\" is not implemented; only Trigger.CONTEXT is supported");
     }
 
-    // compiled mode: ensure_aoti_package compiles on first startup (weights
-    // are loaded by now) or returns the hash-cached package. Failures
-    // propagate — a deployment declaring compiled mode must not come up
-    // degraded to eager.
-    if (py::hasattr(handler_, "ensure_aoti_package")) {
-        auto package = handler_.attr("ensure_aoti_package")();
-        if (!package.is_none()) {
-            const auto path = py::cast<std::string>(package);
-            aoti_loader_    = std::make_unique<torch::inductor::AOTIModelPackageLoader>(path);
-            RTP_LLM_LOG_INFO("post-layers AOTI package loaded: %s", path.c_str());
-        }
-    }
-
     wants_context_ = true;
     has_handler_   = true;
-    RTP_LLM_LOG_INFO("post-layers handler registered, trigger=%s, mode=%s",
-                     trigger.c_str(),
-                     aoti_loader_ ? "compiled" : "eager");
+    RTP_LLM_LOG_INFO("post-layers handler registered, trigger=%s", trigger.c_str());
 }
 
 torch::Tensor PostLayersProcessor::invokeHandler(const torch::Tensor& context_rows) const {
-    torch::Tensor output;
-    if (aoti_loader_) {
-        // compiled tier: runs the AOTI package on the current CUDA stream,
-        // no GIL and no python objects on the hot path
-        auto outputs = aoti_loader_->run({context_rows.contiguous()});
-        if (outputs.empty()) {
-            throw std::runtime_error("post-layers AOTI package returned no outputs");
-        }
-        output = outputs[0];
-    } else {
-        py::gil_scoped_acquire gil;
-        py::dict               kwargs;
-        if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES)) {
-            kwargs[HandlerArgs::get_name(HandlerArgs::Arg::LAST_HIDDEN_STATES)] = context_rows;
-        }
-        if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
-            kwargs[HandlerArgs::get_name(HandlerArgs::Arg::SELECTED_HIDDEN_STATES)] = context_rows;
-        }
-        output = handler_.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
+    py::gil_scoped_acquire gil;
+    py::dict               kwargs;
+    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES)) {
+        kwargs[HandlerArgs::get_name(HandlerArgs::Arg::LAST_HIDDEN_STATES)] = context_rows;
     }
-    if (output.defined() && output.size(0) != context_rows.size(0)) {
+    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::SELECTED_HIDDEN_STATES)) {
+        kwargs[HandlerArgs::get_name(HandlerArgs::Arg::SELECTED_HIDDEN_STATES)] = context_rows;
+    }
+    auto output = handler_.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
+    if (!output.defined()) {
+        throw std::runtime_error("post-layers handler returned an undefined tensor");
+    }
+    if (output.dim() == 0) {
+        throw std::runtime_error("post-layers handler output must have a batch dimension");
+    }
+    if (!output.is_cuda()) {
+        throw std::runtime_error("post-layers handler output must remain on CUDA");
+    }
+    if (output.size(0) != context_rows.size(0)) {
         throw std::runtime_error("post-layers handler returned " + std::to_string(output.size(0)) + " rows for "
                                  + std::to_string(context_rows.size(0)) + " context requests");
     }

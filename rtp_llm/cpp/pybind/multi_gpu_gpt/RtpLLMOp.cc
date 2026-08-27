@@ -140,7 +140,7 @@ void RtpLLMOp::init(py::object model,
     // Deployment-registered post-layers CustomHandler (generate path):
     // extracted here, injected by initRPCServer after the engine is built and
     // before is_server_ready_ flips — the first routed request must already
-    // see the handler (in compiled mode injection includes the AOT compile).
+    // see the handler.
     py::object post_layers_handler;
     if (pybind11::hasattr(model, "custom_module") && !model.attr("custom_module").is_none()) {
         post_layers_handler = model.attr("custom_module").attr("handler");
@@ -157,19 +157,6 @@ void RtpLLMOp::init(py::object model,
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
-    }
-
-    // Deployment-registered post-layers CustomHandler (generate path): inject
-    // after the engine is up so the setter can warm the handler up on the
-    // built model. Failures propagate — a deployment that declares a handler
-    // it cannot run must not come up.
-    {
-        pybind11::gil_scoped_acquire acquire;
-        if (pybind11::hasattr(model, "custom_module") && !model.attr("custom_module").is_none()) {
-            auto engine = model_rpc_service_->getEngine();
-            RTP_LLM_CHECK_WITH_INFO(engine != nullptr, "engine not ready for post-layers handler injection");
-            engine->setHiddenStatesProcessor(model.attr("custom_module").attr("handler"));
-        }
     }
 }
 
@@ -344,8 +331,8 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
 
-        // Post-layers handler injection (incl. warmup, and the AOT compile in
-        // compiled mode) must finish before is_server_ready_ flips below:
+        // Post-layers handler injection and warmup must finish before
+        // is_server_ready_ flips below:
         // once ready, every routed request is entitled to a score. Failures
         // propagate — a deployment declaring a handler it cannot run must not
         // come up.
@@ -353,7 +340,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
             auto engine = model_rpc_service_->getEngine();
             RTP_LLM_CHECK_WITH_INFO(engine != nullptr, "engine not ready for post-layers handler injection");
             try {
-                engine->setHiddenStatesProcessor(post_layers_handler);
+                engine->setPostLayersProcessor(post_layers_handler);
             } catch (const std::exception& e) {
                 RTP_LLM_FAIL("post-layers handler injection failed: %s", e.what());
             }

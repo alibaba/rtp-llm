@@ -606,14 +606,6 @@ def trans_output(
 
         if all_custom_output is not None:
             output_py.custom_output = all_custom_output[i]
-            # Deployment compatibility hack: the ingress layer currently drops
-            # custom_output but preserves the established aux_info.softmax_probs
-            # field. Mirror the custom processor result there without requesting
-            # or computing vocabulary softmax probabilities.
-            if current_aux_info is not None:
-                current_aux_info.softmax_probs = (
-                    output_py.custom_output.reshape(-1).tolist()
-                )
 
         if (
             logits_index is not None

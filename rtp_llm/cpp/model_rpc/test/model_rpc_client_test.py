@@ -609,36 +609,6 @@ class ModelRpcClientTest(TestCase):
             outputs.generate_outputs[1].all_hidden_states.tolist(),
         )
 
-    def test_trans_output_mirrors_custom_output_into_softmax_probs(self):
-        input_py = GenerateInput(
-            token_ids=torch.tensor([1, 2, 3]),
-            generate_config=GenerateConfig(aux_info=True),
-            request_id=123,
-            mm_inputs=[],
-        )
-        outputs_pb = GenerateOutputsPB()
-        flatten = outputs_pb.flatten_output
-        flatten.finished.append(True)
-        flatten.aux_info.add().softmax_probs.CopyFrom(
-            TensorPB(
-                data_type=TensorPB.DataType.FP32,
-                shape=[1],
-                fp32_data=struct.pack("<f", 9.0),
-            )
-        )
-        flatten.custom_output.CopyFrom(
-            TensorPB(
-                data_type=TensorPB.DataType.FP32,
-                shape=[1, 2],
-                fp32_data=struct.pack("<ff", 0.25, 0.75),
-            )
-        )
-
-        output = trans_output(input_py, outputs_pb, StreamState()).generate_outputs[0]
-
-        self.assertEqual(output.custom_output.tolist(), [0.25, 0.75])
-        self.assertEqual(output.aux_info.softmax_probs, [0.25, 0.75])
-
     def test_trans_output_does_not_create_aux_info_for_custom_output(self):
         input_py = GenerateInput(
             token_ids=torch.tensor([1, 2, 3]),
