@@ -261,9 +261,20 @@ The client is configured entirely through environment variables
 for that mapping (unpassed vars are blanked so no ambient environment leaks
 in).
 
-For master-enqueued batch requests, the client follows the frontend behavior:
-it calls `FetchResponse` on the selected prefill engine. For direct requests, it
-calls `GenerateStreamCall`.
+For master-enqueued batch requests (BATCH dispatcher), the client follows the
+frontend behavior: it calls `FetchResponse` on the selected prefill engine. For
+frontend-sent requests (NON_BATCH dispatcher), it calls `GenerateStreamCall`
+directly on the routed prefill engine.
+
+Migration note (2026-08, task #55): the legacy v1 `--mode batch|direct|queue`
+axis no longer exists — all three v1 modes mapped to the same v2 configuration,
+so the mode axis was dead. The functional-test runner now selects a scheduling
+profile (`--profile batch-window|single-nonbatch|single-batch|window-nonbatch`:
+QUEUE + FIFO ordering × SINGLE/FIXED_WINDOW decision × BATCH/NON_BATCH
+dispatcher, injected as the schema-v2 `FLEXLB_CONFIG` document). The v1
+"direct" mode name was doubly misleading: v1 direct still routed through the
+master (only the delivery leg was frontend-sent), and in v2 frontend-sending
+is a dispatcher axis (`non_batch`), not a scheduling mode.
 
 Outputs:
 
