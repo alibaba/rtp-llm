@@ -52,6 +52,7 @@ import json
 import random
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -317,8 +318,60 @@ def _wait_master_topology(ops, role: str, expected: int, timeout_s: float) -> bo
     return wait_for(converged, timeout_s, 0.2)
 
 
+def _request_with_ttft(ops, rid: int, output_len: int, keys: list):
+    """run_one_request variant that also measures TTFT.
+
+    TTFT = time from the schedule() call to the first streamed output (2ms
+    poll granularity — ``first_received`` is edge-triggered on the consume
+    thread, so the poller only has to catch the edge before termination).
+    Returns (prefill_addr, error, ttft_ms); ttft_ms is None when the first
+    output was never observed.
+    """
+    t0 = time.monotonic()
+    try:
+        response = ops.schedule(rid, output_len=output_len, block_keys=keys)
+        if response.code != 200 or not response.success:
+            return "", f"schedule failed: {response.error_message}", None
+        addr = ops.role_addr(response, "PREFILL")
+        input_pb = (
+            None if response.enqueued_by_master else ops.build_generate_input(rid)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        first_ms: Optional[float] = None
+        deadline = time.monotonic() + STREAM_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if handle.snap.first_received:
+                first_ms = (time.monotonic() - t0) * 1000.0
+                break
+            if handle.snap.terminated:
+                break
+            time.sleep(0.002)
+        handle.wait_end(STREAM_TIMEOUT_S)
+        snap = handle.snap
+        if snap.error:
+            return addr, snap.error, first_ms
+        if not snap.completed:
+            return addr, "stream did not complete", first_ms
+        return addr, None, first_ms
+    except Exception as exc:
+        return "", repr(exc), None
+
+
+def _ttft_p50(values: list) -> Optional[float]:
+    """Index-method p50 (same as harness.per_request_ttft_p50)."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * 50 / 100))]
+
+
 def _run_batch(
-    ops, base: int, n: int, output_len: int = 2, concurrency: int = 10
+    ops,
+    base: int,
+    n: int,
+    output_len: int = 2,
+    concurrency: int = 10,
+    collect_ttft: bool = False,
 ) -> tuple[int, int, list[str]]:
     """Send *n* small requests (up to *concurrency* in flight); returns
     (ok, errors, prefill_addrs).
@@ -327,25 +380,34 @@ def _run_batch(
     ``last_error_types`` for failure diagnostics — batch paths routinely
     fail with distinct gRPC/queue errors and the verdict alone cannot
     distinguish "routed to a dead engine" from "queue admission reject".
+    With ``collect_ttft=True`` the per-request TTFTs of *successful*
+    requests are additionally stashed as ``last_ttfts`` (ms, unsorted).
     """
     rids = [ops.next_request_id(base) for _ in range(n)]
 
     def run(rid: int):
         keys = [rid * 100 + j for j in range(3)]
-        return ops.run_one_request(
+        if collect_ttft:
+            return _request_with_ttft(ops, rid, output_len, keys)
+        addr, err = ops.run_one_request(
             rid,
             output_len=output_len,
             block_keys=keys,
             stream_timeout_s=STREAM_TIMEOUT_S,
         )
+        return addr, err, None
 
     with ThreadPoolExecutor(max_workers=min(n, concurrency)) as pool:
         results = list(pool.map(run, rids))
-    ok = sum(1 for _, err in results if err is None)
-    addrs = [addr for addr, _ in results]
+    ok = sum(1 for _, err, _ttft in results if err is None)
+    addrs = [addr for addr, _err, _ttft in results]
     _run_batch.last_error_types = sorted(
-        {str(err)[:60] for _, err in results if err is not None}
+        {str(err)[:60] for _, err, _ttft in results if err is not None}
     )
+    if collect_ttft:
+        _run_batch.last_ttfts = [
+            ttft for _, err, ttft in results if err is None and ttft is not None
+        ]
     return ok, n - ok, addrs
 
 
@@ -1024,20 +1086,22 @@ def coldstart_burst(ctx: CaseContext):
         poller.start()
 
         # Burst: 20 requests (10-way concurrent) immediately after ready.
+        # The prefill address of every request is kept for the load-balance
+        # assertion (S1/S6 contract) below.
         def run(rid: int):
-            _, err = ops.run_one_request(
+            addr, err = ops.run_one_request(
                 rid,
                 output_len=2,
                 block_keys=[rid * 100 + 1],
                 stream_timeout_s=STREAM_TIMEOUT_S,
             )
-            return err
+            return addr, err
 
         rids = [ops.next_request_id(base) for _ in range(20)]
         with ThreadPoolExecutor(max_workers=10) as pool:
-            errs = list(pool.map(run, rids))
-        ok = sum(1 for e in errs if e is None)
-        error_types = sorted({str(e)[:60] for e in errs if e is not None})
+            results = list(pool.map(run, rids))
+        ok = sum(1 for _, e in results if e is None)
+        error_types = sorted({str(e)[:60] for _, e in results if e is not None})
 
         # Keep sampling 10s past the burst: transient 3-strike marks recover,
         # permanent ones stay dead (that is the S10-class regression).
@@ -1051,12 +1115,37 @@ def coldstart_burst(ctx: CaseContext):
             final
             and all(d == expected[role] and a == d for role, (d, a) in final.items())
         )
+
+        # Load-balance contract (user-mandated): under the cold-start burst
+        # traffic must still spread across the engines.  Same calibration
+        # as scheduling S1/S6: 20 requests over 2 prefills (10-way
+        # concurrent), both engines used, no engine above 80% of the
+        # *successful* requests — COST_BASED_PREFILL scores the two prefills
+        # identically on an empty cold ledger and RANDOM_WITHIN_TOLERANCE
+        # samples the tie window uniformly, so a one-sided distribution can
+        # only come from an engine being 3-strike-marked dead (the S10-class
+        # intake defect this probe guards).  80% of 20 = 16 requests, i.e.
+        # the same "no engine eats the burst" bound as S1/S6.
+        addr_map = ops.addr_to_name()
+        dist = Counter(addr_map.get(a, a) for a, e in results if e is None and a)
+        n_ok = sum(dist.values())
+        workers_used = len(dist)
+        max_share = (max(dist.values()) / n_ok) if n_ok else 1.0
+        balance_ok = workers_used >= 2 and max_share <= 0.80
+
         success_rate = ok / 20 * 100.0
-        passed = ok >= 16 and final_ok  # >=80% success + no permanent eviction
+        passed = (
+            ok >= 16  # >=80% success + no permanent eviction
+            and final_ok
+            and balance_ok
+        )
         return passed, (
             f"burst_ok={ok}/20 ({success_rate:.0f}%), "
             f"dead_samples={dead_samples}/{len(samples)}, final={final}, "
-            f"error_types={error_types[:3]}"
+            f"error_types={error_types[:3]}, "
+            f"balance: workers={workers_used}/{env.spec.n_prefill}, "
+            f"max_share={max_share:.0%} (need >=2 workers and <=80%), "
+            f"dist={json.dumps(dict(sorted(dist.items())))}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -1159,8 +1248,10 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
                 == 200
             )
 
-        # Phase 1 — baseline: 20 requests, all succeed.
-        ok1, err1, _ = _run_batch(ops, base, 20)
+        # Phase 1 — baseline: 20 requests, all succeed.  TTFT p50 is
+        # recorded for the post-recovery regression gate (Phase 5).
+        ok1, err1, _ = _run_batch(ops, base, 20, collect_ttft=True)
+        base_ttft_p50 = _ttft_p50(getattr(_run_batch, "last_ttfts", []))
         master_ok1 = master_up()
         if err1:
             return False, f"baseline had {err1} errors (master_up={master_ok1})"
@@ -1190,8 +1281,18 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
         # Channel recovery settle (S2's reconnect window).
         time.sleep(3.0)
 
-        # Phase 5 — recovery: 20 requests ≥95%.
-        ok5, err5, _ = _run_batch(ops, base, 20)
+        # Phase 5 — recovery: 20 requests ≥95%, and TTFT must fall back to
+        # within 1.5x of the baseline p50 (master_recovery_ttft_test.sh
+        # semantics: once the fault heals, TTFT returns to baseline — the
+        # legacy analyzer tolerates an early 1.5x spike and only degrades
+        # the verdict when the *stable* window stays above 1.2x; this batch
+        # sits past the 3s channel-settle window, so the 1.5x gate is the
+        # conservative bound on steady-state recovery).
+        ok5, err5, _ = _run_batch(ops, base, 20, collect_ttft=True)
+        recovery_ttft_p50 = _ttft_p50(getattr(_run_batch, "last_ttfts", []))
+        ttft_ok, ttft_detail = AssertUtils.ttft_degradation(
+            base_ttft_p50, recovery_ttft_p50, threshold_pct=50.0
+        )
         master_ok5 = master_up()
         recovery_ok = ok5 >= 19  # ≥95%
 
@@ -1203,6 +1304,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
             and takeover_ok
             and alive_back
             and recovery_ok
+            and ttft_ok
         )
         return passed, (
             f"baseline=20/20, evicted_after_stop={evicted}"
@@ -1210,6 +1312,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
             f"downtime={ok2}/20({rate2:.0%}, err_types={downtime_err_types}), "
             f"alive_restored={alive_back}, "
             f"recovery={ok5}/20({ok5 / 20:.0%}), "
+            f"ttft_recovery=[{ttft_detail}], "
             f"master_up=(p1:{master_ok1}, p3:{master_ok2}, p5:{master_ok5})"
         )
     except Exception as exc:
@@ -1384,5 +1487,117 @@ def master_quota_block(ctx: CaseContext):
             if snap.get("prefill-0", {}).get("stopped"):
                 ops.start_engine("prefill-0")
             ops.set_perf("prefill-0", prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+
+
+# ===========================================================================
+# Engine flap (gap G2) — connection flapping under live traffic
+# ===========================================================================
+
+
+@case(
+    "chaos_engine_flap",
+    source="gap G2: rapid /stop_engine+/start_engine oscillation, 3-strike eviction vs re-discovery race",
+)
+def engine_flap(ctx: CaseContext):
+    """Connection flapping: >=5 rapid stop/start cycles on one prefill.
+
+    Exercises the race window between the master's 3-strike health eviction
+    and the engine's re-discovery: each cycle stops prefill-0, holds it down
+    long enough for the health poller (20ms interval) to accumulate strikes,
+    then brings it back WITHOUT waiting for convergence (the flap).  A
+    background flow keeps traffic live throughout.
+
+    Assertions (user-mandated):
+      * master stays healthy the whole time — HTTP 200 probe every cycle,
+        no hang;
+      * after the flapping stops: the engine is re-discovered
+        (discovered == alive == initial topology), routing and requests
+        recover (>=95% batch), and no inflight leaks (global drain to zero
+        within the 90s cap that covers the 30s stale-inflight TTL).
+
+    The per-cycle alive count is observational evidence of the eviction vs
+    re-discovery race: dipping below 2 means the 3-strike demotion landed,
+    staying at 2 means recovery won the race — both are correct; the
+    contract is only about final convergence and no leak.
+    """
+    env, ops = _elastic_env(ctx)
+    base = rid_base(ctx, "chaos")
+    flow: Optional[_BackgroundFlow] = None
+    try:
+        _cleanup_dynamic(ops, env)
+
+        flow = _BackgroundFlow(ops, base, interval_s=0.2)
+        flow.start()
+        time.sleep(1.0)  # let the flow ramp up before the first stop
+
+        cycles = 6
+        cycle_log: list[str] = []
+        master_200_all = True
+        evict_landings = 0
+        for i in range(1, cycles + 1):
+            ops.stop_engine("prefill-0")
+            # Hold down ~0.8s: the health poller runs every 20ms, so the
+            # 3-strike counter fires well inside this window, while the
+            # EngineSyncRunner endpoint-eviction threshold (max(3*20ms, 1s)
+            # from the last successful status) lands at the tail of the
+            # window or right after the restart — exactly the race under
+            # test.
+            time.sleep(0.8)
+            alive_mid = ops.master_alive_count("PREFILL")
+            if alive_mid < 2:
+                evict_landings += 1
+            probe = http_get_status(
+                f"{_master_http(ops)}/rtp_llm/inflight_status", timeout=5
+            )
+            if probe != 200:
+                master_200_all = False
+            ops.start_engine("prefill-0")
+            time.sleep(0.4)  # short gap — flap, no convergence wait
+            cycle_log.append(f"c{i}[alive={alive_mid}, master={probe}]")
+
+        total, ok = flow.stop()
+        rate = ok / total if total else 0.0
+
+        # Post-flap convergence: full re-discovery of the flapped engine
+        # (discovered count covers the eviction side of the race — see
+        # elastic_rebalance for why alive alone is not a safe signal).
+        topology_ok = _wait_master_topology(
+            ops, "PREFILL", env.spec.n_prefill, MASTER_EVICT_S
+        )
+        # Routing/request recovery: 20 requests, >=95%.
+        ok_batch, _, _ = _run_batch(ops, base, 20)
+        recovery_ok = ok_batch >= 19
+        # No inflight leak: global drain to zero (covers the 30s TTL).
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 90.0
+        )
+
+        passed = (
+            master_200_all
+            and topology_ok
+            and recovery_ok
+            and inflight_ok
+            and total > 0
+            and rate >= 0.5  # availability floor — a total blackout must fail
+        )
+        return passed, (
+            f"cycles={cycles}, evictions_landed={evict_landings}/{cycles}, "
+            f"flap=[{'; '.join(cycle_log)}], "
+            f"flow_success={ok}/{total}({rate:.0%}), "
+            f"topology_converged={topology_ok}, "
+            f"post_flap_batch={ok_batch}/20, "
+            f"inflight_clean={inflight_ok}({inflight_detail})"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if flow is not None:
+            flow.stop()
+        try:
+            snap = ops.snapshot_by_name()
+            if snap.get("prefill-0", {}).get("stopped"):
+                ops.start_engine("prefill-0")
         except Exception:
             pass
