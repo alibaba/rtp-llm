@@ -30,6 +30,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
+from rtp_llm.models_py.modules.hybrid.indexer_grouping import (
+    IndexerGroupingGeometry,
+    append_incomplete_tail_indices,
+    expand_indexer_group_indices,
+)
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
@@ -50,6 +55,9 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 class SparseMlaOp(object):
     """Unified Sparse MLA FMHA operator for both prefill and decode stages."""
 
+    _FLASH_MLA_SUPPORTED_HEAD_COUNTS = (64, 128)
+    _FLASH_MLA_TOPK_ALIGNMENT = 128
+
     def __init__(
         self,
         num_heads: int,
@@ -60,6 +68,8 @@ class SparseMlaOp(object):
         softmax_extra_scale: float,
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
+        indexer_top_k: Optional[int] = None,
+        indexer_group_size: int = 1,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -71,6 +81,11 @@ class SparseMlaOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.scale = (self.qk_head_dim**-0.5) * softmax_extra_scale
         self.top_k = top_k
+        self.indexer_top_k = top_k if indexer_top_k is None else indexer_top_k
+        self.indexer_group_size = indexer_group_size
+        IndexerGroupingGeometry(
+            self.indexer_top_k, self.indexer_group_size, self.top_k
+        ).validate()
 
         # Batch-related indices will be computed in plan
         self.block_table = None
@@ -85,6 +100,47 @@ class SparseMlaOp(object):
         self.block_table = block_table
         self.mla_params = mla_params
 
+    def _prepare_local_topk_indices(
+        self,
+        topk_indices: torch.Tensor,
+        raw_sequence_lengths: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, int]:
+        """Normalize heads and expand compressed group ids to raw token ids."""
+        if topk_indices.dim() not in (2, 3):
+            raise ValueError(
+                "topk_indices must be [tokens, topk] or [tokens, heads, topk], "
+                f"got shape={tuple(topk_indices.shape)}"
+            )
+        if topk_indices.dim() == 2:
+            _, selection_topk = topk_indices.shape
+            h_kv = 1
+            topk_indices_2d = topk_indices
+        else:
+            _, h_kv, selection_topk = topk_indices.shape
+            topk_indices_2d = topk_indices[:, 0, :]
+        if selection_topk != self.indexer_top_k:
+            raise ValueError(
+                f"indexer topk {selection_topk} does not match configured "
+                f"selection topk {self.indexer_top_k}"
+            )
+        topk_indices_2d = expand_indexer_group_indices(
+            topk_indices_2d,
+            self.indexer_group_size,
+            raw_sequence_lengths=raw_sequence_lengths,
+        )
+        if raw_sequence_lengths is not None:
+            topk_indices_2d = append_incomplete_tail_indices(
+                topk_indices_2d,
+                raw_sequence_lengths,
+                self.indexer_group_size,
+            )
+        if topk_indices_2d.shape[1] != self.top_k:
+            raise RuntimeError(
+                f"expanded sparse topk width {topk_indices_2d.shape[1]} "
+                f"does not match attention topk {self.top_k}"
+            )
+        return topk_indices_2d, h_kv
+
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
     ) -> torch.Tensor:
@@ -98,18 +154,16 @@ class SparseMlaOp(object):
         Returns:
             global_indices: [num_tokens, h_kv, topk] - global cache indices
         """
-        # Handle both 2D [num_tokens, topk] and 3D [num_tokens, h_kv, topk] input
-        if topk_indices.dim() == 2:
-            num_tokens, topk = topk_indices.shape
-            h_kv = 1
-            topk_indices_2d = topk_indices
-        else:
-            num_tokens, h_kv, topk = topk_indices.shape
-            # Flatten to 2D for triton kernel: [num_tokens, topk]
-            # All heads share the same indices, so we can just take the first head
-            topk_indices_2d = topk_indices[:, 0, :]
-
-        assert topk == self.top_k, f"topk {topk} not equal to top_k {self.top_k}"
+        num_tokens = topk_indices.shape[0]
+        raw_lengths = (
+            self.mla_params.positions_d.to(torch.int32) + 1
+            if self.indexer_group_size > 1
+            else None
+        )
+        topk_indices_2d, h_kv = self._prepare_local_topk_indices(
+            topk_indices, raw_lengths
+        )
+        topk = self.top_k
         assert self.block_table is not None
         assert self.mla_params is not None
 
@@ -154,6 +208,45 @@ class SparseMlaOp(object):
             Attention output of shape [total_q_len, num_heads, kv_lora_rank]
         """
         flatten_topk_indices = self._convert_topk_indices_to_global(topk_indices)
+        topk_padding = (
+            -flatten_topk_indices.shape[-1]
+        ) % self._FLASH_MLA_TOPK_ALIGNMENT
+        if topk_padding:
+            flatten_topk_indices = torch.cat(
+                (
+                    flatten_topk_indices,
+                    flatten_topk_indices.new_full(
+                        (*flatten_topk_indices.shape[:-1], topk_padding), -1
+                    ),
+                ),
+                dim=-1,
+            )
+        original_num_heads = q.shape[1]
+        if original_num_heads not in self._FLASH_MLA_SUPPORTED_HEAD_COUNTS:
+            padded_num_heads = next(
+                (
+                    head_count
+                    for head_count in self._FLASH_MLA_SUPPORTED_HEAD_COUNTS
+                    if head_count > original_num_heads
+                ),
+                None,
+            )
+            if padded_num_heads is None:
+                raise RuntimeError(
+                    "FlashMLA sparse attention supports 64 or 128 query heads; "
+                    f"cannot pad local head count {original_num_heads}"
+                )
+            q = torch.cat(
+                (
+                    q,
+                    q.new_zeros(
+                        q.shape[0],
+                        padded_num_heads - original_num_heads,
+                        q.shape[2],
+                    ),
+                ),
+                dim=1,
+            )
         out_batch, _, _ = flash_mla_sparse_fwd(
             q,
             kv,  # Full KV cache with global indices
@@ -161,7 +254,7 @@ class SparseMlaOp(object):
             self.scale,
             d_v=self.kv_lora_rank,
         )
-        return out_batch
+        return out_batch[:, :original_num_heads, :].contiguous()
 
 
 class SparseMlaFp8DecodeParams(object):
@@ -191,6 +284,8 @@ class SparseMlaFp8Op(SparseMlaOp):
         softmax_extra_scale: float,
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
+        indexer_top_k: Optional[int] = None,
+        indexer_group_size: int = 1,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -200,6 +295,8 @@ class SparseMlaFp8Op(SparseMlaOp):
             page_size=page_size,
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
+            indexer_top_k=indexer_top_k,
+            indexer_group_size=indexer_group_size,
         )
         self._fp8_kernel_metadata = None
 
@@ -361,6 +458,7 @@ class SparseMlaImpl(MlaImplBase):
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}"
             )
+        indexer_geometry = IndexerGroupingGeometry.from_attention_config(attn_configs)
         self.fmha_impl = fmha_impl_cls(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
@@ -368,8 +466,10 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.nope_head_dim,
             attn_configs.kernel_tokens_per_block,
             attn_configs.softmax_extra_scale,
-            attn_configs.indexer_topk,
+            indexer_geometry.attention_topk,
             parallelism_config=parallelism_config,
+            indexer_top_k=indexer_geometry.selection_topk,
+            indexer_group_size=indexer_geometry.group_size,
         )
 
         self.rope_impl = NewMlaRotaryEmbeddingOp(

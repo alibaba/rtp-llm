@@ -677,6 +677,13 @@ class ModelConfig(CppModelConfig):
             f"attn_config.kv_cache_dtype: {self.attn_config.kv_cache_dtype}"
         )
 
+    def init_linear_attention_cache_precision(self, kv_cache_config: Any) -> None:
+        """Initialize model-specific linear-attention cache dtypes."""
+        self.linear_attention_config.ssm_state_dtype = ssm_state_dtype_str_to_data_type(
+            kv_cache_config.ssm_state_dtype
+        )
+        self.linear_attention_config.conv_state_dtype = self.data_type
+
 
 def get_task_type_from_ckpt_path(
     task_type: Optional[TaskType],
@@ -847,10 +854,7 @@ def build_model_config(
         if kv_cache_config.kernel_seq_size_per_block > 0
         else kv_cache_config.seq_size_per_block
     )
-    model_config.linear_attention_config.ssm_state_dtype = (
-        ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)
-    )
-    model_config.linear_attention_config.conv_state_dtype = model_config.data_type
+    model_config.init_linear_attention_cache_precision(kv_cache_config)
 
     model_config.use_kvcache = model_config.task_type == TaskType.LANGUAGE_MODEL
     logging.info(

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.hc import build_hc_head, build_hc_unit
+from rtp_llm.models_py.modules.dsv4.hc import HCMode, build_hc_head, build_hc_unit
 from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import (
     FallbackHCHead,
     FallbackHCUnit,
@@ -41,6 +41,23 @@ def _weights(hc: int, dim: int, device: str = "cpu"):
 
 
 class TestHCImpl(unittest.TestCase):
+    def test_explicit_mode_overrides_environment(self) -> None:
+        hc, dim = 4, 16
+        fn, base, scale = _weights(hc, dim)
+        with _env("DSV4_HC_IMPL", "tilelang"):
+            unit = build_hc_unit(
+                fn,
+                base,
+                scale,
+                dim=dim,
+                hc_mult=hc,
+                hc_sinkhorn_iters=3,
+                norm_eps=1e-6,
+                hc_eps=1e-6,
+                mode=HCMode.FALLBACK,
+            )
+        self.assertIsInstance(unit, FallbackHCUnit)
+
     def test_factory_fallback_cpu_shapes(self) -> None:
         hc, dim = 4, 16
         fn, base, scale = _weights(hc, dim)

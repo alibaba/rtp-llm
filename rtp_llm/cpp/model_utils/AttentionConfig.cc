@@ -37,6 +37,13 @@ std::string AttentionConfigs::DebugAttentionConfigStr() const {
     oss << "  softmax_extra_scale: " << softmax_extra_scale << std::endl;
     oss << "  kv_cache_dtype: " << kvCacheDataTypeToString(kv_cache_dtype) << std::endl;
     oss << "  need_rope_kv_cache: " << need_rope_kv_cache << std::endl;
+    oss << "  is_sparse: " << is_sparse << std::endl;
+    oss << "  indexer_head_dim: " << indexer_head_dim << std::endl;
+    oss << "  indexer_head_num: " << indexer_head_num << std::endl;
+    oss << "  indexer_topk: " << indexer_topk << std::endl;
+    oss << "  indexer_compress_ratio: " << indexer_compress_ratio << std::endl;
+    oss << "  indexer_compressor_overlap: " << indexer_compressor_overlap << std::endl;
+    oss << "  sparse_attention_topk: " << sparse_attention_topk << std::endl;
     oss << rope_config.DebugRopeConfigStr();
     return oss.str();
 }

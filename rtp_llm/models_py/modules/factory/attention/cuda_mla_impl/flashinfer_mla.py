@@ -452,7 +452,7 @@ class MlaFlashInferPrefillOp(object):
             compressed_kv, k_pe, kv_cache
         )
 
-        k_pe = k_pe.view(-1, 1, self.qk_rope_head_dim)
+        k_pe = k_pe.reshape(compressed_kv.shape[0], 1, self.qk_rope_head_dim)
         self.kv_b_proj = LinearFactory.create_linear_from_weights(
             self.weights[layer_id],
             W.mla_kv_b_w,

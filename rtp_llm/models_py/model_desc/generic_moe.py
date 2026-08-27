@@ -43,6 +43,7 @@ class GenericMoeLayer(nn.Module):
         max_generate_batch_size: int = 0,
         enable_cuda_graph: bool = False,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__()
         self.config = config
@@ -69,21 +70,53 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
-        config_adapter = MoEConfigAdapter(
-            model_config=config,
-            parallelism_config=parallelism_config,
-            moe_config=moe_config,
-            quant_config=quant_config,
-            enable_cuda_graph=enable_cuda_graph,
-        )
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        self._use_mega_moe = moe_config.moe_strategy == "mega_moe"
+        if self._use_mega_moe:
+            from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+                MegaMoeWrapper,
+            )
+
+            self.fused_moe = MegaMoeWrapper(
+                config,
+                parallelism_config,
+                weights,
+                moe_config,
+                layer_idx=layer_idx,
+                max_generate_batch_size=max_generate_batch_size,
+            )
+        else:
+            config_adapter = MoEConfigAdapter(
+                model_config=config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                quant_config=quant_config,
+                enable_cuda_graph=enable_cuda_graph,
+            )
+            self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        self.swiglu_limit = float(getattr(config, "swiglu_limit", 0.0))
+        if (
+            self.swiglu_limit > 0
+            and not self._use_mega_moe
+            and not bool(
+                getattr(self.fused_moe.fused_experts, "supports_swiglu_clamp", False)
+            )
+        ):
+            raise NotImplementedError(
+                f"{type(self.fused_moe.fused_experts).__name__} does not support "
+                "the model-required SwiGLU clamp"
+            )
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
-        assert (
-            self.w1 is not None and self.w2 is not None
-        ), "Weights w1 and w2 must be provided"
-        self.num_local_experts = self.w1.shape[0]
+        if self.w1 is not None and self.w2 is not None:
+            self.num_local_experts = self.w1.shape[0]
+        elif hasattr(self.fused_moe, "expert_num"):
+            self.num_local_experts = self.fused_moe.expert_num
+        else:
+            raise ValueError(
+                "Cannot determine num_local_experts: no routed weights and "
+                "fused_moe has no expert_num"
+            )
         self.add_shared_expert = config.moe_style == 2
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
@@ -152,6 +185,9 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_expert_args=(
+                {"swiglu_limit": self.swiglu_limit} if self.swiglu_limit > 0 else None
+            ),
         )
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(hidden_states)

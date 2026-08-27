@@ -15,8 +15,16 @@ namespace rtp_llm {
 
 namespace {
 
-bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
+bool hasDsv4TypedHybridPoolLayout(const ModelConfig& model_config) {
     return !model_config.attn_config.layer_compress_ratios.empty();
+}
+
+bool hasCompressedIndexerPoolLayout(const ModelConfig& model_config) {
+    return model_config.attn_config.indexer_compress_ratio > 1;
+}
+
+bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
+    return hasDsv4TypedHybridPoolLayout(model_config) || hasCompressedIndexerPoolLayout(model_config);
 }
 
 bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
@@ -41,7 +49,7 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
             if (!isDsv4FixedRegion(region)) {
                 continue;
             }
-            const bool explicit_hca = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
+            const bool explicit_hca   = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
             const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
             if (!explicit_hca && !explicit_fixed) {
                 bytes += config.group_block_size_bytes[gid];
@@ -112,14 +120,15 @@ uint32_t maxSpeculativeGlobalBlockNum(const CacheConfig& score_config,
         const size_t score_bytes   = cacheLayoutBytes(score_config, global_block_num, step);
         const size_t propose_bytes = cacheLayoutBytes(propose_config, global_block_num, step);
         if (propose_bytes > 0
-            && static_cast<size_t>(num_mtp_modules) > (budget_bytes - std::min(budget_bytes, score_bytes)) / propose_bytes) {
+            && static_cast<size_t>(num_mtp_modules)
+                   > (budget_bytes - std::min(budget_bytes, score_bytes)) / propose_bytes) {
             return false;
         }
         return score_bytes <= budget_bytes
                && score_bytes + propose_bytes * static_cast<size_t>(num_mtp_modules) <= budget_bytes;
     };
 
-    uint32_t low = 0;
+    uint32_t low  = 0;
     uint32_t high = 1;
     while (fits(high)) {
         low = high;
@@ -161,6 +170,29 @@ void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size
                             kernel_seq_size_per_block);
 }
 
+void validateTypedKernelSeqSize(const ModelConfig& model_config,
+                                size_t             seq_size_per_block,
+                                size_t             kernel_seq_size_per_block,
+                                const char*        config_name) {
+    if (hasDsv4TypedHybridPoolLayout(model_config)) {
+        validateDsv4KernelSeqSize(seq_size_per_block, kernel_seq_size_per_block, config_name);
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0 && seq_size_per_block >= kernel_seq_size_per_block
+                                && seq_size_per_block % kernel_seq_size_per_block == 0,
+                            "%s compressed-indexer seq_size_per_block(%zu) must be divisible by "
+                            "kernel_seq_size_per_block(%zu)",
+                            config_name,
+                            seq_size_per_block,
+                            kernel_seq_size_per_block);
+    const auto ratio = static_cast<size_t>(model_config.attn_config.indexer_compress_ratio);
+    RTP_LLM_CHECK_WITH_INFO(ratio > 1 && kernel_seq_size_per_block % ratio == 0,
+                            "%s compressed-indexer kernel_seq_size_per_block(%zu) must be divisible by ratio(%zu)",
+                            config_name,
+                            kernel_seq_size_per_block,
+                            ratio);
+}
+
 }  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
@@ -192,7 +224,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(model_config)) {
-            validateDsv4KernelSeqSize(config.seq_size_per_block, kernel_seq_size_per_block, "cache");
+            validateTypedKernelSeqSize(model_config, config.seq_size_per_block, kernel_seq_size_per_block, "cache");
         } else {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
                                     "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
@@ -281,7 +313,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(score_model_config)) {
-            validateDsv4KernelSeqSize(score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
+            validateTypedKernelSeqSize(
+                score_model_config, score_config.seq_size_per_block, kernel_seq_size_per_block, "score");
         } else {
             RTP_LLM_CHECK_WITH_INFO(score_config.seq_size_per_block % kernel_seq_size_per_block == 0,
                                     "score seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
@@ -289,7 +322,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                     kernel_seq_size_per_block);
         }
         if (hasTypedHybridPoolLayout(propose_model_config)) {
-            validateDsv4KernelSeqSize(propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
+            validateTypedKernelSeqSize(
+                propose_model_config, propose_config.seq_size_per_block, kernel_seq_size_per_block, "propose");
         } else {
             RTP_LLM_CHECK_WITH_INFO(
                 propose_config.seq_size_per_block % kernel_seq_size_per_block == 0,
@@ -391,8 +425,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             joint_block_bytes / 1024 / 1024);
         if ((score_config.use_independent_block_pools && !score_config.use_typed_cache_regions)
             || (propose_config.use_independent_block_pools && !propose_config.use_typed_cache_regions)) {
-            block_num = maxSpeculativeGlobalBlockNum(
-                score_config, propose_config, num_mtp_modules, joint_step, paged_budget);
+            block_num =
+                maxSpeculativeGlobalBlockNum(score_config, propose_config, num_mtp_modules, joint_step, paged_budget);
         } else {
             block_num = paged_budget / joint_block_bytes;
         }
@@ -424,23 +458,21 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             config.global_layer_ids.emplace_back();
             config.layer_ids.emplace_back();
             config.group_types.push_back(propose_config.group_types[g]);
-            config.group_region_names.push_back(
-                g < propose_config.group_region_names.size() ? propose_config.group_region_names[g]
-                                                             : KVCacheRegionName::DEFAULT);
-            config.group_seq_size_per_block.push_back(
-                g < propose_config.group_seq_size_per_block.size() ? propose_config.group_seq_size_per_block[g]
-                                                                   : propose_config.seq_size_per_block);
-            config.group_kv_block_stride_bytes.push_back(
-                g < propose_config.group_kv_block_stride_bytes.size()
-                    ? propose_config.group_kv_block_stride_bytes[g]
-                    : propose_config.kv_block_stride_bytes);
-            config.group_kv_scale_stride_bytes.push_back(
-                g < propose_config.group_kv_scale_stride_bytes.size()
-                    ? propose_config.group_kv_scale_stride_bytes[g]
-                    : propose_config.kv_scale_stride_bytes);
-            config.group_block_size_bytes.push_back(
-                g < propose_config.group_block_size_bytes.size() ? propose_config.group_block_size_bytes[g]
-                                                                 : propose_config.block_size_bytes);
+            config.group_region_names.push_back(g < propose_config.group_region_names.size() ?
+                                                    propose_config.group_region_names[g] :
+                                                    KVCacheRegionName::DEFAULT);
+            config.group_seq_size_per_block.push_back(g < propose_config.group_seq_size_per_block.size() ?
+                                                          propose_config.group_seq_size_per_block[g] :
+                                                          propose_config.seq_size_per_block);
+            config.group_kv_block_stride_bytes.push_back(g < propose_config.group_kv_block_stride_bytes.size() ?
+                                                             propose_config.group_kv_block_stride_bytes[g] :
+                                                             propose_config.kv_block_stride_bytes);
+            config.group_kv_scale_stride_bytes.push_back(g < propose_config.group_kv_scale_stride_bytes.size() ?
+                                                             propose_config.group_kv_scale_stride_bytes[g] :
+                                                             propose_config.kv_scale_stride_bytes);
+            config.group_block_size_bytes.push_back(g < propose_config.group_block_size_bytes.size() ?
+                                                        propose_config.group_block_size_bytes[g] :
+                                                        propose_config.block_size_bytes);
             config.group_block_nums.push_back(0);
             if (propose_config.group_types[g] == CacheGroupType::FULL) {
                 ++config.full_group_num;
@@ -518,10 +550,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
                 // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid = independent_eagle_pool
-                                           ? static_cast<int>(propose_group_offset + g)
-                                           : ((g < config.global_layer_ids.size()) ? static_cast<int>(g)
-                                                                                  : static_cast<int>(full_gid));
+                const int target_gid =
+                    independent_eagle_pool ?
+                        static_cast<int>(propose_group_offset + g) :
+                        ((g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid));
                 config.layer_to_group_id[global_layer_id] = target_gid;
                 if (target_gid >= 0 && target_gid < static_cast<int>(config.global_layer_ids.size())) {
                     config.global_layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);

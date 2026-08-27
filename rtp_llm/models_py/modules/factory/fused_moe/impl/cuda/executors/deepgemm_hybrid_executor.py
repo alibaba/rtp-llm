@@ -52,6 +52,8 @@ def align_up_math(n: int, alignment: int = 128) -> int:
 
 
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
+    supports_swiglu_clamp = True
+
     BLOCK_SIZE = 128
     EXPERT_ALIGNMENT = 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
@@ -177,6 +179,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             payload.expert_tokens_meta is not None
         ), "expert_tokens_meta is not initialized"
         assert payload.expert_tokens_meta.expert_num_tokens is not None
+        swiglu_limit = float((extra_expert_args or {}).get("swiglu_limit", 0.0))
 
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states_fp8 = payload.expert_x
@@ -288,6 +291,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     down_input_scale,
                     self.DEEPGEMM_BLOCK_SHAPE[0],
                     num_recv_tokens_per_expert,
+                    clamp_limit=swiglu_limit,
                 )
             else:
                 # Standard path for other SM versions
@@ -309,6 +313,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     masked_m=num_recv_tokens_per_expert,
                     expected_m=expected_m,
                     scale_ue8m0=is_deep_gemm_e8m0_used(),
+                    clamp_limit=swiglu_limit,
                 )
 
             # Free upgate_output
@@ -370,6 +375,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert (
             payload.expert_tokens_meta is not None
         ), "expert_tokens_meta is not initialized"
+        swiglu_limit = float((extra_expert_args or {}).get("swiglu_limit", 0.0))
         hidden_states_fp8 = payload.expert_x
         hidden_states_scale = payload.expert_x_scale
         topk_idx = payload.expert_topk_ids
@@ -487,7 +493,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             dtype=torch.bfloat16,
         )
         gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
+        silu_and_mul(down_input, gateup_output, clamp_limit=swiglu_limit)
         del gateup_output
         down_output = torch.empty(
             (all_tokens, K),

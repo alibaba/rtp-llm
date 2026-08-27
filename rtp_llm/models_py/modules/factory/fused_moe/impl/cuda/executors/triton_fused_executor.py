@@ -28,6 +28,8 @@ from rtp_llm.utils.model_weight import W
 
 
 class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
+    supports_swiglu_clamp = True
+
     @classmethod
     def executor_type(cls):
         return ExecutorType.FUSED_MOE
@@ -137,10 +139,24 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         )
 
         # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
-        intermediate2 = torch.empty(
-            M * top_k, self.inter_size, device=device, dtype=dtype
-        )
-        silu_and_mul(intermediate2, intermediate1)
+        swiglu_limit = float((extra_expert_args or {}).get("swiglu_limit", 0.0))
+        if swiglu_limit > 0:
+            from rtp_llm.models_py.modules.dsv4._silu_mul_split_triton import (
+                silu_mul_split,
+            )
+
+            # Generic MoE stacks [up, gate], matching silu_and_mul's layout.
+            up, gate = intermediate1.float().chunk(2, dim=-1)
+            intermediate2 = silu_mul_split(
+                gate.contiguous(),
+                up.contiguous(),
+                clamp_limit=swiglu_limit,
+            ).to(dtype)
+        else:
+            intermediate2 = torch.empty(
+                M * top_k, self.inter_size, device=device, dtype=dtype
+            )
+            silu_and_mul(intermediate2, intermediate1)
 
         # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
         out = torch.empty(M * top_k, K, device=device, dtype=dtype)

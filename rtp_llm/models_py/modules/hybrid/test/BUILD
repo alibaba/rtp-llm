@@ -9,6 +9,24 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "glm53_indexer_cache_unit_test",
+    srcs = ["glm53_indexer_cache_unit_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "moderate",
+)
+
+py_test(
+    name = "glm53_swiglu_clamp_unit_test",
+    srcs = ["glm53_swiglu_clamp_unit_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "moderate",
+)
+
+py_test(
     name = "kimi_k3_mla_projection_fusion_unit_test",
     srcs = ["kimi_k3_mla_projection_fusion_unit_test.py"],
     deps = [

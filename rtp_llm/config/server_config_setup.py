@@ -350,6 +350,34 @@ def setup_default_args(py_env_configs):
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
 
+    # GLM-5.3 KPool compresses four raw tokens into one FP8 indexer entry.
+    # DeepGEMM's paged MQA score only supports 32/64/128 entries per kernel
+    # block, so the generic CUDA default of 64 raw tokens (16 entries) is not
+    # valid for this model. Keep explicit valid overrides, but fail during
+    # configuration instead of aborting on the first decode for invalid ones.
+    if py_env_configs.model_args.model_type == "glm5_3_flash":
+        kv_config = py_env_configs.kv_cache_config
+        if kv_config.seq_size_per_block == 0:
+            kv_config.seq_size_per_block = 128
+            logging.info("set GLM-5.3 SEQ_SIZE_PER_BLOCK 128 by default")
+        if kv_config.kernel_seq_size_per_block == 0:
+            kv_config.kernel_seq_size_per_block = kv_config.seq_size_per_block
+        indexer_entries_per_block = kv_config.kernel_seq_size_per_block // 4
+        if (
+            kv_config.seq_size_per_block % kv_config.kernel_seq_size_per_block != 0
+            or indexer_entries_per_block not in (32, 64, 128)
+        ):
+            raise ValueError(
+                "GLM-5.3 cache block configuration must use a kernel block of "
+                "128, 256, or 512 raw tokens and seq_size_per_block must be "
+                "divisible by it; got seq_size_per_block=%d, "
+                "kernel_seq_size_per_block=%d"
+                % (
+                    kv_config.seq_size_per_block,
+                    kv_config.kernel_seq_size_per_block,
+                )
+            )
+
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
     if os.path.exists("/dev/kfd") and os.getenv("FT_DISABLE_CUSTOM_AR") is None:

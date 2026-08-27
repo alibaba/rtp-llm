@@ -35,3 +35,11 @@ py_test(
         "//rtp_llm:models",
     ],
 )
+
+py_test(
+    name = "test_glm53_online_quant_weight",
+    srcs = ["test_glm53_online_quant_weight.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+)

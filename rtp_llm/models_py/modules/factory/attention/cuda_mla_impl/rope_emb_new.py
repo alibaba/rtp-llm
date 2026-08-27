@@ -29,6 +29,12 @@ class NewMlaRotaryEmbeddingOp(object):
         precomputed_pos_ids: torch.Tensor = None,
     ):
 
+        # NoPE models such as GLM-5.3 expose a physical RoPE width of zero.
+        # Keep the shared MLA path shape-compatible without invoking
+        # FlashInfer's rotary kernel on empty tensors.
+        if query.shape[-1] == 0 and key.shape[-1] == 0:
+            return
+
         rope._apply_rope_pos_ids_cos_sin_cache(
             q=query,
             k=key.unsqueeze(1),

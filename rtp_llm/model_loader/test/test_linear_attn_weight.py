@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.model_loader.linear_attn_weight import (
+    split_kda_qkv_fa_beta,
     split_kda_qkvg_fa_beta,
     split_kda_qkvg_fa_beta_sections,
 )
@@ -33,6 +34,56 @@ class _IdentityExportedDevice:
 
 
 class KdaFusedProjectionSplitTest(unittest.TestCase):
+    def test_glm_low_rank_gate_qkv_are_sharded_and_fa_beta_replicated(self):
+        hidden = 2
+        heads = 8
+        head_dim = 2
+        projection_width = heads * head_dim
+        f_a_width = 3
+        sections = [
+            torch.full((hidden, width), float(section_id))
+            for section_id, width in enumerate(
+                (
+                    projection_width,
+                    projection_width,
+                    projection_width,
+                    f_a_width,
+                    heads,
+                ),
+                start=1,
+            )
+        ]
+        fused = torch.cat(sections, dim=1)
+        linear_config = SimpleNamespace(
+            linear_num_key_heads=heads,
+            linear_num_value_heads=heads,
+            linear_key_head_dim=head_dim,
+            linear_value_head_dim=head_dim,
+        )
+
+        load_config = SimpleNamespace(tp_size=4, tp_rank=2)
+        actual = split_kda_qkv_fa_beta(fused, load_config, linear_config)
+        local_width = projection_width // load_config.tp_size
+        begin = load_config.tp_rank * local_width
+        expected = torch.cat(
+            tuple(section[:, begin : begin + local_width] for section in sections[:3])
+            + tuple(sections[3:]),
+            dim=1,
+        )
+        torch.testing.assert_close(actual, expected)
+
+    def test_glm_low_rank_gate_split_rejects_nondivisible_tp_width(self):
+        linear_config = SimpleNamespace(
+            linear_num_key_heads=3,
+            linear_num_value_heads=3,
+            linear_key_head_dim=2,
+            linear_value_head_dim=2,
+        )
+        fused = torch.zeros(2, 3 * 6 + 2 + 3)
+        load_config = SimpleNamespace(tp_size=4, tp_rank=0)
+        with self.assertRaisesRegex(ValueError, "not divisible by TP"):
+            split_kda_qkv_fa_beta(fused, load_config, linear_config)
+
     def test_qkvg_are_sharded_and_fa_beta_are_replicated(self):
         hidden = 3
         heads = 8

@@ -103,25 +103,37 @@ else:
         PREFILL_MLA_IMPS.append(MlaFlashMLAPrefillImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
-        # SparseMlaImpl requires CUDA >= 12.9 for flash_mla support
+        # SparseMlaImpl requires CUDA >= 12.9 for flash_mla support.  Keep its
+        # registration independent from the optional context-parallel wrapper:
+        # a missing CP-only dependency must not remove normal sparse decode.
         try:
             import torch
 
-            if torch.version.cuda:
-                major, minor = map(int, torch.version.cuda.split(".")[:2])
-                if (major, minor) >= (12, 9):
-                    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
-                        SparseMlaCpImpl,
-                    )
-                    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
-                        SparseMlaImpl,
-                    )
+            flash_mla_supported = bool(torch.version.cuda) and tuple(
+                map(int, torch.version.cuda.split(".")[:2])
+            ) >= (12, 9)
+        except (AttributeError, ValueError):
+            flash_mla_supported = False
 
-                    DECODE_MLA_IMPS.append(SparseMlaImpl)
-                    PREFILL_MLA_IMPS.append(SparseMlaImpl)
-                    PREFILL_MLA_IMPS.append(SparseMlaCpImpl)
-        except (ImportError, AttributeError, ValueError):
-            pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
+        if flash_mla_supported:
+            try:
+                from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+                    SparseMlaImpl,
+                )
+
+                DECODE_MLA_IMPS.append(SparseMlaImpl)
+                PREFILL_MLA_IMPS.append(SparseMlaImpl)
+            except (ImportError, AttributeError, ValueError) as error:
+                logging.warning("Sparse MLA is unavailable: %s", error)
+
+            try:
+                from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+                    SparseMlaCpImpl,
+                )
+
+                PREFILL_MLA_IMPS.append(SparseMlaCpImpl)
+            except (ImportError, AttributeError, ValueError) as error:
+                logging.warning("Sparse MLA context parallel is unavailable: %s", error)
 
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flash_infer import (
             FlashInferDecodeImpl,

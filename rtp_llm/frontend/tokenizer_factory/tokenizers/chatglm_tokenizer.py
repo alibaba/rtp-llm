@@ -60,6 +60,11 @@ class ChatGLMV5Tokenizer(BaseTokenizer):
         # Load tokenizer directly from tokenizer.json, bypassing tokenizer_config.json
         tokenizer_file = os.path.join(tokenizer_path, "tokenizer.json")
         tokenizer = Tokenizer.from_file(tokenizer_file)
+        chat_template_file = os.path.join(tokenizer_path, "chat_template.jinja")
+        chat_template = None
+        if os.path.exists(chat_template_file):
+            with open(chat_template_file, encoding="utf-8") as reader:
+                chat_template = reader.read()
 
         # Wrap it with PreTrainedTokenizerFast
         self.tokenizer = PreTrainedTokenizerFast(
@@ -67,10 +72,11 @@ class ChatGLMV5Tokenizer(BaseTokenizer):
             eos_token="<|endoftext|>",
             pad_token="<|endoftext|>",
             unk_token="<|endoftext|>",
+            chat_template=chat_template,
         )
 
 
 register_tokenizer(["chatglm2", "chat_glm_2"], ChatGLMV2Tokenizer)
 register_tokenizer(["chatglm3", "chat_glm_3"], ChatGLMV3Tokenizer)
 register_tokenizer(["chatglm4", "chatglm4v"], ChatGLMV4Tokenizer)
-register_tokenizer(["glm_5"], ChatGLMV5Tokenizer)
+register_tokenizer(["glm_5", "glm5_3_flash"], ChatGLMV5Tokenizer)

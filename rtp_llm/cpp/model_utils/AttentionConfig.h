@@ -64,6 +64,21 @@ struct AttentionConfigs {
     int  indexer_head_num = 0;
     int  indexer_topk     = 0;
 
+    // Compressed sparse-indexer geometry (GLM-5.3 KPool style).
+    //
+    // ``indexer_topk`` is the number of compressed groups selected by the
+    // indexer. ``sparse_attention_topk`` is the number of raw-token slots
+    // consumed by sparse MLA after group expansion. A value of 0 derives the
+    // width as ``indexer_topk * indexer_compress_ratio + ratio - 1``.
+    //
+    // ``indexer_compress_ratio == 1`` is the legacy per-token indexer. The
+    // first compressed implementation supports ratio=4. Layer ids are
+    // optional: an empty vector means every non-linear/full-attention layer.
+    int              indexer_compress_ratio     = 1;
+    int              indexer_compressor_overlap = 0;
+    int              sparse_attention_topk      = 0;
+    std::vector<int> indexer_layer_ids;
+
     // DeepSeek-V4 specific
     // Per-layer attention type schedule. Length == num_layers (+1 for MTP).
     //   value 0   -> sliding-window-only / non-compressed (Flash first 2 layers, MTP last)
@@ -71,12 +86,12 @@ struct AttentionConfigs {
     //   value 128 -> HCA (compress every m'=128 raw tokens, dense MQA)
     std::vector<int> layer_compress_ratios;
     // Output projection: grouped (n_h heads -> g groups -> per-group rank -> hidden_size)
-    size_t o_groups               = 0;
-    size_t o_lora_rank            = 0;
+    size_t o_groups    = 0;
+    size_t o_lora_rank = 0;
     // Sliding-window bypass attention window size (0 disables SWA bypass)
-    int    sliding_window         = 0;
+    int sliding_window = 0;
     // Separate RoPE base for the compressed K branch (V4: rope_theta=10000 main, compress=160000)
-    double compress_rope_theta    = 0.0;
+    double compress_rope_theta = 0.0;
 
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;

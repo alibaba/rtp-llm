@@ -55,7 +55,9 @@ class KimiK3KDA(nn.Module):
         self.layer_idx = layer_idx
         self.parallelism_config = parallelism_config
         self.weights = weights
-        runtime = config.k3_runtime_config
+        runtime = getattr(config, "k3_runtime_config", None)
+        if runtime is None:
+            runtime = config.glm5_3_flash_runtime_config
         self.head_dim = int(config.linear_attention_config.linear_key_head_dim)
         self.attn_tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_rank = int(parallelism_config.get_attn_tp_rank())
@@ -72,17 +74,18 @@ class KimiK3KDA(nn.Module):
         )
         self.eps = float(config.layernorm_eps)
         self.gate_lower_bound = runtime.kda_gate_lower_bound
-        if not runtime.kda_use_full_rank_gate:
-            raise NotImplementedError(
-                "K3 checkpoint manifest currently requires full-rank KDA output gate"
-            )
+        self.low_rank_output_gate = W.linear_attn_qkv_fa_beta_w in weights
+        if not self.low_rank_output_gate and not bool(
+            getattr(runtime, "kda_use_full_rank_gate", False)
+        ):
+            raise ValueError("KDA full-rank gate weight is missing")
         if parallelism_config.role_type not in (
             RoleType.PREFILL,
             RoleType.DECODE,
             RoleType.PDFUSION,
         ):
             raise RuntimeError(
-                "Kimi K3 supports only PREFILL, DECODE, or PDFUSION roles, got "
+                "KDA supports only PREFILL, DECODE, or PDFUSION roles, got "
                 f"{parallelism_config.role_type}"
             )
         self._role_type = parallelism_config.role_type
@@ -111,14 +114,22 @@ class KimiK3KDA(nn.Module):
         )
         self.cache_store_segment_sizes = self.cache.store_segment_sizes
 
-        fused_projection = weights[W.linear_attn_qkvg_fa_beta_w]
         self.forget_latent_size = int(weights[W.linear_attn_f_b_w].shape[0])
+        fused_key = (
+            W.linear_attn_qkv_fa_beta_w
+            if self.low_rank_output_gate
+            else W.linear_attn_qkvg_fa_beta_w
+        )
+        fused_projection = weights[fused_key]
         expected_fused_width = (
-            4 * self.projection_size + self.forget_latent_size + self.total_heads
+            3 * self.projection_size
+            + self.forget_latent_size
+            + self.total_heads
+            + (0 if self.low_rank_output_gate else self.projection_size)
         )
         if fused_projection.shape[1] != expected_fused_width:
             raise ValueError(
-                "fused KDA QKVG/F_A/beta width "
+                "fused KDA input width "
                 f"{fused_projection.shape[1]} != {expected_fused_width}"
             )
         self.kda_fused_w = fused_projection
@@ -173,7 +184,7 @@ class KimiK3KDA(nn.Module):
         torch.Tensor,
         torch.Tensor,
     ]:
-        """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
+        """Run and unpack the loader-provided KDA input projection."""
 
         if prefill_sp_layout is not None:
             projected_fused = all_gather_gemm(
@@ -183,23 +194,50 @@ class KimiK3KDA(nn.Module):
             )[0]
         else:
             projected_fused = torch.matmul(hidden_states, self.kda_fused_w)
-        (
-            q_projected,
-            k_projected,
-            v_projected,
-            output_gate,
-            forget_latent,
-            full_raw_beta,
-        ) = split_kda_qkvg_fa_beta_sections(
-            projected_fused,
-            self.projection_size,
-            self.projection_size,
-            self.projection_size,
-            self.projection_size,
-            self.forget_latent_size,
-            self.total_heads,
-            dim=1,
-        )
+        if self.low_rank_output_gate:
+            (
+                q_projected,
+                k_projected,
+                v_projected,
+                forget_latent,
+                full_raw_beta,
+            ) = torch.split(
+                projected_fused,
+                [
+                    self.projection_size,
+                    self.projection_size,
+                    self.projection_size,
+                    self.forget_latent_size,
+                    self.total_heads,
+                ],
+                dim=1,
+            )
+            if prefill_sp_layout is not None:
+                raise NotImplementedError(
+                    "low-rank KDA output gate does not yet support token-SP Prefill"
+                )
+            output_gate = torch.matmul(
+                torch.matmul(hidden_states, self.weights[W.linear_attn_g_a_w]),
+                self.weights[W.linear_attn_g_b_w],
+            )
+        else:
+            (
+                q_projected,
+                k_projected,
+                v_projected,
+                output_gate,
+                forget_latent,
+                full_raw_beta,
+            ) = split_kda_qkvg_fa_beta_sections(
+                projected_fused,
+                self.projection_size,
+                self.projection_size,
+                self.projection_size,
+                self.projection_size,
+                self.forget_latent_size,
+                self.total_heads,
+                dim=1,
+            )
         raw_gate = torch.matmul(forget_latent, self.weights[W.linear_attn_f_b_w])
         beta_begin = self.attn_tp_rank * self.local_heads
         raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
@@ -337,15 +375,15 @@ class KimiK3KDA(nn.Module):
         )
         if is_target_verify and self._role_type == RoleType.PREFILL:
             raise RuntimeError(
-                "Kimi K3 target verify requires the direct paged Decode path"
+                "KDA target verify requires the direct paged Decode path"
             )
         if self._role_type == RoleType.PREFILL and mode != "prefill":
-            raise RuntimeError("Kimi K3 Prefill role cannot execute Decode")
+            raise RuntimeError("KDA Prefill role cannot execute Decode")
         if self._role_type == RoleType.DECODE and mode != "decode":
-            raise RuntimeError("Kimi K3 Decode role cannot execute Prefill")
+            raise RuntimeError("KDA Decode role cannot execute Prefill")
         if kv_cache is None or attention_inputs is None:
             raise RuntimeError(
-                "Kimi K3 Prefill, Decode, and target verify require direct paged cache"
+                "KDA Prefill, Decode, and target verify require direct paged cache"
             )
         if prefill_sp_layout is not None and (
             mode != "prefill"

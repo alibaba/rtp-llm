@@ -37,6 +37,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import _CompressorPending
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
     IndexerFP8,
+    _as_int32_contig,
     _IndexerFP8PrefillMeta,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
@@ -115,6 +116,18 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.device = torch.device("cpu")
         torch.manual_seed(0)
+
+    def test_decode_context_lengths_are_int32_contiguous(self) -> None:
+        positions = torch.tensor([[3, 7], [11, 15]], dtype=torch.int64)
+        compressed_lens = ((positions + 1) // 4).T
+
+        result = _as_int32_contig(compressed_lens)
+
+        self.assertEqual(result.dtype, torch.int32)
+        self.assertTrue(result.is_contiguous())
+        self.assertTrue(
+            torch.equal(result, torch.tensor([[1, 3], [2, 4]], dtype=torch.int32))
+        )
 
     # ------------------------------------------------------------------
     # Warmup (pool unbound)

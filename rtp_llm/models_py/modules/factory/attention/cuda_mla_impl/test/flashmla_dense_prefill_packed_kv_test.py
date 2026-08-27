@@ -44,11 +44,12 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
     def _make_op(
         prefix_chunk_tokens: int = 0,
         num_heads: int = 12,
+        qk_rope_head_dim: int = 64,
     ) -> MlaFlashMLAPrefillOp:
         return MlaFlashMLAPrefillOp(
             num_heads=num_heads,
             kv_lora_rank=512,
-            qk_rope_head_dim=64,
+            qk_rope_head_dim=qk_rope_head_dim,
             qk_nope_head_dim=128,
             v_head_dim=128,
             page_size=128,
@@ -57,6 +58,21 @@ class FlashMLADensePrefillPackedKVTest(unittest.TestCase):
             weights=[{}],
             prefix_chunk_tokens=prefix_chunk_tokens,
         )
+
+    def test_gather_without_reuse_supports_zero_rope_dim(self) -> None:
+        op = self._make_op(qk_rope_head_dim=0)
+        tokens = 8
+        compressed_kv = torch.empty(
+            (tokens, op.kv_lora_rank), dtype=torch.bfloat16, device="cuda"
+        )
+        k_pe = torch.empty((tokens, 1, 0), dtype=torch.bfloat16, device="cuda")
+
+        gathered_compressed, gathered_k_pe = op._gather_reused_kv(
+            compressed_kv, k_pe, None
+        )
+
+        self.assertIs(gathered_compressed, compressed_kv)
+        self.assertEqual(tuple(gathered_k_pe.shape), (tokens, 0))
 
     def _assert_close_chunked(
         self,

@@ -1755,6 +1755,18 @@ def warmup_mhc_prenorm_gemm_jit(
                         ),
                         device=device,
                     )
+            _run_tilelang_warmup_launch_with_retry(
+                "DSV4 mHC TileLangPost",
+                f"shape={key} m=1",
+                partial(
+                    _launch_dummy_mhc_post,
+                    key=key,
+                    info=info,
+                    m_value=1,
+                    device=device,
+                ),
+                device=device,
+            )
             _sync_cuda(device)
             _release_cuda_cache(device)
 
@@ -1778,9 +1790,7 @@ def warmup_mhc_head_fused_jit(
         return
     _assert_not_capturing()
 
-    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-        tk_mhc_head_fused_enabled,
-    )
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused_enabled
 
     if not tk_mhc_head_fused_enabled():
         return
@@ -1816,13 +1826,9 @@ def warmup_mhc_head_fused_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHCHeadFused", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHCHeadFused", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 
@@ -2246,6 +2252,53 @@ def _launch_dummy_mhc_pre_wrapper(
             f"shape={tuple(residual.shape)}, key={key}"
         )
     del residual, out, fn, scale, base
+
+
+def _launch_dummy_mhc_post(
+    *,
+    key: tuple[int, int],
+    info: dict,
+    m_value: int,
+    device: torch.device,
+) -> None:
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_post
+
+    _, k_value = key
+    mhc_mult = int(info.get("hc_mult", 4) or 4)
+    hidden_size = int(info.get("dim", 0) or 0)
+    if hidden_size <= 0:
+        hidden_size = int(k_value) // max(mhc_mult, 1)
+    num_tokens = max(int(m_value), 1)
+
+    residual = torch.zeros(
+        (1, num_tokens, mhc_mult, hidden_size),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    x = torch.zeros((1, num_tokens, hidden_size), dtype=torch.bfloat16, device=device)
+    post_mix = torch.zeros(
+        (1, num_tokens, mhc_mult, 1), dtype=torch.float32, device=device
+    )
+    comb_mix = (
+        torch.eye(mhc_mult, dtype=torch.float32, device=device)
+        .view(1, 1, mhc_mult, mhc_mult)
+        .expand(1, num_tokens, mhc_mult, mhc_mult)
+        .contiguous()
+    )
+    out = tk_mhc_post(
+        x,
+        residual,
+        post_mix,
+        comb_mix,
+        hc_mult=mhc_mult,
+        out=residual,
+    )
+    if out is None:
+        raise RuntimeError(
+            "TileLang mHC post warmup failed availability gate for "
+            f"shape={tuple(residual.shape)}, key={key}"
+        )
+    del residual, x, post_mix, comb_mix, out
 
 
 def _launch_dummy_mhc_head_fused(

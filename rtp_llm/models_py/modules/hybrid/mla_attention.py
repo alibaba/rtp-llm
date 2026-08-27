@@ -122,6 +122,7 @@ class MlaAttention(nn.Module):
             fmha_impl.attn_inputs,
             use_fast_path=not fmha_impl.is_sparse(),
             cp_params=fmha_impl.cp_params,
+            global_kv_cache=getattr(self, "global_kv_cache", None),
         )
 
     def _project_qkv_a_input(

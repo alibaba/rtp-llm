@@ -41,6 +41,10 @@ class WeightModule(ABC):
         self.lora_a: Optional["WeightModule"] = None
         self.lora_b: Optional["WeightModule"] = None
         self.is_lora = kwargs.pop("is_lora", False)
+        # Some heterogeneous checkpoints use a global quantization config but
+        # deliberately keep selected projections in BF16.  Model manifests can
+        # opt those weights out before the quant-weight registry is consulted.
+        self.skip_quantization = kwargs.pop("skip_quantization", False)
 
     def __init_subclass__(cls, **kwargs: Any):
         super().__init_subclass__(**kwargs)
@@ -61,6 +65,9 @@ class WeightModule(ABC):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> "WeightModule":
         if quant_config is None:
+            return weight_info
+
+        if getattr(weight_info, "skip_quantization", False):
             return weight_info
 
         if isinstance(weight_info, QuantWeight):

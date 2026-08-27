@@ -4,11 +4,13 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.attn_factory import DECODE_MLA_IMPS
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
     flashinfer_mla_wrapper,
     flashmla_dense_prefill,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
+    MlaFlashInferPrefillImpl,
     MlaFlashMLAPrefillImpl,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
@@ -22,6 +24,29 @@ CUDA_AVAILABLE = torch.cuda.is_available()
 
 
 class FlashMlaDensePrefillConfigForwardingTest(TestCase):
+    def test_sparse_mla_decode_is_registered_without_cp_dependency(self) -> None:
+        self.assertIn("SparseMlaImpl", [impl.__name__ for impl in DECODE_MLA_IMPS])
+
+    def test_prefill_backend_support_routes_glm53_to_flashinfer(self) -> None:
+        attn_inputs = SimpleNamespace(is_prefill=True)
+        k3 = SimpleNamespace(
+            use_mla=True,
+            nope_head_dim=128,
+            rope_head_dim=64,
+            v_head_dim=128,
+        )
+        glm53 = SimpleNamespace(
+            use_mla=True,
+            nope_head_dim=256,
+            rope_head_dim=0,
+            v_head_dim=256,
+        )
+
+        self.assertTrue(MlaFlashMLAPrefillImpl.support(k3, attn_inputs))
+        self.assertTrue(MlaFlashInferPrefillImpl.support(k3, attn_inputs))
+        self.assertFalse(MlaFlashMLAPrefillImpl.support(glm53, attn_inputs))
+        self.assertTrue(MlaFlashInferPrefillImpl.support(glm53, attn_inputs))
+
     def test_wrapper_forwards_explicit_prefix_chunk_capacity(self) -> None:
         configs = AttentionConfigs()
         configs.head_num = 96

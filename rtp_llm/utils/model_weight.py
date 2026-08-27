@@ -1190,6 +1190,7 @@ class W:
     # and forget-gate layout as kimi_linear; the output gate differs (see below).
     linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
     linear_attn_qkvg_fa_beta_w = "linear_attn.in_proj_qkvg_fa_beta.weight"
+    linear_attn_qkv_fa_beta_w = "linear_attn.in_proj_qkv_fa_beta.weight"
     linear_attn_b_w = "linear_attn.b_proj.weight"
     linear_attn_f_a_w = "linear_attn.f_a_proj.weight"
     linear_attn_f_b_w = "linear_attn.f_b_proj.weight"
@@ -1278,6 +1279,8 @@ class W:
     mla_indexer_weights_proj_w = (
         "self_attention_weights.mla.indexer.weights_proj.kernel"
     )
+    mla_indexer_kpool_gate_w = "self_attention_weights.mla.indexer.kpool_gate.kernel"
+    mla_indexer_kpool_ape = "self_attention_weights.mla.indexer.kpool_ape"
     # cross attn
     cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma"
     cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta"
@@ -1579,6 +1582,8 @@ class W:
         mla_indexer_weights_proj_w: sp_id,
         mla_indexer_qb_w: sp_id,
         mla_indexer_k_w: sp_id,
+        mla_indexer_kpool_gate_w: sp_id,
+        mla_indexer_kpool_ape: sp_id,
         # ---- DSv4 (TP=1 today; all sp_id placeholders) ----
         v4_attn_norm: sp_id,
         v4_attn_q_norm: sp_id,

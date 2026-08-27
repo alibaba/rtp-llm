@@ -43,6 +43,62 @@ def create_scalar_ones(ts: List[torch.Tensor]):
     return torch.ones([1], dtype=torch.float32).to(ts[0].device)
 
 
+def _apply_mega_moe_fp4_wrappers(
+    weight_info: "ModelWeightInfo",
+) -> "ModelWeightInfo":
+    """Convert routed MoE weights to Mega MoE's FP4 layout while loading.
+
+    This is the online FP8/BF16 checkpoint path from the GLM-5 reference
+    implementation. It deliberately runs after the normal quant wrapper
+    selection so that FP8 checkpoint scales are still available in their raw
+    form instead of the packed runtime layout.
+    """
+    from rtp_llm.model_loader.ffn_weight import MoeWeight
+    from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+        is_mega_moe_strategy,
+        wrap_moe_for_mega_moe,
+    )
+
+    if not is_mega_moe_strategy():
+        return weight_info
+
+    def _walk(weight: WeightModule) -> WeightModule:
+        wrapped = wrap_moe_for_mega_moe(weight)
+        if wrapped is not weight:
+            return wrapped
+        if isinstance(weight, MoeWeight):
+            for name, sub_weight in list(weight.sub_weights.items()):
+                weight.sub_weights[name] = _walk(sub_weight)
+            if W.moe_w1 in weight.sub_weights:
+                weight.moe_w1 = weight.sub_weights[W.moe_w1]
+            if W.moe_w2 in weight.sub_weights:
+                weight.moe_w2 = weight.sub_weights[W.moe_w2]
+            return weight
+        if isinstance(weight, FfnWeight):
+            for name, sub_weight in list(weight.sub_weights.items()):
+                weight.sub_weights[name] = _walk(sub_weight)
+            weight.w1 = weight.sub_weights.get(W.ffn_w1)
+            weight.w2 = weight.sub_weights.get(W.ffn_w2)
+            weight.w3 = weight.sub_weights.get(W.ffn_w3)
+            weight.w13 = weight.sub_weights.get(W.ffn_w13)
+            weight.b1 = weight.sub_weights.get(W.ffn_b1)
+            weight.b2 = weight.sub_weights.get(W.ffn_b2)
+            weight.b3 = weight.sub_weights.get(W.ffn_b3)
+            weight.b13 = weight.sub_weights.get(W.ffn_b13)
+        return weight
+
+    if weight_info.layer_weights:
+        weight_info.layer_weights = [
+            (
+                [_walk(weight) for weight in layer]
+                if isinstance(layer, list)
+                else _walk(layer)
+            )
+            for layer in weight_info.layer_weights
+        ]
+    return weight_info
+
+
 class ModelWeightInfo:
     layer_weights: Union[List[WeightModule], List[List[WeightModule]]]
     weights: List[WeightModule]
@@ -323,6 +379,8 @@ class ModelDeployWeightInfo:
 
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
+
+        weight_info = _apply_mega_moe_fp4_wrappers(weight_info)
 
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")

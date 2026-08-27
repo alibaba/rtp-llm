@@ -412,6 +412,28 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
 # =============================================================================
 # Indexer path: head_dim=128, single quant block, 132B per slot
 # =============================================================================
+@triton.jit
+def _glm_kpool_hadamard128_stage(x, GROUPS: tl.constexpr, STRIDE: tl.constexpr):
+    x3 = tl.reshape(x, (GROUPS, 2, STRIDE))
+    x3 = tl.trans(x3, 0, 2, 1)
+    a, b = tl.split(x3)
+    x3 = tl.join(a + b, a - b)
+    x3 = tl.trans(x3, 0, 2, 1)
+    return tl.reshape(x3, (128,))
+
+
+@triton.jit
+def _glm_kpool_hadamard128(x):
+    x = _glm_kpool_hadamard128_stage(x, 64, 1)
+    x = _glm_kpool_hadamard128_stage(x, 32, 2)
+    x = _glm_kpool_hadamard128_stage(x, 16, 4)
+    x = _glm_kpool_hadamard128_stage(x, 8, 8)
+    x = _glm_kpool_hadamard128_stage(x, 4, 16)
+    x = _glm_kpool_hadamard128_stage(x, 2, 32)
+    x = _glm_kpool_hadamard128_stage(x, 1, 64)
+    return x * 0.08838834764831845
+
+
 @triton.jit(
     do_not_specialize=[
         "block_table_stride",
@@ -479,6 +501,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     BATCHED: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
+    KPOOL_MODE: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -598,10 +621,16 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
 
     compressed_kv = tl.sum(kv * score, axis=0)
 
-    rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
-    variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
-    rrms = tl.rsqrt(variance + rms_norm_eps)
-    normed = compressed_kv * rrms * rms_w
+    if KPOOL_MODE:
+        # GLM-5.3 normalizes each raw wk(x) before pooling, then rotates the
+        # pooled key. BF16 round trips match the released implementation.
+        result = compressed_kv.to(tl.bfloat16).to(tl.float32)
+        result = _glm_kpool_hadamard128(result).to(tl.bfloat16).to(tl.float32)
+    else:
+        rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
+        variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
+        rrms = tl.rsqrt(variance + rms_norm_eps)
+        normed = compressed_kv * rrms * rms_w
 
     kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
     if kv_slot_idx < 0:
@@ -623,28 +652,29 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         + kv_pos_in_block * SCALE_DIM
     )
 
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
+    if not KPOOL_MODE:
+        NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
+        HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
 
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
+        NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
+        NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
 
-    normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
-    even, odd = tl.split(normed_2d)
+        normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
+        even, odd = tl.split(normed_2d)
 
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
+        pair_idx = tl.arange(0, NUM_PAIRS)
+        rope_pair_local = pair_idx - NOPE_PAIRS
+        is_rope_pair = rope_pair_local >= 0
+        cs_idx = tl.maximum(rope_pair_local, 0)
 
-    compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
+        compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
+        cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
+        cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
+        sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
 
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
-    result = tl.interleave(new_even, new_odd)
+        new_even = even * cos_v - odd * sin_v
+        new_odd = odd * cos_v + even * sin_v
+        result = tl.interleave(new_even, new_odd)
 
     tl.static_assert(
         TRITON_BLOCK_SIZE == QUANT_BLOCK,
@@ -842,6 +872,7 @@ def run_fused_compress_kv_write(
     seq_start_per_req: Optional[torch.Tensor] = None,  # [B] int64
     cu_seq_per_req: Optional[torch.Tensor] = None,  # [B+1] int64
     state_tokens_per_block: int,
+    kpool_mode: bool = False,
 ) -> None:
     """Boundary-token compress→norm→rope→fp8 quant→KV-pool store.
 
@@ -958,6 +989,7 @@ def run_fused_compress_kv_write(
         BATCHED=batched,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         STATE_RING_ENTRIES=state_ring_entries,
+        KPOOL_MODE=kpool_mode,
         num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
     )
 

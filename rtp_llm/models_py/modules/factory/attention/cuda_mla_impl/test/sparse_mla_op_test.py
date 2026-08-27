@@ -484,6 +484,8 @@ class SparseMlaOpTest(TestCase):
         test_cases = [
             # (batch_size, total_cache_len, top_k, num_heads, qk_nope_dim, kv_lora_rank, 描述)
             (1, 128, 128, 64, 448, 512, "单batch解码"),
+            (1, 128, 128, 16, 448, 512, "GLM-5.3 TP4 head padding解码"),
+            (1, 256, 131, 16, 448, 512, "GLM-5.3 tail top-k padding解码"),
             (2, 512, 128, 64, 448, 512, "2batch解码"),
             (4, 1024, 256, 64, 448, 512, "4batch解码"),
             (1, 2048, 256, 128, 448, 512, "大cache解码"),

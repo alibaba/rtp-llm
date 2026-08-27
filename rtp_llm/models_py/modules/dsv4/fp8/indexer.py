@@ -22,6 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
@@ -70,6 +71,14 @@ def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
+
+
+def _as_int32_contig(t: torch.Tensor) -> torch.Tensor:
+    if t.dtype != torch.int32:
+        t = t.to(torch.int32)
+    if not t.is_contiguous():
+        t = t.contiguous()
+    return t
 
 
 # Persistent radix-select TopK — vendored CUDA kernel binding. Same gate
@@ -287,6 +296,13 @@ class IndexerFP8(PoolBackedModule):
         max_seq_len: int,
         norm_eps: float = 1e-6,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        q_projection: Optional[nn.Module] = None,
+        weights_projection: Optional[torch.Tensor] = None,
+        compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
+        compressor_kpool_mode: bool = False,
+        compressor_pre_norm_weight: Optional[torch.Tensor] = None,
+        compressor_pre_norm_bias: Optional[torch.Tensor] = None,
+        rotate_q: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
@@ -302,10 +318,11 @@ class IndexerFP8(PoolBackedModule):
             "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
             "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
         )
-        assert layer_weights is not None, (
-            "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
-            "construction is not supported (use the BF16 path for that)."
-        )
+        assert layer_weights is not None or (
+            q_projection is not None
+            and weights_projection is not None
+            and compressor_weights is not None
+        ), "IndexerFP8 requires either DSV4 layer_weights or explicit projections"
         self.dim = dim
         self.n_heads = index_n_heads
         self.head_dim = index_head_dim
@@ -314,30 +331,40 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
+        self.rotate_q = bool(rotate_q)
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
 
-        self.wq_b = _v4_fp8_linear(
-            layer_weights[W.v4_indexer_wq_b_w],
-            layer_weights[W.v4_indexer_wq_b_s],
-        )
+        if q_projection is not None:
+            self.wq_b = q_projection
+        else:
+            assert layer_weights is not None
+            self.wq_b = _v4_fp8_linear(
+                layer_weights[W.v4_indexer_wq_b_w],
+                layer_weights[W.v4_indexer_wq_b_s],
+            )
         # weights_proj is plain BF16. Pre-fold the runtime ``softmax_scale *
         # n_heads^-0.5`` into the weight at load time so prefill / decode can
         # do a single ``F.linear`` (cuBLAS GEMM) without a trailing elementwise
         # mul. New tensor — never mutate ``layer_weights`` in place.
         _wp_scale = self.softmax_scale * self.n_heads**-0.5
-        self.weights_proj = (
-            layer_weights[W.v4_indexer_weights_proj_w] * _wp_scale
-        ).contiguous()
+        if weights_projection is None:
+            assert layer_weights is not None
+            weights_projection = layer_weights[W.v4_indexer_weights_proj_w]
+        self.weights_proj = (weights_projection * _wp_scale).contiguous()
 
         # Nested compressor: 132B layout (head_dim=128).
-        inner_cmp_weights = {
-            "ape": layer_weights[W.v4_indexer_compressor_ape],
-            "wkv": layer_weights[W.v4_indexer_compressor_wkv],
-            "wgate": layer_weights[W.v4_indexer_compressor_wgate],
-            "norm": layer_weights[W.v4_indexer_compressor_norm],
-        }
+        if compressor_weights is None:
+            assert layer_weights is not None
+            inner_cmp_weights = {
+                "ape": layer_weights[W.v4_indexer_compressor_ape],
+                "wkv": layer_weights[W.v4_indexer_compressor_wkv],
+                "wgate": layer_weights[W.v4_indexer_compressor_wgate],
+                "norm": layer_weights[W.v4_indexer_compressor_norm],
+            }
+        else:
+            inner_cmp_weights = compressor_weights
         self.compressor = CompressorFP8(
             dim=dim,
             head_dim=index_head_dim,
@@ -348,6 +375,10 @@ class IndexerFP8(PoolBackedModule):
             norm_eps=norm_eps,
             rotate=True,
             compressor_weights=inner_cmp_weights,
+            overlap=False if compressor_kpool_mode else None,
+            kpool_mode=compressor_kpool_mode,
+            pre_norm_weight=compressor_pre_norm_weight,
+            pre_norm_bias=compressor_pre_norm_bias,
         )
         self.max_batch_size = max_batch_size
         self._kv_cache_t = max_seq_len // compress_ratio
@@ -555,6 +586,12 @@ class IndexerFP8(PoolBackedModule):
                 q = self.wq_b(qr)
             q = q.unflatten(-1, (self.n_heads, self.head_dim))
         if not apply_rope:
+            if self.rotate_q:
+                from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+                    _rotate_activation,
+                )
+
+                q = _rotate_activation(q)
             return q
         with record_function_range("dsv4.fp8.indexer.compute_q.rope"):
             rope_view = q[..., -self.rope_head_dim :]
@@ -565,6 +602,12 @@ class IndexerFP8(PoolBackedModule):
             )
 
             rope_only_inplace(rope_view, freqs_cis)
+        if self.rotate_q:
+            from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+                _rotate_activation,
+            )
+
+            q = _rotate_activation(q)
         return q
 
     # --------------------------------------------------------------
@@ -596,7 +639,11 @@ class IndexerFP8(PoolBackedModule):
             )
 
             if position_ids is None:
-                freqs = self.freqs_cis[start_pos.long()]
+                freqs = (
+                    self.freqs_cis[start_pos.long()]
+                    if self.freqs_cis is not None
+                    else x.new_empty((bsz, 0), dtype=torch.complex64)
+                )
                 q = self._compute_indexer_q(
                     qr, freqs, batched_rope=True, apply_rope=False
                 )
@@ -604,7 +651,11 @@ class IndexerFP8(PoolBackedModule):
             else:
                 assert compressor_meta is not None
                 pos_flat = compressor_meta.positions.reshape(-1)
-                freqs = self.freqs_cis.index_select(0, pos_flat).contiguous()
+                freqs = (
+                    self.freqs_cis.index_select(0, pos_flat).contiguous()
+                    if self.freqs_cis is not None
+                    else x.new_empty((pos_flat.numel(), 0), dtype=torch.complex64)
+                )
                 q = self._compute_indexer_q(
                     qr, freqs, batched_rope=False, apply_rope=False
                 )
@@ -625,13 +676,22 @@ class IndexerFP8(PoolBackedModule):
             T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
             T_max = max(32, min(T_cache, T_static))
 
-            q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
-                _as_bf16_contig(q),
-                _as_bf16_contig(weights),
-                freqs,
-                self.rope_head_dim,
-            )
-            ctx_lens_2d = compressed_len.view(bsz, q_len)
+            if self.rope_head_dim > 0:
+                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                    _as_bf16_contig(q),
+                    _as_bf16_contig(weights),
+                    freqs,
+                    self.rope_head_dim,
+                )
+            else:
+                q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                    _as_bf16_contig(q), _as_bf16_contig(weights)
+                )
+            # Positions arrive as int64 on some model paths. DeepGEMM's paged
+            # score ABI requires int32 context lengths, and its metadata
+            # builder consumes the tensor before any implicit conversion can
+            # happen inside the kernel wrapper.
+            ctx_lens_2d = _as_int32_contig(compressed_len.view(bsz, q_len))
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
             # (set by ``Attention._set_compressor_pool_context``); standalone
@@ -656,7 +716,7 @@ class IndexerFP8(PoolBackedModule):
             # TopK (with optional persistent radix-select)
             K_eff = min(K, T_max)
             score_2d = score.view(bsz * q_len, T_max)
-            lengths_i32 = compressed_len.view(bsz * q_len)
+            lengths_i32 = ctx_lens_2d.view(bsz * q_len)
             out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
             if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
                 rtp_llm_ops.dsv4_persistent_topk(
@@ -727,7 +787,9 @@ class IndexerFP8(PoolBackedModule):
         layout-agnostic — once the caller starts feeding per-request
         ``cu_seqlens`` we'll fan that out here.
         """
-        assert self.freqs_cis is not None, "IndexerFP8.prepare needs freqs_cis bound"
+        assert (
+            self.rope_head_dim == 0 or self.freqs_cis is not None
+        ), "IndexerFP8.prepare needs freqs_cis when RoPE is enabled"
         ratio = self.compress_ratio
         # ``use_varlen`` is required — set by
         # ``Attention._build_csa_prefill_meta`` which receives it from
@@ -829,8 +891,10 @@ class IndexerFP8(PoolBackedModule):
             # sp:sp+S]`` for B == 1 contiguous range; per-token gather is
             # required when requests interleave on the flat axis.
             with record_function_range("dsv4.fp8.indexer.prepare.freqs"):
-                freqs_cis_slice = self.freqs_cis.index_select(
-                    0, positions_d.to(torch.long)
+                freqs_cis_slice = (
+                    self.freqs_cis.index_select(0, positions_d.to(torch.long))
+                    if self.freqs_cis is not None
+                    else torch.empty((M, 0), dtype=torch.complex64, device=device)
                 )
 
             if kv_block_table is not None and kv_eb > 0:
@@ -861,7 +925,11 @@ class IndexerFP8(PoolBackedModule):
                 T = end_pos // ratio
                 M = bsz * seqlen
 
-                freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
+                freqs_cis_slice = (
+                    self.freqs_cis[sp_int : sp_int + seqlen]
+                    if self.freqs_cis is not None
+                    else torch.empty((seqlen, 0), dtype=torch.complex64, device=device)
+                )
 
                 # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
                 positions_d = torch.arange(
@@ -1064,7 +1132,7 @@ class IndexerFP8(PoolBackedModule):
         ):
             return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
 
-        if self.compressor.freqs_cis is None:
+        if self.rope_head_dim > 0 and self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
 
         self._propagate_pool_to_nested()
@@ -1085,12 +1153,18 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
-                    _as_bf16_contig(q_for_quant),
-                    _as_bf16_contig(w_for_quant),
-                    attention_inputs.freqs_cis_slice,
-                    self.rope_head_dim,
-                )
+                if self.rope_head_dim > 0:
+                    q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                        _as_bf16_contig(q_for_quant),
+                        _as_bf16_contig(w_for_quant),
+                        attention_inputs.freqs_cis_slice,
+                        self.rope_head_dim,
+                    )
+                else:
+                    q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                        _as_bf16_contig(q_for_quant),
+                        _as_bf16_contig(w_for_quant),
+                    )
 
             assert (
                 has_fp8_mqa_logits()
@@ -1219,7 +1293,7 @@ class IndexerFP8(PoolBackedModule):
             or self._kv_eb <= 0
         ):
             return None
-        if self.compressor.freqs_cis is None:
+        if self.rope_head_dim > 0 and self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
         self._propagate_pool_to_nested()
         kwargs = {
@@ -1278,7 +1352,7 @@ class IndexerFP8(PoolBackedModule):
             self.compressor.finish_prefill(nested_pending)
             return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
 
-        if self.compressor.freqs_cis is None:
+        if self.rope_head_dim > 0 and self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
         # ``set_pool_context`` is idempotent — re-propagating is safe and
         # mirrors ``forward``'s unconditional propagate so callers that
@@ -1299,12 +1373,18 @@ class IndexerFP8(PoolBackedModule):
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
             with record_function_range("dsv4.fp8.indexer.prefill.quant_q_rope"):
-                q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
-                    _as_bf16_contig(q_for_quant),
-                    _as_bf16_contig(w_for_quant),
-                    attention_inputs.freqs_cis_slice,
-                    self.rope_head_dim,
-                )
+                if self.rope_head_dim > 0:
+                    q_fp8, w_fold = indexer_q_rope_fp8_quant_fold(
+                        _as_bf16_contig(q_for_quant),
+                        _as_bf16_contig(w_for_quant),
+                        attention_inputs.freqs_cis_slice,
+                        self.rope_head_dim,
+                    )
+                else:
+                    q_fp8, w_fold = indexer_q_fp8_quant_fold(
+                        _as_bf16_contig(q_for_quant),
+                        _as_bf16_contig(w_for_quant),
+                    )
 
             assert (
                 has_fp8_mqa_logits()

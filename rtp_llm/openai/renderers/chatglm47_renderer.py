@@ -17,6 +17,15 @@ class ChatGlm47Renderer(ChatGlm45Renderer):
     """ChatGLM45Renderer 使用 GLM4MoeDetector 进行工具调用解析"""
 
     @override
+    def in_think_mode(self, request: ChatCompletionRequest) -> bool:
+        # GLM-5.3's checkpoint template always opens a <think> channel for the
+        # assistant turn, so its reasoning must be parsed even when the global
+        # THINK_MODE switch was not set for the service.
+        if self.model_type == "glm5_3_flash":
+            return True
+        return super().in_think_mode(request)
+
+    @override
     def _create_detector(
         self, request: ChatCompletionRequest
     ) -> Optional[BaseFormatDetector]:
@@ -28,3 +37,4 @@ class ChatGlm47Renderer(ChatGlm45Renderer):
 
 
 register_renderer("glm47_moe", ChatGlm47Renderer)
+register_renderer("glm5_3_flash", ChatGlm47Renderer)

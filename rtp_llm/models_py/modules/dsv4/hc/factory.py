@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 import torch
 
@@ -16,7 +17,9 @@ def _mode_from_env() -> HCMode:
         return HCMode(raw)
     except ValueError as exc:
         allowed = ", ".join(m.value for m in HCMode)
-        raise ValueError(f"invalid DSV4_HC_IMPL={raw!r}; expected one of: {allowed}") from exc
+        raise ValueError(
+            f"invalid DSV4_HC_IMPL={raw!r}; expected one of: {allowed}"
+        ) from exc
 
 
 def build_hc_unit(
@@ -31,8 +34,9 @@ def build_hc_unit(
     hc_eps: float,
     layer_id: int = -1,
     name: str = "",
+    mode: Optional[HCMode] = None,
 ) -> HCUnitBase:
-    mode = _mode_from_env()
+    mode = _mode_from_env() if mode is None else mode
     scale = maybe_squeeze_hc_1d(scale)
     if mode is HCMode.TILELANG:
         from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
@@ -74,8 +78,9 @@ def build_hc_head(
     hc_mult: int,
     norm_eps: float,
     hc_eps: float,
+    mode: Optional[HCMode] = None,
 ) -> HCHeadBase:
-    mode = _mode_from_env()
+    mode = _mode_from_env() if mode is None else mode
     scale = maybe_squeeze_hc_1d(scale)
     if mode is HCMode.TILELANG:
         from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCHead

@@ -75,12 +75,14 @@ def get_mla_impl(
             total_kv_tokens = sum(int(value) for value in input_host.tolist())
             if prefix_host is not None and prefix_host.numel():
                 total_kv_tokens += sum(int(value) for value in prefix_host.tolist())
-            use_fast_path = total_kv_tokens <= attn_configs.indexer_topk
+            indexer_raw_capacity = attn_configs.indexer_topk * int(
+                getattr(attn_configs, "indexer_compress_ratio", 1)
+            )
+            use_fast_path = total_kv_tokens <= indexer_raw_capacity
         else:
             use_fast_path = (
                 attn_inputs.is_prefill
-                and attn_inputs.cu_kv_seqlens.max().item()
-                <= attn_configs.indexer_topk
+                and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             )
         use_fast_path = use_fast_path and not (
             parallelism_config and parallelism_config.prefill_cp_config.is_enabled()

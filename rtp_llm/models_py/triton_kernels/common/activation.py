@@ -14,6 +14,8 @@ def _silu_and_mul_kernel(
     # Row strides for jumping between batches
     input_row_stride: tl.int32,
     output_row_stride: tl.int32,
+    CLAMP_LIMIT: tl.constexpr,
+    APPLY_CLAMP: tl.constexpr,
     # Meta-parameter for tuning
     BLOCK_SIZE_N: tl.constexpr,
 ):
@@ -33,6 +35,10 @@ def _silu_and_mul_kernel(
     gate = tl.load(gate_ptrs, mask=mask)
     value = tl.load(value_ptrs, mask=mask)
 
+    if APPLY_CLAMP:
+        value = tl.maximum(tl.minimum(value, CLAMP_LIMIT), -CLAMP_LIMIT)
+        gate = tl.minimum(gate, CLAMP_LIMIT)
+
     silu_gate = gate * tl.sigmoid(gate.to(tl.float32))
     output = silu_gate * value
 
@@ -40,7 +46,9 @@ def _silu_and_mul_kernel(
 
 
 def silu_and_mul(
-    output_tensor: torch.Tensor, input_tensor: torch.Tensor
+    output_tensor: torch.Tensor,
+    input_tensor: torch.Tensor,
+    clamp_limit: float = 0.0,
 ) -> torch.Tensor:
     """
     Computes SiLU(gate) * value in a fused Triton kernel.
@@ -62,6 +70,8 @@ def silu_and_mul(
         N,
         input_tensor.stride(0),
         output_tensor.stride(0),
+        CLAMP_LIMIT=float(clamp_limit),
+        APPLY_CLAMP=clamp_limit > 0,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
     )
     return output_tensor
@@ -113,9 +123,7 @@ def situ_and_mul(
         gate_float = gate.float()
         up_float = up.float()
         activated_gate = (
-            beta
-            * torch.tanh(gate_float / beta)
-            * torch.sigmoid(gate_float)
+            beta * torch.tanh(gate_float / beta) * torch.sigmoid(gate_float)
         )
         if linear_beta is not None:
             up_float = linear_beta * torch.tanh(up_float / linear_beta)
@@ -745,6 +753,8 @@ def _silu_and_mul_post_quant_packed_kernel(
     size_n,
     fp8_max,
     fp8_min,
+    CLAMP_LIMIT: tl.constexpr,
+    APPLY_CLAMP: tl.constexpr,
     BLOCK_N: tl.constexpr,  # group_size (e.g., 128)
     NUM_STAGE: tl.constexpr,
 ):
@@ -811,6 +821,10 @@ def _silu_and_mul_post_quant_packed_kernel(
                 mask=mask,
                 other=0.0,
             )
+
+            if APPLY_CLAMP:
+                up = tl.maximum(tl.minimum(up, CLAMP_LIMIT), -CLAMP_LIMIT)
+                gate = tl.minimum(gate, CLAMP_LIMIT)
 
             # SiLU activation
             gate = gate / (1 + tl.exp(-gate))
@@ -901,6 +915,7 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     output_scale: torch.Tensor,
     quant_group_size: int,
     masked_m: torch.Tensor,
+    clamp_limit: float = 0.0,
 ):
     """
     Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing.
@@ -965,6 +980,8 @@ def silu_and_mul_masked_post_quant_packed_fwd(
         size_n,
         fp8_max,
         fp8_min,
+        CLAMP_LIMIT=float(clamp_limit),
+        APPLY_CLAMP=clamp_limit > 0,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
     )
@@ -1023,6 +1040,8 @@ def _silu_mul_masked_fp8_post_quant_fwd(
     size_n,
     fp8_max,
     fp8_min,
+    CLAMP_LIMIT: tl.constexpr,
+    APPLY_CLAMP: tl.constexpr,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
@@ -1062,6 +1081,9 @@ def _silu_mul_masked_fp8_post_quant_fwd(
             mask=offs_in_d < size_n,
             other=0.0,
         )
+        if APPLY_CLAMP:
+            up = tl.maximum(tl.minimum(up, CLAMP_LIMIT), -CLAMP_LIMIT)
+            gate = tl.minimum(gate, CLAMP_LIMIT)
         gate = gate / (1 + tl.exp(-gate))
         gate_up = up * gate
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
@@ -1090,6 +1112,7 @@ def silu_mul_masked_fp8_post_quant_fwd(
     masked_m: torch.Tensor,
     expected_m: int,
     scale_ue8m0: bool = False,
+    clamp_limit: float = 0.0,
 ):
     """
     SiLU and multiply with masked FP8 post-quantization forward pass.
@@ -1147,6 +1170,8 @@ def silu_mul_masked_fp8_post_quant_fwd(
         size_n,
         fp8_max,
         fp8_min,
+        CLAMP_LIMIT=float(clamp_limit),
+        APPLY_CLAMP=clamp_limit > 0,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
         num_warps=num_warps,

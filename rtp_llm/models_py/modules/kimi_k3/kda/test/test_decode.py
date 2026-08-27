@@ -183,6 +183,83 @@ class KimiK3KDATargetVerifyTest(TestCase):
 
         torch.testing.assert_close(output.reshape(batch * steps, -1), q)
 
+    def test_glm_low_rank_gate_projection_keeps_replicated_beta_layout(self) -> None:
+        module = kda_module.KimiK3KDA.__new__(kda_module.KimiK3KDA)
+        nn.Module.__init__(module)
+        module.projection_size = 2
+        module.forget_latent_size = 1
+        module.total_heads = 4
+        module.local_heads = 2
+        module.attn_tp_rank = 1
+        module.low_rank_output_gate = True
+
+        hidden_states = torch.tensor(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=torch.float32
+        )
+        module.kda_fused_w = torch.arange(33, dtype=torch.float32).reshape(3, 11)
+        module.weights = {
+            W.linear_attn_f_b_w: torch.tensor([[2.0, 3.0]]),
+            W.linear_attn_g_a_w: torch.tensor([[1.0], [2.0], [3.0]]),
+            W.linear_attn_g_b_w: torch.tensor([[5.0, 7.0]]),
+        }
+
+        (
+            mixed_qkv,
+            q,
+            k,
+            v,
+            raw_gate,
+            raw_beta,
+            output_gate,
+        ) = module._project_fused_kda_inputs(
+            hidden_states,
+            prefill_sp_layout=None,
+        )
+
+        projected = hidden_states @ module.kda_fused_w
+        torch.testing.assert_close(mixed_qkv, projected[:, :6])
+        torch.testing.assert_close(q, projected[:, 0:2])
+        torch.testing.assert_close(k, projected[:, 2:4])
+        torch.testing.assert_close(v, projected[:, 4:6])
+        torch.testing.assert_close(
+            raw_gate, projected[:, 6:7] @ module.weights[W.linear_attn_f_b_w]
+        )
+        # beta is replicated by the loader and narrowed to this TP rank here.
+        torch.testing.assert_close(raw_beta, projected[:, 9:11])
+        expected_output_gate = (
+            hidden_states
+            @ module.weights[W.linear_attn_g_a_w]
+            @ module.weights[W.linear_attn_g_b_w]
+        )
+        torch.testing.assert_close(output_gate, expected_output_gate)
+
+    def test_glm_low_rank_gate_rejects_prefill_token_sp(self) -> None:
+        module = kda_module.KimiK3KDA.__new__(kda_module.KimiK3KDA)
+        nn.Module.__init__(module)
+        module.projection_size = 1
+        module.forget_latent_size = 1
+        module.total_heads = 1
+        module.local_heads = 1
+        module.attn_tp_rank = 0
+        module.low_rank_output_gate = True
+        module.kda_fused_w = torch.ones(2, 5)
+        module.weights = {
+            W.linear_attn_f_b_w: torch.ones(1, 1),
+            W.linear_attn_g_a_w: torch.ones(2, 1),
+            W.linear_attn_g_b_w: torch.ones(1, 1),
+        }
+        layout = SimpleNamespace(logical_tokens=1)
+
+        with patch.object(
+            kda_module,
+            "all_gather_gemm",
+            return_value=[torch.ones(1, 5)],
+        ), self.assertRaisesRegex(NotImplementedError, "does not yet support"):
+            module._project_fused_kda_inputs(
+                torch.ones(1, 2),
+                prefill_sp_layout=layout,
+            )
+
 
 if __name__ == "__main__":
     main()

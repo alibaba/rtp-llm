@@ -365,9 +365,10 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # K3 的 Prefill 恒走 FlashMLA(见 MlaFlashMLAPrefillImpl),所以这条
-        # K3 Prefill 不选择 FlashInfer 实现。
-        return False
+        # FlashMLA is registered ahead of this implementation and remains the
+        # preferred K3 path.  Other MLA geometries, including GLM-5.3's
+        # 256-wide NoPE QK/value heads, fall back to FlashInfer.
+        return attn_configs.use_mla and attn_inputs.is_prefill
 
     def _handle_long_sequence(
         self,
@@ -534,11 +535,18 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # Prefill 按 PD 角色固定走 FlashMLA。
+        # Sparse models still need the dense fast path while the whole KV
+        # sequence fits in the indexer's raw capacity. ``get_mla_impl`` owns
+        # that length-dependent choice and filters this implementation for
+        # long sparse requests.
+        # The CUDA13 FlashMLA dense-prefill package used by RTP instantiates
+        # K3's 192-wide QK and 128-wide value kernel.  It aborts the process,
+        # rather than returning an error, for GLM-5.3's 256/256 geometry.
         return (
             attn_configs.use_mla
-            and not attn_configs.is_sparse
             and attn_inputs.is_prefill
+            and attn_configs.nope_head_dim + attn_configs.rope_head_dim == 192
+            and attn_configs.v_head_dim == 128
         )
 
 
@@ -614,32 +622,16 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         return (
             attn_configs.use_mla
-            and (
-                not attn_inputs.is_prefill
-                or is_target_verify
-                or is_mtp_draft_update
-            )
-            and (
-                not attn_configs.is_sparse
-                or is_target_verify
-                or is_mtp_draft_update
-            )
+            and (not attn_inputs.is_prefill or is_target_verify or is_mtp_draft_update)
+            and (not attn_configs.is_sparse or is_target_verify or is_mtp_draft_update)
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
-        is_mtp_draft_update = bool(
-            getattr(attn_inputs, "is_mtp_draft_update", False)
-        )
-        sequence_lengths_d = getattr(
-            attn_inputs, "sequence_lengths_plus_1_d", None
-        )
-        sequence_lengths_host = getattr(
-            attn_inputs, "sequence_lengths_host", None
-        )
-        block_table_d = getattr(
-            attn_inputs, "kv_cache_kernel_block_id_device", None
-        )
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
+        sequence_lengths_d = getattr(attn_inputs, "sequence_lengths_plus_1_d", None)
+        sequence_lengths_host = getattr(attn_inputs, "sequence_lengths_host", None)
+        block_table_d = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
 
         # Normal and MTP draft decode are q=1. Build their bulk metadata with
         # the existing CUDA replay kernel, while retaining only the tiny CPU

@@ -6,11 +6,74 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
 from rtp_llm.server.server_args.server_args import setup_args
 
 
 class GenerateConfigTest(TestCase):
+
+    @patch.dict(
+        "os.environ",
+        {"MODEL_TYPE": "glm5_3_flash", "USE_ALL_GATHER": "0"},
+        clear=True,
+    )
+    def test_glm53_uses_deepgemm_compatible_cache_block_default(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+
+        setup_default_args(py_env_configs)
+
+        self.assertEqual(py_env_configs.kv_cache_config.seq_size_per_block, 128)
+        self.assertEqual(py_env_configs.kv_cache_config.kernel_seq_size_per_block, 128)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "glm5_3_flash",
+            "SEQ_SIZE_PER_BLOCK": "64",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_glm53_rejects_cache_block_with_only_16_indexer_entries(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+
+        with self.assertRaisesRegex(ValueError, "128, 256, or 512"):
+            setup_default_args(py_env_configs)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "glm5_3_flash",
+            "SEQ_SIZE_PER_BLOCK": "256",
+            "KERNEL_SEQ_SIZE_PER_BLOCK": "128",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_glm53_preserves_valid_split_cache_block_override(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+
+        setup_default_args(py_env_configs)
+
+        self.assertEqual(py_env_configs.kv_cache_config.seq_size_per_block, 256)
+        self.assertEqual(py_env_configs.kv_cache_config.kernel_seq_size_per_block, 128)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "glm5_3_flash",
+            "SEQ_SIZE_PER_BLOCK": "192",
+            "KERNEL_SEQ_SIZE_PER_BLOCK": "128",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_glm53_rejects_nondivisible_physical_and_kernel_blocks(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            setup_default_args(py_env_configs)
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).

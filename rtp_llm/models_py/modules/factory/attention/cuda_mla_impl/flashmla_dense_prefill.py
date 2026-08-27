@@ -686,7 +686,7 @@ class MlaFlashMLAPrefillOp:
         k_pe: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
+        flat_k_pe = k_pe.reshape(compressed_kv.shape[0], self.qk_rope_head_dim)
         if not self.has_reuse_cache:
             return compressed_kv, flat_k_pe
         kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(
@@ -756,7 +756,7 @@ class MlaFlashMLAPrefillOp:
         ):
             return None
 
-        flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
+        flat_k_pe = k_pe.reshape(compressed_kv.shape[0], self.qk_rope_head_dim)
         kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(
             compressed_kv, kv_cache
         )
@@ -1069,7 +1069,9 @@ class MlaFlashMLAPrefillOp:
             # and round only once after the last historical-prefix chunk.
             output = output.float()
 
-        flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim).contiguous()
+        flat_k_pe = k_pe.reshape(
+            compressed_kv.shape[0], self.qk_rope_head_dim
+        ).contiguous()
         reuse_cache_page_indice = self._current_reuse_cache_page_indices()
         fused_prefix_gather = getattr(
             rtp_llm_ops, "gather_mla_latent_and_fill_k_pe", None

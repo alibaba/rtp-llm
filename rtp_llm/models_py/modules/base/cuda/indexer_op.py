@@ -7,6 +7,7 @@ from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.modules.base.cuda.hadamard import normalized_hadamard_transform
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
@@ -53,14 +54,12 @@ def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         Rotated activation tensor
     """
     assert x.dtype == torch.bfloat16
-    from fast_hadamard_transform import hadamard_transform
-
     hidden_size = x.size(-1)
     assert (
         hidden_size & (hidden_size - 1)
     ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
 
-    return hadamard_transform(x, scale=hidden_size**-0.5)
+    return normalized_hadamard_transform(x)
 
 
 class IndexerOp(nn.Module):
@@ -603,9 +602,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None
