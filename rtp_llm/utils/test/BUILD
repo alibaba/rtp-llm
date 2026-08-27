@@ -134,6 +134,7 @@ py_test(
     ],
     deps = [
         "//rtp_llm:utils",
+        "//rtp_llm:protobuf",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
     ],
 )

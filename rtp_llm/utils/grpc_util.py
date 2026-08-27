@@ -51,7 +51,7 @@ def trans_from_tensor(t: torch.Tensor, res: TensorPB | None = None):
         res.Clear()
     if t is None or t.numel() == 0:
         return res
-    # RPC serialization is an inference boundary.  Callers may still hand us
+    # RPC serialization is an inference boundary. Callers may still hand us
     # tensors produced by an autograd-enabled module, and NumPy rejects such
     # tensors even though gradients are never meaningful on the wire.
     t = t.detach().cpu()
