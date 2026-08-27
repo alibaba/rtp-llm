@@ -1281,3 +1281,126 @@ def e3_worker_fail(ctx: CaseContext):
     return _anomaly_error_case(
         ctx, {"enqueue_error": True}, ANOMALY_STREAM_TIMEOUT_S, True
     )
+
+
+@case(
+    "smoke_anomaly_e4",
+    modes=["batch", "direct"],
+    source="decode-side anomaly gap (G1) — new",
+)
+def e4_decode_capacity_exhausted(ctx: CaseContext):
+    """Decode-side anomaly: every decode engine KV-exhausted -> scheduling is
+    rejected fail-fast; clear the pressure -> fresh request recovers.
+
+    Why KV pressure and not the E-series ops.inject faults: a decode engine
+    in the Java mock never receives traffic through any gRPC entry point.
+    After prefill completes, the request is handed off IN-PROCESS
+    (JavaMockEngineCluster.FastRpcService.startDecode ->
+    scheduleDecodeCompletion), so enqueue_error / generate_error /
+    fetch_error — all checked at the enqueueBatch / generateStreamCall /
+    fetchResponse RPC entries — never fire for a decode engine, and
+    no_respond on decode only suppresses the "intermediate first-step
+    output" which the mock never produces (each request yields exactly one
+    finished message).  The one decode-side anomaly observable e2e is KV
+    capacity: the master's decode selector (COST_BASED_DECODE) hard-filters
+    every decode endpoint whose available_kv_tokens < seq_len
+    (KV_CAPACITY rejection) plus the kv-usage% availability gate, so
+    exhausting every decode engine's KV must fail scheduling with
+    NO_AVAILABLE_WORKER instead of hanging or erroring 500.
+
+    Scenario: set active_kv_tokens = total on every decode engine -> the
+    next schedule must be rejected (correct fail-fast error, not a hang);
+    the rejection must leave no inflight residue; clearing the pressure
+    must let a fresh request complete again.
+
+    batch/direct only: queue mode's soft queue placement does not apply the
+    KV hard filter at decode selection (requests legitimately queue), so
+    the fail-fast assertion does not hold there.
+    """
+    ops = ctx.ops()
+    base = rid_base(ctx, "anomaly")
+    injected: list[str] = []
+    try:
+        snap = ops.snapshot_by_name()
+        decode_names = sorted(
+            name for name, e in snap.items() if e.get("role") == "decode"
+        )
+        if not decode_names:
+            return False, "no decode workers found"
+
+        # Exhaust every decode engine: active = total -> available = 0.
+        for name in decode_names:
+            info = snap[name]
+            total_kv = int(info.get("available_kv_tokens", 0)) + int(
+                info.get("active_kv_tokens", 0)
+            )
+            ops.set_kv_pressure(name, total_kv)
+            injected.append(name)
+        time.sleep(1.5)  # master worker-status sync
+
+        # Probe until the master's view reflects the exhaustion.  A probe
+        # that still succeeds raced the sync window — consume its stream to
+        # terminal state so no inflight residue is left behind (S4 lesson:
+        # fire-and-forget streams poison later inflight assertions).
+        rejected_detail = ""
+        probes_accepted = 0
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            rid = ops.next_request_id(base)
+            response = ops.schedule(rid)
+            if response.code != 200 or not response.success:
+                rejected_detail = (
+                    f"code={response.code}, error={response.error_message}"
+                )
+                break
+            probes_accepted += 1
+            input_pb = (
+                None if response.enqueued_by_master else ops.build_generate_input(rid)
+            )
+            ops.start_stream(response, rid, input_pb=input_pb).wait_end(15.0)
+            time.sleep(0.3)
+        error_observed = bool(rejected_detail)
+
+        # Clear the pressure on every decode engine.
+        for name in injected:
+            try:
+                ops.set_kv_pressure(name, 0)
+            except Exception:
+                pass
+        time.sleep(2.0)  # master worker-status sync (recovery view)
+
+        # Recovery must be functional, not just cosmetic: a fresh request
+        # must schedule and complete again once the pressure is cleared
+        # (distinguishes "health flag back to green" from "actually able
+        # to route decode again").
+        rid_rec = ops.next_request_id(base)
+        rec_addr, rec_err = ops.run_one_request(
+            rid_rec, output_len=2, stream_timeout_s=STREAM_TIMEOUT_S
+        )
+
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        if ctx.mode == "batch":
+            inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+                _master_http(ops), 10.0
+            )
+        else:
+            inflight_ok, inflight_detail = True, "N/A (non-batch path)"
+        passed = error_observed and rec_err is None and recovery_ok and inflight_ok
+        return passed, (
+            f"error_observed={error_observed} "
+            f"({rejected_detail or 'never rejected'}), "
+            f"probes_accepted_before_reject={probes_accepted}, "
+            f"decode_engines={len(injected)}, "
+            f"recovered_request_ok={rec_err is None}"
+            f"(prefill={rec_addr}, err={rec_err}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        for name in injected:
+            try:
+                ops.set_kv_pressure(name, 0)
+            except Exception:
+                pass
