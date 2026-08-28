@@ -104,6 +104,13 @@ class KvAllocatedSameTickAtomicityTest {
         assertTrue(settled.inflight().containsKey(REQUEST_C));
         assertFalse(settled.confirmedReservationTokens()
                 .containsKey(REQUEST_C));
+        // Stage-1 fix E5: the kv counters (the aggregate mirror of layer 1)
+        // decrement by exactly the retired reservations in the same tick —
+        // A(500/700) and B(300/400) leave, C(200/250) stays.
+        assertEquals(200L, settled.inflightKvReservedTotal(),
+                "kv counter must drop with the same-tick retirement");
+        assertEquals(250L, settled.inflightExpectedKvReservedTotal(),
+                "expected-kv counter must drop with the same-tick");
     }
 
     @Test
@@ -115,6 +122,10 @@ class KvAllocatedSameTickAtomicityTest {
         assertTrue(before.queuedPhaseRequestIds().contains(REQUEST_A));
         assertTrue(before.engineDispatchPermitRequestIds()
                 .contains(REQUEST_A));
+        // Stage-1 fix E5: the counters reflect the live layer-1 reservation
+        // before the tick.
+        assertEquals(500L, before.inflightKvReservedTotal());
+        assertEquals(700L, before.inflightExpectedKvReservedTotal());
 
         TaskInfo running = task(REQUEST_A);
         running.setPhase(TaskPhase.KV_ALLOCATED);
@@ -127,6 +138,10 @@ class KvAllocatedSameTickAtomicityTest {
         assertTrue(after.confirmedReservationTokens()
                 .containsKey(REQUEST_A));
         assertFalse(after.inflight().containsKey(REQUEST_A));
+        // And the counters fall to zero together with the retirement —
+        // no leaked aggregate after the layer-1 exit.
+        assertEquals(0L, after.inflightKvReservedTotal());
+        assertEquals(0L, after.inflightExpectedKvReservedTotal());
     }
 
     /**

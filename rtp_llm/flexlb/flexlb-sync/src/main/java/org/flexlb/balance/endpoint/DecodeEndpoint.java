@@ -1405,43 +1405,78 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * reconciliation (plan section 6, stage 1 three-way comparison).
      *
      * <p>Pure addition: this view changes no layer semantics and never
-     * mutates state.  It is captured under the canonical admission lock so
-     * all eight layers are one consistent snapshot — the same linearization
-     * guarantee the KV_ALLOCATED same-tick handover relies on.</p>
+     * mutates state.  <b>Capture consistency contract (stage-1 fix D1):</b>
+     * the five HashMap-backed layers (L2 count, L4 claims, L4b attempt
+     * incoming, L5 protections, L6 tombstones) are copied inside one short
+     * admission-lock critical section — O(|claims|+|protections|+|tombstones|),
+     * never O(|L1|) — while the four concurrent-container layers (L1
+     * inflight, L3 confirmed, L7 queued phase, L8 dispatch permits) are
+     * copied lock-free right after it, each individually atomic (weakly
+     * consistent iterator) but mutually unaligned by up to one admission
+     * tick.  Cross-layer tears in this window are exactly what the
+     * harness confirm-window absorbs; the lock budget no longer scales
+     * with the running-request count, so the 10 ms reconciliation period
+     * cannot squeeze {@code admission} / {@code doCalibrate}.</p>
      */
     public DecodeLedgerAuditView ledgerAuditView() {
+        // Phase 1 — admission lock: admissionVersion plus the five
+        // HashMap-backed layers (small key sets; the critical section is
+        // bounded by the preemption / fence / tombstone populations, not
+        // by the running-request population).
+        final long version;
+        final int lifecycleReservationCount;
+        final Set<Long> claimRequestIds;
+        final Set<Long> attemptIncomingRequestIds;
+        final Set<Long> fenceProtectedRequestIds;
+        final Set<Long> settledRequestIds;
         admissionLock.lock();
         try {
-            Map<Long, Long> confirmedTokens = new HashMap<>();
-            trackedConfirmed.forEach((requestId, task) ->
-                    confirmedTokens.put(requestId, task.reservationToken()));
+            version = admissionVersion.get();
+            lifecycleReservationCount = engineLifecycleReservations.size();
+            claimRequestIds = Set.copyOf(preemptionClaims.keySet());
             Set<Long> attemptIncoming = new HashSet<>();
-            for (EndpointPreemptionAttempt attempt : preemptionAttempts.values()) {
+            for (EndpointPreemptionAttempt attempt
+                    : preemptionAttempts.values()) {
                 attemptIncoming.add(attempt.incomingRequestId);
             }
-            return new DecodeLedgerAuditView(
-                    admissionVersion.get(),
-                    Map.copyOf(inflightRequests),
-                    engineLifecycleReservations.size(),
-                    Map.copyOf(confirmedTokens),
-                    Set.copyOf(preemptionClaims.keySet()),
-                    Set.copyOf(attemptIncoming),
-                    Set.copyOf(engineFenceProtections.keySet()),
-                    Set.copyOf(settledTombstones.keySet()),
-                    Set.copyOf(queuedPhase),
-                    Set.copyOf(engineDispatchPermits.keySet()));
+            attemptIncomingRequestIds = Set.copyOf(attemptIncoming);
+            fenceProtectedRequestIds =
+                    Set.copyOf(engineFenceProtections.keySet());
+            settledRequestIds = Set.copyOf(settledTombstones.keySet());
         } finally {
             admissionLock.unlock();
         }
+        // Phase 2 — lock-free: the four concurrent-container layers, each
+        // an individually atomic weakly-consistent snapshot.
+        Map<Long, Long> confirmedTokens = new HashMap<>();
+        trackedConfirmed.forEach((requestId, task) ->
+                confirmedTokens.put(requestId, task.reservationToken()));
+        return new DecodeLedgerAuditView(
+                version,
+                Map.copyOf(inflightRequests),
+                lifecycleReservationCount,
+                Map.copyOf(confirmedTokens),
+                claimRequestIds,
+                attemptIncomingRequestIds,
+                fenceProtectedRequestIds,
+                settledRequestIds,
+                Set.copyOf(queuedPhase),
+                Set.copyOf(engineDispatchPermits.keySet()),
+                inflightKvReservedTotal.get(),
+                inflightExpectedKvReservedTotal.get());
     }
 
     /**
      * Immutable audit tuple over the eight endpoint layers, mapped onto the
-     * slot resource-row authorities (plan 3.1 item 2):
+     * slot resource-row authorities (plan 3.1 item 2) — the single
+     * authoritative eight-layer consolidation table:
      * <ol>
      *   <li>L1 {@code inflightRequests} — A-road master reservations; slot
      *       pRow mirrors these numerics until the KV_ALLOCATED critical
-     *       point.</li>
+     *       point.  {@code inflightKvReservedTotal} /
+     *       {@code inflightExpectedKvReservedTotal} carry the L1 aggregate
+     *       KV counters (same-tick decrement contract as the layer-1
+     *       entries themselves).</li>
      *   <li>L2 {@code engineLifecycleReservations} — engine-lifecycle
      *       markers; count only (identities stay engine-side).</li>
      *   <li>L3 {@code trackedConfirmed} — B-road engine projection; slot
@@ -1466,7 +1501,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             Set<Long> engineFenceProtectedRequestIds,
             Set<Long> settledTombstoneRequestIds,
             Set<Long> queuedPhaseRequestIds,
-            Set<Long> engineDispatchPermitRequestIds) {
+            Set<Long> engineDispatchPermitRequestIds,
+            long inflightKvReservedTotal,
+            long inflightExpectedKvReservedTotal) {
     }
 
     /**
