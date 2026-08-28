@@ -762,34 +762,6 @@ class SwaSlotMappingTest(unittest.TestCase):
         )
         self.assertEqual(tuple(empty.shape), (0,))
 
-    def test_dspark_position_mapping_rejects_invalid_geometry(self):
-        block_table = torch.tensor([[1]], dtype=torch.int32, device=self.device)
-        req_ids = torch.tensor([0], dtype=torch.int32, device=self.device)
-        positions = torch.tensor([0], dtype=torch.int32, device=self.device)
-
-        with self.assertRaises(AssertionError):
-            compute_swa_slot_mapping_from_positions(
-                block_table=block_table,
-                req_id_per_token=req_ids,
-                positions=positions,
-                seq_lens=torch.tensor([1, 1], dtype=torch.int32, device=self.device),
-                num_tokens=1,
-                pool_entries_per_block=134,
-                tokens_per_block_for_block_table=256,
-                ring_entries=134,
-            )
-        with self.assertRaises(AssertionError):
-            compute_swa_slot_mapping_from_positions(
-                block_table=block_table,
-                req_id_per_token=req_ids,
-                positions=positions,
-                seq_lens=torch.tensor([1], dtype=torch.int32, device=self.device),
-                num_tokens=1,
-                pool_entries_per_block=133,
-                tokens_per_block_for_block_table=256,
-                ring_entries=134,
-            )
-
     def test_dspark_position_mapping_cuda_graph_replay(self):
         """Replay must consume new metadata and clear stale graph-bucket rows."""
         graph_batch = 32

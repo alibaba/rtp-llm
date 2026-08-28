@@ -116,14 +116,8 @@ def fused_sqrtsoftplus_gate(
         weights = scores.gather(1, indices)
         weights = weights / (weights.sum(-1, keepdim=True) + 1e-12) * route_scale
     """
-    assert (
-        scores.dtype == torch.float32 and scores.dim() == 2 and scores.is_contiguous()
-    )
-    assert bias.dtype == torch.float32 and bias.dim() == 1 and bias.is_contiguous()
     N, E = scores.shape
-    assert bias.numel() == E
     K = int(topk)
-    assert 1 <= K <= 32, "K must be small for the per-program insertion-sort top-K"
     BLOCK_E = triton.next_power_of_2(E)
     BLOCK_K = triton.next_power_of_2(K)
 

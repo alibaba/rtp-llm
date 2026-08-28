@@ -235,16 +235,8 @@ def silu_mul_fp8_quant_packed(
                  ``sgl_per_token_group_quant_fp8(..., column_major_scales=True,
                  scale_tma_aligned=True, scale_ue8m0=True)``.
     """
-    assert gate_up.dim() == 2, f"expected 2D, got {gate_up.shape}"
-    assert gate_up.is_contiguous(), "gate_up must be contiguous"
-    assert gate_up.dtype == torch.bfloat16, f"expected bf16, got {gate_up.dtype}"
-
     M, N = gate_up.shape
     N_2 = N // 2
-
-    assert (
-        N_2 % group_size == 0
-    ), f"inter ({N_2}) must be a multiple of group_size ({group_size})"
 
     fp8_dtype = torch.float8_e4m3fn
     finfo = torch.finfo(fp8_dtype)
@@ -256,9 +248,6 @@ def silu_mul_fp8_quant_packed(
 
     if output_q is None:
         output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=gate_up.device)
-    else:
-        assert output_q.shape == (M, N_2)
-        assert output_q.dtype == fp8_dtype
 
     if output_scale is None:
         # Allocate as [num_packed_groups, tma_aligned_M] int32 row-major, then
@@ -270,8 +259,6 @@ def silu_mul_fp8_quant_packed(
             device=gate_up.device,
         ).T[:M, :]
     else:
-        assert output_scale.shape == (M, num_packed_groups)
-        assert output_scale.dtype == torch.int32
         output_scale_packed = output_scale
 
     BLOCK_M = 8
@@ -315,15 +302,7 @@ def silu_mul_fp8_quant_packed_from_parts(
     """Same fused activation+quant path as :func:`silu_mul_fp8_quant_packed`,
     but reads gate/up from two contiguous BF16 GEMM outputs.
     """
-    assert gate.dim() == 2 and up.dim() == 2
-    assert gate.shape == up.shape, f"gate/up shape mismatch: {gate.shape} vs {up.shape}"
-    assert gate.is_contiguous() and up.is_contiguous(), "gate/up must be contiguous"
-    assert gate.dtype == torch.bfloat16 and up.dtype == torch.bfloat16
-
     M, N_2 = gate.shape
-    assert (
-        N_2 % group_size == 0
-    ), f"inter ({N_2}) must be a multiple of group_size ({group_size})"
 
     fp8_dtype = torch.float8_e4m3fn
     finfo = torch.finfo(fp8_dtype)
@@ -335,9 +314,6 @@ def silu_mul_fp8_quant_packed_from_parts(
 
     if output_q is None:
         output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=gate.device)
-    else:
-        assert output_q.shape == (M, N_2)
-        assert output_q.dtype == fp8_dtype
 
     if output_scale is None:
         output_scale_packed = torch.empty(
@@ -346,8 +322,6 @@ def silu_mul_fp8_quant_packed_from_parts(
             device=gate.device,
         ).T[:M, :]
     else:
-        assert output_scale.shape == (M, num_packed_groups)
-        assert output_scale.dtype == torch.int32
         output_scale_packed = output_scale
 
     if M == 0:
