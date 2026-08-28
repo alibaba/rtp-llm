@@ -334,6 +334,27 @@ def forward_layers(
     owned KV regions are registered with the PD-disagg cache_store immediately
     after that layer's forward.
     """
+    # Allocate the max-sized workspace before CP metadata, embedding, or any
+    # other forward-local CUDA tensor.  If embedding lands in the cached block
+    # first, it can split the only contiguous region large enough for this
+    # allocation and force the expandable allocator to map another region.
+    ws: Optional[PrefillWorkspace] = None
+    if v4.fp8_kv_cache:
+        reserve_cp = (
+            getattr(v4, "_cp_info", None) is not None
+            and int(getattr(v4, "_cp_size", 1)) > 1
+            and int(v4._prefill_ws_full_rows) > 0
+        )
+        ws = PrefillWorkspace(
+            input_ids.device,
+            q_rows=v4._prefill_ws_q_rows,
+            q_dim=v4._prefill_ws_q_dim,
+            reserve_cp=reserve_cp,
+            cp_rows=v4._prefill_ws_full_rows,
+            main_w=v4._prefill_ws_main_w,
+            idx_w=v4._prefill_ws_idx_w,
+        )
+
     # Build + propagate CP context once per prefill step. Under CP the
     # caller hands us a per-rank chunk slice (T_local = chunk_length),
     # and each attn / compressor / indexer reads ``cp_ctx`` off the
@@ -471,34 +492,10 @@ def forward_layers(
                     prefix_lengths = pl.to(
                         device=positions.device, dtype=torch.int32
                     ).contiguous()
-            # Per-forward prefill workspace: one runtime buffer allocated at the
-            # top of the forward, freed when ``forward_layers`` returns (so the
-            # MTP draft forward, which runs right after on a near-full card, can
-            # borrow it). Holds the prefill-Q output (eager) and — whenever CP is
-            # active — the main + indexer compressor CP gather/restore scratch
-            # (dedicated buffer pairs per role, used by BOTH the serial and
-            # overlap paths for the workspace-backed roles). Sizing is MAX
-            # (capacity-bound, runtime-length-independent) so every forward
-            # allocates the same-sized block → zero allocator fragmentation,
-            # IDENTICAL across main and MTP-draft forwards (the draft overrides
-            # ``_resolve_prefill_ws_gather_widths`` to size off the main model's
-            # ratios — see ``deepseek_v4_mtp_model``). Current-layer SWA ``kv_full``
-            # all-gather is intentionally not workspace-backed.
-            #
-            # ``reserve_cp`` gates the CP region; we cannot derive it from
-            # ``compress_ratio != 0`` on the layers because the workspace is bound
-            # once for the whole prefill forward. The bound ``_prefill_ws_full_rows>0``
-            # is the canonical signal that CP is active at workspace bind time.
-            reserve_cp = (cp_ctx is not None) and int(v4._prefill_ws_full_rows) > 0
-            ws = PrefillWorkspace(
-                input_ids.device,
-                q_rows=v4._prefill_ws_q_rows,
-                q_dim=v4._prefill_ws_q_dim,
-                reserve_cp=reserve_cp,
-                cp_rows=v4._prefill_ws_full_rows,
-                main_w=v4._prefill_ws_main_w,
-                idx_w=v4._prefill_ws_idx_w,
-            )
+            # The max-sized workspace was allocated at function entry, before
+            # embedding could fragment its cached address range.  It remains a
+            # per-forward local so the MTP draft can reuse the block immediately.
+            assert ws is not None
             build_and_propagate_prefill_meta_fp8(
                 v4,
                 h,
