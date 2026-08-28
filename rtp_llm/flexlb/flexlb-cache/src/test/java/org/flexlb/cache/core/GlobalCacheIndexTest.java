@@ -3,12 +3,17 @@ package org.flexlb.cache.core;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.flexlb.cache.domain.CacheMatch;
+import org.flexlb.cache.domain.EngineGeneration;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -19,25 +24,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @ExtendWith(MockitoExtension.class)
 class GlobalCacheIndexTest {
 
-    private GlobalCacheIndex globalCacheIndex;
+    private TestGlobalCacheIndex globalCacheIndex;
 
     @BeforeEach
     void setUp() {
-        globalCacheIndex = new GlobalCacheIndex();
+        globalCacheIndex = new TestGlobalCacheIndex();
     }
 
     @Test
     void testEmptyInput() {
         // Test empty input cases
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(
                 Collections.emptyList(), Arrays.asList(1L, 2L, 3L));
         assertTrue(result.isEmpty(), "Empty engines should return empty result");
 
-        result = globalCacheIndex.batchCalculatePrefixMatchLength(
+        result = globalCacheIndex.prefixMatches(
                 Arrays.asList("engine1", "engine2"), Collections.emptyList());
         assertTrue(result.isEmpty(), "Empty blocks should return empty result");
 
-        result = globalCacheIndex.batchCalculatePrefixMatchLength(null, null);
+        result = globalCacheIndex.prefixMatches(null, null);
         assertTrue(result.isEmpty(), "Null inputs should return empty result");
     }
 
@@ -57,7 +62,7 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         // Verify results
         assertEquals(3, result.get("engine1").intValue(), "Engine1 should match all 3 blocks");
@@ -74,7 +79,7 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         assertEquals(0, result.get("engine1").intValue(), "Engine1 should have 0 prefix match");
         assertEquals(0, result.get("engine2").intValue(), "Engine2 should have 0 prefix match");
@@ -93,7 +98,7 @@ class GlobalCacheIndexTest {
             }
         }
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         for (String engine : engines) {
             assertEquals(4, result.get(engine).intValue(), "All engines should match all 4 blocks");
@@ -112,7 +117,7 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         assertEquals(2, result.get("engine1").intValue(), "Engine1 should match 2 blocks before termination");
         assertEquals(1, result.get("engine2").intValue(), "Engine2 should match 1 block before termination");
@@ -138,7 +143,7 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2", "engine3", "engine4");
         List<Long> blocks = Arrays.asList(1L, 2L, 3L, 4L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         assertEquals(4, result.get("engine1").intValue(), "Engine1 should match all blocks");
         assertEquals(3, result.get("engine2").intValue(), "Engine2 should match first 3 blocks");
@@ -151,7 +156,7 @@ class GlobalCacheIndexTest {
         // Test single block single engine case
         globalCacheIndex.addCacheBlock(1L, "engine1");
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(
                 List.of("engine1"), List.of(1L));
 
         assertEquals(1, result.get("engine1").intValue(), "Single engine should match single block");
@@ -165,7 +170,7 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 999L); // 999L does not exist
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         assertEquals(1, result.get("engine1").intValue(), "Engine1 should match first block only");
         assertEquals(0, result.get("engine2").intValue(), "Engine2 should have no matches");
@@ -185,7 +190,7 @@ class GlobalCacheIndexTest {
         List<String> engines = Arrays.asList("engine1", "engine2");
         List<Long> blocks = Arrays.asList(1L, 2L);
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         assertEquals(2, result.get("engine1").intValue(), "Engine1 should still match both blocks");
         assertEquals(1, result.get("engine2").intValue(), "Engine2 should match only first block after removal");
@@ -205,12 +210,59 @@ class GlobalCacheIndexTest {
             }
         }
 
-        Map<String, Integer> result = globalCacheIndex.batchCalculatePrefixMatchLength(engines, blocks);
+        Map<String, Integer> result = globalCacheIndex.prefixMatches(engines, blocks);
 
         assertEquals(10, result.get("engine1").intValue(), "Engine1 should match 10 blocks");
         assertEquals(9, result.get("engine2").intValue(), "Engine2 should match 9 blocks");
         assertEquals(8, result.get("engine3").intValue(), "Engine3 should match 8 blocks");
         assertEquals(7, result.get("engine4").intValue(), "Engine4 should match 7 blocks");
         assertEquals(6, result.get("engine5").intValue(), "Engine5 should match 6 blocks");
+    }
+
+    /** Keeps individual test setup concise while exercising only fenced APIs. */
+    private static final class TestGlobalCacheIndex extends GlobalCacheIndex {
+        private static final long GENERATION = 1L;
+        private final Map<String, Set<Long>> engineBlocks = new HashMap<>();
+
+        private void addCacheBlock(Long block, String engine) {
+            Set<Long> current = engineBlocks.computeIfAbsent(
+                    engine, ignored -> new HashSet<>());
+            if (!current.add(block)) {
+                return;
+            }
+            activateEngineGeneration(engine, GENERATION);
+            replaceEngineCache(engine, GENERATION, Set.copyOf(current));
+        }
+
+        private void removeCacheBlock(String engine, Long block) {
+            Set<Long> current = engineBlocks.get(engine);
+            if (current == null || !current.remove(block)) {
+                return;
+            }
+            replaceEngineCache(engine, GENERATION, Set.copyOf(current));
+        }
+
+        private Map<String, Integer> prefixMatches(
+                List<String> engines, List<Long> blocks) {
+            if (engines == null || engines.isEmpty()
+                    || blocks == null || blocks.isEmpty()) {
+                return Map.of();
+            }
+            List<EngineGeneration> generations = engines.stream()
+                    .map(engine -> {
+                        activateEngineGeneration(engine, GENERATION);
+                        return new EngineGeneration(engine, GENERATION);
+                    })
+                    .toList();
+            Map<EngineGeneration, CacheMatch> matches =
+                    batchCalculatePrefixMatches(generations, blocks);
+            Map<String, Integer> result = new HashMap<>();
+            for (EngineGeneration generation : generations) {
+                CacheMatch match = matches.get(generation);
+                result.put(generation.address(),
+                        match == null ? 0 : match.prefixMatchLength());
+            }
+            return Map.copyOf(result);
+        }
     }
 }

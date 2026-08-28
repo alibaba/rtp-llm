@@ -31,6 +31,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final String site;
     private final RoleType roleType;
     private final WorkerStatus workerStatus;
+    private final long generationId;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
@@ -62,6 +63,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
         this.modelName = modelName;
         this.workerStatus = workerStatus;
+        this.generationId = workerStatus.getGenerationId();
         this.site = site;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
@@ -118,14 +120,23 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                             } else {
                                 handleCacheStatusResponse(cacheStatus, startTime);
                             }
+                        } catch (Throwable callbackFailure) {
+                            logger.error("Cache status callback failed for {}",
+                                    ipPort, callbackFailure);
                         } finally {
-                            workerStatus.getCacheCheckInProgress().set(false);
+                            workerStatus.endCachePoll();
                         }
-                    }, callbackExecutor);
+                    }, callbackExecutor)
+                    .exceptionally(callbackSchedulingFailure -> {
+                        workerStatus.endCachePoll();
+                        logger.error("Cache status callback was not scheduled for {}",
+                                ipPort, callbackSchedulingFailure);
+                        return null;
+                    });
             asyncInitiated = true;
         } finally {
             if (!asyncInitiated) {
-                workerStatus.getCacheCheckInProgress().set(false);
+                workerStatus.endCachePoll();
             }
         }
     }
@@ -144,15 +155,25 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     modelName, roleType.name(), startTime);
 
             if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
-
-                workerStatus.setCacheStatus(newCacheStatus);
-                updateLocalKvCache(workerStatus);
+                if (isCacheProducingRole()) {
+                    WorkerCacheUpdateResult updateResult =
+                            updateLocalKvCache(newCacheStatus);
+                    if (updateResult == null || !updateResult.isSuccess()) {
+                        if (updateResult != null
+                                && updateResult.isStaleGeneration()) {
+                            logger.debug(
+                                    "Ignore stale cache callback for {}#{}",
+                                    ipPort, generationId);
+                        }
+                        return;
+                    }
+                }
+                workerStatus.publishCacheStatus(newCacheStatus);
                 logCacheStatusUpdate(newCacheStatus, startTime);
             }
 
+            workerStatus.recordSuccessfulCachePoll();
             engineHealthReporter.reportCacheStatusCheckerSuccess(modelName, workerStatus);
-            workerStatus.getCacheLastUpdateTime().set(System.nanoTime() / 1000);
-
         } catch (Throwable e) {
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
             engineHealthReporter.reportCacheStatusCheckerFail(
@@ -188,22 +209,50 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 DynamicCacheIntervalService.getCurrentIntervalMs());
     }
 
-    private void updateLocalKvCache(WorkerStatus workerStatus) {
+    private WorkerCacheUpdateResult updateLocalKvCache(
+            CacheStatus cacheStatus) {
         try {
-            if (!RoleType.PREFILL.equals(roleType) && !RoleType.PDFUSION.equals(roleType)) {
-                return;
-            }
-            WorkerCacheUpdateResult result = cacheAwareService.updateEngineBlockCache(workerStatus);
-            if (!result.isSuccess()) {
-                logger.debug("Failed to update worker cache for IP: {}, error: {}", workerStatus.getIp(), result.getErrorMessage());
+            WorkerCacheUpdateResult result =
+                    cacheAwareService.updateEngineBlockCache(
+                            ipPort,
+                            roleType,
+                            generationId,
+                            cacheStatus);
+            if (result == null) {
+                logger.debug(
+                        "Cache service returned no update result for {}#{}",
+                        ipPort, generationId);
                 engineHealthReporter.reportCacheStatusCheckerFail(
                         modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+                return null;
             }
+            if (!result.isSuccess()) {
+                logger.debug(
+                        "Cache update rejected for {}#{}, outcome:{}, error:{}",
+                        ipPort,
+                        generationId,
+                        result.getOutcome(),
+                        result.getErrorMessage());
+                if (!result.isStaleGeneration()) {
+                    engineHealthReporter.reportCacheStatusCheckerFail(
+                            modelName,
+                            BalanceStatusEnum.CACHE_UPDATE_FAILED,
+                            roleType);
+                }
+            }
+            return result;
         } catch (Exception e) {
-            logger.debug("Exception to update worker cache for IP: {}, error: {}", workerStatus.getIp(), e.getMessage());
+            logger.debug("Exception to update worker cache for {}#{}: {}",
+                    ipPort, generationId, e.getMessage());
             engineHealthReporter.reportCacheStatusCheckerFail(
                     modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+            return null;
         }
+    }
+
+    private boolean isCacheProducingRole() {
+        return RoleType.PREFILL.equals(roleType)
+                || RoleType.PDFUSION.equals(roleType);
     }
 
     private void log(String msg) {

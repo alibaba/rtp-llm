@@ -1,8 +1,6 @@
 package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -10,13 +8,13 @@ import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.enums.TaskPhase;
 import org.springframework.stereotype.Component;
 
-import org.flexlb.util.Logger;
-
 import java.util.Map;
 
 /**
- * Prefill role resource measure
- * Availability criteria: queue wait time below threshold
+ * Prefill availability derived from coherent pending-request ownership.
+ *
+ * <p>The hard gate is the configured pending request count, not an estimated
+ * millisecond duration.
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -24,45 +22,31 @@ import java.util.Map;
 @Component
 public class PrefillResourceMeasure implements ResourceMeasure {
     private final long maxPendingRequests;
-    private final long hysteresisBiasPercent;
     private final long prefillSaturatedAtPendingRequests;
 
     public PrefillResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
         this.maxPendingRequests = config.getRouter().getRoles().getPrefill()
                 .getAvailability().getMaxPendingRequests();
-        this.hysteresisBiasPercent = config.getRouter().getAvailabilityHysteresisPercent();
         this.prefillSaturatedAtPendingRequests = config.getInternalRuntime()
                 .getPrefillSaturatedAtPendingRequests();
     }
 
-    @Override
-    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
-        if (endpoint instanceof PrefillEndpoint) {
-            return isResourceAvailable((PrefillEndpoint) endpoint);
+    /**
+     * Evaluate availability from one caller-owned canonical pending-count
+     * snapshot. The configured hysteresis remains loadable for configuration
+     * compatibility, but routing readers do not persist availability state.
+     */
+    public boolean isResourceAvailable(long pendingRequests) {
+        if (pendingRequests < 0L) {
+            throw new IllegalArgumentException("pendingRequests must be non-negative");
         }
-        return ResourceMeasure.super.isResourceAvailable(endpoint);
-    }
-
-    public boolean isResourceAvailable(PrefillEndpoint endpoint) {
-        if (endpoint == null || !endpoint.getStatus().isAlive()) {
-            return false;
-        }
-        long pendingRequests = endpoint.realPendingCount();
-        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(
-                pendingRequests, maxPendingRequests, hysteresisBiasPercent);
-        if (!available) {
-            Logger.debug("Prefill worker {} resource unavailable: pendingRequests={}, "
-                            + "maxPendingRequests={}, alive={}",
-                    endpoint.getIp(), pendingRequests, maxPendingRequests,
-                    endpoint.getStatus().isAlive());
-        }
-        return available;
+        return pendingRequests < maxPendingRequests;
     }
 
     @Override
     public ResourceMeasureIndicatorEnum getResourceMeasureIndicator() {
-        return ResourceMeasureIndicatorEnum.WAIT_TIME;
+        return ResourceMeasureIndicatorEnum.PREFILL_PENDING_REQUESTS;
     }
 
     @Override
@@ -100,11 +84,13 @@ public class PrefillResourceMeasure implements ResourceMeasure {
     }
 
     private static long countWaitingTasks(WorkerStatus workerStatus) {
-        if (MapUtils.isEmpty(workerStatus.getRunningTaskList())) {
+        Map<String, WorkerStatus.TaskObservation> runningTasks =
+                workerStatus.committedEngineObservation().runningTaskList();
+        if (MapUtils.isEmpty(runningTasks)) {
             return 0;
         }
-        return workerStatus.getRunningTaskList().values().stream()
-                .filter(t -> t.getPhase() != TaskPhase.RUNNING).count();
+        return runningTasks.values().stream()
+                .filter(t -> t.phase() != TaskPhase.RUNNING).count();
     }
 
 }

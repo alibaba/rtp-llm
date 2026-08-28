@@ -4,11 +4,10 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
 import static org.flexlb.enums.ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
-import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
+import static org.flexlb.enums.ResourceMeasureIndicatorEnum.PREFILL_PENDING_REQUESTS;
 
 /**
  * Public FLEXLB_CONFIG contract, organized by stable responsibility owner.
@@ -19,7 +18,7 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 @Setter
 public final class FlexlbConfig {
 
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = 2;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new QueueSchedulerConfig();
@@ -47,9 +46,34 @@ public final class FlexlbConfig {
                 && ((QueueSchedulerConfig) scheduler).getOrdering() instanceof PriorityOrderingConfig;
     }
 
+    /** Resolve the QUEUE decision policy from its single configuration owner. */
     @JsonIgnore
-    public boolean isBatchDispatch() {
-        return dispatcher instanceof BatchDispatcherConfig;
+    public DecisionPolicyConfig decisionPolicy() {
+        return queueScheduler().getDecision();
+    }
+
+    @JsonIgnore
+    public boolean isSingleDecision() {
+        if (isDirect()) {
+            return false;
+        }
+        return queueScheduler().getDecision() instanceof SingleDecisionConfig;
+    }
+
+    @JsonIgnore
+    public boolean isFixedWindowDecision() {
+        return !isDirect()
+                && queueScheduler().getDecision() instanceof FixedWindowDecisionConfig;
+    }
+
+    @JsonIgnore
+    public FixedWindowDecisionConfig fixedWindowDecision() {
+        DecisionPolicyConfig policy = decisionPolicy();
+        if (policy instanceof FixedWindowDecisionConfig fixedWindow) {
+            return fixedWindow;
+        }
+        throw new IllegalStateException(
+                "fixed-window decision configuration is not active");
     }
 
     @JsonIgnore
@@ -70,30 +94,9 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public BatchDispatcherConfig batchDispatcher() {
-        if (dispatcher instanceof BatchDispatcherConfig batch) {
-            return batch;
-        }
-        throw new IllegalStateException("batch dispatcher configuration is not active");
-    }
-
-    @JsonIgnore
-    public NonBatchDispatcherConfig nonBatchDispatcher() {
-        if (dispatcher instanceof NonBatchDispatcherConfig nonBatch) {
-            return nonBatch;
-        }
-        throw new IllegalStateException("non-batch dispatcher configuration is not active");
-    }
-
-    @JsonIgnore
-    public LoadBalanceStrategyEnum strategyFor(RoleType role) {
-        return router.strategyFor(role);
-    }
-
-    @JsonIgnore
     public ResourceMeasureIndicatorEnum resourceMeasureFor(RoleType role) {
         return switch (role) {
-            case PREFILL, PDFUSION, VIT -> WAIT_TIME;
+            case PREFILL, PDFUSION, VIT -> PREFILL_PENDING_REQUESTS;
             case DECODE -> REMAINING_KV_CACHE;
             case FRONTEND -> null;
         };

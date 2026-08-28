@@ -5,12 +5,6 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
-
-import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_DECODE;
-import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_PREFILL;
-import static org.flexlb.enums.LoadBalanceStrategyEnum.RANDOM;
-import static org.flexlb.enums.LoadBalanceStrategyEnum.SHORTEST_TTFT;
 
 @Getter
 @Setter
@@ -20,13 +14,21 @@ public final class RoutingConfig {
     private volatile TrafficPolicyConfig groupSelector;
     private RolesConfig roles = new RolesConfig();
 
-    public LoadBalanceStrategyEnum strategyFor(RoleType role) {
+    public EndpointSelectorConfig selectorFor(RoleType role) {
         return switch (role) {
-            case PREFILL, PDFUSION -> roles.getPrefill().strategy();
-            case DECODE -> roles.getDecode().strategy();
-            case VIT -> RANDOM;
-            case FRONTEND -> null;
+            case PREFILL, PDFUSION -> roles.getPrefill().getSelector();
+            case DECODE -> roles.getDecode().getSelector();
+            case VIT -> roles.getVit().getSelector();
+            case FRONTEND -> throw new IllegalArgumentException(
+                    "FRONTEND has no endpoint selector");
         };
+    }
+
+    /** Closed root for every endpoint-selection configuration variant. */
+    public sealed interface EndpointSelectorConfig
+            permits PrefillSelectorConfig,
+                    DecodeSelectorConfig,
+                    VitSelectorConfig {
     }
 
     @Getter
@@ -45,14 +47,6 @@ public final class RoutingConfig {
         private PrefillSelectorConfig selector = new EstimatedTtftSelectorConfig();
         private CacheAffinityConfig cacheAffinity;
 
-        private LoadBalanceStrategyEnum strategy() {
-            if (selector instanceof RandomPrefillSelectorConfig) {
-                return RANDOM;
-            }
-            EstimatedTtftSelectorConfig estimated = (EstimatedTtftSelectorConfig) selector;
-            return estimated.getCandidateChoice() instanceof LeastRecentlyUsedInPoolConfig
-                    ? SHORTEST_TTFT : COST_BASED_PREFILL;
-        }
     }
 
     @Getter
@@ -85,6 +79,7 @@ public final class RoutingConfig {
             @JsonSubTypes.Type(value = EstimatedTtftSelectorConfig.class, name = "ESTIMATED_TTFT")
     })
     public sealed interface PrefillSelectorConfig
+            extends EndpointSelectorConfig
             permits RandomPrefillSelectorConfig, EstimatedTtftSelectorConfig {
     }
 
@@ -101,7 +96,7 @@ public final class RoutingConfig {
     @Setter
     public static final class OutlierRejectionConfig {
         private double maxPendingVsAverageMultiplier = 3.0;
-        private double maxWaitVsAverageMultiplier = 3.0;
+        private double maxProjectedDrainVsAverageMultiplier = 3.0;
     }
 
     @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
@@ -161,7 +156,18 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class CacheAffinityConfig {
+        /**
+         * Maximum projected-TTFT penalty accepted for choosing a cache leader.
+         * The cutoff is {@code minimumProjectedTtft + maxExtraTtftMs}; cache
+         * affinity never bypasses an unavailable or unmodelled endpoint.
+         */
         private long maxExtraTtftMs;
+
+        /**
+         * Minimum reusable prefix percentage required before affinity applies.
+         * This uses predictor-effective cache-hit tokens (the final cache block
+         * is intentionally left as compute work), not the raw routing match.
+         */
         private double minPrefixHitPercent = 5;
     }
 
@@ -172,9 +178,6 @@ public final class RoutingConfig {
         private KvReservationConfig kvReservation = new KvReservationConfig();
         private DecodeSelectorConfig selector = new KvUsageWeightedRandomConfig();
 
-        private LoadBalanceStrategyEnum strategy() {
-            return selector instanceof RandomDecodeSelectorConfig ? RANDOM : COST_BASED_DECODE;
-        }
     }
 
     @Getter
@@ -197,6 +200,7 @@ public final class RoutingConfig {
                     name = "KV_USAGE_WEIGHTED_RANDOM")
     })
     public sealed interface DecodeSelectorConfig
+            extends EndpointSelectorConfig
             permits RandomDecodeSelectorConfig, KvUsageWeightedRandomConfig {
     }
 
@@ -225,7 +229,9 @@ public final class RoutingConfig {
 
     @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
     @JsonSubTypes({@JsonSubTypes.Type(value = RandomVitSelectorConfig.class, name = "RANDOM")})
-    public sealed interface VitSelectorConfig permits RandomVitSelectorConfig {
+    public sealed interface VitSelectorConfig
+            extends EndpointSelectorConfig
+            permits RandomVitSelectorConfig {
     }
 
     public static final class RandomVitSelectorConfig implements VitSelectorConfig {

@@ -1,557 +1,246 @@
 package org.flexlb.balance.strategy;
 
-import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.collections4.MapUtils;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.resource.PrefillResourceMeasure;
+import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.DebugInfo;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Load balancing strategy based on shortest Time-To-First-Token (TTFT).
- *
- * <p>This strategy selects the optimal worker by considering the following factors:
- * 1. KV-Cache hit rate: Prioritize workers with higher cache hit rates
- * 2. Queue time: Consider the current task queue status of workers
- * 3. Scheduling fairness: Achieve load balancing among workers with similar performance
- *
- * <p>Algorithm:
- * <ol>
- *   <li>Score all eligible endpoints by TTFT = prefillTime + queueTime</li>
- *   <li>Sort by TTFT ascending, take top-N as the candidate pool</li>
- *   <li>Within the pool, use CAS on {@code lastSelectedTime} to pick the
- *       least-recently-selected worker, ensuring concurrent requests spread
- *       across different workers</li>
- *   <li>If all CAS attempts fail, fall back to the lowest-TTFT candidate</li>
- * </ol>
- *
- * <p>Supports DIRECT and QUEUE scheduling with either dispatcher. Common
- * scheduler paths include the worker-batcher wait while their inflight
- * lifecycle remains owned by {@code PriorityScheduler}; DIRECT and FIFO
- * non-batch queue routing reserve locally.
+ * Selects the shortest projected-TTFT pool and uses live LRU as its final
+ * fairness tie-breaker. A lost endpoint CAS causes one complete rescan.
  */
-@Component("shortestTtftStrategy")
-public class ShortestTTFTStrategy implements LoadBalanceStrategy {
-
-    private final EngineWorkerStatus engineWorkerStatus;
-    private final CacheAwareService cacheAwareService;
-    private final ResourceMeasureFactory resourceMeasureFactory;
-    private final EngineHealthReporter engineHealthReporter;
+@Component
+public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
 
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 CacheAwareService cacheAwareService,
                                 ResourceMeasureFactory resourceMeasureFactory,
                                 EngineHealthReporter engineHealthReporter) {
-        this.engineWorkerStatus = engineWorkerStatus;
-        this.cacheAwareService = cacheAwareService;
-        this.resourceMeasureFactory = resourceMeasureFactory;
-        this.engineHealthReporter = engineHealthReporter;
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
+        super(engineWorkerStatus,
+                cacheAwareService,
+                resourceMeasureFactory,
+                engineHealthReporter);
     }
 
     @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        try {
-            return doSelect(balanceContext, roleType, group);
-        } catch (Exception e) {
-            Logger.warn("{} select failed", LoadBalanceStrategyEnum.SHORTEST_TTFT.getName(), e);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
+    public boolean supports(
+            RoleType role,
+            RoutingConfig.EndpointSelectorConfig configured) {
+        return (role == RoleType.PREFILL || role == RoleType.PDFUSION)
+                && configured
+                instanceof RoutingConfig.EstimatedTtftSelectorConfig estimated
+                && estimated.getCandidateChoice()
+                instanceof RoutingConfig.LeastRecentlyUsedInPoolConfig;
     }
 
     @Override
-    public void rollBack(WorkerEndpoint ep, long requestId) {
-        // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by PriorityScheduler — no-op here.
-        if (ep instanceof PrefillEndpoint pe) {
-            pe.releaseBatch(requestId);
+    protected int selectBestCandidate(CandidateSet survivors,
+                                      long minProjectedTtftMs,
+                                      BalanceContext balanceContext,
+                                      RoleType roleType,
+                                      String group,
+                                      long seqLen,
+                                      FlexlbConfig config) {
+        if (survivors.size() == 0) {
+            return -1;
         }
+
+        List<Integer> baselinePool = shortestCandidateIndexes(
+                survivors,
+                config.shortestTtftCandidateCount(survivors.size()));
+        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        CacheAffinityPolicy.Decision affinity = null;
+        if (cacheAffinity != null) {
+            long referenceHitTokens = 0L;
+            for (int i = 0; i < survivors.size(); i++) {
+                if (survivors.projectedTtftMs(i) == minProjectedTtftMs) {
+                    referenceHitTokens = Math.max(
+                            referenceHitTokens, survivors.cacheHit(i));
+                }
+            }
+            affinity = CacheAffinityPolicy.evaluate(
+                    survivors.size(),
+                    survivors::projectedTtftMs,
+                    survivors::cacheHit,
+                    minProjectedTtftMs,
+                    referenceHitTokens,
+                    seqLen,
+                    cacheAffinity.getMaxExtraTtftMs(),
+                    cacheAffinity.getMinPrefixHitPercent());
+        }
+
+        ClaimResult result = claimCandidate(survivors, affinity, baselinePool);
+        if (result == null) {
+            return -1;
+        }
+
+        if (affinity != null) {
+            String reason = result.preferred()
+                    ? CacheAffinityPolicy.Reason.CACHE_LEADER.name()
+                    : affinity.hasPreference()
+                            ? "CACHE_AFFINITY_FALLBACK"
+                            : affinity.reason().name();
+            reportCacheAffinityDecision(
+                    roleType, survivors.endpoint(result.index()).getIp(), reason);
+            if (Logger.isDebugEnabled()) {
+                Logger.debug(
+                        "ShortestTtft cache-affinity decision - role: {}, group: {}, "
+                                + "selected: {}, minTtftMs: {}, selectedTtftMs: {}, "
+                                + "ttftCutoffMs: {}, hitTokens: {}, reason: {}",
+                        roleType,
+                        group,
+                        survivors.endpointAddress(result.index()),
+                        affinity.minProjectedTtftMs(),
+                        survivors.projectedTtftMs(result.index()),
+                        affinity.projectedTtftCutoffMs(),
+                        survivors.cacheHit(result.index()),
+                        reason);
+            }
+        }
+        return result.index();
     }
 
-    /** Internal record holding TTFT score and cache hit for a single endpoint. */
-    protected record ScoredEndpoint(PrefillEndpoint ep,
-                                    long ttft,
-                                    long hitCache,
-                                    long prefillMs,
-                                    long lastSelectedTime) {}
-
-    // ==================== Core Selection ====================
-
-    private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        long requestId = balanceContext.getRequestId();
-        long seqLen = balanceContext.getRequest().getSeqLen();
-        FlexlbConfig config = balanceContext.getConfig();
-
-        List<PrefillEndpoint> eligible = getAvailableEndpoints(
-                roleType,
-                group,
-                config.resourceMeasureFor(roleType),
-                balanceContext.getExcludedPrefillIpPort());
-        if (CollectionUtils.isEmpty(eligible)) {
-            Logger.debug("ShortestTTFT select failed: no available endpoints, request_id={}", requestId);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-
-        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
-
-        // Score all eligible endpoints by TTFT
-        List<ScoredEndpoint> scoredEndpoints = scoreEndpoints(
-                eligible, cacheMatchResults, balanceContext);
-        if (scoredEndpoints.isEmpty()) {
-            Logger.debug("ShortestTTFT select failed: no scored endpoints, request_id={}", requestId);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-        long candidateMaxHitTokens = scoredEndpoints.stream()
-                .mapToLong(scored -> calculateRoutingCacheMatchTokens(
-                        scored.ep(), cacheMatchResults, balanceContext.getRequest()))
-                .max()
-                .orElse(0L);
-
-        // Sort by TTFT ascending; secondary sort by the selection-time snapshot for determinism.
-        scoredEndpoints.sort(Comparator.comparingLong(ScoredEndpoint::ttft)
-                .thenComparingLong(ScoredEndpoint::lastSelectedTime));
-
-        ScoredEndpoint selected = selectBestEndpoint(
-                scoredEndpoints, balanceContext, roleType, group, seqLen, config);
-        if (selected == null) {
-            Logger.debug("{} select failed: no selectable endpoint, request_id={}",
-                    LoadBalanceStrategyEnum.SHORTEST_TTFT.getName(), requestId);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-
-        Logger.debug("{} selected endpoint - ip: {}, port: {}, ttft: {}, hitCache: {}",
-                LoadBalanceStrategyEnum.SHORTEST_TTFT.getName(),
-                selected.ep().getIp(), selected.ep().getHttpPort(),
-                selected.ttft(), selected.hitCache());
-
-        reportCacheHitMetrics(roleType, selected.hitCache(), seqLen);
-        reportRoutingCacheMatchMetrics(
-                roleType,
-                calculateRoutingCacheMatchTokens(
-                        selected.ep(), cacheMatchResults, balanceContext.getRequest()),
-                candidateMaxHitTokens,
-                seqLen);
-
-        return buildServerStatus(selected, roleType, requestId, balanceContext);
+    /** Shortest-TTFT selection never consumes suffix drain. */
+    @Override
+    protected RouteProjection.Demand projectionDemand(FlexlbConfig config) {
+        return RouteProjection.Demand.TTFT_ONLY;
     }
 
     /**
-     * Select the final endpoint from a list already sorted by TTFT.
-     * Subclasses may override this decision while reusing filtering, cache lookup,
-     * scoring, metrics, and response construction.
+     * Keep only indexes for the configured shortest-TTFT pool. Production does
+     * not materialize endpoint score objects; the list only carries indexes
+     * into the common projection result.
      */
-    protected ScoredEndpoint selectBestEndpoint(List<ScoredEndpoint> scoredEndpoints,
-                                                BalanceContext balanceContext,
-                                                RoleType roleType,
-                                                String group,
-                                                long seqLen,
-                                                FlexlbConfig config) {
-        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
-                .getPrefill().getCacheAffinity();
-        if (cacheAffinity == null) {
-            return selectBaselineEndpoint(scoredEndpoints, config);
+    private static List<Integer> shortestCandidateIndexes(
+            CandidateSet candidates, int configuredCount) {
+        int count = Math.min(
+                Math.max(1, configuredCount), candidates.size());
+        List<Integer> indexes = new ArrayList<>(candidates.size());
+        for (int i = 0; i < candidates.size(); i++) {
+            indexes.add(i);
+        }
+        indexes.sort(Comparator
+                .comparingLong((Integer index) -> candidates.projectedTtftMs(index))
+                .thenComparingInt(Integer::intValue));
+        return indexes.subList(0, count);
+    }
+
+    /**
+     * Scan the preferred pool (when present), otherwise the baseline pool.
+     * A CAS conflict invalidates the live LRU observation, so the final round
+     * starts again from a complete scan and publishes to that fresh target
+     * atomically. The cold publish prevents ordinary contention from turning a
+     * non-empty candidate pool into a false "no available worker" result.
+     */
+    private static ClaimResult claimCandidate(
+            CandidateSet candidates,
+            CacheAffinityPolicy.Decision affinity,
+            List<Integer> baselinePool) {
+        LiveCandidate target = findTarget(candidates, affinity, baselinePool);
+        if (target == null) {
+            return null;
+        }
+        if (claim(target.clock(), target.expected())) {
+            return new ClaimResult(target.index(), target.preferred());
         }
 
-        long minTtftMs = scoredEndpoints.getFirst().ttft();
-        long referenceHitTokens = scoredEndpoints.stream()
-                .filter(candidate -> candidate.ttft() == minTtftMs)
-                .mapToLong(ScoredEndpoint::hitCache)
-                .max()
-                .orElse(0L);
-        CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
-                scoredEndpoints.size(),
-                index -> scoredEndpoints.get(index).ttft(),
-                index -> scoredEndpoints.get(index).hitCache(),
-                minTtftMs,
-                referenceHitTokens,
-                seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
-                cacheAffinity.getMinPrefixHitPercent());
-
-        ScoredEndpoint selected;
-        String reason;
-        if (affinity.hasPreference()) {
-            List<ScoredEndpoint> preferenceOrder = new ArrayList<>(affinity.preferredCount());
-            for (int i = 0; i < affinity.preferredCount(); i++) {
-                preferenceOrder.add(scoredEndpoints.get(affinity.preferredIndex(i)));
-            }
-            selected = selectFirstWithoutConcurrentConflict(preferenceOrder);
-            if (selected == null) {
-                selected = selectBaselineEndpoint(
-                        refreshSelectionSnapshots(scoredEndpoints), config);
-                reason = "CACHE_AFFINITY_FALLBACK";
-            } else {
-                reason = selected.equals(preferenceOrder.getFirst())
-                        ? CacheAffinityPolicy.Reason.CACHE_LEADER.name()
-                        : "CACHE_AFFINITY_FALLBACK";
-            }
-        } else {
-            selected = selectBaselineEndpoint(scoredEndpoints, config);
-            reason = affinity.reason().name();
+        target = findTarget(candidates, affinity, baselinePool);
+        if (target == null) {
+            return null;
         }
+        publishMonotonically(target.clock());
+        return new ClaimResult(target.index(), target.preferred());
+    }
 
-        if (selected != null) {
-            reportCacheAffinityDecision(roleType, selected.ep().getIp(), reason);
-            Logger.debug(
-                    "ShortestTtft cache-affinity decision - role: {}, group: {}, "
-                            + "selected: {}, minTtftMs: {}, selectedTtftMs: {}, "
-                            + "ttftCutoffMs: {}, hitTokens: {}, reason: {}",
-                    roleType,
-                    group,
-                    selected.ep().ipPort(),
-                    affinity.minScoreMs(),
-                    selected.ttft(),
-                    affinity.scoreCutoffMs(),
-                    selected.hitCache(),
-                    reason);
+    private static LiveCandidate findTarget(
+            CandidateSet candidates,
+            CacheAffinityPolicy.Decision affinity,
+            List<Integer> baselinePool) {
+        LiveCandidate target = affinity != null && affinity.hasPreference()
+                ? findLiveLru(candidates, affinity)
+                : null;
+        if (target != null) {
+            return target.asPreferred();
+        }
+        return findLiveLru(candidates, baselinePool);
+    }
+
+    private static LiveCandidate findLiveLru(
+            CandidateSet candidates,
+            CacheAffinityPolicy.Decision affinity) {
+        LiveCandidate selected = null;
+        for (int i = 0; i < affinity.preferredCount(); i++) {
+            selected = chooseLiveLru(
+                    candidates, affinity.preferredIndex(i), selected);
         }
         return selected;
     }
 
-    /** Refresh CAS snapshots after an affinity claim loses to concurrent schedulers. */
-    private List<ScoredEndpoint> refreshSelectionSnapshots(
-            List<ScoredEndpoint> scoredEndpoints) {
-        List<ScoredEndpoint> refreshed = new ArrayList<>(scoredEndpoints.size());
-        for (ScoredEndpoint scored : scoredEndpoints) {
-            refreshed.add(new ScoredEndpoint(
-                    scored.ep(),
-                    scored.ttft(),
-                    scored.hitCache(),
-                    scored.prefillMs(),
-                    scored.ep().getLastSelectedTime().get()));
+    private static LiveCandidate findLiveLru(
+            CandidateSet candidates, List<Integer> indexes) {
+        LiveCandidate selected = null;
+        for (int index : indexes) {
+            selected = chooseLiveLru(candidates, index, selected);
         }
-        refreshed.sort(Comparator.comparingLong(ScoredEndpoint::ttft)
-                .thenComparingLong(ScoredEndpoint::lastSelectedTime));
-        return refreshed;
+        return selected;
     }
 
-    /** Preserve the original candidate-pool and CAS fairness behavior. */
-    private ScoredEndpoint selectBaselineEndpoint(
-            List<ScoredEndpoint> scoredEndpoints, FlexlbConfig config) {
-        int candidateCount = config.shortestTtftCandidateCount(scoredEndpoints.size());
-        List<ScoredEndpoint> candidates = scoredEndpoints.subList(
-                0, Math.min(candidateCount, scoredEndpoints.size()));
-
-        ScoredEndpoint selected = selectByFairness(candidates);
-        if (selected != null) {
+    private static LiveCandidate chooseLiveLru(
+            CandidateSet candidates, int index, LiveCandidate selected) {
+        AtomicLong clock = candidates.endpoint(index).getLastSelectedTime();
+        long live = clock.get();
+        if (live == Long.MAX_VALUE) {
             return selected;
         }
-
-        ScoredEndpoint fallback = candidates.getFirst();
-        Logger.debug("ShortestTtft: all CAS claims failed, falling back to lowest-TTFT endpoint, ip={}",
-                fallback.ep().getIp());
-        return fallback;
+        if (selected == null
+                || live < selected.expected()
+                || live == selected.expected()
+                        && (candidates.projectedTtftMs(index)
+                                < candidates.projectedTtftMs(selected.index())
+                        || candidates.projectedTtftMs(index)
+                                == candidates.projectedTtftMs(selected.index())
+                                && index < selected.index())) {
+            return new LiveCandidate(index, clock, live);
+        }
+        return selected;
     }
 
-    /**
-     * Select worker based on scheduling fairness.
-     *
-     * <p>Among the candidate pool, prefer the least-recently-selected worker.
-     * CAS on {@code lastSelectedTime} ensures concurrent requests are spread
-     * across different workers rather than all landing on the same one.
-     *
-     * @param candidates candidate pool (already sorted by TTFT ascending)
-     * @return selected endpoint, or {@code null} if all CAS attempts failed
-     */
-    protected ScoredEndpoint selectByFairness(List<ScoredEndpoint> candidates) {
-        if (candidates.isEmpty()) {
-            return null;
-        }
-
-        // Sort ascending by lastSelectedTime so the least recently used worker is tried first
-        List<ScoredEndpoint> sorted = new ArrayList<>(candidates);
-        sorted.sort(Comparator.comparingLong(ScoredEndpoint::lastSelectedTime));
-        return selectFirstWithoutConcurrentConflict(sorted);
+    private static boolean claim(AtomicLong clock, long expected) {
+        long nowMicros = System.nanoTime() / 1_000;
+        long claimedAt = Math.max(nowMicros, expected + 1L);
+        return clock.compareAndSet(expected, claimedAt);
     }
 
-    /**
-     * Claim the first endpoint whose selection timestamp still matches the scoring snapshot.
-     * A failed claim means another scheduler made a decision from the same snapshot.
-     */
-    protected ScoredEndpoint selectFirstWithoutConcurrentConflict(List<ScoredEndpoint> selectionOrder) {
-        long now = System.nanoTime() / 1000;
-        for (ScoredEndpoint candidate : selectionOrder) {
-            long expected = candidate.lastSelectedTime();
-            if (expected == Long.MAX_VALUE) {
-                continue;
-            }
-            long claimedAt = Math.max(now, expected + 1L);
-            if (candidate.ep().getLastSelectedTime().compareAndSet(expected, claimedAt)) {
-                return candidate;
-            }
-        }
-        return null;
+    private static void publishMonotonically(AtomicLong clock) {
+        long nowMicros = System.nanoTime() / 1_000;
+        clock.updateAndGet(current -> current == Long.MAX_VALUE
+                ? Long.MAX_VALUE
+                : Math.max(nowMicros, current + 1L));
     }
 
-    protected void reportCacheAffinityDecision(RoleType roleType,
-                                               String engineIp,
-                                               String decision) {
-        engineHealthReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
+    private record LiveCandidate(
+            int index, AtomicLong clock, long expected, boolean preferred) {
+        private LiveCandidate(int index, AtomicLong clock, long expected) {
+            this(index, clock, expected, false);
+        }
+
+        private LiveCandidate asPreferred() {
+            return new LiveCandidate(index, clock, expected, true);
+        }
     }
 
-    // ==================== Scoring ====================
-
-    /**
-     * Calculate TTFT scores for all eligible endpoints.
-     *
-     * <p>TTFT = predicted prefill time + estimated queue wait time.
-     * Endpoints without a predictor are skipped.
-     *
-     * @param endpoints eligible endpoint list
-     * @param cacheMatchResults cache match results from {@link CacheAwareService}
-     * @param balanceContext request and scheduling context
-     * @return list of scored endpoints
-     */
-    private List<ScoredEndpoint> scoreEndpoints(List<PrefillEndpoint> endpoints,
-                                                Map<String, Integer> cacheMatchResults,
-                                                BalanceContext balanceContext) {
-        Request request = balanceContext.getRequest();
-        long seqLen = request.getSeqLen();
-        List<ScoredEndpoint> result = new ArrayList<>(endpoints.size());
-        for (PrefillEndpoint ep : endpoints) {
-            PrefillTimePredictor predictor = ep.getPredictor();
-            if (predictor == null) {
-                Logger.debug("ShortestTTFT: skipping endpoint without predictor, ip={}", ep.getIp());
-                continue;
-            }
-            long cacheHit = calculateCacheHit(ep, cacheMatchResults, request);
-            long prefillMs = Math.max(0L, predictor.estimateMs(seqLen, cacheHit));
-            long queueMs = estimatedQueueWaitMs(ep, balanceContext);
-            if (queueMs == Long.MAX_VALUE) {
-                Logger.debug("ShortestTTFT: skipping endpoint with unavailable wait estimate, ip={}",
-                        ep.getIp());
-                continue;
-            }
-            long ttft = saturatingAdd(prefillMs, queueMs);
-            Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
-                    ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
-            result.add(new ScoredEndpoint(
-                    ep, ttft, cacheHit, prefillMs, ep.getLastSelectedTime().get()));
-        }
-        return result;
-    }
-
-    /**
-     * Estimate all work already ahead of a request. Queue-scheduler-owned paths include
-     * both dispatched inflight work and the per-worker batcher queue; otherwise only the
-     * inflight ledger is relevant. Long.MAX_VALUE remains an unavailable sentinel.
-     */
-    protected long estimatedQueueWaitMs(PrefillEndpoint ep, BalanceContext balanceContext) {
-        long inflightWaitMs = ep.realWaitTimeMs();
-        if (inflightWaitMs == Long.MAX_VALUE) {
-            return Long.MAX_VALUE;
-        }
-        inflightWaitMs = Math.max(0L, inflightWaitMs);
-        if (!queueSchedulerOwnsRequest(balanceContext)) {
-            return inflightWaitMs;
-        }
-
-        FlexlbConfig config = balanceContext.getConfig();
-        long batcherWaitMs = config.isPriorityOrdering()
-                ? ep.batcherEstimatedWaitMs(
-                        balanceContext.getPriority(),
-                        balanceContext.getRequestId())
-                : ep.batcherWaitMs();
-        batcherWaitMs = Math.max(0L, batcherWaitMs);
-        return saturatingAdd(inflightWaitMs, batcherWaitMs);
-    }
-
-    private static long saturatingAdd(long left, long right) {
-        if (right > 0L && left > Long.MAX_VALUE - right) {
-            return Long.MAX_VALUE;
-        }
-        if (right < 0L && left < Long.MIN_VALUE - right) {
-            return Long.MIN_VALUE;
-        }
-        return left + right;
-    }
-
-    // ==================== Endpoint Filtering (mirrors CostBasedPrefillStrategy) ====================
-
-    private List<PrefillEndpoint> getAvailableEndpoints(RoleType roleType,
-                                                        String group,
-                                                        ResourceMeasureIndicatorEnum indicator,
-                                                        String excludedIpPort) {
-        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        if (MapUtils.isEmpty(workerEndpointMap)) {
-            return new ArrayList<>();
-        }
-        PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
-        if (measure == null) {
-            return new ArrayList<>();
-        }
-        List<PrefillEndpoint> result = new ArrayList<>();
-        PrefillEndpoint excludedEligible = null;
-        for (WorkerEndpoint ep : workerEndpointMap.values()) {
-            if (!(ep instanceof PrefillEndpoint pe)) {
-                continue;
-            }
-            if (!pe.getStatus().isAlive()) {
-                continue;
-            }
-            if (!measure.isResourceAvailable(pe)) {
-                continue;
-            }
-            if (excludedIpPort != null && excludedIpPort.equals(pe.ipPort())) {
-                excludedEligible = pe;
-                continue;
-            }
-            result.add(pe);
-        }
-        if (result.isEmpty() && excludedEligible != null) {
-            result.add(excludedEligible);
-        }
-        return result;
-    }
-
-    private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
-    }
-
-    private long calculateCacheHit(PrefillEndpoint ep,
-                                   Map<String, Integer> cacheMatchResults,
-                                   Request request) {
-        if (cacheMatchResults == null || request == null) {
-            return 0L;
-        }
-        long seqLen = request.getSeqLen();
-        if (seqLen <= 0L) {
-            return 0L;
-        }
-        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
-        if (prefixMatchLength == null || prefixMatchLength <= 0) {
-            return 0L;
-        }
-        long blockSize = request.getCacheKeyBlockSize();
-        if (blockSize <= 0L && ep.getStatus().getCacheStatus() != null) {
-            blockSize = ep.getStatus().getCacheStatus().getBlockSize();
-        }
-        if (blockSize <= 0L) {
-            return 0L;
-        }
-        long rawHit;
-        try {
-            rawHit = Math.multiplyExact(blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            rawHit = seqLen;
-        }
-        if (rawHit >= seqLen) {
-            return Math.max(0L, seqLen - blockSize);
-        }
-        return Math.max(0L, rawHit);
-    }
-
-    private long calculateRoutingCacheMatchTokens(PrefillEndpoint ep,
-                                                  Map<String, Integer> cacheMatchResults,
-                                                  Request request) {
-        if (ep == null || cacheMatchResults == null || request == null || request.getSeqLen() <= 0L) {
-            return 0L;
-        }
-
-        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
-        if (prefixMatchLength == null || prefixMatchLength <= 0) {
-            return 0L;
-        }
-
-        long blockSize = request.getCacheKeyBlockSize();
-        if (blockSize <= 0L && ep.getStatus().getCacheStatus() != null) {
-            blockSize = ep.getStatus().getCacheStatus().getBlockSize();
-        }
-        if (blockSize <= 0L) {
-            return 0L;
-        }
-
-        long hitTokens;
-        try {
-            hitTokens = Math.multiplyExact(blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            return request.getSeqLen();
-        }
-        return Math.min(request.getSeqLen(), hitTokens);
-    }
-
-    // ==================== Metrics & ServerStatus (mirrors CostBasedPrefillStrategy) ====================
-
-    private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
-        double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
-    }
-
-    private void reportRoutingCacheMatchMetrics(RoleType roleType,
-                                                long selectedHitTokens,
-                                                long candidateMaxHitTokens,
-                                                long totalTokens) {
-        engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(
-                roleType, selectedHitTokens, totalTokens);
-        engineHealthReporter.reportRoutingCandidateMaxCacheMatchMetrics(
-                roleType, candidateMaxHitTokens);
-    }
-
-    private ServerStatus buildServerStatus(ScoredEndpoint selected,
-                                           RoleType roleType,
-                                           long requestId,
-                                           BalanceContext balanceContext) {
-        PrefillEndpoint ep = selected.ep();
-        long ttft = selected.ttft();
-        long bestCacheHit = selected.hitCache();
-
-        // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
-        if (strategyOwnsInflightTracking(balanceContext)) {
-            ep.commitBatch(requestId, selected.prefillMs(), Collections.emptyList());
-        }
-
-        // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
-        DebugInfo debugInfo = new DebugInfo();
-        debugInfo.setHitCacheLen(bestCacheHit);
-
-        ServerStatus result = new ServerStatus();
-        result.setSuccess(true);
-        result.setRole(roleType);
-        result.setRequestId(requestId);
-        result.setPrefillTime(ttft);
-        result.setGroup(ep.getStatus().getGroup());
-        result.setServerIp(ep.getIp());
-        result.setHttpPort(ep.getHttpPort());
-        result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
-        result.setDpRank(ep.getStatus().getDpRank());
-        result.setDebugInfo(debugInfo);
-        return result;
-    }
-
-    /** Whether this request is owned by the common queue/batch scheduler. */
-    private static boolean queueSchedulerOwnsRequest(BalanceContext balanceContext) {
-        if (balanceContext == null || balanceContext.getConfig() == null) {
-            return false;
-        }
-        FlexlbConfig config = balanceContext.getConfig();
-        return config.isQueue();
-    }
-
-    /** Whether this strategy, rather than PriorityScheduler, owns Prefill accounting. */
-    private static boolean strategyOwnsInflightTracking(BalanceContext balanceContext) {
-        return !queueSchedulerOwnsRequest(balanceContext);
-    }
+    private record ClaimResult(int index, boolean preferred) {}
 }

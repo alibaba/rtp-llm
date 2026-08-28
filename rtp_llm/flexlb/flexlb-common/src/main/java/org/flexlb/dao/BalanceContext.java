@@ -1,5 +1,6 @@
 package org.flexlb.dao;
 
+import com.google.protobuf.ByteString;
 import lombok.Data;
 import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
@@ -26,7 +27,7 @@ public class BalanceContext {
     private Response response;
 
     @ToString.Exclude
-    private byte[] generateInputPbBytes;
+    private ByteString generateInputPb;
 
     //======================== Queue ========================//
 
@@ -60,7 +61,7 @@ public class BalanceContext {
 
     /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
-     * Set when PriorityScheduler confirms the EnqueueBatch acknowledgement.
+     * Set when RequestScheduler confirms the EnqueueBatch acknowledgement.
      * Used to compute ack_to_response_time_ms in FlexlbServiceImpl.completeSchedule().
      * Remains 0 for non-BATCH paths or when ACK was not received.
      */

@@ -18,7 +18,7 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.BeforeEach;
@@ -76,7 +76,7 @@ class FlexlbServiceImplTest {
                 configService,
                 batchSchedulerReporter,
                 serverLatencyRecorder,
-                mock(PrioritySchedulerReporter.class)
+                mock(RequestSchedulerReporter.class)
         );
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
