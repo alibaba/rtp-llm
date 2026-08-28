@@ -201,6 +201,12 @@ def main() -> str:
 
     args, remaining = parse_args()
     remaining = resolve_perf_engine_paths(remaining)
+    # This runner submits requests through the unified HTTP frontend.  Keep the
+    # backend in PDFUSION mode unless a caller explicitly supplies a role; the
+    # standalone DECODE RPC role intentionally does not implement the
+    # GenerateStreamCall path used by this perf client.
+    if extract_arg(remaining, "role_type") is None:
+        remaining.extend(["--role_type", "PDFUSION"])
     # batch_decode_test always needs BatchDecodeScheduler
     if extract_arg(remaining, "use_batch_decode_scheduler") is None:
         remaining.extend(["--use_batch_decode_scheduler", "1"])
