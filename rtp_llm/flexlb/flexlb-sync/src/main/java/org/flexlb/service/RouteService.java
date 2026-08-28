@@ -3,6 +3,7 @@ package org.flexlb.service;
 import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.NaviBatchScheduler;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.scheduler.Router;
@@ -22,15 +23,18 @@ public class RouteService {
     private final ConfigService configService;
     private final Router router;
     private final RequestScheduler requestScheduler;
+    private final NaviBatchScheduler naviBatchScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
                         RequestScheduler requestScheduler,
+                        NaviBatchScheduler naviBatchScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
         this.router = defaultScheduler;
         this.requestScheduler = requestScheduler;
+        this.naviBatchScheduler = naviBatchScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
@@ -46,6 +50,8 @@ public class RouteService {
         CompletableFuture<Response> resultFuture;
         if (flexlbConfig.isDirect()) {
             resultFuture = routeDirect(balanceContext);
+        } else if (flexlbConfig.isNaviBatch()) {
+            resultFuture = naviBatchScheduler.submit(balanceContext);
         } else {
             resultFuture = routeScheduled(balanceContext);
         }

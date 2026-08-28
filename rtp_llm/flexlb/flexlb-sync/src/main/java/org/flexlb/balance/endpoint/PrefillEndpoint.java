@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.prediction.LearningPredictor;
+import org.flexlb.balance.prediction.LearningPredictorPersistence;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -21,6 +22,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -81,7 +83,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 endpointEventSink, "endpointEventSink");
         this.placementAvailability = java.util.Objects.requireNonNull(
                 placementAvailability, "placementAvailability");
-        this.predictor = createPredictor(config);
+        this.predictor = createPredictor(config, status.getIpPort());
         // Factory construction is deliberately contained: it may retain this
         // exact endpoint but cannot dereference it, start a thread, publish a
         // callback, or otherwise expose it before these final fields are set.
@@ -158,6 +160,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Runs once, after every accepted generation handoff has released its pin. */
     @Override
     protected void closeEndpoint() {
+        // Persist the final learning-predictor state before any retirement
+        // step can fail. Persistence is best-effort: flush failures are
+        // logged and never block or fail the retirement itself.
+        flushPredictorState();
         // A self-await invariant escapes here before ledger mutation/event
         // publication. Ordinary stop cleanup failures are returned only after
         // the exact worker has exited, and are aggregated below.
@@ -222,15 +228,64 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    private static PrefillTimePredictor createPredictor(FlexlbConfig config) {
+    private static PrefillTimePredictor createPredictor(FlexlbConfig config,
+                                                         String endpointId) {
         RoutingConfig.ExecutionTimeEstimatorConfig estimator = config.getRouter()
                 .getRoles().getPrefill().getExecutionTimeEstimator();
-        if (estimator instanceof RoutingConfig.LearningEstimatorConfig) {
-            return new LearningPredictor();
+        if (estimator instanceof RoutingConfig.LearningEstimatorConfig learning) {
+            RoutingConfig.LearningPersistenceConfig persistence = learning.getPersistence();
+            boolean enabled = persistence != null && persistence.isEnabled();
+            LearningPredictorPersistence state = enabled
+                    ? new LearningPredictorPersistence(
+                            resolveStateFile(persistence, endpointId),
+                            persistence.getHistoryLimit(), persistence.getSaveInterval())
+                    : null;
+            return new LearningPredictor(state, enabled ? persistence.getRefitEpochs() : 0);
         }
         RoutingConfig.FormulaEstimatorConfig formula =
                 (RoutingConfig.FormulaEstimatorConfig) estimator;
         return new FormulaPredictor(formula.getExpression());
+    }
+
+    /**
+     * Persists the final learning-predictor state before the endpoint
+     * disappears. Persistence is best-effort: flush failures are logged and
+     * never block or fail the retirement itself.
+     */
+    private void flushPredictorState() {
+        if (!(this.predictor instanceof LearningPredictor learningPredictor)) {
+            return;
+        }
+        try {
+            learningPredictor.flushState();
+        } catch (Throwable failure) {
+            logger.warn("learning predictor final state flush failed: engine={}",
+                    getIp(), failure);
+        }
+    }
+
+    /**
+     * Every endpoint derives its own file so concurrent endpoints never write
+     * the same state file. The configured stateFile is a base path: a
+     * directory resolves to {@code <dir>/<ip-port>.json} while a
+     * {@code .json} file path resolves to {@code <stem>-<ip-port>.json}. An
+     * unset stateFile keeps the default
+     * {@code var/flexlb/learning-predictor/<ip-port>.json} under the process
+     * working directory.
+     */
+    static Path resolveStateFile(RoutingConfig.LearningPersistenceConfig persistence,
+                                 String endpointId) {
+        String endpointFile = endpointId.replace(':', '-') + ".json";
+        if (persistence.getStateFile() == null) {
+            return Path.of("var", "flexlb", "learning-predictor", endpointFile);
+        }
+        Path configured = Path.of(persistence.getStateFile());
+        String fileName = configured.getFileName().toString();
+        if (fileName.endsWith(".json")) {
+            String stem = fileName.substring(0, fileName.length() - ".json".length());
+            return configured.resolveSibling(stem + "-" + endpointFile);
+        }
+        return configured.resolve(endpointFile);
     }
 
     public PrefillState.BatchReservationResult reserveBatch(

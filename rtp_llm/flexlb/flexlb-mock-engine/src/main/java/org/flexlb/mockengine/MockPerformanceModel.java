@@ -72,7 +72,7 @@ final class MockPerformanceModel {
      * data/config/master_fixed_window.json inject this same expression)
      * always win over this fallback.
      */
-    private static final String DSV4_PREFILL_FIT_EXPRESSION =
+    static final String DSV4_PREFILL_FIT_EXPRESSION =
             "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + "
             + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
             + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
@@ -201,7 +201,15 @@ final class MockPerformanceModel {
                 .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
         int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
 
-        PrefillTimeFormula formula = PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
+        // Performance-JSON direct supply (NAVI_BATCH): when the master config
+        // cannot provide a prefill expression (the LEARNING estimator has no
+        // replayable formula), prefill.expression in the performance file
+        // keeps engine-side latency aligned with the production formula
+        // instead of the generic code default.
+        String performanceExpression =
+                prefill.has("expression") ? prefill.get("expression").asText() : null;
+        PrefillTimeFormula formula =
+                PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile, performanceExpression));
 
         JsonNode decode = performance.path("decode");
         // per_token_ms is REMOVED (task #69, wrong-version-deleted-clean rule):
@@ -264,6 +272,10 @@ final class MockPerformanceModel {
      * <ol>
      *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
      *       (blank expression = misconfiguration, fail fast);</li>
+     *   <li>otherwise an explicit {@code prefill.expression} declared in the
+     *       performance JSON — the NAVI_BATCH direct-supply channel for when
+     *       the master config cannot provide an expression (e.g. the LEARNING
+     *       estimator the mock cannot replay);</li>
      *   <li>otherwise {@link #DSV4_PREFILL_FIT_EXPRESSION} — the production
      *       DSv4 fit the mock keeps as its own built-in default, and the
      *       static approximation for a LEARNING estimator the mock cannot
@@ -274,7 +286,8 @@ final class MockPerformanceModel {
      * (an explicit performance-JSON "prefill.fixed_ms" declaration still
      * wins over the formula — see prefillMs).
      */
-    private static String loadPrefillExpression(String masterConfigFile) throws IOException {
+    private static String loadPrefillExpression(String masterConfigFile, String performanceExpression)
+            throws IOException {
         JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
         JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
         for (JsonNode item : envs) {
@@ -294,10 +307,12 @@ final class MockPerformanceModel {
                     }
                     return expression;
                 }
-                break;  // LEARNING estimator: fall through to the production-fit default
+                break;  // LEARNING estimator: fall through to the explicit
+                        // performance-JSON expression or the production-fit default
             }
         }
-        return DSV4_PREFILL_FIT_EXPRESSION;
+        return performanceExpression != null
+                ? performanceExpression : DSV4_PREFILL_FIT_EXPRESSION;
     }
 
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
@@ -341,7 +356,8 @@ final class MockPerformanceModel {
             latency = configuredFixedPrefillMs;
         } else {
             // The only prefill source: the expression resolved in
-            // loadPrefillExpression (explicit FORMULA or the production fit).
+            // loadPrefillExpression (explicit FORMULA, the performance-JSON
+            // direct supply, or the production fit).
             double[] batchVars = new double[5];
             batchVars[0] = requests.size();
             List<double[]> itemVars = new ArrayList<>(requests.size());

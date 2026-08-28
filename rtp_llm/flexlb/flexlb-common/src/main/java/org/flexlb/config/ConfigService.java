@@ -100,10 +100,17 @@ public class ConfigService {
     }
 
     private static void logEffectiveConfig(FlexlbConfig config) {
-        String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
-        String ordering = config.isDirect() ? "N/A"
+        String scheduler;
+        if (config.isDirect()) {
+            scheduler = "DIRECT";
+        } else if (config.isNaviBatch()) {
+            scheduler = "NAVI_BATCH";
+        } else {
+            scheduler = "QUEUE";
+        }
+        String ordering = (config.isDirect() || config.isNaviBatch()) ? "N/A"
                 : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
-        String decision = config.isDirect() ? "N/A"
+        String decision = (config.isDirect() || config.isNaviBatch()) ? "N/A"
                 : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
         String dispatcher = config.getDispatcher().typeName();
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "

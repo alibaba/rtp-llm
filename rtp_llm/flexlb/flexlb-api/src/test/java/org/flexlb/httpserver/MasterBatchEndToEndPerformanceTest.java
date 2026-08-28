@@ -360,7 +360,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 configService,
                 (DefaultRouter) router,
                 scheduler,
-                new RecentCacheKeyTraceReporter());
+                // This end-to-end suite drives the QUEUE scheduler family only;
+                // the NaviBatchScheduler branch is unreachable under its configs.
+                null,
+                mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()));
 
         activeRequestCounter = new ActiveRequestCounter();
         latencyRecorder = new ServerScheduleLatencyRecorder();

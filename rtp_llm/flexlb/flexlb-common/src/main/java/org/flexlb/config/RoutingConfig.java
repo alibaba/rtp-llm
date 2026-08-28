@@ -70,7 +70,44 @@ public final class RoutingConfig {
         private String expression = "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
     }
 
+    @Getter
+    @Setter
     public static final class LearningEstimatorConfig implements ExecutionTimeEstimatorConfig {
+        private LearningPersistenceConfig persistence = new LearningPersistenceConfig();
+    }
+
+    /**
+     * Model-state persistence for the LEARNING estimator. Disabled by default;
+     * when enabled the rolling learning history and model weights are saved to
+     * a JSON state file so a restart resumes from the learned model instead of
+     * the built-in initial parameters.
+     */
+    @Getter
+    @Setter
+    public static final class LearningPersistenceConfig {
+        /** Master switch; false keeps the historical in-memory-only behavior. */
+        private boolean enabled = false;
+        /**
+         * Base state-file path shared by all endpoints. Each endpoint derives
+         * its own file so concurrent endpoints never write the same file: a
+         * directory resolves to {@code <dir>/<ip-port>.json} while a
+         * {@code .json} file path resolves to {@code <stem>-<ip-port>.json}.
+         * Null selects the default
+         * {@code var/flexlb/learning-predictor/<ip-port>.json} under the
+         * process working directory.
+         */
+        private String stateFile;
+        /** Rolling learning-sample history retained across restarts. */
+        private int historyLimit = 2000;
+        /**
+         * Refit epochs replayed over the retained history on a cold start.
+         * The default of 10 matches the recovery quality of far longer
+         * schedules at near-zero startup cost and avoids the slow weight
+         * drift observed with hundreds of epochs on some endpoints.
+         */
+        private int refitEpochs = 10;
+        /** New learning samples between state-file updates. */
+        private int saveInterval = 256;
     }
 
     @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")

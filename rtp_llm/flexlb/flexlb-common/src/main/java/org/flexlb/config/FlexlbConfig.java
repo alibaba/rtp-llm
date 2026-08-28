@@ -41,6 +41,19 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
+    public boolean isNaviBatch() {
+        return scheduler instanceof NaviBatchSchedulerConfig;
+    }
+
+    @JsonIgnore
+    public NaviBatchSchedulerConfig naviBatchScheduler() {
+        if (scheduler instanceof NaviBatchSchedulerConfig naviBatch) {
+            return naviBatch;
+        }
+        throw new IllegalStateException("navi-batch scheduler configuration is not active");
+    }
+
+    @JsonIgnore
     public boolean isPriorityOrdering() {
         return isQueue()
                 && ((QueueSchedulerConfig) scheduler).getOrdering() instanceof PriorityOrderingConfig;
@@ -69,7 +82,10 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public boolean isSingleDecision() {
-        if (isDirect()) {
+        // NAVI_BATCH owns global batching in NaviBatchScheduler; per-worker
+        // batchers are constructed for registry symmetry but never enqueue,
+        // so they must not dereference the (absent) QUEUE decision policy.
+        if (isDirect() || isNaviBatch()) {
             return false;
         }
         return queueScheduler().getDecision() instanceof SingleDecisionConfig;
@@ -77,7 +93,7 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public boolean isFixedWindowDecision() {
-        return !isDirect()
+        return isQueue()
                 && queueScheduler().getDecision() instanceof FixedWindowDecisionConfig;
     }
 

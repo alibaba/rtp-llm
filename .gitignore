@@ -83,3 +83,10 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# online_eval stress-test artifacts (lease A/B run scripts + proc configs,
+# per-run outputs, learning-predictor runtime state)
+# NOTE: proc baseline configs under lease_ab/ need `git add -f` or relocation to data/config/ if they should be tracked
+/rtp_llm/flexlb/tools/online_eval/lease_ab/
+/rtp_llm/flexlb/tools/online_eval/var/
+/rtp_llm/flexlb/var/

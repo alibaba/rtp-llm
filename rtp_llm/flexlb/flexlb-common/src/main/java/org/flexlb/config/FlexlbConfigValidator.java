@@ -8,6 +8,8 @@ import org.flexlb.config.RoutingConfig.EstimatedTtftSelectorConfig;
 import org.flexlb.config.RoutingConfig.FixedCandidatePoolConfig;
 import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
 import org.flexlb.config.RoutingConfig.KvUsageWeightedRandomConfig;
+import org.flexlb.config.RoutingConfig.LearningEstimatorConfig;
+import org.flexlb.config.RoutingConfig.LearningPersistenceConfig;
 import org.flexlb.config.RoutingConfig.LeastRecentlyUsedInPoolConfig;
 import org.flexlb.config.RoutingConfig.OutlierRejectionConfig;
 import org.flexlb.config.RoutingConfig.PrefillConfig;
@@ -26,13 +28,26 @@ final class FlexlbConfigValidator {
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
         require(config.getObservability() != null, "observability", "is required");
 
-        if (!config.isDirect()) {
+        if (config.isNaviBatch()) {
+            validateNaviBatch(config.naviBatchScheduler());
+        } else if (!config.isDirect()) {
             validateQueue(config.queueScheduler());
         }
         config.getDispatcher().validateFor(config.getScheduler());
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
+    }
+
+    private static void validateNaviBatch(NaviBatchSchedulerConfig naviBatch) {
+        range(naviBatch.getNaviBatchLambda(), 0.0, 1.0, "scheduler.naviBatchLambda");
+        positive(naviBatch.getNaviBatchAlpha(), "scheduler.naviBatchAlpha");
+        range(naviBatch.getNaviBatchAlphaDecay(), 0.0, 1.0, "scheduler.naviBatchAlphaDecay");
+        nonNegative(naviBatch.getNaviBatchMinAlpha(), "scheduler.naviBatchMinAlpha");
+        positive(naviBatch.getNaviBatchMaxLoopCount(), "scheduler.naviBatchMaxLoopCount");
+        nonNegative(naviBatch.getNaviBatchTimeBudgetUs(), "scheduler.naviBatchTimeBudgetUs");
+        positive(naviBatch.getNaviBatchWindowMs(), "scheduler.naviBatchWindowMs");
+        positive(naviBatch.getNaviBatchMaxCount(), "scheduler.naviBatchMaxCount");
     }
 
     private static void validateQueue(QueueSchedulerConfig queue) {
@@ -114,6 +129,9 @@ final class FlexlbConfigValidator {
                         "router.roles.prefill.executionTimeEstimator.expression",
                         "contains an invalid formula: " + error.getMessage(), error);
             }
+        } else if (prefill.getExecutionTimeEstimator()
+                instanceof LearningEstimatorConfig learning) {
+            validateLearningPersistence(learning.getPersistence());
         }
         require(prefill.getSelector() != null,
                 "router.roles.prefill.selector", "is required");
@@ -191,6 +209,23 @@ final class FlexlbConfigValidator {
                 "router.roles.vit.selector", "is required");
         if (routing.getGroupSelector() != null) {
             TrafficPolicyConfig.validate(routing.getGroupSelector());
+        }
+    }
+
+    private static void validateLearningPersistence(LearningPersistenceConfig persistence) {
+        if (persistence == null) {
+            return;
+        }
+        positive(persistence.getHistoryLimit(),
+                "router.roles.prefill.executionTimeEstimator.persistence.historyLimit");
+        nonNegative(persistence.getRefitEpochs(),
+                "router.roles.prefill.executionTimeEstimator.persistence.refitEpochs");
+        positive(persistence.getSaveInterval(),
+                "router.roles.prefill.executionTimeEstimator.persistence.saveInterval");
+        if (persistence.getStateFile() != null) {
+            require(!persistence.getStateFile().isBlank(),
+                    "router.roles.prefill.executionTimeEstimator.persistence.stateFile",
+                    "must not be blank");
         }
     }
 

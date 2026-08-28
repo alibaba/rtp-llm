@@ -21,7 +21,11 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1421,6 +1425,66 @@ class PrefillEndpointTest {
                 taskInfo(requestId, batchId, null, 0, executionTimeMs)));
         response.setRunningTaskInfo(Map.of());
         EndpointTestSupport.applyStatus(target, response);
+    }
+
+    @Test
+    void resolveStateFileDerivesPerEndpointFiles() {
+        RoutingConfig.LearningPersistenceConfig directory =
+                new RoutingConfig.LearningPersistenceConfig();
+        directory.setStateFile("/tmp/flexlb/states");
+        assertEquals(Path.of("/tmp/flexlb/states", "10.0.0.1-8080.json"),
+                PrefillEndpoint.resolveStateFile(directory, "10.0.0.1:8080"),
+                "a directory base must resolve to <dir>/<ip-port>.json");
+
+        RoutingConfig.LearningPersistenceConfig file =
+                new RoutingConfig.LearningPersistenceConfig();
+        file.setStateFile("/tmp/flexlb/state.json");
+        assertEquals(Path.of("/tmp/flexlb/state-10.0.0.1-8080.json"),
+                PrefillEndpoint.resolveStateFile(file, "10.0.0.1:8080"),
+                "a .json file base must resolve to <stem>-<ip-port>.json");
+        assertEquals(Path.of("/tmp/flexlb/state-10.0.0.2-8081.json"),
+                PrefillEndpoint.resolveStateFile(file, "10.0.0.2:8081"),
+                "each endpoint must derive its own file from the same base");
+
+        assertEquals(Path.of("var", "flexlb", "learning-predictor", "10.0.0.1-8080.json"),
+                PrefillEndpoint.resolveStateFile(
+                        new RoutingConfig.LearningPersistenceConfig(), "10.0.0.1:8080"),
+                "an unset stateFile must keep the working-directory default");
+    }
+
+    @Test
+    void retirementFlushesLearningPredictorState(@TempDir Path tempDir) throws IOException {
+        FlexlbConfig learningConfig = new FlexlbConfig();
+        configureBatch(learningConfig, 100,
+                learningConfig.fixedWindowDecision().getMaxRequests(), 300, null);
+        RoutingConfig.LearningEstimatorConfig estimator =
+                new RoutingConfig.LearningEstimatorConfig();
+        estimator.getPersistence().setEnabled(true);
+        estimator.getPersistence().setStateFile(tempDir.resolve("state.json").toString());
+        learningConfig.getRouter().getRoles().getPrefill()
+                .setExecutionTimeEstimator(estimator);
+
+        WorkerStatus status = EndpointTestSupport.workerStatus(
+                RoleType.PREFILL, "127.0.0.8", 8080, 8090);
+        EndpointTestSupport.TestRequestRuntime runtime =
+                EndpointTestSupport.requestRuntime();
+        PrefillEndpoint persistingEndpoint = new PrefillEndpoint(
+                status,
+                learningConfig,
+                EndpointTestSupport.routeStrategy(runtime),
+                EndpointTestSupport.realRuntimeFactory(),
+                runtime,
+                runtime,
+                mock(BatchSchedulerReporter.class));
+        persistingEndpoint.startGeneration();
+
+        Path derived = tempDir.resolve("state-127.0.0.8-8080.json");
+        assertFalse(Files.exists(derived),
+                "no state file may exist before retirement without learning traffic");
+        persistingEndpoint.close();
+        assertTrue(Files.exists(derived),
+                "retirement must flush the final predictor state to the"
+                        + " derived per-endpoint file");
     }
 
     private static PrefillEndpoint createLearningEndpoint() {

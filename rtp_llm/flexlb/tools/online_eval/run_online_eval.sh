@@ -68,6 +68,12 @@ JAVA_MOCK_STATS_INTERVAL_MS="${JAVA_MOCK_STATS_INTERVAL_MS:-1000}"
 # 128 = CONCURRENCY_LIMIT-aligned (production anchor; previously 132).
 JAVA_MOCK_DECODE_MAX_CONCURRENCY="${JAVA_MOCK_DECODE_MAX_CONCURRENCY:-128}"
 JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-32g}"
+# Unique per-engine loopback advertisement IPs (127.x.y.z) rely on Linux's
+# whole-127.0.0.0/8 loopback routing. macOS only routes 127.0.0.1, so
+# master-to-engine gRPC to 127.1.x.y fails there ("marked dead after 3
+# consecutive gRPC failures"). Set JAVA_MOCK_UNIQUE_ENGINE_IPS=false on
+# macOS hosts to restore the legacy single-host advertisement.
+JAVA_MOCK_UNIQUE_ENGINE_IPS="${JAVA_MOCK_UNIQUE_ENGINE_IPS:-true}"
 JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 ENDPOINT_READY_TIMEOUT_S="${ENDPOINT_READY_TIMEOUT_S:-120}"
@@ -847,6 +853,7 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
     --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
     --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
+    --unique-engine-ips "${JAVA_MOCK_UNIQUE_ENGINE_IPS}" \
     --performance "${PERFORMANCE_FILE}" \
     --master-config "${PROCESS_CONFIG_FILE}" \
     --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \

@@ -96,6 +96,11 @@ public final class JavaLoadClient {
     private final List<RequestResult> results = new ArrayList<>();
     final AtomicInteger actualSentCount = new AtomicInteger();
     private final AtomicInteger responseCount = new AtomicInteger();
+    // FETCH_OUTPUT_STREAM=0 telemetry: enqueued=true responses seen vs
+    // route-decision fallbacks (NAVI_BATCH degrades some batches to route
+    // decisions, which still need the client-side GenerateStreamCall submit).
+    private final AtomicInteger enqueuedByMasterSeen = new AtomicInteger();
+    private final AtomicInteger routeDecisionFallbackSeen = new AtomicInteger();
     private volatile long replayStartedEpochMs;
     private volatile long replayStartedNanos;
     private volatile long sendStartNanos;
@@ -611,24 +616,8 @@ public final class JavaLoadClient {
                 result.prefill = roleAddr(scheduleResponse, "PREFILL");
                 result.decode = roleAddr(scheduleResponse, "DECODE");
 
-                if (!config.fetchOutputStream) {
-                    // Under a NON_BATCH dispatcher the engine only receives the
-                    // request through the client's own GenerateStreamCall
-                    // (submission and stream reading are the same streaming
-                    // call), so skipping the fetch would mean the request
-                    // never reaches any engine. Fail fast instead of silently
-                    // producing a run with zero engine load.
-                    if (!scheduleResponse.getEnqueuedByMaster()) {
-                        System.err.println(
-                                "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
-                                + "schedule response reports enqueued_by_master=false "
-                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
-                                + "dispatcher the engine only receives requests through the "
-                                + "client's GenerateStreamCall stream, so skipping the fetch "
-                                + "would leave the engine idle. Re-enable stream reading or "
-                                + "switch the master to a BATCH dispatcher.");
-                        System.exit(86);
-                    }
+                if (!config.fetchOutputStream && scheduleResponse.getEnqueuedByMaster()) {
+                    enqueuedByMasterSeen.incrementAndGet();
                     result.status = "scheduled";
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                     // Route through tallyResult so the result lands in
@@ -638,6 +627,41 @@ public final class JavaLoadClient {
                     tallyResult(result);
                     responseCount.incrementAndGet();
                     return result;
+                }
+                if (!config.fetchOutputStream && !scheduleResponse.getEnqueuedByMaster()) {
+                    // Route-decision response: the master did NOT enqueue this
+                    // request (NAVI_BATCH degrades some batches to route
+                    // decisions; a NON_BATCH dispatcher always answers this
+                    // way). The engine only receives the request through the
+                    // client's own GenerateStreamCall (submission and stream
+                    // reading are the same streaming call), so keep the
+                    // phase-2 stream path for THIS request instead of skipping
+                    // it — engine-side load stays complete.
+                    int fallbacks = routeDecisionFallbackSeen.incrementAndGet();
+                    if (fallbacks == 1) {
+                        System.err.println(
+                                "WARN: FETCH_OUTPUT_STREAM=0 saw a route-decision response "
+                                + "(enqueued_by_master=false, request_id=" + record.requestId
+                                + "); this request keeps the client-side GenerateStreamCall "
+                                + "submit so the engine still receives it.");
+                    }
+                    // Misuse guard: a NON_BATCH dispatcher answers every schedule
+                    // with enqueued_by_master=false. If the first 50 completed
+                    // responses are ALL route decisions (no BATCH_ENQUEUE seen),
+                    // this run would degenerate into full stream mode — fail fast
+                    // like the pure NON_BATCH case instead of silently producing
+                    // a run whose client-side cost matches FETCH_OUTPUT_STREAM=1.
+                    if (enqueuedByMasterSeen.get() == 0 && fallbacks >= 50) {
+                        System.err.println(
+                                "FATAL: FETCH_OUTPUT_STREAM=0 requires a BATCH dispatcher: "
+                                + fallbacks + " schedule responses so far all report "
+                                + "enqueued_by_master=false. Under a NON_BATCH dispatcher the "
+                                + "engine only receives requests through the client's "
+                                + "GenerateStreamCall stream, so skipping the fetch would "
+                                + "leave the engine idle. Re-enable stream reading or switch "
+                                + "the master to a BATCH dispatcher.");
+                        System.exit(86);
+                    }
                 }
             }
         } catch (Exception e) {
@@ -666,8 +690,12 @@ public final class JavaLoadClient {
             return result;
         }
 
-        // Phase 2: engine stream reading (outside semaphore)
-        if (scheduleResponse != null && config.fetchOutputStream) {
+        // Phase 2: engine stream reading (outside semaphore). In no-fetch mode
+        // only route-decision responses reach this point (they still need the
+        // GenerateStreamCall submit); enqueued responses returned above as
+        // status=scheduled.
+        if (scheduleResponse != null
+                && (config.fetchOutputStream || !scheduleResponse.getEnqueuedByMaster())) {
             try {
                 Double firstFrameNanos = null;
                 Double terminalNanos = null;
