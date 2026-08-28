@@ -53,7 +53,7 @@ envs = payload["zone_process_setting"]["process_info"]["envs"]
 document = next(value for key, value in envs if key == "FLEXLB_CONFIG")
 config = json.loads(document)
 config["dispatcher"]["maxInflightBatchesPerPrefillWorker"] = int(max_batches)
-config["dispatcher"]["maxCollectionWaitMs"] = int(wait_ms)
+config["scheduler"]["decision"]["maxCollectionWaitMs"] = int(wait_ms)
 print(json.dumps(config, separators=(",", ":")))
 PY
 )"

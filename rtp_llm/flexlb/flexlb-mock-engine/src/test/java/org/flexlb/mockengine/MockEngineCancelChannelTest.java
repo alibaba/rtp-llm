@@ -3,11 +3,12 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelAck;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelOutcome;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelTarget;
+import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.eviction.EngineCancelChannel.CancelAck;
+import org.flexlb.balance.eviction.EngineCancelChannel.CancelOutcome;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -34,8 +35,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * {@link MockEngineCancelChannel} contract tests against the in-process mock
- * engine cluster (test wiring only — production Spring contexts keep
- * UnsupportedEngineCancelChannel):
+ * engine cluster (test wiring only):
  * <ul>
  *   <li>accepted: a live request on the addressed worker is cancelled and its
  *       CANCELLED completion surfaces in WorkerStatus;</li>
@@ -261,11 +261,10 @@ class MockEngineCancelChannelTest {
     }
 
     private static DecodeEndpoint endpoint(int grpcPort) {
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.1");
-        status.setPort(grpcPort - 2);
-        status.setGrpcPort(grpcPort);
-        return new DecodeEndpoint(status);
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                RoleType.DECODE, "test", "127.0.0.1",
+                grpcPort - 2, grpcPort, null);
+        return new DecodeEndpoint(status, event -> { });
     }
 
     private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode) {

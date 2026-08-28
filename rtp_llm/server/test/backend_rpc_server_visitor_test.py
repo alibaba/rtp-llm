@@ -59,18 +59,29 @@ class _FakeInput:
     enqueued_by_master: bool = False
     prompt_length: int = 17
 
-    def __init__(self, is_streaming=False, **generate_config_kwargs):
-        if isinstance(is_streaming, _FakeGenerateConfig):
+    def __init__(
+        self,
+        is_streaming=False,
+        generate_config=None,
+        request_id=123,
+        token_ids=None,
+        enqueued_by_master=False,
+        prompt_length=17,
+        **generate_config_kwargs,
+    ):
+        if generate_config is not None:
+            self.generate_config = generate_config
+        elif isinstance(is_streaming, _FakeGenerateConfig):
             self.generate_config = is_streaming
         else:
             self.generate_config = _FakeGenerateConfig(
                 is_streaming=is_streaming, **generate_config_kwargs
             )
-        self.request_id = 123
-        self.token_ids = _FakeTokenIds()
+        self.request_id = request_id
+        self.token_ids = token_ids or _FakeTokenIds()
         self.headers = None
-        self.enqueued_by_master = False
-        self.prompt_length = 17
+        self.enqueued_by_master = enqueued_by_master
+        self.prompt_length = prompt_length
 
 
 class _FakeRouteTokenIds:
@@ -83,6 +94,7 @@ class _FakeRouteTokenIds:
 class _FakeRouteInput:
     request_id = 456
     token_ids = _FakeRouteTokenIds()
+    prompt_length = 3
 
     def __init__(self):
         self.generate_config = _FakeGenerateConfig()

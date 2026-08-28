@@ -70,7 +70,7 @@ class CacheAffinityPolicyTest {
                 5);
 
         assertTrue(decision.hasPreference());
-        assertEquals(Long.MAX_VALUE, decision.scoreCutoffMs());
+        assertEquals(Long.MAX_VALUE, decision.projectedTtftCutoffMs());
     }
 
     @Test

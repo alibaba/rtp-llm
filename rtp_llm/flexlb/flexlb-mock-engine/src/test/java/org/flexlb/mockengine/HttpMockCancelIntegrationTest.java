@@ -4,12 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelTarget;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelAck;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelOutcome;
-import org.flexlb.balance.scheduler.priority.HttpMockEngineCancelChannel;
+import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.eviction.EngineCancelChannel.CancelAck;
+import org.flexlb.balance.eviction.EngineCancelChannel.CancelOutcome;
+import org.flexlb.balance.eviction.HttpMockEngineCancelChannel;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -378,11 +379,10 @@ class HttpMockCancelIntegrationTest {
     }
 
     private static DecodeEndpoint endpoint(int grpcPort) {
-        WorkerStatus status = new WorkerStatus();
-        status.setIp("127.0.0.1");
-        status.setPort(grpcPort - 2);
-        status.setGrpcPort(grpcPort);
-        return new DecodeEndpoint(status);
+        WorkerStatus status = WorkerStatus.createDiscovered(
+                RoleType.DECODE, "test", "127.0.0.1",
+                grpcPort - 2, grpcPort, null);
+        return new DecodeEndpoint(status, event -> { });
     }
 
     private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests,

@@ -1,31 +1,50 @@
 package org.flexlb.sync.status;
 
-import lombok.Data;
-import lombok.NoArgsConstructor;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-@Data
-@NoArgsConstructor
-public class ModelWorkerStatus {
+public final class ModelWorkerStatus {
 
     /**
      * Non-PD separation mode
      */
-    private Map<String/*ipPort*/, WorkerStatus> pdFusionStatusMap = new ConcurrentHashMap<>();
+    private final Map<String/*ipPort*/, WorkerStatus> pdFusionStatusMap =
+            new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> prefillStatusMap = new ConcurrentHashMap<>();
+    private final Map<String/*ipPort*/, WorkerStatus> prefillStatusMap =
+            new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> decodeStatusMap = new ConcurrentHashMap<>();
+    private final Map<String/*ipPort*/, WorkerStatus> decodeStatusMap =
+            new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> vitStatusMap = new ConcurrentHashMap<>();
+    private final Map<String/*ipPort*/, WorkerStatus> vitStatusMap =
+            new ConcurrentHashMap<>();
 
-    private Map<String/*ipPort*/, WorkerStatus> frontendStatusMap = new ConcurrentHashMap<>();
+    private final Map<String/*ipPort*/, WorkerStatus> frontendStatusMap =
+            new ConcurrentHashMap<>();
+
+    public Map<String, WorkerStatus> getPdFusionStatusMap() {
+        return pdFusionStatusMap;
+    }
+
+    public Map<String, WorkerStatus> getPrefillStatusMap() {
+        return prefillStatusMap;
+    }
+
+    public Map<String, WorkerStatus> getDecodeStatusMap() {
+        return decodeStatusMap;
+    }
+
+    public Map<String, WorkerStatus> getVitStatusMap() {
+        return vitStatusMap;
+    }
+
+    public Map<String, WorkerStatus> getFrontendStatusMap() {
+        return frontendStatusMap;
+    }
 
     public Map<String, WorkerStatus> getRoleStatusMap(RoleType roleType) {
         return switch (roleType) {
@@ -36,26 +55,6 @@ public class ModelWorkerStatus {
             case FRONTEND -> frontendStatusMap;
             case null -> Map.of();
         };
-    }
-
-    public List<RoleType> getRoleTypeList() {
-        List<RoleType> roleTypeList = new ArrayList<>();
-        if (!pdFusionStatusMap.isEmpty()) {
-            roleTypeList.add(RoleType.PDFUSION);
-        }
-        if (!decodeStatusMap.isEmpty()) {
-            roleTypeList.add(RoleType.DECODE);
-        }
-        if (!prefillStatusMap.isEmpty()) {
-            roleTypeList.add(RoleType.PREFILL);
-        }
-        if (!vitStatusMap.isEmpty()) {
-            roleTypeList.add(RoleType.VIT);
-        }
-        if (!frontendStatusMap.isEmpty()) {
-            roleTypeList.add(RoleType.FRONTEND);
-        }
-        return roleTypeList;
     }
 
     public int getWorkerTotalCount() {

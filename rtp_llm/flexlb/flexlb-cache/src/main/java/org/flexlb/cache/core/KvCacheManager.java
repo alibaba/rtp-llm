@@ -1,46 +1,40 @@
 package org.flexlb.cache.core;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.domain.CacheMatch;
 import org.flexlb.cache.domain.DiffResult;
+import org.flexlb.cache.domain.EngineGeneration;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.dao.master.WorkerStatusProvider;
+import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
-/**
- * KV cache manager
- * Core functions:
- * 1. Unified management of two-level hash table
- * 2. Provide advanced cache query and matching services
- *
- * @author FlexLB
- */
+/** Thin cache API over the single generation-fenced cache index. */
 @Slf4j
 @Component
 public class KvCacheManager {
 
-    @Autowired
-    private GlobalCacheIndex globalCacheIndex;
+    private final GlobalCacheIndex cacheIndex;
+    private final CacheMetricsReporter cacheMetricsReporter;
+    private final DynamicCacheIntervalService dynamicIntervalManager;
 
     @Autowired
-    private EngineLocalView engineLocalView;
-
-    @Autowired
-    private WorkerStatusProvider workerStatusProvider;
-
-    /**
-     * Cache metrics reporter
-     */
-    @Autowired
-    private CacheMetricsReporter cacheMetricsReporter;
+    public KvCacheManager(
+            GlobalCacheIndex cacheIndex,
+            CacheMetricsReporter cacheMetricsReporter,
+            DynamicCacheIntervalService dynamicIntervalManager) {
+        this.cacheIndex = cacheIndex;
+        this.cacheMetricsReporter = cacheMetricsReporter;
+        this.dynamicIntervalManager = dynamicIntervalManager;
+    }
 
     @PostConstruct
     public void init() {
@@ -53,83 +47,101 @@ public class KvCacheManager {
         clear();
     }
 
-    /**
-     * Query engine cache matching status
-     *
-     * @param blockCacheKeys List of cache block hash values to query
-     * @param roleType       Engine role to query
-     * @param group          Engine group to query
-     * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
-     */
-    public Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(List<Long> blockCacheKeys,
-        RoleType roleType, String group) {
-
-        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
-            return Collections.emptyMap();
+    public Map<EngineGeneration, CacheMatch> findMatchingEngines(
+            List<Long> blockCacheKeys,
+            List<EngineGeneration> candidates) {
+        if (blockCacheKeys == null || blockCacheKeys.isEmpty()
+                || candidates == null || candidates.isEmpty()) {
+            return Map.of();
         }
-
-        // Use candidate engine list
-        List<String> enginesIpPorts = workerStatusProvider.getWorkerIpPorts(roleType, group);
-
-        // Batch calculate prefix match length
-        return globalCacheIndex.batchCalculatePrefixMatchLength(enginesIpPorts, blockCacheKeys);
+        return cacheIndex.batchCalculatePrefixMatches(
+                candidates, blockCacheKeys);
     }
 
-    /**
-     * Update engine cache status
-     *
-     * @param engineIPort    Engine IP:Port
-     * @param role           Engine role
-     * @param newCacheBlocks New cache block set (blockCacheKeys)
-     */
-    public void updateEngineCache(String engineIPort, String role, Set<Long> newCacheBlocks) {
-        if (engineIPort == null || newCacheBlocks == null) {
-            return;
+    public boolean activateEngineGeneration(
+            String engineIpPort, long generationId) {
+        boolean activated = cacheIndex.activateEngineGeneration(
+                engineIpPort, generationId);
+        if (activated) {
+            reportIndexMetricsSafely();
         }
-
-        // Calculate diff
-        DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks, role);
-        if (!diffResult.hasChanges()) {
-            return;
-        }
-
-        // Apply added cache blocks
-        for (Long addedBlock : diffResult.getAddedBlocks()) {
-            boolean contains = newCacheBlocks.contains(addedBlock);
-            if (contains) {
-                // Update local view
-                engineLocalView.addOrUpdateCacheBlock(engineIPort, addedBlock);
-                // Update global index
-                globalCacheIndex.addCacheBlock(addedBlock, engineIPort);
-            }
-        }
-
-        // Apply removed cache blocks
-        for (Long removedBlock : diffResult.getRemovedBlocks()) {
-            // Remove from local view
-            engineLocalView.removeCacheBlock(engineIPort, removedBlock);
-            // Remove from global index
-            globalCacheIndex.removeCacheBlock(engineIPort, removedBlock);
-        }
-
-        // Report metrics
-        cacheMetricsReporter.reportEngineLocalMetrics(
-                engineIPort.split(":")[0], role, engineLocalView.size(engineIPort));
-        cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
-        cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
+        return activated;
     }
 
-    /**
-     * Clear all data
-     */
+    /** Replace one exact generation's full cache snapshot. */
+    public boolean updateEngineCache(
+            String engineIpPort,
+            long generationId,
+            RoleType roleType,
+            Set<Long> newCacheBlocks) {
+        if (newCacheBlocks == null) {
+            throw new IllegalArgumentException("newCacheBlocks must not be null");
+        }
+        Set<Long> immutableSnapshot = Set.copyOf(newCacheBlocks);
+        Optional<DiffResult> committed = cacheIndex.replaceEngineCache(
+                engineIpPort, generationId, immutableSnapshot);
+        if (committed.isEmpty()) {
+            return false;
+        }
+
+        DiffResult diff = committed.get();
+        String role = roleType == null ? "unknown" : roleType.getCode();
+        reportCommittedUpdateSafely(
+                engineIpPort, role, immutableSnapshot.size(), diff);
+        return true;
+    }
+
+    public boolean retireEngineGeneration(
+            String engineIpPort, long generationId) {
+        boolean retired = cacheIndex.retireEngineGeneration(
+                engineIpPort, generationId);
+        if (retired) {
+            reportIndexMetricsSafely();
+        }
+        return retired;
+    }
+
     public void clear() {
-
-        globalCacheIndex.clear();
-        engineLocalView.clear();
-
-        // Report
-        cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
-
+        cacheIndex.clear();
+        reportIndexMetricsSafely();
         log.info("Cleared all cache data");
+    }
+
+    private void reportCommittedUpdateSafely(
+            String engineIpPort,
+            String role,
+            int cacheBlockCount,
+            DiffResult diff) {
+        try {
+            cacheMetricsReporter.reportCacheDiffMetrics(
+                    role, diff.addedBlocks().size(), diff.removedBlocks().size());
+            dynamicIntervalManager.updateDiffStatistics(
+                    diff.addedBlocks().size() + diff.removedBlocks().size());
+            cacheMetricsReporter.reportEngineLocalMetrics(
+                    engineHost(engineIpPort), role, cacheBlockCount);
+        } catch (RuntimeException telemetryFailure) {
+            log.warn("Cache update telemetry failed for {}: {}",
+                    engineIpPort, telemetryFailure.getMessage());
+        }
+        reportIndexMetricsSafely();
+    }
+
+    private void reportIndexMetricsSafely() {
+        try {
+            GlobalCacheIndex.IndexMetrics snapshot = cacheIndex.metricsSnapshot();
+            cacheMetricsReporter.reportGlobalCacheMetrics(
+                    snapshot.totalBlocks(), snapshot.totalMappings());
+            cacheMetricsReporter.reportEngineViewsMapSize(snapshot.engineCount());
+        } catch (RuntimeException telemetryFailure) {
+            log.warn("Cache index telemetry failed: {}",
+                    telemetryFailure.getMessage());
+        }
+    }
+
+    private static String engineHost(String engineIpPort) {
+        int separator = engineIpPort.lastIndexOf(':');
+        return separator > 0
+                ? engineIpPort.substring(0, separator)
+                : engineIpPort;
     }
 }

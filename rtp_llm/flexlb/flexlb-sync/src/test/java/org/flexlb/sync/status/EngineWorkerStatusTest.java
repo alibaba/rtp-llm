@@ -1,16 +1,18 @@
 package org.flexlb.sync.status;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.sync.runner.RunnerTestSupport;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -22,241 +24,186 @@ class EngineWorkerStatusTest {
 
     private EngineWorkerStatus engineWorkerStatus;
     private EndpointRegistry registry;
-    private ConfigService configService;
-    private WorkerStatus workerStatus1;
-    private WorkerStatus workerStatus2;
 
     @BeforeEach
     void setUp() {
-        for (RoleType roleType : RoleType.values()) {
-            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType).clear();
-        }
-        configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        registry = new EndpointRegistry(configService, () -> null,
-                Mockito.mock(BatchSchedulerReporter.class));
+        clearStatusMaps();
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig())
+                .thenReturn(new FlexlbConfig());
+        registry = RunnerTestSupport.endpointRegistry(configService);
         engineWorkerStatus = new EngineWorkerStatus(registry);
-        workerStatus1 = new WorkerStatus();
-        workerStatus1.setGroup("group1");
-        workerStatus2 = new WorkerStatus();
-        workerStatus2.setGroup("group2");
+    }
+
+    @AfterEach
+    void tearDown() {
+        registry.close();
+        clearStatusMaps();
     }
 
     @Test
-    void should_return_filtered_worker_status_when_selecting_model_worker_status_with_group_filter() {
-        // Given
-        String ipPort1 = "127.0.0.1:8080";
-        String ipPort2 = "127.0.0.1:8081";
+    void should_capture_only_endpoint_generation_matching_group() {
+        WorkerStatus matching = status(RoleType.DECODE, "group1", 8080);
+        WorkerStatus filtered = status(RoleType.DECODE, "group2", 8081);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, matching.getIpPort(), matching);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, filtered.getIpPort(), filtered);
 
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, workerStatus1); // group1
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, workerStatus2); // group2
-
-        // Register corresponding DecodeEndpoints
-        workerStatus1.setIp("127.0.0.1");
-        workerStatus1.setPort(8080);
-        workerStatus1.setGrpcPort(9090);
-        workerStatus2.setIp("127.0.0.1");
-        workerStatus2.setPort(8081);
-        workerStatus2.setGrpcPort(9091);
-        registry.ensureEndpoint(RoleType.DECODE, ipPort1, workerStatus1);
-        registry.ensureEndpoint(RoleType.DECODE, ipPort2, workerStatus2);
-
-        // When
-        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, "group1");
-
-        // Then
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertTrue(result.containsKey(ipPort1));
-        assertFalse(result.containsKey(ipPort2));
-
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        List<WorkerEndpoint.GenerationPin> result =
+                engineWorkerStatus.captureModelWorkerEndpoints(
+                        RoleType.DECODE, "group1");
+        try {
+            assertEquals(1, result.size());
+            assertSame(matching, result.getFirst().endpoint().getStatus());
+            assertEquals(matching.getIpPort(),
+                    result.getFirst().endpoint().ipPort());
+        } finally {
+            closePins(result);
+        }
     }
 
     @Test
-    void should_return_all_worker_status_when_selecting_model_worker_status_without_group_filter() {
-        // Given
-        String ipPort1 = "127.0.0.1:8080";
-        String ipPort2 = "127.0.0.1:8081";
+    void should_capture_all_endpoint_generations_without_group_filter() {
+        WorkerStatus first = status(RoleType.PREFILL, "group1", 8080);
+        WorkerStatus second = status(RoleType.PREFILL, "group2", 8081);
+        registry.registerPreinitializedEndpoint(
+                RoleType.PREFILL, first.getIpPort(), first);
+        registry.registerPreinitializedEndpoint(
+                RoleType.PREFILL, second.getIpPort(), second);
 
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort1, workerStatus1);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort2, workerStatus2);
-
-        // Register corresponding PrefillEndpoints
-        workerStatus1.setIp("127.0.0.1");
-        workerStatus1.setPort(8080);
-        workerStatus1.setGrpcPort(9090);
-        workerStatus2.setIp("127.0.0.1");
-        workerStatus2.setPort(8081);
-        workerStatus2.setGrpcPort(9091);
-        registry.ensureEndpoint(RoleType.PREFILL, ipPort1, workerStatus1);
-        registry.ensureEndpoint(RoleType.PREFILL, ipPort2, workerStatus2);
-
-        // When
-        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null);
-
-        // Then
-        assertNotNull(result);
-        assertEquals(2, result.size());
-        assertTrue(result.containsKey(ipPort1));
-        assertTrue(result.containsKey(ipPort2));
-
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        List<WorkerEndpoint.GenerationPin> result =
+                engineWorkerStatus.captureModelWorkerEndpoints(
+                        RoleType.PREFILL, null);
+        try {
+            assertEquals(2, result.size());
+            assertTrue(result.stream().anyMatch(
+                    pin -> pin.endpoint().getStatus() == first));
+            assertTrue(result.stream().anyMatch(
+                    pin -> pin.endpoint().getStatus() == second));
+        } finally {
+            closePins(result);
+        }
     }
 
     @Test
-    void should_return_empty_map_when_selecting_model_worker_status_with_null_status() {
-        // Given - clear all status maps
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
+    void should_return_empty_capture_when_role_registry_is_empty() {
+        List<WorkerEndpoint.GenerationPin> result =
+                engineWorkerStatus.captureModelWorkerEndpoints(
+                        RoleType.PDFUSION, null);
 
-        // When
-        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.PDFUSION, null);
-
-        // Then
         assertNotNull(result);
         assertTrue(result.isEmpty());
     }
 
     @Test
-    void should_return_empty_map_after_group_filtering_when_no_matching_group_exists() {
-        // Given
-        String ipPort = "127.0.0.1:8080";
+    void should_close_filtered_pins_when_no_group_matches() {
+        WorkerStatus status = status(RoleType.VIT, "group1", 8080);
+        registry.registerPreinitializedEndpoint(
+                RoleType.VIT, status.getIpPort(), status);
 
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put(ipPort, workerStatus1); // group1
+        List<WorkerEndpoint.GenerationPin> result =
+                engineWorkerStatus.captureModelWorkerEndpoints(
+                        RoleType.VIT, "nonExistentGroup");
 
-        // When
-        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.VIT, "nonExistentGroup");
-
-        // Then
-        assertNotNull(result);
         assertTrue(result.isEmpty());
-
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+        assertEquals(List.of(status.getIpPort()),
+                engineWorkerStatus.modelWorkerAddresses(
+                        RoleType.VIT, null));
     }
 
     @Test
-    void should_exclude_null_group_worker_when_group_specified() {
-        // Given - worker1 has group "groupA", worker2 has no group (null)
-        String ipPort1 = "127.0.0.1:8080";
-        String ipPort2 = "127.0.0.1:8081";
+    void should_exclude_null_group_endpoint_when_group_is_specified() {
+        WorkerStatus matching = status(RoleType.DECODE, "groupA", 8080);
+        WorkerStatus ungrouped = status(RoleType.DECODE, null, 8081);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, matching.getIpPort(), matching);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
 
-        WorkerStatus ws1 = new WorkerStatus();
-        ws1.setGroup("groupA");
-        ws1.setIp("127.0.0.1");
-        ws1.setPort(8080);
-        ws1.setGrpcPort(9090);
+        List<String> result = engineWorkerStatus.modelWorkerAddresses(
+                RoleType.DECODE, "groupA");
 
-        WorkerStatus ws2 = new WorkerStatus();
-        // ws2 group left as null (not set)
-        ws2.setIp("127.0.0.1");
-        ws2.setPort(8081);
-        ws2.setGrpcPort(9091);
-
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, ws1);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, ws2);
-
-        registry.ensureEndpoint(RoleType.DECODE, ipPort1, ws1);
-        registry.ensureEndpoint(RoleType.DECODE, ipPort2, ws2);
-
-        // When - select with group "groupA"
-        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, "groupA");
-
-        // Then - only worker1 should be returned, worker2 (null group) should be excluded
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertTrue(result.containsKey(ipPort1));
-        assertFalse(result.containsKey(ipPort2));
-
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        assertEquals(List.of(matching.getIpPort()), result);
+        assertFalse(result.contains(ungrouped.getIpPort()));
     }
 
     @Test
-    void should_include_all_workers_when_group_is_null() {
-        // Given - worker1 has group "groupA", worker2 has no group (null)
-        String ipPort1 = "127.0.0.1:8080";
-        String ipPort2 = "127.0.0.1:8081";
+    void should_include_grouped_and_ungrouped_endpoints_without_filter() {
+        WorkerStatus grouped = status(RoleType.DECODE, "groupA", 8080);
+        WorkerStatus ungrouped = status(RoleType.DECODE, null, 8081);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, grouped.getIpPort(), grouped);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
 
-        WorkerStatus ws1 = new WorkerStatus();
-        ws1.setGroup("groupA");
-        ws1.setIp("127.0.0.1");
-        ws1.setPort(8080);
-        ws1.setGrpcPort(9090);
+        List<String> result = engineWorkerStatus.modelWorkerAddresses(
+                RoleType.DECODE, null);
 
-        WorkerStatus ws2 = new WorkerStatus();
-        // ws2 group left as null (not set)
-        ws2.setIp("127.0.0.1");
-        ws2.setPort(8081);
-        ws2.setGrpcPort(9091);
-
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort1, ws1);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort2, ws2);
-
-        registry.ensureEndpoint(RoleType.DECODE, ipPort1, ws1);
-        registry.ensureEndpoint(RoleType.DECODE, ipPort2, ws2);
-
-        // When - select with group null (no group constraint)
-        var result = engineWorkerStatus.selectModelWorkerStatus(RoleType.DECODE, null);
-
-        // Then - both workers should be returned
-        assertNotNull(result);
         assertEquals(2, result.size());
-        assertTrue(result.containsKey(ipPort1));
-        assertTrue(result.containsKey(ipPort2));
-
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        assertTrue(result.contains(grouped.getIpPort()));
+        assertTrue(result.contains(ungrouped.getIpPort()));
     }
 
     @Test
-    void should_visit_registered_endpoints_without_materializing_result() {
-        String matching = "127.0.0.1:8080";
-        String filtered = "127.0.0.1:8081";
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(matching, workerStatus1);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(filtered, workerStatus2);
-        workerStatus1.setIp("127.0.0.1");
-        workerStatus1.setPort(8080);
-        workerStatus2.setIp("127.0.0.1");
-        workerStatus2.setPort(8081);
-        registry.ensureEndpoint(RoleType.DECODE, matching, workerStatus1);
-        registry.ensureEndpoint(RoleType.DECODE, filtered, workerStatus2);
-        AtomicInteger visited = new AtomicInteger();
+    void monitoring_addresses_are_non_owning_and_capacity_uses_larger_owner() {
+        WorkerStatus matching = status(RoleType.DECODE, "group1", 8080);
+        WorkerStatus filtered = status(RoleType.DECODE, "group2", 8081);
+        var statusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
+                .getDecodeStatusMap();
+        statusMap.put(matching.getIpPort(), matching);
+        statusMap.put(filtered.getIpPort(), filtered);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, matching.getIpPort(), matching);
+        registry.registerPreinitializedEndpoint(
+                RoleType.DECODE, filtered.getIpPort(), filtered);
 
-        int count = engineWorkerStatus.forEachModelWorkerEndpoint(
-                RoleType.DECODE, "group1", (ipPort, endpoint) -> {
-                    assertEquals(matching, ipPort);
-                    visited.incrementAndGet();
-                });
-
-        assertEquals(1, count);
-        assertEquals(1, visited.get());
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().remove(filtered);
-        assertEquals(2, engineWorkerStatus.getModelWorkerCapacity(RoleType.DECODE));
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        assertEquals(List.of(matching.getIpPort()),
+                engineWorkerStatus.modelWorkerAddresses(
+                        RoleType.DECODE, "group1"));
+        statusMap.remove(filtered.getIpPort());
+        assertEquals(2,
+                engineWorkerStatus.getModelWorkerCapacity(RoleType.DECODE));
     }
 
     @Test
-    void should_resolve_pd_fusion_and_vit_from_role_specific_registries() {
-        assertRoleEndpoint(RoleType.PDFUSION, "127.0.0.1:8101");
-        assertRoleEndpoint(RoleType.VIT, "127.0.0.1:8102");
+    void should_capture_pd_fusion_and_vit_from_role_specific_registries() {
+        assertRoleEndpoint(RoleType.PDFUSION, 8101);
+        assertRoleEndpoint(RoleType.VIT, 8102);
     }
 
-    private void assertRoleEndpoint(RoleType roleType, String ipPort) {
-        WorkerStatus status = new WorkerStatus();
-        status.setRole(roleType);
-        status.setIp("127.0.0.1");
-        status.setPort(Integer.parseInt(ipPort.substring(ipPort.lastIndexOf(':') + 1)));
-        status.setAlive(true);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleStatusMap(roleType).put(ipPort, status);
-        var registered = registry.ensureEndpoint(roleType, ipPort, status);
+    private void assertRoleEndpoint(RoleType role, int port) {
+        WorkerStatus status = status(role, null, port);
+        WorkerEndpoint registered = registry.registerPreinitializedEndpoint(
+                role, status.getIpPort(), status);
 
-        var selected = engineWorkerStatus.selectModelWorkerStatus(roleType, null);
+        List<WorkerEndpoint.GenerationPin> selected =
+                engineWorkerStatus.captureModelWorkerEndpoints(role, null);
+        try {
+            assertEquals(1, selected.size());
+            assertSame(registered, selected.getFirst().endpoint());
+        } finally {
+            closePins(selected);
+        }
+    }
 
-        assertEquals(1, selected.size());
-        assertSame(registered, selected.get(ipPort));
+    private static WorkerStatus status(
+            RoleType role, String group, int port) {
+        return RunnerTestSupport.alive(
+                role, group, "127.0.0.1", port, port + 1, "test-site");
+    }
+
+    private static void closePins(
+            List<WorkerEndpoint.GenerationPin> pins) {
+        for (WorkerEndpoint.GenerationPin pin : pins) {
+            pin.close();
+        }
+    }
+
+    private static void clearStatusMaps() {
+        for (RoleType role : RoleType.values()) {
+            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
+                    .getRoleStatusMap(role).clear();
+        }
     }
 }

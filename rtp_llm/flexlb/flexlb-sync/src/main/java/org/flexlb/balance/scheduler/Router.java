@@ -22,6 +22,8 @@ public interface Router {
      * @param balanceContext Load balancing context containing request information and available worker list
      * @return Response containing selected worker node information
      */
-    Response route(BalanceContext balanceContext);
+    Response routeDirect(BalanceContext balanceContext);
+
+    QueueRoutingResult routeForQueue(BalanceContext balanceContext);
 
 }

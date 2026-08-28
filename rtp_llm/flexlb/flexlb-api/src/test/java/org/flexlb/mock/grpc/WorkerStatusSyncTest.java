@@ -45,9 +45,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       {@code alive}, {@code status_version}, etc.</li>
  *   <li>{@link EngineStatusConverter#convertToWorkerStatusResponse} converts the PB
  *       to a {@link WorkerStatusResponse}</li>
- *   <li>{@link WorkerStatus#updateFromResponse} updates the in-memory status</li>
- *   <li>{@link PrefillEndpoint#onWorkerStatusUpdate} replaces the endpoint's status
- *       reference and calls {@code calibrate()} for inflight reconciliation</li>
+ *   <li>The prepared observation updates the committed in-memory status</li>
+ *   <li>The prepared-status transaction atomically commits the WorkerStatus
+ *       observation and projects endpoint-owned reconciliation facts</li>
  * </ul>
  *
  * <p>Note: In production, {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner} performs
@@ -97,7 +97,9 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
         assertNotNull(ws, "PrefillEndpoint should have a WorkerStatus");
         assertEquals(10L, ws.getAvailableConcurrency(),
                 "WorkerStatus should reflect concurrency=10 after sync");
-        assertTrue(ws.isAlive(), "Worker should be alive after sync");
+        assertEquals(WorkerStatus.GenerationLifecycle.ACTIVE,
+                ws.generationLifecycle(),
+                "Worker generation should remain active after an alive status sync");
 
         // 6. Verify mock received the GetWorkerStatus gRPC call
         assertEquals(statusCallCountBefore + 1, mockPrefillWorker.getWorkerStatusCallCount(),
@@ -138,6 +140,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
      */
     private EngineRpcService.WorkerStatusPB fetchWorkerStatus() throws Exception {
         EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
+                .setLatestCacheVersion(getPrefillEndpoint().getStatus()
+                        .appliedStatusCursor().statusVersion())
                 .setLatestFinishedVersion(0)
                 .build();
         return grpcClient.getWorkerStatusAsync(prefillIp, prefillGrpcPort, request, SYNC_TIMEOUT_MS)
@@ -150,8 +154,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
      * does in production:
      * <ol>
      *   <li>Convert {@code WorkerStatusPB} → {@code WorkerStatusResponse}</li>
-     *   <li>Update {@code WorkerStatus} via {@code updateFromResponse}</li>
-     *   <li>Notify {@code PrefillEndpoint} via {@code onWorkerStatusUpdate}</li>
+     *   <li>Atomically publish {@code WorkerStatus} and reconcile the
+     *       {@code PrefillEndpoint}</li>
      * </ol>
      */
     private void applyWorkerStatus(EngineRpcService.WorkerStatusPB pb) {
@@ -161,7 +165,6 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
         response.setRole(RoleType.PREFILL);
 
         WorkerStatus ws = getPrefillEndpoint().getStatus();
-        ws.updateFromResponse(response);
-        getPrefillEndpoint().onWorkerStatusUpdate(ws, response);
+        applyWorkerStatusResponse(ws, response);
     }
 }

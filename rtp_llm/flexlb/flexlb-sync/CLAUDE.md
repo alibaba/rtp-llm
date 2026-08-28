@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Module Overview
 
 flexlb-sync is the core load balancing module of FlexLB. It handles:
-- Load balancing strategy execution (RandomStrategy, WeightedCacheLoadBalancer, ShortestTTFTStrategy)
+- Load balancing strategy execution (`RandomStrategy`, cost-based Prefill/Decode, and `ShortestTTFTStrategy`)
 - Worker node status synchronization via gRPC
 - Master election using ZooKeeper
 - Request routing across different role types (PREFILL, DECODE, PDFUSION, VIT)
@@ -88,7 +88,8 @@ flexlb-sync/
 │       ├── LoadBalanceStrategy.java        # Load balancing interface
 │       ├── RandomStrategy.java      # Random selection strategy
 │       ├── ShortestTTFTStrategy.java   # TTFT-based strategy
-│       └── WeightedCacheLoadBalancer.java  # Cache-aware strategy
+│       ├── CostBasedPrefillStrategy.java   # Predicted Prefill cost strategy
+│       └── CostBasedDecodeStrategy.java    # KV-weighted Decode strategy
 ├── consistency/
 │   ├── MasterElectService.java      # Master election interface
 │   └── ZookeeperMasterElectService.java  # ZK implementation
@@ -108,8 +109,8 @@ flexlb-sync/
 ## Key Dependencies
 
 This module depends on:
-- **flexlb-common**: Shared data models (ServerStatus, RoleType, MasterRequest/Response)
-- **flexlb-cache**: KV cache management (FlexCacheManager)
+- **flexlb-common**: Shared data models (`BalanceContext`, `ServerStatus`, `RoleType`, `WorkerStatus`)
+- **flexlb-cache**: KV cache management (`CacheAwareService`, `KvCacheManager`)
 - **flexlb-grpc**: gRPC protocol definitions and clients
 
 External dependencies:
@@ -122,16 +123,24 @@ External dependencies:
 ## Important Implementation Notes
 
 ### Rollback Mechanism
-When routing fails for a later role type (e.g., PREFILL succeeds but DECODE fails), the system must rollback local state updates for previously selected workers. See `DefaultRouter.roolBackRoutingFailure()`.
+When routing fails for a later role type (e.g., PREFILL succeeds but DECODE fails),
+`DefaultRouter` closes the exact `SelectedRole` capabilities already selected and
+rolls back any direct-placement endpoint reservations.
 
-### Load Balancer Registration
-All LoadBalanceStrategy implementations must register themselves with `LoadBalanceStrategyFactory` to be accessible. See Spring bean configuration with `@DependsOn` annotation in DefaultRouter.
+### Load Balancer Selection
+Load-balance strategies are ordinary Spring leaf beans. `ConfiguredLoadBalanceSelector`
+matches the request's sealed role selector configuration and requires exactly one supporting
+strategy. Do not introduce static registration, bean-name lookup, fallbacks, or `@DependsOn`
+ordering to wire strategies.
 
 ### Worker Status Updates
-Worker status is updated asynchronously by scheduled runners. The routing logic reads from shared `EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP` which is concurrently modified.
+Worker status is updated asynchronously by scheduled runners. `EndpointRegistry`
+owns generation-fenced endpoint publication, while `EngineWorkerStatus` exposes
+immutable routing snapshots and exact captures to strategies.
 
 ### Cache Integration
-The module calls `FlexCacheManager` from flexlb-cache to update cache information received from workers. See `GrpcCacheStatusCheckRunner`.
+The module calls `CacheAwareService` from flexlb-cache to update cache information
+received from workers. See `GrpcCacheStatusCheckRunner`.
 
 ## Configuration
 

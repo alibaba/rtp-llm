@@ -1,230 +1,243 @@
 package org.flexlb.cache.core;
 
-import com.google.common.collect.Sets;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.domain.CacheMatch;
+import org.flexlb.cache.domain.DiffResult;
+import org.flexlb.cache.domain.EngineGeneration;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Global cache index (large hash table)
- * Manages block_hash_id -> Set<EngineIP:EnginePort> mapping
+ * The single source of truth for generation-fenced KV-cache ownership.
  *
- * @author FlexLB
+ * <p>Both directions of the index are guarded by one lock:
+ * address-to-(generation, immutable blocks) and block-to-addresses. A full
+ * snapshot is diffed and committed while holding that lock, so readers cannot
+ * observe one direction before the other. Delayed callbacks can only address
+ * their exact generation token.</p>
  */
 @Slf4j
 @Component
 public class GlobalCacheIndex {
 
-    /**
-     * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
-     */
-    private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap = new ConcurrentHashMap<>();
+    private record EngineOwnership(long generationId, Set<Long> cacheBlocks) {
+        private EngineOwnership {
+            cacheBlocks = Set.copyOf(cacheBlocks);
+        }
+    }
 
-    /**
-     * Read-write lock for data consistency
-     */
+    /** Guarded by {@link #lock}; values never escape this class. */
+    private final Map<Long, Set<String>> blockToEnginesMap = new HashMap<>();
+
+    /** Guarded by {@link #lock}; contained block sets are immutable. */
+    private final Map<String, EngineOwnership> engineOwnerships = new HashMap<>();
+
     private final ReentrantLock lock = new ReentrantLock();
 
-    /**
-     * Statistics
-     */
-    private final LongAdder totalBlocks = new LongAdder();
-    private final LongAdder totalMappings = new LongAdder();
+    /** Guarded by {@link #lock}. */
+    private long totalMappings;
 
     /**
-     * Add cache block to specified engine
-     *
-     * @param blockCacheKey Cache block hash value
-     * @param engineIpPort  Engine IP:Port
+     * Activate a generation and atomically withdraw all blocks belonging to
+     * its predecessor. Repeating the active token is idempotent; an older token
+     * is rejected.
      */
-    public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
-        if (blockCacheKey == null || engineIpPort == null) {
-            log.warn("Invalid parameters: blockCacheKey={}, engineIpPort={}", blockCacheKey, engineIpPort);
-            return;
-        }
-
+    public boolean activateEngineGeneration(
+            String engineIpPort, long generationId) {
+        requireIdentity(engineIpPort, generationId);
         lock.lock();
         try {
-            Set<String> engines = blockToEnginesMap.computeIfAbsent(blockCacheKey, k -> {
-                totalBlocks.increment();
-                return Sets.newConcurrentHashSet();
-            });
-
-            boolean added = engines.add(engineIpPort);
-            if (added) {
-                totalMappings.increment();
+            EngineOwnership current = engineOwnerships.get(engineIpPort);
+            if (current != null && current.generationId() > generationId) {
+                return false;
             }
+            if (current != null && current.generationId() == generationId) {
+                return true;
+            }
+            if (current != null) {
+                removeMappings(engineIpPort, current.cacheBlocks());
+            }
+            engineOwnerships.put(
+                    engineIpPort, new EngineOwnership(generationId, Set.of()));
+            return true;
         } finally {
             lock.unlock();
         }
     }
 
     /**
-     * Remove cache block from specified engine
+     * Atomically replace the full cache snapshot of one exact generation.
      *
-     * @param engineIp      Engine IP
-     * @param blockCacheKey Cache block hash value
+     * @return the committed immutable diff, or empty when the token is stale
      */
-    public void removeCacheBlock(String engineIp, Long blockCacheKey) {
-        if (blockCacheKey == null || engineIp == null) {
-            return;
+    public Optional<DiffResult> replaceEngineCache(
+            String engineIpPort,
+            long generationId,
+            Set<Long> newCacheBlocks) {
+        requireIdentity(engineIpPort, generationId);
+        if (newCacheBlocks == null) {
+            throw new IllegalArgumentException("newCacheBlocks must not be null");
         }
+        Set<Long> immutableSnapshot = Set.copyOf(newCacheBlocks);
 
         lock.lock();
         try {
-            Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-            if (engines == null) {
-                return;
+            EngineOwnership current = engineOwnerships.get(engineIpPort);
+            if (current == null || current.generationId() != generationId) {
+                return Optional.empty();
             }
 
-            boolean removed = engines.remove(engineIp);
-            if (removed) {
-                totalMappings.decrement();
+            Set<Long> addedBlocks = new HashSet<>(immutableSnapshot);
+            addedBlocks.removeAll(current.cacheBlocks());
+            Set<Long> removedBlocks = new HashSet<>(current.cacheBlocks());
+            removedBlocks.removeAll(immutableSnapshot);
 
-                // Remove entire entry if no engine owns this cache block
-                if (engines.isEmpty()) {
-                    blockToEnginesMap.remove(blockCacheKey);
-                    totalBlocks.decrement();
-                }
-            }
+            removeMappings(engineIpPort, removedBlocks);
+            addMappings(engineIpPort, addedBlocks);
+            engineOwnerships.put(engineIpPort,
+                    new EngineOwnership(generationId, immutableSnapshot));
+
+            return Optional.of(new DiffResult(
+                    engineIpPort, addedBlocks, removedBlocks));
         } finally {
             lock.unlock();
         }
     }
 
-    /**
-     * Remove an engine
-     *
-     * @param engineIp Engine IP
-     */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
-            return;
-        }
-
+    /** Retire only the exact active generation. */
+    public boolean retireEngineGeneration(
+            String engineIpPort, long generationId) {
+        requireIdentity(engineIpPort, generationId);
         lock.lock();
         try {
-            blockToEnginesMap.forEach((blockCacheKey, engines) -> {
-                boolean removed = engines.remove(engineIp);
-                if (removed) {
-                    totalMappings.decrement();
-
-                    // Remove entire entry if no engine owns this cache block
-                    if (engines.isEmpty()) {
-                        blockToEnginesMap.remove(blockCacheKey);
-                        totalBlocks.decrement();
-                    }
-                }
-            });
+            EngineOwnership current = engineOwnerships.get(engineIpPort);
+            if (current == null || current.generationId() != generationId) {
+                return false;
+            }
+            removeMappings(engineIpPort, current.cacheBlocks());
+            engineOwnerships.remove(engineIpPort);
+            return true;
         } finally {
             lock.unlock();
         }
     }
 
-    /**
-     * Calculate engine prefix match length based on prefix matching
-     *
-     * @param engineIpPorts  Engine IP:Port list
-     * @param blockCacheKeys Ordered cache block hash value list
-     * @return Map<EngineIP:EnginePort, PrefixMatchLength>
-     */
-    public Map<String, Integer> batchCalculatePrefixMatchLength(List<String> engineIpPorts,
-                                                                List<Long> blockCacheKeys) {
-
-        if (isEmpty(engineIpPorts) || isEmpty(blockCacheKeys)) {
+    /** Calculate prefix matches for exact candidates from one locked snapshot. */
+    public Map<EngineGeneration, CacheMatch> batchCalculatePrefixMatches(
+            List<EngineGeneration> engineGenerations,
+            List<Long> blockCacheKeys) {
+        if (isEmpty(engineGenerations) || isEmpty(blockCacheKeys)) {
             return Collections.emptyMap();
         }
-        return calculatePrefixMatchLength(engineIpPorts, blockCacheKeys);
-    }
 
-    /**
-     * Prefix match calculation
-     *
-     * @param engineIpPorts  Engine IP:Port list
-     * @param blockCacheKeys Ordered cache block hash value list
-     * @return Map<EngineIP:EnginePort, PrefixMatchLength>
-     */
-    private Map<String, Integer> calculatePrefixMatchLength(List<String> engineIpPorts,
-                                                            List<Long> blockCacheKeys) {
-
-        Map<String, Integer> result = new HashMap<>(engineIpPorts.size());
-
-        // Initialize all engines as candidates, set of engines with undetermined prefix length
-        Set<String> candidateEngines = Sets.newHashSet(engineIpPorts);
-
-        // Iterate through each block, gradually filter candidate engines
-        for (int i = 0; i < blockCacheKeys.size(); i++) {
-            Long blockCacheKey = blockCacheKeys.get(i);
-            Set<String> blockOwners = getEnginesForBlock(blockCacheKey);
-
-            // Filter candidate engines: only keep engines that exist in current block
-            Iterator<String> candidates = candidateEngines.iterator();
-            while (candidates.hasNext()) {
-                String candidateEngine = candidates.next();
-                if (blockOwners.isEmpty() || !blockOwners.contains(candidateEngine)) {
-                    // This engine does not exist in current block, prefix match interrupted
-                    result.put(candidateEngine, i);
-                    candidates.remove();
+        lock.lock();
+        try {
+            Map<EngineGeneration, CacheMatch> result =
+                    new HashMap<>(engineGenerations.size());
+            for (EngineGeneration candidate : engineGenerations) {
+                if (candidate == null) {
+                    throw new IllegalArgumentException(
+                            "Engine generation candidate must not be null");
                 }
+                EngineOwnership ownership = engineOwnerships.get(
+                        candidate.address());
+                if (ownership == null
+                        || ownership.generationId() != candidate.generationId()) {
+                    continue;
+                }
+
+                int prefixMatchLength = 0;
+                while (prefixMatchLength < blockCacheKeys.size()) {
+                    Set<String> blockOwners = blockToEnginesMap.get(
+                            blockCacheKeys.get(prefixMatchLength));
+                    if (blockOwners == null
+                            || !blockOwners.contains(candidate.address())) {
+                        break;
+                    }
+                    prefixMatchLength++;
+                }
+                result.put(candidate, new CacheMatch(prefixMatchLength));
             }
-
-            // Exit early if no candidate engines remain
-            if (candidateEngines.isEmpty()) {
-                break;
-            }
+            return Map.copyOf(result);
+        } finally {
+            lock.unlock();
         }
-
-        // Process remaining candidate engines (they matched all blocks)
-        for (String remainingEngine : candidateEngines) {
-            result.put(remainingEngine, blockCacheKeys.size());
-        }
-
-        return result;
     }
 
-    /**
-     * Check if collection is empty
-     */
-    private boolean isEmpty(List<?> list) {
+    public void clear() {
+        lock.lock();
+        try {
+            blockToEnginesMap.clear();
+            engineOwnerships.clear();
+            totalMappings = 0L;
+        } finally {
+            lock.unlock();
+        }
+        log.info("Cleared cache index");
+    }
+
+    /** Return all metric values from the same locked snapshot. */
+    public IndexMetrics metricsSnapshot() {
+        lock.lock();
+        try {
+            return new IndexMetrics(
+                    blockToEnginesMap.size(),
+                    totalMappings,
+                    engineOwnerships.size());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public record IndexMetrics(
+            long totalBlocks,
+            long totalMappings,
+            int engineCount) {
+    }
+
+    private void addMappings(String engineIpPort, Set<Long> cacheBlocks) {
+        for (Long blockCacheKey : cacheBlocks) {
+            Set<String> engines = blockToEnginesMap.computeIfAbsent(
+                    blockCacheKey, ignored -> new HashSet<>());
+            if (engines.add(engineIpPort)) {
+                totalMappings++;
+            }
+        }
+    }
+
+    private void removeMappings(String engineIpPort, Set<Long> cacheBlocks) {
+        for (Long blockCacheKey : cacheBlocks) {
+            Set<String> engines = blockToEnginesMap.get(blockCacheKey);
+            if (engines == null || !engines.remove(engineIpPort)) {
+                continue;
+            }
+            totalMappings--;
+            if (engines.isEmpty()) {
+                blockToEnginesMap.remove(blockCacheKey);
+            }
+        }
+    }
+
+    private static boolean isEmpty(List<?> list) {
         return list == null || list.isEmpty();
     }
 
-    /**
-     * Get engine set for specified cache block
-     */
-    private Set<String> getEnginesForBlock(Long blockCacheKey) {
-        if (blockCacheKey == null) {
-            return Collections.emptySet();
+    private static void requireIdentity(
+            String engineIpPort, long generationId) {
+        if (engineIpPort == null || engineIpPort.isBlank()) {
+            throw new IllegalArgumentException("engineIpPort must not be blank");
         }
-        Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-        return engines != null ? engines : Collections.emptySet();
-    }
-
-    /**
-     * Clear all data
-     */
-    public void clear() {
-
-        blockToEnginesMap.clear();
-        totalBlocks.reset();
-        totalMappings.reset();
-        log.info("Cleared global cache index");
-    }
-
-    public long totalBlocks() {
-        return totalBlocks.sum();
-    }
-
-    public long totalMappings() {
-        return totalMappings.sum();
+        if (generationId <= 0L) {
+            throw new IllegalArgumentException(
+                    "generationId must be positive: " + generationId);
+        }
     }
 }

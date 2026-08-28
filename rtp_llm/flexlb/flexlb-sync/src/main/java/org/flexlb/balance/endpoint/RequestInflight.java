@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.InflightEvictor;
+import org.flexlb.balance.execution.TtlEvictor;
 import org.flexlb.enums.DecodeTaskPhase;
 
 /**
@@ -26,14 +26,26 @@ import org.flexlb.enums.DecodeTaskPhase;
  * @param priority         Auto-TPM normalized priority (30/40/50/60/70);
  *                         0 = no priority (task40) — never evictable
  * @param phase            shadow admission phase
+ * @param reservationToken endpoint-local monotonic identity for this exact
+ *                         request reservation; zero is reserved for detached
+ *                         test/snapshot values that were not admitted by an
+ *                         endpoint
  */
 public record RequestInflight(
         long kvTokens,
         long expectedKvTokens,
         long createdAtMs,
         int priority,
-        DecodeTaskPhase phase
-) implements InflightEvictor.TtlTracked {
+        DecodeTaskPhase phase,
+        long reservationToken
+) implements TtlEvictor.TtlTracked {
+
+    public RequestInflight {
+        if (reservationToken < 0L) {
+            throw new IllegalArgumentException(
+                    "reservationToken must be non-negative");
+        }
+    }
 
     /**
      * Priority recorded when the caller carries no Auto-TPM priority: the
@@ -42,13 +54,14 @@ public record RequestInflight(
      */
     static final int DEFAULT_PRIORITY = 0;
 
-    RequestInflight(long kvTokens, long expectedKvTokens) {
-        this(kvTokens, expectedKvTokens, DEFAULT_PRIORITY);
-    }
-
-    RequestInflight(long kvTokens, long expectedKvTokens, int priority) {
+    RequestInflight(
+            long kvTokens,
+            long expectedKvTokens,
+            int priority,
+            long reservationToken) {
         this(kvTokens, expectedKvTokens, System.currentTimeMillis(),
-                priority, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN);
+                priority, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                reservationToken);
     }
 
     /**

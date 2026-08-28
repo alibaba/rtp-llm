@@ -40,9 +40,11 @@ class DecodeResourceMeasureTest {
                 .setMaxEngineRequests(null);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
-        endpoint.getStatus().setRunningTaskList(taskMap(1L, 2L, 3L, 4L));
+        ResourceTestSupport.publish(
+                endpoint.getStatus(), true, 100L, 100L,
+                taskMap(1L, 2L, 3L, 4L));
 
-        assertTrue(measure.isResourceAvailable(endpoint));
+        assertTrue(measure.isResourceAvailable(endpoint.routingView()));
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", endpoint.getStatus())));
     }
 
@@ -52,10 +54,10 @@ class DecodeResourceMeasureTest {
                 .setMaxEngineRequests(2L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
-        endpoint.reserve(1L, 0, 0);
-        endpoint.reserve(2L, 0, 0);
+        reserve(endpoint, 1L, 0, 0);
+        reserve(endpoint, 2L, 0, 0);
         // getEngineLoad() = confirmedRunningCount(0) + inflightRequests.size(2) = 2, limit = 2, 2 >= 2 → unavailable
-        assertFalse(measure.isResourceAvailable(endpoint));
+        assertFalse(measure.isResourceAvailable(endpoint.routingView()));
     }
 
     @Test
@@ -64,9 +66,26 @@ class DecodeResourceMeasureTest {
                 .setMaxEngineRequests(3L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
-        endpoint.reserve(1L, 0, 0);
+        reserve(endpoint, 1L, 0, 0);
         // getEngineLoad() = confirmedRunningCount(0) + inflightRequests.size(1) = 1, limit = 3, 1 < 3 → available
-        assertTrue(measure.isResourceAvailable(endpoint));
+        assertTrue(measure.isResourceAvailable(endpoint.routingView()));
+    }
+
+    @Test
+    void routingViewExcludesQueuedReservationsFromEngineFacingLoad() {
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(1L);
+        DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
+        DecodeEndpoint endpoint = createAliveDecodeEndpoint();
+        reserveQueued(endpoint, 1L, 0, 0, 50);
+
+        assertEquals(1, endpoint.routingView().totalLoad());
+        assertEquals(0, endpoint.routingView().engineLoad());
+        assertTrue(measure.isResourceAvailable(endpoint.routingView()));
+
+        reserve(endpoint, 2L, 0, 0);
+        assertEquals(1, endpoint.routingView().engineLoad());
+        assertFalse(measure.isResourceAvailable(endpoint.routingView()));
     }
 
     @Test
@@ -75,7 +94,8 @@ class DecodeResourceMeasureTest {
                 .setMaxEngineRequests(4L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveWorkerStatus();
-        worker.setRunningTaskList(taskMap(1L, 2L, 3L));
+        ResourceTestSupport.publish(
+                worker, true, 100L, 100L, taskMap(1L, 2L, 3L));
 
         assertEquals(75.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
@@ -86,24 +106,44 @@ class DecodeResourceMeasureTest {
                 .setMaxEngineRequests(4L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         WorkerStatus worker = createAliveWorkerStatus();
-        worker.getTotalKvCacheTokens().set(100);
-        worker.getAvailableKvCacheTokens().set(30);
-        worker.setRunningTaskList(taskMap(1L));
+        ResourceTestSupport.publish(
+                worker, true, 100L, 30L, taskMap(1L));
 
         assertEquals(75.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 
     private DecodeEndpoint createAliveDecodeEndpoint() {
         WorkerStatus status = createAliveWorkerStatus();
-        return new DecodeEndpoint(status);
+        return new DecodeEndpoint(status, ignored -> { });
     }
 
     private WorkerStatus createAliveWorkerStatus() {
-        WorkerStatus worker = new WorkerStatus();
-        worker.setAlive(true);
-        worker.getTotalKvCacheTokens().set(100);
-        worker.getAvailableKvCacheTokens().set(100);
-        return worker;
+        return ResourceTestSupport.worker(
+                org.flexlb.dao.route.RoleType.DECODE,
+                100L, 100L, Map.of());
+    }
+
+    private static void reserve(
+            DecodeEndpoint endpoint,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens) {
+        try (var pin = endpoint.tryPinGeneration()) {
+            endpoint.reservePinned(
+                    pin, requestId, kvTokens, expectedKvTokens, 0);
+        }
+    }
+
+    private static void reserveQueued(
+            DecodeEndpoint endpoint,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority) {
+        try (var pin = endpoint.tryPinGeneration()) {
+            endpoint.reserveQueuedPinned(
+                    pin, requestId, kvTokens, expectedKvTokens, priority);
+        }
     }
 
     private Map<String, TaskInfo> taskMap(Long... requestIds) {
