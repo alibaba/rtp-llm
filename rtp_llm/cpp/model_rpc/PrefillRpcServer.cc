@@ -123,7 +123,11 @@ PrefillRpcServer::~PrefillRpcServer() = default;
         auto status = prefill_context.closeGrpcStream();                                                               \
         if (!status.ok()) {                                                                                            \
             const auto& error_msg = status.error_message();                                                            \
-            if (error_msg.find("Connect Failed") != std::string::npos) {                                               \
+            ErrorInfo remote_error_info;                                                                              \
+            if (deserializeErrorDetails(status, &remote_error_info)) {                                                \
+                new_error_code = remote_error_info.code();                                                            \
+                new_error_msg += remote_error_info.ToString();                                                        \
+            } else if (error_msg.find("Connect Failed") != std::string::npos) {                                      \
                 new_error_code = ErrorCode::CONNECT_FAILED;                                                            \
                 prefill_context.closeGrpcConnection();                                                                 \
             } else if (error_msg.find("No route to host") != std::string::npos) {                                      \
@@ -142,9 +146,11 @@ PrefillRpcServer::~PrefillRpcServer() = default;
                 new_error_code = ErrorCode::KEEP_ALIVE_TIMEOUT;                                                        \
                 prefill_context.closeGrpcConnection();                                                                 \
             }                                                                                                          \
-            new_error_msg += error_msg;                                                                                \
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                         \
-                new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                      \
+            if (!remote_error_info.hasError()) {                                                                      \
+                new_error_msg += error_msg;                                                                            \
+                if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                    \
+                    new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                  \
+                }                                                                                                      \
             }                                                                                                          \
         } else {                                                                                                       \
             if (prefill_context.client_stream) {                                                                       \
@@ -700,8 +706,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   metrics_reporter_,
                                                   meta_,
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
-    prefill_context.onflight_requests      = onflight_requests_;
-    prefill_context.loading_cache_requests = loading_cache_requests_;
+    prefill_context.onflight_requests      = &onflight_requests_;
+    prefill_context.loading_cache_requests = &loading_cache_requests_;
 
     try {
         auto status = syncPrefix(prefill_context);

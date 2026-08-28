@@ -38,6 +38,19 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
     }
 }
 
+inline bool deserializeErrorDetails(const grpc::Status& status, ErrorInfo* error_info) {
+    if (error_info == nullptr || status.error_details().empty()) {
+        return false;
+    }
+    ErrorDetailsPB details;
+    if (!details.ParseFromString(status.error_details())) {
+        return false;
+    }
+    *error_info = ErrorInfo(static_cast<ErrorCode>(details.error_code()),
+                            details.error_message().empty() ? status.error_message() : details.error_message());
+    return true;
+}
+
 inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
     const static std::unordered_map<ErrorCodePB, ErrorCode> error_code_map = {
         {ErrorCodePB::NONE_ERROR, ErrorCode::NONE_ERROR},

@@ -451,7 +451,7 @@ class GrammarValidator:
             tokenizer_info = xgr.TokenizerInfo.deserialize_json(
                 self._tokenizer_info_json
             )
-            return xgr.GrammarCompiler(
+            return load_xgrammar().GrammarCompiler(
                 tokenizer_info,
                 max_threads=self._compile_threads,
                 cache_enabled=True,
@@ -783,9 +783,9 @@ class GrammarValidator:
     def _xgrammar() -> Any:
         """The xgrammar module if importable, else None (memoized)."""
         try:
-            import xgrammar as xgr
+            from rtp_llm.config.grammar_tokenizer_info import load_xgrammar
 
-            return xgr
+            return load_xgrammar()
         except Exception:
             # Not just ImportError: xgrammar's tvm-ffi loader raises RuntimeError
             # (or OSError from dlopen) when libxgrammar_bindings.so is not

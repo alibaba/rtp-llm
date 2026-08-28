@@ -70,10 +70,24 @@ CacheTransferRequest* Messager::makeTransferRequest(const std::shared_ptr<Transf
 
     for (auto& [local_key, remote_key] : request->buffer_pairs) {
         auto block_buffer = request_block_buffer_store_->findUserBuffer(local_key);
-        if (block_buffer == nullptr || block_buffer->len % request->local_partition_count != 0) {
-            RTP_LLM_LOG_WARNING("messager client find user buffer failed or len not match, local key %s, len %d",
+        if (block_buffer == nullptr) {
+            RTP_LLM_LOG_WARNING(
+                "cache store transfer request validation failed, source=client stage=find_user_buffer request_id=%s "
+                "peer=%s:%u local_key=%s remote_key=%s error=buffer_not_found",
+                request->request_id.c_str(),
+                request->ip.c_str(),
+                request->port,
                                 local_key.c_str(),
-                                block_buffer->len);
+                remote_key.c_str());
+            delete transfer_request;
+            return nullptr;
+        }
+        if (request->local_partition_count == 0 || block_buffer->len % request->local_partition_count != 0) {
+            RTP_LLM_LOG_WARNING(
+                "cache store transfer request validation failed, source=client stage=validate_partition request_id=%s "
+                "peer=%s:%u local_key=%s remote_key=%s len=%d partition_id=%u partition_count=%u",
+                request->request_id.c_str(), request->ip.c_str(), request->port, local_key.c_str(), remote_key.c_str(),
+                block_buffer->len, request->local_partition_id, request->local_partition_count);
             delete transfer_request;
             return nullptr;
         }

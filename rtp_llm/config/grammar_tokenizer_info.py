@@ -1,4 +1,7 @@
+import importlib.util
 import json
+import os
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Sequence, Tuple, Union
 
 VocabToken = Union[str, bytes]
@@ -140,6 +143,24 @@ def _has_sentencepiece_api(candidate: Any) -> bool:
         return False
     return callable(piece_to_id) and callable(id_to_piece) and callable(vocab_size)
 
+
+def load_xgrammar() -> Any:
+    """Import xgrammar, including from Bazel rules_python runfiles."""
+    spec = importlib.util.find_spec("xgrammar")
+    if spec is not None and spec.origin:
+        package_dir = Path(spec.origin).parent
+        binding_path = package_dir / "libxgrammar_bindings.so"
+        if binding_path.is_file():
+            library_paths = os.environ.get("LD_LIBRARY_PATH", "").split(":")
+            package_path = str(package_dir)
+            if package_path not in library_paths:
+                os.environ["LD_LIBRARY_PATH"] = ":".join(
+                    [package_path] + [path for path in library_paths if path]
+                )
+
+    import xgrammar as xgr
+
+    return xgr
 
 def build_grammar_tokenizer_info_json(
     tokenizer: Any,
