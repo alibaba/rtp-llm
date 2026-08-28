@@ -380,6 +380,32 @@ def main():
 
     sm = agg.get("summary") or {}
     per_second = agg.get("per_second") or []
+    # ---- 错误桶定义（旧 7 桶 + err_other 细分 9 子桶；label 供图例/汇总表） ----
+    # 新子桶（20260828+ aggregate 才有）：旧 aggregate 无这些键 -> 全零
+    # -> 图/表自适应跳过，输出与旧版一致（向后兼容）。
+    ERR_DEFS = [
+        ("err_no_decode", "no worker", "danger"),
+        ("err_queue_full", "queue full", "warning"),
+        ("err_deadline", "deadline", "info"),
+        ("err_priority", "priority ahead", "warning"),
+        ("err_preempted", "preempted", None),
+        ("err_yielded", "yielded", None),
+        ("err_backpressure", "backpressure (843x)", "warning"),
+        ("err_queue_timeout", "queue timeout (8503)", "warning"),
+        ("err_rst_stream", "rst_stream", "danger"),
+        ("err_goaway", "goaway", "danger"),
+        ("err_unavailable", "unavailable", "danger"),
+        ("err_cancelled", "cancelled", None),
+        ("err_internal", "internal", "danger"),
+        ("err_empty_response", "empty response", "warning"),
+        ("err_duplicate_rid", "duplicate rid", "warning"),
+        ("err_other", "other", "neutral"),
+    ]
+    # 各桶 per_second 口径总量（仅带时间戳行；0 = 该桶不存在/无数据）
+    err_totals = {k: 0 for k, _, _ in ERR_DEFS}
+    for p in per_second:
+        for k, _, _ in ERR_DEFS:
+            err_totals[k] += p.get(k, 0) or 0
     queue_ts = agg.get("queue_timeseries") or []
     # compact time series (aggregate_canvas_run.py 861f3a9+；旧 aggregate 无这些键 ->
     # 空 list，对应图条件渲染)
@@ -822,29 +848,50 @@ def main():
                 domain="[0, " + num(nice_max(qps_max * 1.05)) + "]",
             ),
         )
-        # 失败按原因分曲线（全零也画：证明无该类失败）
-        err_defs = [
-            ("err_no_decode", "no worker", "danger"),
-            ("err_queue_full", "queue full", "warning"),
-            ("err_deadline", "deadline", "info"),
-            ("err_priority", "priority ahead", "warning"),
-            ("err_preempted", "preempted", None),
-            ("err_yielded", "yielded", None),
-            ("err_other", "other", "neutral"),
-        ]
+        # 失败按原因分曲线：曲线按「实际存在的桶」自适应（具名桶优先，
+        # 总曲线数不超 ~8，超出时总量排序保留 top，其余合并为一条曲线）；
+        # 零失败 run 画一条全零 err_other 曲线保持「无失败」证据。
+        # 桶含义：deadline=客户端/调度超时；backpressure=master 准入拒绝
+        # （8430/8431/8432）；queue timeout=master 排队超时（8503）；
+        # rst_stream/goaway/unavailable/cancelled/internal=gRPC 传输层错误；
+        # empty response=零输出流；duplicate rid=请求 ID 重复；
+        # other=未归类残渣。旧 aggregate 无新子桶键 -> 全零 -> 自动跳过。
+        MAX_ERR_CURVES = 8
+        err_total_errors = sum(p.get("errors", 0) or 0 for p in per_second)
+        err_nonzero = [(k, lb, tn) for k, lb, tn in ERR_DEFS if err_totals.get(k)]
+        merged_keys = []
+        if err_total_errors > 0 and len(err_nonzero) > MAX_ERR_CURVES:
+            ranked = sorted(err_nonzero, key=lambda x: -err_totals[x[0]])
+            sel = ranked[: MAX_ERR_CURVES - 1] + [
+                ("__merged__", "small buckets merged", "neutral")
+            ]
+            merged_keys = [k for k, _, _ in ranked[MAX_ERR_CURVES - 1 :]]
+        elif err_total_errors > 0:
+            sel = err_nonzero
+        else:
+            sel = [("err_other", "other", "neutral")]
         err_series = []
-        for k, label, tone in err_defs:
-            ref = const(
-                "err" + k[4:].title().replace("_", ""),
-                num_arr([p.get(k, 0) for p in per_second]),
-            )
-            err_series.append((k, label, ref, tone))
-        err_max = max(
-            max((p.get(k, 0) or 0) for p in per_second) for k, _, _ in err_defs
-        )
+        err_max = 0
+        for k, lb, tn in sel:
+            if k == "__merged__":
+                cname = "errMergedSmall"
+                vals = [
+                    sum(p.get(mk, 0) or 0 for mk in merged_keys) for p in per_second
+                ]
+            else:
+                cname = "err" + k[4:].title().replace("_", "")
+                vals = [p.get(k, 0) or 0 for p in per_second]
+            ref = const(cname, num_arr(vals))
+            err_series.append((k, lb, ref, tn))
+            if vals:
+                err_max = max(err_max, max(vals))
         fail_chart = emit_container(
             "每秒失败 QPS：按原因",
-            "x = 压测时间（s）；y = 每秒失败请求数（按错误原因分类）",
+            "x = 压测时间（s）；y = 每秒失败请求数。桶：deadline=客户端/调度超时；"
+            "backpressure=master 准入拒绝（8430/8431/8432）；queue timeout=master"
+            " 排队超时（8503）；rst_stream/goaway/unavailable/cancelled/internal"
+            "=gRPC 传输层错误；empty response=零输出流；duplicate rid=请求 ID"
+            " 重复；other=未归类残渣。曲线按实际存在的桶自适应，小桶自动合并",
             emit_chart(
                 "LineChart",
                 TSEC,
@@ -2025,6 +2072,24 @@ def main():
         num(error_n) + " · " + fmt_pct(error_rate) if error_n is not None else "—"
     )
     rows.append(["错误", err_disp])
+    # 错误构成（top 子桶）：优先 summary.error_breakdown（含无时间戳行，
+    # 与 error_count 同口径）；旧 aggregate 无此键时退化为 per_second
+    # 汇总口径（仅带时间戳行）。
+    err_breakdown = dict(sm.get("error_breakdown") or {})
+    if not err_breakdown and per_second:
+        err_breakdown = {k: v for k, v in err_totals.items() if v}
+    if err_breakdown:
+        _eb_label = {k: lb for k, lb, _ in ERR_DEFS}
+        _eb_items = sorted(err_breakdown.items(), key=lambda kv: -kv[1])
+        eb_parts = []
+        for k, v in _eb_items[:6]:
+            if not v:
+                continue
+            eb_parts.append((_eb_label.get(k) or k) + " " + fmt_int_trunc(v))
+        if len(_eb_items) > 6:
+            eb_parts.append("+" + str(len(_eb_items) - 6) + " 桶")
+        if eb_parts:
+            rows.append(["错误构成（top 子桶）", " · ".join(eb_parts)])
     if lat_summary:
         rows.append(
             [
