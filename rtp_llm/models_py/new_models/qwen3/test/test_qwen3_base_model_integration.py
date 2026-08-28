@@ -9,6 +9,7 @@ import torch
 from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import (
+    CompressedW8A8Int8PerChannelQuantConfig,
     GPTQConfig,
     ModelOptFp4Config,
     QuantizationConfig as SourceQuantizationConfig,
@@ -153,6 +154,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         config.use_new_loader = None
         model = _base_model(config)
         cases = {
+            "W8A8_INT8": CompressedW8A8Int8PerChannelQuantConfig(),
             "INT8": WeightOnlyInt8PerChannelQuantConfig(),
             "GPTQ": GPTQConfig(bits=4, group_size=128, is_quanted=True),
             "MODELOPT_FP4": ModelOptFp4Config(bits=4, group_size=16, is_quanted=True),
