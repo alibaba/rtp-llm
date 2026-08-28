@@ -20,10 +20,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from flexlb_ft.chaos_cases import CHAOS_CASES
 from flexlb_ft.context import CaseContext, CaseDef
 from flexlb_ft.grade import GRADES, VERDICT_LABELS, GradeReport, overall_verdict
-from flexlb_ft.harness import PROFILE_CAPS, PROFILES, EnvManager
+from flexlb_ft.harness import EXCLUSIVE_PROFILES, PROFILE_CAPS, PROFILES, EnvManager
+from flexlb_ft.priority_cases import PRIORITY_CASES
 from flexlb_ft.smoke_cases import SMOKE_CASES
 
-ALL_CASES: list[CaseDef] = SMOKE_CASES + CHAOS_CASES
+ALL_CASES: list[CaseDef] = SMOKE_CASES + CHAOS_CASES + PRIORITY_CASES
 
 # Task #51 (append-only registration): cross-process injection coverage
 # (chaos suite) + admission gates (smoke suite). See flexlb_ft/injection_gate_cases.py.
@@ -68,12 +69,17 @@ def main():
         cases = [c for c in cases if args.filter.lower() in c.name.lower()]
     # Profile filter: explicit profile list, then semantic requirements
     # (CaseDef.requires must be covered by the profile's capability set).
+    # An EXCLUSIVE profile (e.g. priority-single-nonbatch) additionally
+    # drops profiles=None legacy cases — only its own declared case set
+    # runs (see harness.EXCLUSIVE_PROFILES for the rationale).
     caps = PROFILE_CAPS[args.profile]
+    exclusive = args.profile in EXCLUSIVE_PROFILES
     cases = [
         c
         for c in cases
         if (c.profiles is None or args.profile in c.profiles)
         and (not c.requires or set(c.requires) <= caps)
+        and (not exclusive or (c.profiles is not None and args.profile in c.profiles))
     ]
 
     if args.list:

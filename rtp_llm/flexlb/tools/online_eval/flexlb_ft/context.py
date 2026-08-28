@@ -122,36 +122,56 @@ class CaseContext:
 # The legacy "elastic" family was split off "chaos" (2026-08 rework); smoke and
 # chaos run in separate processes whose case_seq counters both start at 1, so
 # the families need disjoint base ranges.
+# Phase-2 fix (2026-08): the five pre-existing families lacked a
+# "priority-single-nonbatch" base — running any legacy case under the new
+# profile raised KeyError at rid_base().  New slots take the 725k..825k ladder
+# (25k step), which keeps every pairwise base distance < 1M against the whole
+# existing 100k..700k grid, preserving the collision-free contract above.
 RID_BASES = {
     "cancel": {
         "batch-window": 100_000,
         "single-nonbatch": 125_000,
         "single-batch": 150_000,
         "window-nonbatch": 175_000,
+        "priority-single-nonbatch": 725_000,
     },
     "scheduling": {
         "batch-window": 200_000,
         "single-nonbatch": 225_000,
         "single-batch": 250_000,
         "window-nonbatch": 275_000,
+        "priority-single-nonbatch": 750_000,
     },
     "anomaly": {
         "batch-window": 300_000,
         "single-nonbatch": 325_000,
         "single-batch": 350_000,
         "window-nonbatch": 375_000,
+        "priority-single-nonbatch": 775_000,
     },
     "chaos": {
         "batch-window": 400_000,
         "single-nonbatch": 425_000,
         "single-batch": 450_000,
         "window-nonbatch": 475_000,
+        "priority-single-nonbatch": 800_000,
     },
     "elastic": {
         "batch-window": 500_000,
         "single-nonbatch": 525_000,
         "single-batch": 550_000,
         "window-nonbatch": 575_000,
+        "priority-single-nonbatch": 825_000,
+    },
+    # Phase-2 (2026-08) priority/auto-tpm family — spans all five profiles
+    # (priority cases may run under the four FIFO profiles with a case-level
+    # ordering override, or natively under priority-single-nonbatch).
+    "priority": {
+        "batch-window": 600_000,
+        "single-nonbatch": 625_000,
+        "single-batch": 650_000,
+        "window-nonbatch": 675_000,
+        "priority-single-nonbatch": 700_000,
     },
 }
 

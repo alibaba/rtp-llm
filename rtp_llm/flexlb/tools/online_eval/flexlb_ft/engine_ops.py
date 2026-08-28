@@ -41,6 +41,12 @@ CHANNEL_OPTIONS = [
     ("grpc.max_send_message_length", 64 * 1024 * 1024),
 ]
 
+# DashScope inner QoS header — the secondary Auto-TPM priority channel,
+# read by the master's GrpcQosHeaderInterceptor into the gRPC Context and
+# consumed by PriorityNormalizer when the proto ``priority`` field is unset
+# (mirror of flexlb-common PriorityNormalizer.QOS_HEADER_NAME).
+QOS_LEVEL_HEADER = "x-dashscope-inner-qos-level"
+
 
 @dataclass
 class StreamSnapshot:
@@ -166,7 +172,16 @@ class EngineOps:
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         block_keys: Optional[List[int]] = None,
+        # Accepted (and ignored) for kwargs-forwarding symmetry with
+        # build_schedule_request: the shared call paths (run_one_request,
+        # smoke_cases._fire_request) forward ONE kwargs dict to both
+        # schedule() and build_generate_input(); GenerateInputPB has no
+        # priority field — priority rides the ScheduleRequest proto field
+        # (or the QoS header), never the generate input.
+        priority: int = 0,
+        qos_level: Optional[int] = None,
     ):
+        del priority, qos_level
         meta = {
             "rid": str(request_id),
             "trace_id": f"cancel_smoke_{request_id}",
@@ -206,6 +221,12 @@ class EngineOps:
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         block_keys: Optional[List[int]] = None,
+        # Auto-TPM QoS priority (proto field 14): 1-100 valid, 0 = unset —
+        # the master then normalizes unset to defaultPriority / the QoS
+        # header (PriorityNormalizer).  Priority must ride the schedule
+        # protocol; embedding it only in unique_key metadata does not reach
+        # Auto-TPM admission (same lesson as flexlb_smoke_base.py).
+        priority: int = 0,
     ):
         input_pb = self.build_generate_input(
             request_id,
@@ -227,6 +248,7 @@ class EngineOps:
             model="engine_service",
             api_key="",
             cache_key_block_size=1024,
+            priority=priority,
         )
 
     # -- master gRPC -------------------------------------------------------
@@ -234,18 +256,38 @@ class EngineOps:
     def master_target(self) -> str:
         return f"{self.master_ip}:{self.master_http_port + 2}"
 
-    def schedule(self, request_id: int, timeout_s: float = 30.0, **kwargs):
+    def schedule(
+        self,
+        request_id: int,
+        timeout_s: float = 30.0,
+        *,
+        qos_level: Optional[int] = None,
+        **kwargs,
+    ):
         """Schedule RPC against the master.
 
         ``timeout_s`` is the *client-side gRPC deadline* — the v2 QUEUE
         scheduler parks capacity-blocked requests (a wait condition, see
         FixedWindowBatcherAlgorithm), so callers probing for parking pass a
         short deadline and expect DEADLINE_EXCEEDED.
+
+        ``qos_level`` (optional) attaches the DashScope inner QoS header
+        (``x-dashscope-inner-qos-level``) to this Schedule RPC — the
+        secondary priority channel read by GrpcQosHeaderInterceptor; the
+        proto ``priority`` kwarg (see build_schedule_request) takes
+        precedence over it during master-side normalization
+        (PriorityNormalizer: proto value > header > defaultPriority).
         """
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             self._channel(self.master_target())
         )
         req = self.build_schedule_request(request_id, **kwargs)
+        if qos_level is not None:
+            return stub.Schedule(
+                req,
+                timeout=timeout_s,
+                metadata=((QOS_LEVEL_HEADER, str(qos_level)),),
+            )
         return stub.Schedule(req, timeout=timeout_s)
 
     def role_addr(self, response, role: str) -> str:
