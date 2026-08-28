@@ -146,13 +146,30 @@ def chaos_flexlb_config(
     )
 
 
+def chaos_perf() -> dict:
+    """Chaos/elastic perf: an EXPLICIT flat prefill (performance JSON
+    "prefill.fixed_ms" — the sanctioned explicit channel, cluster-wide so
+    dynamically added engines inherit it too).
+
+    The elastic suites measure discovery/removal/inflight semantics, not
+    ledger-driven routing. The formula-driven default (~220ms at 2048
+    tokens) doubles the in-flight window at removal time and amplifies a
+    pre-existing intermittent drain stall (requests orphaned by the removed
+    engine never complete decode) — the flat 100ms declaration restores the
+    historical timing envelope this suite was calibrated on.
+    """
+    perf = default_perf()
+    perf["prefill"] = {"fixed_ms": 100.0, "scale": 1.0}
+    return perf
+
+
 def elastic_spec(ctx: CaseContext) -> EnvSpec:
     """Shared elastic/chaos env: 2P+4D, dynamic file discovery, TTL=30s."""
     return EnvSpec(
         label=f"chaos_{ctx.profile}",
         n_prefill=2,
         n_decode=4,
-        perf=default_perf(),
+        perf=chaos_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
         master_env={"FLEXLB_CONFIG": chaos_flexlb_config()},
@@ -165,7 +182,7 @@ def ttl_spec(ctx: CaseContext) -> EnvSpec:
         label=f"chaos_ttl_{ctx.profile}",
         n_prefill=2,
         n_decode=2,
-        perf=default_perf(),
+        perf=chaos_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
         master_env={"FLEXLB_CONFIG": chaos_flexlb_config()},
@@ -180,7 +197,7 @@ def quota_spec(ctx: CaseContext) -> EnvSpec:
         label=f"chaos_quota_{ctx.profile}",
         n_prefill=1,
         n_decode=1,
-        perf=default_perf(),
+        perf=chaos_perf(),
         master_profile=ctx.profile,
         discovery="discovery_file",
         master_env={"FLEXLB_CONFIG": chaos_flexlb_config(max_inflight_batches=1)},

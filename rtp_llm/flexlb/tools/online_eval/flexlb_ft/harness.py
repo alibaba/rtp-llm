@@ -656,6 +656,17 @@ def build_flexlb_config(
                 "roles": {
                     "prefill": {
                         "availability": {"maxPendingRequests": 100000},
+                        # Bounded cache affinity, aligned with the production
+                        # master template (data/config/master_fixed_window.json):
+                        # a cache leader is preferred while its projected TTFT
+                        # stays within maxExtraTtftMs of the best candidate and
+                        # its reusable prefix covers >= minPrefixHitPercent.
+                        # Without this key the affinity gate is disabled and
+                        # prefix reuse degrades to tie-window randomness.
+                        "cacheAffinity": {
+                            "maxExtraTtftMs": 20,
+                            "minPrefixHitPercent": 20,
+                        },
                         "selector": {
                             "type": "ESTIMATED_TTFT",
                             "candidateChoice": {
