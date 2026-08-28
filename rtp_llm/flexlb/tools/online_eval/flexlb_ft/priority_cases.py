@@ -66,12 +66,10 @@ import grpc
 from .context import CaseContext, CaseDef, rid_base
 from .grade import GradeReport
 from .harness import AssertUtils, EnvSpec, build_flexlb_config, default_perf
-from .injection_gate_cases import (
-    MOCK_TOTAL_KV_TOKENS,
-    clear_type_all,
-    inject_type,
-    inject_type_all,
-)
+
+# A9-① (Ryan P3-1): clear_type_all / inject_type / inject_type_all were
+# imported but never used — trimmed to the single live symbol.
+from .injection_gate_cases import MOCK_TOTAL_KV_TOKENS
 
 PRIORITY_CASES: list[CaseDef] = []
 
@@ -131,6 +129,24 @@ CODE_QUEUE_REJECTED = 8510
 #: {8503, 8402, 8430}; the first e2e run records the observed distribution.
 CODE_SLO_EXPIRED = 8511
 
+# A4 (Mark P1-2, PR3): BATCH dispatcher family reservation — the group
+# token-capacity / plan-conflict codes only fire on the BATCH dispatcher,
+# which the current priority profile (SINGLE + NON_BATCH) never enters;
+# constants reserved so atpm_error_code_family's segment-4 skeleton has
+# them in place for the priority-batch variant profile.
+CODE_BATCH_TOKEN_CAPACITY = 8514
+CODE_SCHEDULER_PLAN_CONFLICT = 8515
+# A3 (Mark P1-1): INVALID_REQUEST — RequestLifecycleCoordinator.register's
+# duplicate request_id rejection (putIfAbsent, coordinator L262-268:
+# "duplicate request_id: <rid>"), observable black-box through the
+# schedule RPC response.
+CODE_INVALID_REQUEST = 8406
+# A1 (Ryan P1-1): ErrorCodePB.CANCELLED enum value — the ONLY code the mock
+# engine ever puts on a client-stream error frame (RpcErrorPB; both the
+# client-cancel and preemption-cancel paths emit this enum, NOT the 8429
+# numeric — 8429 rides the TaskInfoPB master channel only).
+_PB_ERROR_CANCELLED = 2
+
 # ScheduleFailureReasonPB (proto field 9)
 REASON_UNSPECIFIED = 0
 REASON_HIGHER = 1
@@ -157,6 +173,22 @@ ROUTE_REJECT_FAMILY = (CODE_NO_PREFILL, CODE_QUEUE_REJECTED)
 # keeps a rejection from this family.  Actual codes are recorded in the
 # case details for calibration.
 EV2_REJECT_FAMILY = (8403,) + ROUTE_REJECT_FAMILY + (CODE_RESOURCE_EXHAUSTED,)
+
+# A6 (Daniel P2-2): flip-runbook anchor for the two empirically
+# established behaviour baselines.  Every EV-1/EV-2 assertion detail
+# carries its key ("[EV-1]" / "[EV-2]"); once the Java side fixes the
+# underlying behaviour, grep these keys to enumerate every assertion
+# point that must be flipped back to the designed shape.
+EXPECTED_BASELINES = {
+    "EV-1": (
+        "single park slot — only a wave FIRST submitter parks, every "
+        "later submitter route-rejects {8402, 8510}"
+    ),
+    "EV-2": (
+        "decode eviction never fires — zero 8400/8429 victims, the "
+        "incoming keeps an EV2_REJECT_FAMILY rejection"
+    ),
+}
 
 STREAM_WAIT_S = 35.0
 # Deterministic arrival ordering: sequential fire submits with a small
@@ -216,9 +248,12 @@ class _Fire:
 
 class _StreamTerminal:
     """Background NON_BATCH direct-stream consumer capturing the typed
-    terminal: completion, gRPC status and the trailing-metadata raw error
-    code (8400/8429 ride grpc-status-details-bin — the
-    priority_preemption_smoke.py verified paradigm, design §2.5 pitfall 9).
+    terminal: completion, gRPC status, the trailing-metadata raw error
+    code (grpc-status-details-bin) AND the in-band error frame
+    (GenerateOutputsPB.error_info — see _consume; the trailing-metadata-
+    only paradigm inherited from priority_preemption_smoke.py was
+    incomplete: the mock engine terminates error streams IN-BAND, so the
+    RpcError branch alone never sees engine-side cancellations).
 
     The shared StreamHandle cannot be reused: it stores ``repr(exc)`` and
     drops trailing_metadata, which is where the raw code lives.
@@ -237,6 +272,8 @@ class _StreamTerminal:
         self.grpc_code = None
         self.raw_error_code = None
         self.error_text = None
+        self.inband_error_code = None
+        self.inband_error_message = None
         self.terminated_s = None
         self._pb2 = ops.pb2
         self.thread = threading.Thread(target=self._consume, daemon=True)
@@ -244,9 +281,46 @@ class _StreamTerminal:
 
     def _consume(self) -> None:
         try:
-            for _output in self.call:
-                pass
-            self.completed = True
+            for output in self.call:
+                # A1 (Ryan P1-1): the mock engine terminates error streams
+                # IN-BAND — a GenerateOutputsPB carrying error_info (proto
+                # field 9, RpcErrorPB) is the last frame, then
+                # observer.onCompleted() (JavaMockEngineCluster.java
+                # L988-1010), so the client stream ends with gRPC status
+                # OK and the RpcError/trailing-metadata branch below never
+                # fires for engine-side cancellations.  Record the frame
+                # here; the typed mapping happens after the loop.
+                try:
+                    if output.HasField("error_info"):
+                        self.inband_error_code = int(output.error_info.error_code)
+                        self.inband_error_message = output.error_info.error_message
+                except AttributeError:
+                    pass
+            if self.inband_error_code is None:
+                # No error frame observed — the stream genuinely completed
+                # (flatten finished flags), so the terminal stays CODE_OK.
+                self.completed = True
+            else:
+                # In-band typed terminal.  The engine only ever puts
+                # ErrorCodePB.CANCELLED (2) on the stream frame — for BOTH
+                # the client-cancel and the preemption-cancel paths
+                # (JavaMockEngineCluster L1232-1238 / L1375-1385; the 8429
+                # numeric rides the TaskInfoPB master channel only), so
+                # the enum maps onto CODE_ENGINE_CANCELLED (8429), the
+                # preemption-family terminal.  Any other value records
+                # as-is for first-run calibration.
+                # TODO(A9-⑤, EV-2 flip): once the Java side makes decode
+                # eviction reachable, this branch becomes the FIRST real
+                # 8429 observation point (w2_owned in
+                # atpm_preempt_decode_engine_owned) — do not remove.
+                if self.inband_error_code == _PB_ERROR_CANCELLED:
+                    self.raw_error_code = CODE_ENGINE_CANCELLED
+                else:
+                    self.raw_error_code = self.inband_error_code
+                self.error_text = (
+                    f"in-band error frame: code={self.inband_error_code} "
+                    f"msg={self.inband_error_message}"
+                )
         except grpc.RpcError as exc:
             # Client-side cancellation is not a typed terminal.
             if exc.code() != grpc.StatusCode.CANCELLED:
@@ -430,6 +504,33 @@ def _prefill_names(ops) -> list:
 def _decode_names(ops) -> list:
     snap = ops.snapshot()
     return [e["name"] for e in snap.get("engines", []) if e.get("role") == "decode"]
+
+
+def _decode_pressure_guardrail(ops, decode_names: list) -> tuple:
+    """A7 (Mark P2-1): assert every decode endpoint is actually in the
+    needs-eviction state — available_kv_tokens drained to <= 0 in the
+    engine snapshot (JavaMockEngineCluster getSnapshot reports
+    max(0, totalKv - effectiveActiveKv)) — BEFORE the incoming fires.
+    An endpoint that silently escaped saturation lets the ordinary route
+    succeed and the choreography degrades to a plain 8402 route-reject
+    (or a normal completion) with zero eviction evidence, which is
+    indistinguishable from the EV-2 baseline.  Returns (ok, evidence)."""
+    evidence = []
+    ok = True
+    try:
+        snap = ops.snapshot_by_name()
+    except Exception as exc:
+        return False, f"snapshot failed: {exc!r}"
+    for name in decode_names:
+        entry = snap.get(name) or {}
+        try:
+            avail = int(entry.get("available_kv_tokens", -1))
+        except (TypeError, ValueError):
+            avail = -1
+        evidence.append(f"{name}:{avail}")
+        if avail > 0:
+            ok = False
+    return ok, ", ".join(evidence)
 
 
 def _single_prefill(ops):
@@ -732,6 +833,22 @@ def _o1_spec(ctx: CaseContext) -> EnvSpec:
     )
 
 
+def _q3_spec(ctx: CaseContext) -> EnvSpec:
+    """ENV-Q3 (A5, Mark P1-3/PR3): metric-plane normalization env — Q1
+    config plus FLEXLB_MONITOR_MODE=all.  auto_tpm.request.count{priority=..}
+    is counted at the schedule RPC entry for EVERY request regardless of
+    outcome (FlexlbServiceImpl:723), which keeps the proto-vs-header
+    channel discrimination observable even under the EV-1 single-park
+    baseline; the shared ENV-P0/Q1/F1 specs cannot serve it because the
+    default critical-only metrics filter hides auto_tpm.*."""
+    return _spec(
+        ctx,
+        "prio_q3",
+        config=_prio_config(),
+        extra_env={"FLEXLB_MONITOR_MODE": "all"},
+    )
+
+
 # ===========================================================================
 # Observability collection: management-port Prometheus, master log, pv.log
 # ===========================================================================
@@ -817,15 +934,30 @@ def _master_log_text(env) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _pv_log_tail(max_lines: int = 400) -> str:
-    """Tail of the pv.log request journal (INFO-level pvLogger, written by
-    every master on the harness line)."""
+def _pv_log_tail(env, rids: Optional[list] = None, max_lines: int = 400) -> str:
+    """pv.log request-journal delta for THIS env (A8, Daniel P2-3): the
+    file is shared across every master in the container, so read only the
+    bytes written since OUR master start (offset recorded by
+    harness.start_master — the same discipline as _master_log_text) and,
+    when *rids* is given, keep only the JSON rows whose "requestId" field
+    matches one of them (PvLogData.java serialises requestId per row) —
+    eliminating sibling-instance read crosstalk."""
     path = Path.home() / "ai-whale" / "logs" / "pv.log"
+    offset = getattr(env, "pv_log_offset", 0)
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        return "\n".join(text.splitlines()[-max_lines:])
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            text = fh.read().decode("utf-8", errors="replace")
     except Exception:
         return ""
+    lines = text.splitlines()
+    if rids:
+        wanted = set()
+        for rid in rids:
+            wanted.add(f'"requestId":{rid}')
+            wanted.add(f'"requestId": {rid}')
+        lines = [ln for ln in lines if any(m in ln for m in wanted)]
+    return "\n".join(lines[-max_lines:])
 
 
 # ===========================================================================
@@ -973,7 +1105,7 @@ def prio_order_basic(ctx: CaseContext):
             _inversion_ratio(dispatched, priorities),
             context="basic_order_ev1",
             detail=(
-                f"dispatched={dispatched_tags} (EV-1 single park slot: "
+                f"[EV-1] dispatched={dispatched_tags} (EV-1 single park slot: "
                 f"reorder unobservable, wave rejections="
                 f"{[m[rids[t]][1] for t in tags[1:]]})"
             ),
@@ -984,7 +1116,7 @@ def prio_order_basic(ctx: CaseContext):
             and _group_order_ok(dispatched, [rids["70a"], rids["70b"]])
             and _group_order_ok(dispatched, [rids["30a"], rids["30b"]]),
             context="same_priority_fifo_ev1",
-            detail=f"dispatched={dispatched_tags}",
+            detail=f"[EV-1] dispatched={dispatched_tags}",
         )
         report.invariant(
             "PR6",
@@ -995,7 +1127,7 @@ def prio_order_basic(ctx: CaseContext):
             and all(m[rids[t]][1] in ROUTE_REJECT_FAMILY for t in tags[1:]),
             context="single_park_slot_ev1",
             detail=(
-                f"parked={tag_of.get(parked_rid, parked_rid)} completed, "
+                f"[EV-1] parked={tag_of.get(parked_rid, parked_rid)} completed, "
                 f"later submitters route-rejected (EV-1), "
                 f"codes={[(t, m[rids[t]][1]) for t in tags]}"
             ),
@@ -1090,7 +1222,7 @@ def prio_same_level_fifo(ctx: CaseContext):
             ev1_shape_ok and fifo_ok,
             context="same_priority_fifo_ev1",
             detail=(
-                f"EV-1 no-placeholder shape: dispatched="
+                f"[EV-1] EV-1 no-placeholder shape: dispatched="
                 f"{[r % 1_000_000 for r in dispatched]} (prefix order), "
                 f"rids[0] direct dispatch ok={first_dispatched}, "
                 f"rids[1] parked (single probe slot) ok="
@@ -1168,6 +1300,16 @@ def prio_normalize(ctx: CaseContext):
     [ph, Y, D, X].  A failed default (D=50) would give [ph, D, Y, X] —
     the two outcomes are distinguishable, so the assertion really pins
     the third channel.
+
+    Segment 4 (ENV-Q3, all five profiles — A5, Mark P1-3/PR3
+    strengthening): channel discrimination observed through the METRIC
+    plane.  The behaviour plane (dispatch order) is EV-1-blocked for
+    multi-parker waves, but auto_tpm.request.count{priority=..} counts
+    at the schedule RPC entry regardless of outcome, so proto(70)+
+    header(30) must land bucket 70, header-only(30) bucket 30, no-input
+    bucket 50.  Normalization is profile-independent (FIFO normalizes
+    identically) — the segment runs on every profile, hardening the
+    four-profile gate (Daniel P2-1).
     """
     report = GradeReport(run_grade=ctx.grade)
     base = rid_base(ctx, "priority")
@@ -1328,6 +1470,63 @@ def prio_normalize(ctx: CaseContext):
                 _master_http(ops3), 30.0
             )
             p6_flags.append(s3_m[ph3][0] and s3_m[d_rid][0] and clean_ok)
+
+        # -- segment 4 (A5): channel discrimination, metric plane -------
+        # Needs its own env (FLEXLB_MONITOR_MODE=all): the shared P0/Q1/
+        # F1 specs run the default critical-only metrics filter that
+        # hides auto_tpm.*.  Fresh env means the counters start at zero,
+        # so the expected buckets are absolute.  Buckets count at the
+        # schedule RPC entry regardless of outcome — EV-1 cannot block
+        # this observation plane.
+        env4 = ctx.env_manager.ensure(_q3_spec(ctx))
+        ops4 = ctx.engine_ops(env4)
+        s4_specs = [
+            (
+                "proto70_over_header30",
+                {
+                    "priority": 70,
+                    "qos_level": 30,
+                    "input_len": 2048,
+                    "output_len": 2,
+                },
+            ),
+            (
+                "header30_only",
+                {"qos_level": 30, "input_len": 2048, "output_len": 2},
+            ),
+            ("no_input_default50", {"input_len": 2048, "output_len": 2}),
+        ]
+        s4_rids = [ops4.next_request_id(base) for _ in s4_specs]
+        s4_fires = _fire_batch(
+            ops4, [(rid, kw) for rid, (_l, kw) in zip(s4_rids, s4_specs)]
+        )
+        _drain(ops4, s4_fires)  # terminals only — buckets count regardless
+        s4_buckets = {
+            p: _metric_sum(
+                _scrape_master_metrics(ops4),
+                "auto_tpm_request",
+                {"priority": str(p)},
+            )
+            for p in (30, 50, 70)
+        }
+        # proto(70) beats header(30); header alone lands 30; no input
+        # defaults to 50 (segment 1's behaviour-plane default form echoed
+        # on the metric plane — a different observation channel, not a
+        # duplicate assertion).
+        s4_ok = (
+            s4_buckets[70] == 1.0 and s4_buckets[30] == 1.0 and s4_buckets[50] == 1.0
+        )
+        segments.append(
+            (
+                "channel_discrimination_metric_plane",
+                s4_ok,
+                f"buckets={ {p: s4_buckets[p] for p in s4_buckets} } "
+                f"(expected 70:1, 30:1, 50:1)",
+            )
+        )
+        hygiene.append((ops4, s4_fires, _prefill_names(ops4)))
+        clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops4), 30.0)
+        p6_flags.append(s4_ok and clean_ok)
 
         report.invariant(
             "PR3",
@@ -1543,6 +1742,8 @@ def prio_queue_timeout_terminal(ctx: CaseContext):
         # 30b/30c and even the higher-priority 70b are route-rejected 8402.
         h1_ok = by_rid[h1][0]
         low_codes = [by_rid[rid][1] for rid in low_rids]
+        # A9-② (Ryan P3-3): low_family_ok was computed but never read —
+        # folded into the P6 detail below as the low-wave family shape.
         low_family_ok = all(
             code in (CODE_SLO_EXPIRED, CODE_NO_PREFILL, CODE_ADMISSION_TIMEOUT)
             for code in low_codes
@@ -1568,9 +1769,10 @@ def prio_queue_timeout_terminal(ctx: CaseContext):
             "P6",
             h1_ok and head_expired and later_rejected and h2_rejected,
             detail=(
-                f"70a ok={h1_ok}, parked 30a=8511@deadline="
+                f"[EV-1] 70a ok={h1_ok}, parked 30a=8511@deadline="
                 f"{head_expired}, 30b/30c route-rejected={later_rejected}, "
                 f"70b route-rejected={h2_rejected} (EV-1 single park slot), "
+                f"low_family_ok={low_family_ok}, "
                 f"no suspension (queueTimeout absolute)"
             ),
         )
@@ -1727,7 +1929,7 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
             ev1_w1 and zero_eviction_w1 and ph1_ok,
             context="deficit_exact_one_ev1",
             detail=(
-                f"ev1_pattern={ev1_w1} (single park slot, queue never "
+                f"[EV-1] ev1_pattern={ev1_w1} (single park slot, queue never "
                 f"fills -> deficit planning unreachable), "
                 f"zero 8400/8429={zero_eviction_w1}, "
                 f"parked=30a ok={m1[parked1][0] if parked1 else False}, "
@@ -1740,7 +1942,7 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
             ev1_w1 and zero_eviction_w1,
             context="victim_determinism_ev1",
             detail=(
-                "victim selection unobservable: no eviction ever runs "
+                "[EV-1] victim selection unobservable: no eviction ever runs "
                 "(EV-1); zero victims across the whole wave is the "
                 "assertable form"
             ),
@@ -1752,7 +1954,7 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
             and m1[incoming][1] in ROUTE_REJECT_FAMILY,
             context="prefill_queued_terminal_ev1",
             detail=(
-                f"later submitters + incoming70 all route-rejected "
+                f"[EV-1] later submitters + incoming70 all route-rejected "
                 f"(EV-1), incoming70={m1[incoming][1]}, "
                 f"detail={m1[incoming][2]}"
             ),
@@ -1765,7 +1967,7 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
             and (parked1 is not None and m1[parked1][0]),
             context="strict_low_priority_victims_ev1",
             detail=(
-                "strictly-lower-priority victim selection unobservable "
+                "[EV-1] strictly-lower-priority victim selection unobservable "
                 "(no eviction, EV-1); parked first submitter completes "
                 "untouched, zero victims"
             ),
@@ -1775,7 +1977,7 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
             "P6",
             ev1_w1 and ph1_ok and parked1 is not None and m1[parked1][0] and clean1_ok,
             detail=(
-                f"wave1: ph+parked drained, later submitters "
+                f"[EV-1] wave1: ph+parked drained, later submitters "
                 f"route-rejected (EV-1), "
                 f"inflight={'ok' if clean1_ok else clean1_detail}"
             ),
@@ -1823,7 +2025,7 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
             zero_eviction and inc90_family and ev1_w2 and ph2_ok,
             context="infeasible_no_partial_eviction_ev1",
             detail=(
-                f"zero eviction={zero_eviction} (no strictly-lower candidate "
+                f"[EV-1] zero eviction={zero_eviction} (no strictly-lower candidate "
                 f"for the 90 → DECLINED, all-or-nothing), "
                 f"90 terminal={m2[inc90][1]} "
                 f"(family {list(ROUTE_REJECT_FAMILY)}), "
@@ -1836,7 +2038,7 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
             "P6",
             ev1_w2 and ph2_ok and parked2 is not None and m2[parked2][0] and clean2_ok,
             detail=(
-                f"wave2: ph+first 70 drained, rest+90 route-rejected "
+                f"[EV-1] wave2: ph+first 70 drained, rest+90 route-rejected "
                 f"(EV-1); inflight={'ok' if clean2_ok else clean2_detail}"
             ),
         )
@@ -1913,6 +2115,24 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
     Victim-count note: exactly ONE victim per wave (the planner releases
     one endpoint's worth); the 70 then takes that endpoint.
     """
+    # A4 (Mark P1-2): batch-dispatch caliber reservation, following the
+    # smoke_cases.py dual-caliber paradigm (is_batch = ctx.batch_dispatch();
+    # completion-duration caliber under BATCH, client-TTFT under NON_BATCH).
+    # Under BATCH dispatch the master enqueues the stream itself
+    # (enqueued_by_master), so the _StreamTerminal direct-stream channel —
+    # and with it the live 8429/AT5-closure observation — is NON_BATCH-only
+    # by construction.  Unreachable under this profile (NON_BATCH is part
+    # of the priority family base config); the arm is reserved so the
+    # priority-batch variant profile fills it without touching the
+    # NON_BATCH logic below.
+    if ctx.batch_dispatch():
+        # TODO(A4): BATCH arm — victim terminal rides FetchResponse, the
+        # closure caliber is completion-duration; fill when the
+        # priority-batch variant profile enables BATCH dispatch.
+        raise NotImplementedError(
+            "atpm_preempt_decode_engine_owned BATCH arm reserved — fill "
+            "when the priority-batch variant profile enables BATCH dispatch"
+        )
     env = ctx.env_manager.ensure(_d1_spec(ctx))
     ops = ctx.engine_ops(env)
     report = GradeReport(run_grade=ctx.grade)
@@ -1941,6 +2161,11 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
         for name in decode_names:
             ops.set_kv_pressure(name, MOCK_TOTAL_KV_TOKENS)
         time.sleep(PERF_SETTLE_S)
+        # A7 (Mark P2-1): pre-fire guardrail — see
+        # _decode_pressure_guardrail.
+        w1_guard = _decode_pressure_guardrail(ops, decode_names)
+        if not w1_guard[0]:
+            return False, f"wave1 decode guardrail failed: {w1_guard[1]}"
         w1_inc = ops.next_request_id(base)
         w1_inc_fire = _fire(ops, w1_inc, priority=70, input_len=2048, output_len=2)
         fires.append(w1_inc_fire)
@@ -1972,7 +2197,7 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
             w1_zero_eviction and w1_inc_rejected and w1_victims_ok,
             context="decode_reserved_terminal_ev2",
             detail=(
-                f"reserved wave (EV-2 baseline): victims="
+                f"[EV-2] reserved wave (EV-2 baseline): victims="
                 f"{ {r % 1_000_000: c for r, c in w1_codes.items()} } "
                 f"(all complete — reserved eviction never fires), "
                 f"yielded(8400)={len(w1_yielded)}, "
@@ -2010,6 +2235,10 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
         for name in decode_names:
             ops.set_kv_pressure(name, MOCK_TOTAL_KV_TOKENS)
         time.sleep(PERF_SETTLE_S)
+        # A7: same guardrail for wave 2 — the AT5 observation wave.
+        w2_guard = _decode_pressure_guardrail(ops, decode_names)
+        if not w2_guard[0]:
+            return False, f"wave2 decode guardrail failed: {w2_guard[1]}"
         w2_inc = ops.next_request_id(base)
         w2_inc_fire = _fire(ops, w2_inc, priority=70, input_len=2048, output_len=2)
         fires.append(w2_inc_fire)
@@ -2039,12 +2268,31 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
             w2_zero_eviction and w2_inc_rejected and w2_survivors_ok,
             context="decode_owned_terminal_ev2",
             detail=(
-                f"owned wave (EV-2 baseline): 8429 victims="
+                f"[EV-2] owned wave (EV-2 baseline): 8429 victims="
                 f"{len(w2_owned)} (engine-owned eviction never fires), "
                 f"engine cancel evidence={cancel_evidence}, "
                 f"incoming70 ok={w2_inc_ok} code={w2_inc_code} "
                 f"(family {list(EV2_REJECT_FAMILY)}), "
                 f"survivors ok={w2_survivors_ok}"
+            ),
+        )
+
+        # A9-④ (Mark P3-2): PR10(decode) in its vacuous EV-2 form — the
+        # replacement-precision property (deficit-exact victims,
+        # infeasible → zero partial eviction) has no decode-side object
+        # while decode eviction never fires; the vacuous form (zero
+        # evictions across BOTH waves, no deficit object anywhere) is
+        # asserted so the property stays registered with the degradation
+        # recorded instead of silently absent.
+        report.invariant(
+            "PR10",
+            w1_zero_eviction and w2_zero_eviction,
+            context="decode_deficit_vacuous_ev2",
+            detail=(
+                "[EV-2] decode-side PR10 vacuous form: zero evictions "
+                "across both waves (reserved + owned), no deficit "
+                "object — replacement precision unobservable while "
+                "decode eviction never fires"
             ),
         )
 
@@ -2055,8 +2303,14 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
         # would need a fabricated value and invariant() is illegal for a
         # banded property (raises) — the gap is filed as behaviour
         # finding EV-2 and carried in the case detail instead.  The
-        # computation stays so a Java-side fix restores the band
-        # automatically.
+        # terminal channel itself is now LIVE (A1, Ryan P1-1):
+        # _StreamTerminal maps the engine's in-band error frames
+        # (GenerateOutputsPB.error_info → CANCELLED enum →
+        # CODE_ENGINE_CANCELLED), so the moment a Java-side EV-2 fix makes
+        # decode eviction reachable, w2_owned populates from real 8429
+        # terminals, the verify_engine_cancelled evidence loop above
+        # runs, and this computation feeds the AT5 band automatically —
+        # no further framework change needed.
         closure_ms = None
         if w2_owned and w2_inc_ok:
             victim_fire = next(fr for fr in w2_fires if fr.rid == w2_owned[0])
@@ -2083,7 +2337,7 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
             "P6",
             w2_inc_rejected and w2_survivors_ok and clean2_ok,
             detail=(
-                f"wave2 drained (EV-2: zero eviction, all victims "
+                f"[EV-2] wave2 drained (EV-2: zero eviction, all victims "
                 f"completed, incoming terminal {w2_inc_code}), "
                 f"inflight={'ok' if clean2_ok else clean2_detail}"
             ),
@@ -2172,7 +2426,7 @@ def atpm_same_priority_zero_eviction(ctx: CaseContext):
             zero_eviction and queued_ok,
             context="same_priority_zero_eviction_ev1",
             detail=(
-                f"zero 8400/8429={zero_eviction}, first 50 completed="
+                f"[EV-1] zero 8400/8429={zero_eviction}, first 50 completed="
                 f"{parked is not None and m[parked][0]}, later 50s "
                 f"route-rejected (EV-1 single park slot) — same priority "
                 f"never evicts"
@@ -2193,7 +2447,7 @@ def atpm_same_priority_zero_eviction(ctx: CaseContext):
             "P6",
             queued_ok and clean_ok,
             detail=(
-                f"ph+first queued drained, later queued route-rejected "
+                f"[EV-1] ph+first queued drained, later queued route-rejected "
                 f"(EV-1); inflight={'ok' if clean_ok else clean_detail}"
             ),
         )
@@ -2439,7 +2693,7 @@ def atpm_timeout_attribution(ctx: CaseContext):
             w1_ok,
             context="higher_priority_ahead_ev1",
             detail=(
-                f"incoming70 terminal={inc70_code} "
+                f"[EV-1] incoming70 terminal={inc70_code} "
                 f"reason={REASON_NAMES.get(inc70_reason, inc70_reason)} "
                 f"(EV-1: 8430 + HIGHER_PRIORITY_AHEAD unobservable — the 70 "
                 f"is never admission-evicted, it route-rejects like every "
@@ -2452,20 +2706,13 @@ def atpm_timeout_attribution(ctx: CaseContext):
             ),
         )
         # deadline-not-extended: under EV-1 the 70 has no queue residency
-        # at all (fast route-reject), so the ratio records the rejection
-        # latency — far under any tier — rather than a deadline window;
-        # the no-extension property itself needs an admitted 70 (Java
-        # behaviour gap, filed with EV-1).
-        inc70_wall = inc70_fire.settled_s - inc70_fire.submitted_s
-        report.check(
-            "PR8",
-            inc70_wall / 7.0,
-            context="attribution_deadline_no_extension_ev1",
-            detail=(
-                f"incoming70 wall={inc70_wall * 1000:.0f}ms / 7000ms "
-                f"(EV-1: fast route-reject, no deadline observation object)"
-            ),
-        )
+        # at all (fast route-reject) — the no-extension property needs an
+        # admitted 70 (Java behaviour gap, filed with EV-1).
+        # A9-③ (Mark P3-1): the fast-reject latency is NOT a deadline
+        # observation; recording it under the PR8 band drifted the
+        # property's口径 (prio_queue_timeout_terminal stays PR8's ONLY
+        # band consumer).  Raw value carried in the case finish detail.
+        inc70_wall_ms = (inc70_fire.settled_s - inc70_fire.submitted_s) * 1000.0
         clean1_ok, clean1_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
         if not clean1_ok:
             return report.finish(
@@ -2523,7 +2770,7 @@ def atpm_timeout_attribution(ctx: CaseContext):
             w2_ok,
             context="same_or_resource_weak_form_ev1",
             detail=(
-                f"incoming70_late terminal={inc70l_code} "
+                f"[EV-1] incoming70_late terminal={inc70l_code} "
                 f"reason={REASON_NAMES.get(inc70l_reason, inc70l_reason)} "
                 f"(EV-1: the weak SAME/RESOURCE form has no object — no "
                 f"admission-evicted 70 exists to attribute a timeout to), "
@@ -2541,13 +2788,15 @@ def atpm_timeout_attribution(ctx: CaseContext):
             and victims8400 == []
             and victims2 == [],
             detail=(
-                f"placeholders completed, zero eviction victims (EV-1), "
+                f"[EV-1] placeholders completed, zero eviction victims (EV-1), "
                 f"inflight={'ok' if clean2_ok else clean2_detail}"
             ),
         )
         return report.finish(
             f"wave1 70={inc70_code}/{REASON_NAMES.get(inc70_reason)}, "
             f"wave2 70={inc70l_code}/{REASON_NAMES.get(inc70l_reason)}, "
+            f"[EV-1] inc70 fast-reject wall={inc70_wall_ms:.0f}ms "
+            f"(raw, no deadline object), "
             f"grades: {report.summary()}"
         )
     except Exception as exc:
@@ -2659,7 +2908,7 @@ def atpm_comparator_frozen_weak(ctx: CaseContext):
             prio_half_ok and fifo_half_ok,
             context="comparator_frozen_weak_ev1",
             detail=(
-                f"EV-1: the dispatch-order contrast (70s before 30s under "
+                f"[EV-1] EV-1: the dispatch-order contrast (70s before 30s under "
                 f"PRIORITY vs arrival order under FIFO) has no observation "
                 f"object — only the first submitter parks, later submitters "
                 f"route-reject 8402 under BOTH orderings; both halves "
@@ -2748,10 +2997,32 @@ def atpm_error_code_family(ctx: CaseContext):
     deterministic under this choreography).  The 70_early completes (its
     deadline cancelled at delivery ACK).
 
+    Segment 4 (A4, Mark P1-2, SKELETON — BATCH dispatcher family,
+    reserved not constructed): 8514 BATCH_TOKEN_CAPACITY / 8515
+    SCHEDULER_PLAN_CONFLICT only fire on the BATCH dispatcher, which the
+    current priority profile (SINGLE + NON_BATCH) never enters; filled
+    when the priority-batch variant profile enables BATCH dispatch.
+
     Cross-segment isolation (AT4, per segment): segment-1 terminals
     contain no 8402/8403/8431/8400/8429/8511; segment-2 no
     8502/8403/8431/8400/8429/8511; segment-3 no 8502/8402/8403/8510.
     """
+    # A4 (Mark P1-2): batch-dispatch caliber reservation, following the
+    # smoke_cases.py dual-caliber paradigm (is_batch = ctx.batch_dispatch();
+    # completion-duration caliber under BATCH, client-TTFT under NON_BATCH).
+    # The 8514/8515 segment-4 codes below are BATCH-dispatcher-only, so
+    # the whole segment is unreachable under this profile (NON_BATCH is
+    # part of the priority family base config); the arm is reserved so
+    # the priority-batch variant profile fills it without touching the
+    # NON_BATCH segments below.
+    if ctx.batch_dispatch():
+        # TODO(A4): BATCH arm — segment 4 becomes live (8514 group token
+        # capacity / 8515 plan conflict); fill when the priority-batch
+        # variant profile enables BATCH dispatch.
+        raise NotImplementedError(
+            "atpm_error_code_family BATCH arm reserved — fill when the "
+            "priority-batch variant profile enables BATCH dispatch"
+        )
     report = GradeReport(run_grade=ctx.grade)
     base = rid_base(ctx, "priority")
     segs = []
@@ -3011,6 +3282,18 @@ def atpm_error_code_family(ctx: CaseContext):
     finally:
         _finally_hygiene(ops3, fires3, names3)
 
+    # ---- segment 4 (A4, Mark P1-2): BATCH dispatcher family — SKELETON --
+    # Reserved, not constructed: CODE_BATCH_TOKEN_CAPACITY (8514, group
+    # token capacity exceeded) and CODE_SCHEDULER_PLAN_CONFLICT (8515,
+    # plan conflict) only fire on the BATCH dispatcher, which the
+    # current priority profile (SINGLE + NON_BATCH) never enters.  Fill
+    # when the priority-batch variant profile enables BATCH dispatch —
+    # expected shape: saturate maxWaitingRequestsPerGroup so an incoming
+    # over the group token budget rejects 8514; force a concurrent plan
+    # mutation for 8515; keep the cross-segment isolation table growing
+    # (segment-4 terminals must contain none of segments 1-3's codes).
+    # Constants live at the module head next to the code-family block.
+
     try:
         report.invariant(
             "AT4",
@@ -3146,10 +3429,20 @@ def atpm_config_strict_reject(ctx: CaseContext):
                 f"{l}={'ok' if ok else 'FAIL(' + d + ')'}" for l, ok, d in results
             ),
         )
+        # A2 (Ryan P2-1): was invariant("P6", True, ...) — a can't-fail
+        # registration.  Real (failable) condition: every rejected variant
+        # build leaves EnvManager.current at None (harness _build's
+        # failure path stops the half-started processes and never
+        # publishes the env), so a master surviving a supposedly-fatal
+        # variant flips this.
         report.invariant(
             "P6",
-            True,
-            detail="no live requests — startup-failure variants only",
+            ctx.env_manager.current is None,
+            detail=(
+                f"no live env after {len(variants)} startup-failure "
+                f"variants (env_manager.current is None="
+                f"{ctx.env_manager.current is None})"
+            ),
         )
         return report.finish(
             f"rejected={[l for l, ok, _d in results if ok]}, "
@@ -3503,6 +3796,31 @@ def atpm_observability_integrity(ctx: CaseContext):
             return False, f"placeholder failed: code={ph_fire.code}"
         if not _poll_engine_pending(ops, prefill_names[0], 1):
             return False, "placeholder never dispatched"
+        # A3 (Mark P1-1): AT6 black-box aggregate, probe 1 — duplicate
+        # request_id rejection observed through the schedule RPC response
+        # (RequestLifecycleCoordinator.register putIfAbsent, coordinator
+        # L262-268 "duplicate request_id: <rid>" →
+        # StrategyErrorType.INVALID_REQUEST 8406).  Probed WHILE ph is
+        # still inflight: after its terminal the slot ledger may clean
+        # up and a re-submit would re-register successfully.  priority=40
+        # keeps the probe out of the expected metric buckets
+        # {30, 50, 70, 90} (the counter fires at the schedule RPC entry
+        # regardless of outcome).
+        dup_code = None
+        dup_err = None
+        try:
+            dup_resp = ops.schedule(
+                ph, priority=40, input_len=2048, output_len=2, timeout_s=30.0
+            )
+            dup_code = int(getattr(dup_resp, "code", -1))
+        except Exception as exc:
+            dup_err = repr(exc)
+        dup_rejected = dup_code == CODE_INVALID_REQUEST
+        dup_note = (
+            f"observed (code={dup_code})"
+            if dup_rejected
+            else f"MISSING (code={dup_code}, err={dup_err})"
+        )
         # The client-shape assertions index rids["ph"] — register the
         # placeholder alongside the ladder tags (first-run KeyError fix).
         rids: dict = {"ph": ph}
@@ -3580,7 +3898,10 @@ def atpm_observability_integrity(ctx: CaseContext):
         sched_log_ok = "[priority-scheduler]" in log_text
 
         # ---- pv.log plane ------------------------------------------------
-        pv_tail = _pv_log_tail()
+        # A8 (Daniel P2-3): this env's delta only, filtered to this
+        # case's rids (the dup probe re-uses ph, so its INVALID_REQUEST
+        # row is inside the ph filter as well).
+        pv_tail = _pv_log_tail(env, [ph] + [rids[t] for t in wave_tags])
         pv_field_ok = "admissionRejectReason" in pv_tail
         pv_samples = re.findall(r'"admissionRejectReason"\s*:\s*"([A-Z_]+)"', pv_tail)
 
@@ -3594,7 +3915,7 @@ def atpm_observability_integrity(ctx: CaseContext):
             and pv_field_ok,
             context="observability_integrity_ev1",
             detail=(
-                f"client shape (EV-1): completed={completed}, "
+                f"[EV-1] client shape (EV-1): completed={completed}, "
                 f"rejected8402={len(rejected8402)}/8, expired8511="
                 f"{len(expired8511)}, ev1_pattern={ev1_ok}; "
                 f"request.count buckets={ {p: buckets[p] for p in buckets} } "
@@ -3617,8 +3938,26 @@ def atpm_observability_integrity(ctx: CaseContext):
             "P6",
             client_shape_ok and clean_ok,
             detail=(
-                f"every request reached a terminal (EV-1: 2 completed "
-                f"[ph, {parked_tag}], 8 route-rejected), "
+                f"[EV-1] every request reached a terminal: 2 completed "
+                f"[ph, {parked_tag}], 8 route-rejected, "
+                f"inflight={'ok' if clean_ok else clean_detail}"
+            ),
+        )
+        # A3 (Mark P1-1): AT6 black-box aggregate — the design's white-box
+        # observability-closure item, rebuilt as the three black-box-
+        # observable facets on one invariant: duplicate request_id
+        # rejection through the schedule response (INVALID_REQUEST
+        # 8406), P6 request integrity (every request terminal), and the
+        # inflight ledger clean.  AT6 was registered in grade.py but had
+        # zero call sites (dead entry); this aggregate is its live form.
+        report.invariant(
+            "AT6",
+            dup_rejected and client_shape_ok and clean_ok,
+            context="blackbox_aggregate_dup_p6_inflight",
+            detail=(
+                f"[EV-1] duplicate-rid rejection (INVALID_REQUEST "
+                f"{CODE_INVALID_REQUEST}): {dup_note}, "
+                f"client shape (EV-1)={client_shape_ok}, "
                 f"inflight={'ok' if clean_ok else clean_detail}"
             ),
         )

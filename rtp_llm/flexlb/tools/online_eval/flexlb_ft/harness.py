@@ -829,6 +829,12 @@ def _build_ordering_cfg(
     defaultPriority keeps the Java default (50); an omitted preemption block
     disables preemption (the designed off-switch, doc line 213).
     """
+    # B3 (Daniel P3-3): normalize case at the entry — parallel sessions
+    # have been observed passing the legacy uppercase convention
+    # ("FIFO"/"PRIORITY"); a non-str value falls through to the check
+    # below unchanged (same error as before).
+    if isinstance(ordering, str):
+        ordering = ordering.lower()
     if ordering not in ("fifo", "priority"):
         raise ValueError(f"ordering must be 'fifo' or 'priority', got {ordering!r}")
     if ordering == "fifo":
@@ -1151,7 +1157,14 @@ class EnvManager:
             # mock http = base-1; engines base .. base+n-1; victim zone base+149..base+151
             needed = [base - 1] + list(range(base, base + n_prefill + n_decode))
             needed += [base + 149, base + 150, base + 151]
-            if not any(port_in_use(p) for p in needed):
+            # B1 (Ryan P2-2 + Daniel P3-1): the needed check must use the
+            # SAME predicate as the mock pre-flight below (port_listening
+            # — the kernel LISTEN tables).  A bind-tentative on 127.0.0.1
+            # (port_in_use) is blind to a leftover JVM listening on
+            # 127.1.x.x (unique-engine-ips mode), so a base picked that
+            # way survives selection only to die ~60s later in the mock
+            # pre-flight — skip it here instead.
+            if not any(port_listening(p) for p in needed):
                 return base
             base += 100
         raise RuntimeError("no free mock port range found")
@@ -1445,6 +1458,16 @@ class EnvManager:
             env.flexlb_log_offset = flexlb_log.stat().st_size
         except OSError:
             env.flexlb_log_offset = 0
+        # A8 (Daniel P2-3): same offset discipline for the pv.log request
+        # journal (~/ai-whale/logs/pv.log — shared across every master in
+        # the container): cases read only THIS master's rows via
+        # env.pv_log_offset (see priority_cases._pv_log_tail), with an
+        # additional per-case requestId filter on top.
+        pv_log = Path.home() / "ai-whale" / "logs" / "pv.log"
+        try:
+            env.pv_log_offset = pv_log.stat().st_size
+        except OSError:
+            env.pv_log_offset = 0
         proc = ProcessOps.start(argv, self._master_env(env), env.run_dir / log_name)
         env.master = proc
 
@@ -1457,7 +1480,22 @@ class EnvManager:
             except OSError:
                 return ""
 
-        if not wait_for_port("127.0.0.1", env.master_http_port, 90):
+        # B2 (Daniel P3-2): poll readiness AND liveness — the strict-
+        # config startup-failure variants (atpm_config_strict_reject) die
+        # within seconds of launch, so waiting the full 90s port window
+        # there only delays the failure report; the early exit mirrors
+        # the mock-start polling above.  Only the process-dead branch
+        # short-circuits — a live master keeps the full window.
+        master_up = False
+        master_deadline = time.monotonic() + 90
+        while time.monotonic() < master_deadline:
+            if _tcp_port_open("127.0.0.1", env.master_http_port):
+                master_up = True
+                break
+            if not proc.alive():
+                break
+            time.sleep(1.0)
+        if not master_up:
             app_tail = _app_log_tail_this_start()
             extra = (
                 "\n--- ~/ai-whale/logs/application.log (this start) ---\n" + app_tail
