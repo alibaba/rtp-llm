@@ -190,7 +190,7 @@ JSON
 
 start_master() {
   local log_file="$1"
-  local default_flexlb_config='{"schemaVersion":1,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxRequests":32,"maxCollectionWaitMs":10,"earlyDispatchPredictedExecutionMs":550,"maxInflightBatchesPerPrefillWorker":4},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxWaitVsAverageMultiplier":3.0}}}},"decode":{"availability":{"maxEngineRequests":132}}}}}'
+  local default_flexlb_config='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxProjectedDrainVsAverageMultiplier":3.0}}},"decode":{"availability":{"maxEngineRequests":132}}}}}'
   local flexlb_config="${FLEXLB_CONFIG:-${default_flexlb_config}}"
   echo "  starting master ..."
   env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \

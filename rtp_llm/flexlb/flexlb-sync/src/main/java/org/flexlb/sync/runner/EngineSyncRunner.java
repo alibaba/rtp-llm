@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -12,12 +12,16 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -30,7 +34,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final String modelName;
 
-    private final Map<String /*ipPort*/, WorkerStatus> workerStatusMap;
+    private final WorkerDirectory workerDirectory;
 
     private final WorkerAddressService workerAddressService;
 
@@ -42,7 +46,9 @@ public class EngineSyncRunner implements Runnable {
 
     private final RoleType roleType;
 
-    private final CacheAwareService localKvCacheAwareManager;
+    private final CacheAwareService cacheAwareService;
+
+    private final DynamicCacheIntervalService cacheIntervalService;
 
     private final long syncRequestTimeoutMs;
 
@@ -52,39 +58,44 @@ public class EngineSyncRunner implements Runnable {
 
     private final boolean cacheFullSnapshotDebugMode;
 
-    private final PriorityScheduler priorityScheduler;
-
-    private final EndpointRegistry endpointRegistry;
+    private final long statusStaleAfterUs;
 
     public EngineSyncRunner(String modelName,
-                            Map<String, WorkerStatus> workerStatusMap,
+                            WorkerDirectory workerDirectory,
                             WorkerAddressService workerAddressService,
                             ExecutorService statusCheckExecutor,
                             EngineHealthReporter engineHealthReporter,
                             EngineGrpcService engineGrpcService,
                             RoleType roleType,
-                            CacheAwareService localKvCacheAwareManager,
+                            CacheAwareService cacheAwareService,
+                            DynamicCacheIntervalService cacheIntervalService,
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
                             boolean cacheFullSnapshotDebugMode,
-                            PriorityScheduler priorityScheduler,
-                            EndpointRegistry endpointRegistry) {
+                            long statusStaleAfterUs) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
-        this.workerStatusMap = workerStatusMap;
+        this.workerDirectory = Objects.requireNonNull(
+                workerDirectory, "workerDirectory");
         this.statusCheckExecutor = statusCheckExecutor;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.roleType = roleType;
-        this.localKvCacheAwareManager = localKvCacheAwareManager;
+        this.cacheAwareService = Objects.requireNonNull(
+                cacheAwareService, "cacheAwareService");
+        this.cacheIntervalService = Objects.requireNonNull(
+                cacheIntervalService, "cacheIntervalService");
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
-        this.priorityScheduler = priorityScheduler;
-        this.endpointRegistry = endpointRegistry;
+        if (statusStaleAfterUs <= 0L) {
+            throw new IllegalArgumentException(
+                    "statusStaleAfterUs must be positive");
+        }
+        this.statusStaleAfterUs = statusStaleAfterUs;
     }
 
     @Override
@@ -98,7 +109,8 @@ public class EngineSyncRunner implements Runnable {
             if (CollectionUtils.isEmpty(latestEngineWorkerList)) {
                 logger.debug("get engine worker list is empty, cost={}μs, model={}", System.nanoTime() / 1000 - startTimeInUs, modelName);
             }
-            Map<String/*ip*/, WorkerStatus> cachedWorkerStatuses = workerStatusMap;
+            Map<String, WorkerStatus> cachedWorkerStatuses =
+                    workerDirectory.statusSnapshot(roleType);
             // Log if latest worker count differs from cached worker count
             if (cachedWorkerStatuses.size() != latestEngineWorkerList.size()) {
                 logger.info("[update] engine ip changes, model={}, role={}, before={}, after={}",
@@ -114,18 +126,8 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
-                    long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
-                    // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
-                    long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
-                    if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
-                        workerStatus.setAlive(false);
-                        boolean statusRemoved = cachedWorkerStatuses.remove(ipPort, workerStatus);
-                        boolean endpointRemoved = endpointRegistry != null
-                                && endpointRegistry.remove(roleType, ipPort, workerStatus);
-                        logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}, statusRemoved={}, endpointRemoved={}",
-                                modelName, roleType, ipPort, statusRemoved, endpointRemoved);
-                    }
+                    retireMissingGenerationIfExpired(
+                            ipPort, workerStatus);
                 }
             }
             if (latestEngineWorkerList.isEmpty()) {
@@ -140,36 +142,62 @@ public class EngineSyncRunner implements Runnable {
                 String workerIpPort = host.getIpPort();
                 String site = host.getSite();
 
-                WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
+                WorkerStatus workerStatus = getOrCreateWorkerStatus(
+                        workerIpPort, site, host.getGroup());
 
-                if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
+                if (!workerStatus.isActiveGeneration()) {
+                    logger.debug(
+                            "Skip retiring WorkerStatus generation {} for {}",
+                            workerStatus.getGenerationId(), workerIpPort);
+                    continue;
+                }
+
+                WorkerStatus.PollLease statusPollLease =
+                        workerStatus.tryBeginStatusPoll();
+                if (statusPollLease != null) {
+                    boolean handedOff = false;
                     try {
                         logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
-                                workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, priorityScheduler, endpointRegistry, statusCheckExecutor);
+                                workerStatus, statusPollLease, workerDirectory,
+                                engineHealthReporter, engineGrpcService,
+                                syncRequestTimeoutMs,
+                                cacheAwareService, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
+                        handedOff = true;
                     } catch (RejectedExecutionException e) {
-                        workerStatus.getStatusCheckInProgress().set(false);
                         logger.debug("Status check rejected for worker: {}, reset flag for retry", workerIpPort);
+                    } finally {
+                        if (!handedOff) {
+                            statusPollLease.close();
+                        }
                     }
                 } else {
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+                WorkerStatus.PollLease cachePollLease =
+                        workerStatus.tryBeginCachePoll();
+                if (cachePollLease != null) {
+                    boolean handedOff = false;
                     try {
                         logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                                workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                                workerStatus, cachePollLease, workerDirectory,
+                                engineHealthReporter, engineGrpcService,
+                                cacheAwareService, cacheIntervalService,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                                 cacheFullSnapshotDebugMode, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                        handedOff = true;
                     } catch (RejectedExecutionException e) {
-                        workerStatus.getCacheCheckInProgress().set(false);
                         logger.debug("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
+                    } finally {
+                        if (!handedOff) {
+                            cachePollLease.close();
+                        }
                     }
                 } else {
                     logger.debug("Skip cache check for worker: {}, previous request in progress", workerIpPort);
@@ -183,38 +211,74 @@ public class EngineSyncRunner implements Runnable {
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
             logger.debug("Entering finally block for model: {}", modelName);
-            int size = workerStatusMap.size();
-            logger.debug("Worker status map size: {}", size);
+            Map<String, WorkerStatus> currentStatuses =
+                    workerDirectory.statusSnapshot(roleType);
+            logger.debug("Worker status map size: {}", currentStatuses.size());
 
-            if (size >= 2) {
-                double sumStepLatency = 0.0;
-                double sumRunningLoad = 0.0;
-                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
-                    WorkerStatus workerStatus = entry.getValue();
-                    sumStepLatency += workerStatus.getStepLatencyMs();
-                    WorkerEndpoint ep = endpointRegistry != null
-                            ? endpointRegistry.get(roleType, entry.getKey()) : null;
-                    sumRunningLoad += ep != null ? ep.getLoadMetric() : 0;
+            Map<String, WorkerStatus.EngineObservation> statusSnapshots =
+                    new HashMap<>();
+            Map<String, Long> observedRunningLoads = new HashMap<>();
+            double sumStepLatency = 0.0;
+            double sumRunningLoad = 0.0;
+            for (Map.Entry<String, WorkerStatus> entry
+                    : currentStatuses.entrySet()) {
+                String workerIpPort = entry.getKey();
+                WorkerStatus workerStatus = entry.getValue();
+                if (!workerStatus.isActiveGeneration()) {
+                    continue;
                 }
-                double meanStepLatency = sumStepLatency / size;
-                double meanRunningLoad = sumRunningLoad / size;
+                WorkerStatus.EngineObservation statusSnapshot =
+                        workerStatus.committedEngineObservation();
+                if (!workerDirectory.isCurrentStatus(
+                        roleType, workerIpPort, workerStatus)) {
+                    continue;
+                }
+                statusSnapshots.put(workerIpPort, statusSnapshot);
+                sumStepLatency += statusSnapshot.stepLatencyMs();
+
+                WorkerEndpoint endpoint = workerDirectory.exactEndpoint(
+                        roleType, workerIpPort, workerStatus);
+                OptionalLong load = endpoint == null
+                        ? OptionalLong.empty() : endpoint.getLoadMetric();
+                if (load.isPresent()) {
+                    long value = load.getAsLong();
+                    observedRunningLoads.put(workerIpPort, value);
+                    sumRunningLoad += value;
+                }
+            }
+
+            int observedStatusCount = statusSnapshots.size();
+            if (observedStatusCount >= 2) {
+                double meanStepLatency = sumStepLatency / observedStatusCount;
+                double meanRunningLoad = observedRunningLoads.isEmpty()
+                        ? 0.0 : sumRunningLoad / observedRunningLoads.size();
 
                 // Calculate variance (sample variance using Bessel correction)
                 double sumStepLatencyOfSquaredDiffs = 0.0;
                 double sumRunningLoadOfSquaredDiffs = 0.0;
-                for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
-                    WorkerStatus workerStatus = entry.getValue();
-                    double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
-                    WorkerEndpoint ep = endpointRegistry != null
-                            ? endpointRegistry.get(roleType, entry.getKey()) : null;
-                    double diff2 = (ep != null ? ep.getLoadMetric() : 0) - meanRunningLoad;
+                for (Map.Entry<String, WorkerStatus.EngineObservation> entry
+                        : statusSnapshots.entrySet()) {
+                    double diff = entry.getValue().stepLatencyMs()
+                            - meanStepLatency;
                     sumStepLatencyOfSquaredDiffs += diff * diff;
-                    sumRunningLoadOfSquaredDiffs += diff2 * diff2;
+                    Long runningLoad = observedRunningLoads.get(entry.getKey());
+                    if (runningLoad != null) {
+                        double diff2 = runningLoad - meanRunningLoad;
+                        sumRunningLoadOfSquaredDiffs += diff2 * diff2;
+                    }
                 }
-                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
-                double variance2 = sumRunningLoadOfSquaredDiffs / (size - 1);
-
-                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
+                double variance = sumStepLatencyOfSquaredDiffs
+                        / (observedStatusCount - 1); // Sample variance
+                engineHealthReporter.reportStepLatencyVariance(
+                        modelName, this.roleType.toString(), variance);
+                if (observedRunningLoads.size() >= 2) {
+                    double runningLoadVariance = sumRunningLoadOfSquaredDiffs
+                            / (observedRunningLoads.size() - 1);
+                    engineHealthReporter.reportRunningLoadVariance(
+                            modelName,
+                            this.roleType.toString(),
+                            runningLoadVariance);
+                }
                 logger.debug("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
             } else {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
@@ -222,46 +286,134 @@ public class EngineSyncRunner implements Runnable {
         }
     }
 
-    private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
-        WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
-        if (workerStatus == null) {
-            workerStatus = new WorkerStatus();
-            String[] split = workerIpPort.split(":");
-            workerStatus.setIp(split[0]);
-            workerStatus.setPort(Integer.parseInt(split[1]));
-            workerStatus.setRole(roleType);
-            workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
-            workerStatuses.put(workerIpPort, workerStatus);
-            logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
-        }
-        // Cache and worker status checks run independently. Publish the role known
-        // from service discovery before either callback can observe this object.
-        if (workerStatus.getRole() == null) {
-            workerStatus.setRole(roleType);
-        }
-        if (endpointRegistry != null) {
-            if (!workerStatus.isAlive()) {
-                workerStatus.setAlive(true);
+    private WorkerStatus getOrCreateWorkerStatus(
+            String workerIpPort,
+            String site,
+            String group) {
+        while (true) {
+            WorkerStatus workerStatus = workerDirectory.currentOrDiscover(
+                    roleType, workerIpPort,
+                    () -> createWorkerStatus(workerIpPort, site, group));
+
+            EndpointRegistry.DetachedGeneration endpointToRetire = null;
+            RoleType generationRole = null;
+            boolean retirementStarted = false;
+            workerStatus.lock.lock();
+            try {
+                if (!workerDirectory.isCurrentStatus(
+                        roleType, workerIpPort, workerStatus)) {
+                    continue;
+                }
+                if (!workerStatus.isActiveGeneration()) {
+                    return workerStatus;
+                }
+
+                RoleType currentRole = workerStatus.getRole();
+                String currentGroup = workerStatus.getGroup();
+                boolean roleChanged = currentRole != roleType;
+                boolean groupChanged = !Objects.equals(currentGroup, group);
+                if (!roleChanged && !groupChanged) {
+                    // Site changes do not change scheduling ownership. Publish
+                    // the discovery labels atomically on the same generation.
+                    workerStatus.updateDiscoveryLabels(site, group);
+                    return workerStatus;
+                }
+
+                // Group/role ownership is a generation boundary. Keep the old
+                // status identity published as RETIRING until the endpoint's
+                // real retirement completion runs the exact finalizer. Cache
+                // cleanup is generation-scoped and cannot block replacement.
+                generationRole = currentRole == null ? roleType : currentRole;
+                endpointToRetire = workerDirectory.beginRetirement(
+                        generationRole, workerIpPort, workerStatus);
+                retirementStarted = true;
+            } finally {
+                workerStatus.lock.unlock();
             }
-            ensureEndpoint(workerIpPort, workerStatus);
+
+            if (!retirementStarted) {
+                return workerStatus;
+            }
+            workerDirectory.completeRetirement(
+                    generationRole, workerIpPort, workerStatus,
+                    endpointToRetire, cacheAwareService, logger);
+            logger.info(
+                    "[replace] retiring worker topology generation, model={}, role={}, ipPort={}, generation={}, newGroup={}",
+                    modelName,
+                    roleType,
+                    workerIpPort,
+                    workerStatus.getGenerationId(),
+                    group);
+            // A later discovery pass can publish the replacement only after
+            // real endpoint retirement removes this RETIRING holder.
+            return workerStatus;
         }
-        return workerStatus;
     }
 
-    private void ensureEndpoint(String ipPort, WorkerStatus workerStatus) {
-        int httpPort = workerStatus.getPort();
-        int grpcPort = CommonUtils.toGrpcPort(httpPort);
-        workerStatus.setGrpcPort(grpcPort);
-
-        if (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION) {
-            long dpSize = workerStatus.getDpSize();
-            if (dpSize > 1) {
-                String message = String.format(
-                        "%s DP group endpoint not yet supported: model=%s, ipPort=%s, dp_size=%d",
-                        roleType, modelName, ipPort, dpSize);
-                throw new UnsupportedOperationException(message);
-            }
+    private WorkerStatus createWorkerStatus(
+            String workerIpPort,
+            String site,
+            String group) {
+        int separator = workerIpPort.lastIndexOf(':');
+        if (separator <= 0 || separator == workerIpPort.length() - 1) {
+            throw new IllegalArgumentException(
+                    "Invalid worker address: " + workerIpPort);
         }
-        endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
+        String ip = workerIpPort.substring(0, separator);
+        int port = Integer.parseInt(workerIpPort.substring(separator + 1));
+        WorkerStatus discovered = WorkerStatus.createDiscovered(
+                roleType,
+                group,
+                ip,
+                port,
+                CommonUtils.toGrpcPort(port),
+                site);
+        logger.info("Created WorkerStatus generation {} for worker: {}",
+                discovered.getGenerationId(), workerIpPort);
+        return discovered;
     }
+
+    private void retireMissingGenerationIfExpired(
+            String workerIpPort,
+            WorkerStatus workerStatus) {
+        EndpointRegistry.DetachedGeneration endpointToRetire = null;
+        RoleType generationRole = null;
+        boolean retirementStarted = false;
+        workerStatus.lock.lock();
+        try {
+            if (!workerDirectory.isCurrentStatus(
+                    roleType, workerIpPort, workerStatus)) {
+                return;
+            }
+            if (!workerStatus.isActiveGeneration()) {
+                return;
+            }
+            WorkerStatus.PollHealth health = workerStatus.pollHealth();
+            if (System.nanoTime() / 1000
+                    - health.lastSuccessfulPollUs()
+                    <= statusStaleAfterUs) {
+                return;
+            }
+
+            generationRole = workerStatus.getRole();
+            endpointToRetire = workerDirectory.beginRetirement(
+                    generationRole, workerIpPort, workerStatus);
+            retirementStarted = true;
+        } finally {
+            workerStatus.lock.unlock();
+        }
+
+        if (retirementStarted) {
+            workerDirectory.completeRetirement(
+                    generationRole, workerIpPort, workerStatus,
+                    endpointToRetire, cacheAwareService, logger);
+            logger.info(
+                    "[remove] retiring missing worker, model={}, role={}, ipPort={}, generation={}",
+                    modelName,
+                    roleType,
+                    workerIpPort,
+                    workerStatus.getGenerationId());
+        }
+    }
+
 }

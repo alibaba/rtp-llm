@@ -80,14 +80,14 @@ directly in the environment variable; a file-path form is not supported.
 The parser is strict: duplicate keys, unknown fields, fields from inactive tagged
 variants, `null`, scalar coercion, numeric enum values, and trailing JSON are rejected at
 startup. Optional fields must be omitted rather than set to `null`. If the environment
-variable is absent, the code defaults to `QUEUE + FIFO + BATCH` and the remaining model
-defaults.
+variable is absent, schema v2 defaults directly to
+`QUEUE + FIFO + FIXED_WINDOW + BATCH` and the remaining model defaults.
 
 The following example activates every major configuration section:
 
 ```bash
 export FLEXLB_CONFIG='{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
     "queueTimeoutMs": 3600000,
@@ -106,8 +106,15 @@ export FLEXLB_CONFIG='{
         }
       }
     },
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 8,
+      "maxCollectionWaitMs": 300,
+      "maxPredictedExecutionMs": 100
+    },
     "capacity": {
-      "maxOutstandingRequestsGlobal": 100000
+      "maxOutstandingRequestsGlobal": 100000,
+      "maxWaitingRequestsPerPrefillWorker": 1024
     },
     "lifecycle": {
       "staleInflightTimeoutMs": 300000,
@@ -117,10 +124,6 @@ export FLEXLB_CONFIG='{
   },
   "dispatcher": {
     "type": "BATCH",
-    "maxRequests": 8,
-    "maxCollectionWaitMs": 300,
-    "maxWaitingRequestsPerPrefillWorker": 1024,
-    "earlyDispatchPredictedExecutionMs": 100,
     "maxInflightBatchesPerPrefillWorker": 2,
     "enqueueRpcTimeoutMs": 5000
   },
@@ -149,16 +152,13 @@ export FLEXLB_CONFIG='{
           "type": "FORMULA",
           "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
         },
-        "selector": {
-          "type": "ESTIMATED_TTFT",
-          "candidateChoice": {
-            "type": "RANDOM_WITHIN_TOLERANCE",
-            "relativeTolerance": 0.1,
-            "minimumToleranceMs": 20,
-            "outlierRejection": {
-              "maxPendingVsAverageMultiplier": 3.0,
-              "maxWaitVsAverageMultiplier": 3.0
-            }
+        "candidateChoice": {
+          "type": "RANDOM_WITHIN_TOLERANCE",
+          "relativeTolerance": 0.1,
+          "minimumToleranceMs": 20,
+          "outlierRejection": {
+            "maxPendingVsAverageMultiplier": 3.0,
+            "maxProjectedDrainVsAverageMultiplier": 3.0
           }
         },
         "cacheAffinity": {
@@ -174,17 +174,11 @@ export FLEXLB_CONFIG='{
         "kvReservation": {
           "maxOutputTokensForEstimate": 1000
         },
-        "selector": {
-          "type": "KV_USAGE_WEIGHTED_RANDOM",
-          "decayPerToken": 0.001,
-          "outlierRejection": {
-            "maxEngineLoadVsAverageMultiplier": 3.0,
-            "maxKvUsedVsAverageMultiplier": 3.0
-          }
+        "decayPerToken": 0.001,
+        "outlierRejection": {
+          "maxEngineLoadVsAverageMultiplier": 3.0,
+          "maxKvUsedVsAverageMultiplier": 3.0
         }
-      },
-      "vit": {
-        "selector": {"type": "RANDOM"}
       }
     }
   },
@@ -217,6 +211,10 @@ export FLEXLB_CONFIG='{
   }
 }'
 ```
+
+`maxProjectedDrainVsAverageMultiplier` limits estimated-TTFT outliers by the
+endpoint's known projected drain time. Candidates whose drain cannot be modeled
+are excluded from this particular outlier axis.
 
 `MODEL_SERVICE_CONFIG` still describes service discovery and endpoint topology; it is
 not a second FlexLB behavior configuration:
@@ -256,69 +254,90 @@ export MODEL_SERVICE_CONFIG='{
 }'
 ```
 
-### Scheduler, ordering, and dispatcher
+### Scheduler, ordering, decision, and dispatcher
 
-These are separate concepts:
+Under `QUEUE`, ordering, decision formation, and delivery are three independent
+axes:
 
-| Scheduler | Queue ordering | Dispatcher | Behavior |
-| --- | --- | --- | --- |
-| `DIRECT` | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
-| `QUEUE` | `FIFO` | `NON_BATCH` | Queue lifecycle with arrival-order, one immediate route decision per request |
-| `QUEUE` | `PRIORITY` | `NON_BATCH` | Queue lifecycle with priority-order, one immediate route decision per request |
-| `QUEUE` | `FIFO` | `BATCH` | Arrival-order collection followed by Master `EnqueueBatch` |
-| `QUEUE` | `PRIORITY` | `BATCH` | Priority-order collection followed by Master `EnqueueBatch` |
+| Scheduler | Queue ordering | Decision | Dispatcher | Behavior |
+| --- | --- | --- | --- | --- |
+| `DIRECT` | not applicable | not applicable | `NON_BATCH` | Route immediately; the frontend sends the request |
+| `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | Form singleton decisions; frontend sends |
+| `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | Master sends singleton `EnqueueBatch` calls |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | Form bounded groups; frontend sends each routed request |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | Form bounded groups; Master sends `EnqueueBatch` |
 
-`DIRECT + BATCH` is invalid. `FIFO` and `PRIORITY` only describe the order of
-requests owned by `QUEUE`; neither is a synonym for direct routing or batching.
-`PRIORITY` adds `defaultPriority` and optional preemption. It does not add an SLO
-budget, length buckets, or priority-dependent TTL multipliers. `QUEUE` uses one
-absolute scheduling expiration derived from FlexLB admission time plus
-`scheduler.queueTimeoutMs`; retries and preemption do not reset it. `DIRECT` has
-no scheduling timeout.
+`PRIORITY` can replace `FIFO` in all four QUEUE combinations. `DIRECT + BATCH`
+is invalid and DIRECT cannot configure `decision`. `FIFO`/`PRIORITY` choose which
+request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests form
+one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
+sends them.
 
-`BATCH` dispatches on batch size, maximum collection wait, or the optional predicted
-execution threshold. `NON_BATCH` has no collection window or target batch size.
+`FIXED_WINDOW` is bounded by `maxRequests` (1–1024),
+`maxCollectionWaitMs`, and the optional
+inclusive group-growth cap `maxPredictedExecutionMs`: reaching the cap dispatches
+the group without waiting for the collection window; another request is not
+added when it would exceed the cap, although an indivisible singleton may
+exceed it. A zero collection window skips waiting but still groups requests that
+are already available, so it is not equivalent to `SINGLE`.
+`SINGLE` has no collection parameters. In schema v2 every setting has one owner:
+decision-group limits live only under `scheduler.decision`, waiting-queue limits
+live only under `scheduler.capacity`, and `dispatcher` contains only delivery and
+delivery-backpressure settings. Omitting `scheduler.decision` uses
+`FIXED_WINDOW`; select `SINGLE` explicitly when that behavior is required.
+Omitting `schemaVersion` means v2; other explicit versions are rejected.
 
 Production-style examples migrated from the former field-level environment variables:
 
 - [QUEUE + PRIORITY + NON_BATCH](docs/config-examples/flexlb-queue-priority-non-batch.json)
 - [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
 
-DIRECT uses the same role routing configuration as QUEUE. For example, a compact
-DIRECT configuration with explicit random prefill/decode selection is:
+DIRECT uses the same fixed role-selection pipelines as QUEUE. A compact DIRECT
+configuration is:
 
 ```bash
 export FLEXLB_CONFIG='{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {"type": "DIRECT"},
-  "dispatcher": {"type": "NON_BATCH"},
-  "router": {
-    "roles": {
-      "prefill": {"selector": {"type": "RANDOM"}},
-      "decode": {"selector": {"type": "RANDOM"}},
-      "vit": {"selector": {"type": "RANDOM"}}
-    }
-  }
+  "dispatcher": {"type": "NON_BATCH"}
 }'
 ```
 
-PREFILL and PDFUSION share the prefill selector. Prefill selector types are
-`RANDOM` and `ESTIMATED_TTFT`; the latter supports `BEST_ONLY`,
-`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL` candidate choice.
+PREFILL and PDFUSION share the estimated-TTFT pipeline, configured by
+`candidateChoice`: `BEST_ONLY`, `RANDOM_WITHIN_TOLERANCE`, or
+`LEAST_RECENTLY_USED_IN_POOL`. Decode uses KV-weighted selection and VIT uses
+random selection; these fixed algorithms are not represented as configuration.
 The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
 `{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
-`{"type":"FIXED","workers":2}`. Decode selector types are `RANDOM` and
-`KV_USAGE_WEIGHTED_RANDOM`; VIT currently supports `RANDOM`.
+`{"type":"FIXED","workers":2}`.
+
+`ESTIMATED_TTFT` is a deterministic frozen-snapshot projection, not a promise
+about future wall-clock latency. It inserts the incoming request using the live
+FIFO/PRIORITY order, reuses the production decision-group planner, overlaps
+collection deadlines with already committed work, and assumes no later arrivals,
+cancellations, predictor revisions, or resource changes. An exact admission block
+observed on the current head is represented as a structured blocked state. The
+model does not invent a release time for delivery capacity that is currently
+unobservable; otherwise its service timeline is conditional on later admission.
 
 Cache affinity is enabled by including `router.roles.prefill.cacheAffinity` and is
-valid only with `ESTIMATED_TTFT`. Omit the object to disable it. Decode admission is
-controlled by the optional positive
+valid only with `ESTIMATED_TTFT`. A cache leader is preferred only when its
+endpoint-specific reusable prefix meets `minPrefixHitPercent` and its frozen
+projected TTFT is no more than `maxExtraTtftMs` above the best candidate. The
+percentage uses predictor-effective reusable tokens (the final cache block remains
+compute work), not the raw routing-prefix match. Omit the object to disable it.
+Decode admission is controlled by the optional positive
 `router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
-request-count cap.
+request-count cap. The cap covers all Engine-facing ownership: engine-confirmed
+`KV_ALLOCATED` and `RUNNING` requests, dispatched shadows, and active dispatch
+permits. It is not the Engine's physical `RUNNING` concurrency. For example, an
+Engine running cap of 128 plus roughly one 128-request accepted pipeline buffer
+normally starts with `maxEngineRequests=256`; the split is observable through
+`/rtp_llm/inflight_status` and the `auto_tpm.decode.*` gauges.
 
-See [QUEUE ordering and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
-for the QUEUE lifecycle, accounting invariants, complete scheduler/dispatcher
-parameter reference, and mode matrix.
+See [QUEUE ordering, decision, and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
+for the QUEUE lifecycle, accounting invariants, complete configuration parameter
+reference, and mode matrix.
 
 ### Run
 
@@ -367,8 +386,8 @@ Authorization: Bearer <token>
 - **Prefill execution formula**:
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
   `FORMULA`.
-- **Routing strategy parameters**: the tagged selector objects under
-  `router.roles.prefill`, `router.roles.decode`, and `router.roles.vit`.
+- **Routing strategy parameters**: Prefill `candidateChoice` and Decode
+  `decayPerToken`/`outlierRejection` under their role objects.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
 - **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.

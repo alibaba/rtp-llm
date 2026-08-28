@@ -89,7 +89,7 @@ class BatchSchedulerReporterTest {
         verify(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTE_SUBMIT_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTING_QUEUE_WAIT_TIME_MS, endpointTags);
-        for (String reason : new String[]{"batch_full", "fixed_window_timeout", "predict_threshold"}) {
+        for (String reason : new String[]{"batch_full", "fixed_window_timeout", "predicted_execution_cap"}) {
             FlexMetricTags reasonTags = FlexMetricTags.of(
                     "role", "PREFILL",
                     "engineIp", "10.0.0.1",

@@ -4,6 +4,12 @@
 > `slo` 的文件名、脚本变量和结果字段是测试工具的历史命名，不是当前
 > FlexLB 的 SLO 配置接口。当前调度、凑批和路由行为只从进程配置中的
 > `FLEXLB_CONFIG` JSON 读取；不要把历史环境变量名称复制到生产配置。
+> 文中出现的 `dispatcher.maxRequests`、`dispatcher.maxCollectionWaitMs` 和
+> `dispatcher.earlyDispatchPredictedExecutionMs` 是当时 schema v1 的历史字段，
+> schema v2 已删除。当前分别使用 `scheduler.decision.maxRequests`、
+> `scheduler.decision.maxCollectionWaitMs` 和
+> `scheduler.decision.maxPredictedExecutionMs`；预测边界语义也已收敛为“等于
+> 上限时纳入并立即下发，超过上限时保留新请求”。
 
 本文用于交接 FlexLB Master 的 batch 调度性能测试。目标是让接手人能够复现测试、逐级寻找容量拐点，并判断瓶颈在发压端、FlexLB Master 还是 mock engine。
 
@@ -20,11 +26,13 @@ fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报�
 - Master 进程配置必须在 `FLEXLB_CONFIG` 中选择
   `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`SCHEDULE_ONLY=1` 只是
   load client 的测试开关。历史 10 ms base case 需要在独立进程 JSON 中
-  配置 `dispatcher.maxCollectionWaitMs=10`；当前仓库的
+  配置当时的 `dispatcher.maxCollectionWaitMs=10`，在当前 schema v2 中应写为
+  `scheduler.decision.maxCollectionWaitMs=10`；当前仓库的
   `master_fixed_window.json` 已不是该 10 ms fixture，不能用已删除的标量
   环境变量覆盖。历史 `slo500_wait160` case 在独立 JSON 中配置
-  `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
-  `dispatcher.maxCollectionWaitMs=160`。
+  当时的 `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
+  `dispatcher.maxCollectionWaitMs=160`；当前 fixture 已迁移到对应的
+  `scheduler.decision` 字段。
 - 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
 - 延迟以 Master 服务端的 `schedule_latency_ms` 为准，不以 client RTT 作为最终报告口径。
@@ -130,8 +138,8 @@ python3 -m unittest discover -s tools/online_eval/tests
 
 普通 `./mvnw test` 只运行功能测试，并排除 `performance-regression` tag。性能回归分为两个显式 profile，必须分别运行：
 
-- `sync-performance-regression`：`SchedulingConfigAndExpirationPerformanceTest`、`AutoTpmSchedulingOverheadPerfTest` 和 `CostBasedPrefillRoutingPerformanceTest`。其中后者覆盖 750 个 prefill endpoint 的 cost-based 选点热路径。
-- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路；cost-based prefill 热路径由 Sync profile 的 750-endpoint 门禁独立覆盖。
+- `sync-performance-regression`：`WorkerBatcherPerformanceTest`，覆盖不同真实非空队列深度下 projection input capture 与 immutable materialization 的延迟和分配上限。
+- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路。类内先运行单 worker 的真实 payload burst，再运行 engine-scale 矩阵，避免大规模 fixture 的回收状态污染 burst 基线。
 
 分别运行两组门禁：
 
@@ -139,6 +147,19 @@ python3 -m unittest discover -s tools/online_eval/tests
 ./mvnw test -P '!internal,sync-performance-regression' -pl flexlb-sync -am
 ./mvnw test -P '!internal,api-performance-regression' -pl flexlb-api -am
 ```
+
+需要在 UT 中复核 750 Prefill / 500 Decode 拓扑时，必须显式覆盖矩阵；默认
+矩阵只到 16 / 32：
+
+```bash
+./mvnw -P 'opensource,!internal,api-performance-regression' \
+  -pl flexlb-api -am \
+  -Dflexlb.perf.engine-matrix-topologies=750x500 \
+  -Dflexlb.perf.engine-matrix-target-qps=1000,2000,5000,10000 test
+```
+
+如果一次指定多个 topology，应按 Prefill、Decode 数量均不下降的顺序排列；
+同一测试 fixture 只增加 endpoint，不在参数项之间缩减已注册的拓扑。
 
 profile 已内置精确的测试类 includes；不需要手写 `-Dtest`。上游无匹配性能类的模块会正常放行，每个性能类都在不可复用的新 fork 中执行。
 
@@ -171,7 +192,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 2000 QPS 包含连续的机器数减半对照：`16/32 -> 8/16 -> 4/8 -> 2/4 -> 1/2`。矩阵中的请求按目标 QPS 均匀分布到纳秒时间点，不会在一秒开始时集中发送。每个 prefill 都是独立的 Netty mock server，Master 会建立真实 engine gRPC 连接；decode 只注册逻辑 endpoint，因为 schedule ACK 之前不会调用 decode RPC。每一格都校验成功率、实际 client/Master QPS、Master P99、Master batch wait 分位数、dispatch ACK、dispatch reason、所有 prefill 收到流量、prefill/decode 路由覆盖全部 endpoint，以及请求无丢失/重复。
 
-这里的排队数据是 Master 的 `batch_wait_ms`（路由提交到 batch dispatch），用于观察 engine 数量减少后每个 batcher 的聚合与等待；它不是 engine 内部计算队列延迟。2000 QPS 场景要求 batch wait P95 非零，并默认要求 P99 不超过 50 ms。输出同时提供 `batch_full` / `fixed_window_timeout` / `predict_threshold` 次数和 `dispatch_ack`，用于区分“成功凑满后提前发送”“等待窗口到期”和“mock worker ACK 变慢”。回归门禁还会根据 `QPS * fixed_window / prefill_count` 推导平均 batch 下限，默认要求达到理论值的 80%。
+这里的排队数据是 Master 的 `batch_wait_ms`（路由提交到 batch dispatch），用于观察 engine 数量减少后每个 batcher 的聚合与等待；它不是 engine 内部计算队列延迟。2000 QPS 场景要求 batch wait P95 非零，并默认要求 P99 不超过 50 ms。输出同时提供 `batch_full` / `fixed_window_timeout` / `predicted_execution_cap` 次数和 `dispatch_ack`，用于区分“成功凑满后发送”“等待窗口到期”“预测执行时间到顶”和“mock worker ACK 变慢”。回归门禁还会根据 `QPS * fixed_window / prefill_count` 推导平均 batch 下限，默认要求达到理论值的 80%。
 
 这个矩阵回答的是“Master 在不同 engine 数量和请求压力下是否退化”，不能单独推导真实 GPU 机器数。真实机器数还依赖单机 batch 处理时间、并发上限、KV 容量和请求完成状态更新；这些参数必须通过 Java mock engine 的处理模型或真实 engine 容量结果输入 `run_online_eval.sh`。
 

@@ -115,7 +115,7 @@ PY
 )
 
 # -- 2. Start FlexLB master (queue + priority ordering, batch dispatch) --
-DEFAULT_FLEXLB_CONFIG='{"schemaVersion":1,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxRequests":32,"maxCollectionWaitMs":10,"earlyDispatchPredictedExecutionMs":550,"maxInflightBatchesPerPrefillWorker":4},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxWaitVsAverageMultiplier":3.0}}}},"decode":{"availability":{"maxEngineRequests":132}}}}}'
+DEFAULT_FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxProjectedDrainVsAverageMultiplier":3.0}}},"decode":{"availability":{"maxEngineRequests":132}}}}}'
 FLEXLB_CONFIG="${FLEXLB_CONFIG:-${DEFAULT_FLEXLB_CONFIG}}"
 echo "[2/4] Starting FlexLB master (BATCH / COST_BASED_PREFILL) ..."
 env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \

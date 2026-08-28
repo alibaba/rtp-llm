@@ -50,18 +50,23 @@ PREFILL_EXECUTION_TIME_EXPRESSION = (
 
 DEFAULT_FLEXLB_CONFIG = json.dumps(
     {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "scheduler": {
             "type": "QUEUE",
             "ordering": {"type": "PRIORITY", "defaultPriority": 50},
-            "capacity": {"maxOutstandingRequestsGlobal": 1000000},
+            "decision": {
+                "type": "FIXED_WINDOW",
+                "maxRequests": 32,
+                "maxCollectionWaitMs": 220,
+                "maxPredictedExecutionMs": 550,
+            },
+            "capacity": {
+                "maxOutstandingRequestsGlobal": 1000000,
+                "maxWaitingRequestsPerPrefillWorker": 1024,
+            },
         },
         "dispatcher": {
             "type": "BATCH",
-            "maxRequests": 32,
-            "maxCollectionWaitMs": 220,
-            "maxWaitingRequestsPerPrefillWorker": 1024,
-            "earlyDispatchPredictedExecutionMs": 550,
             "maxInflightBatchesPerPrefillWorker": 2,
             "enqueueRpcTimeoutMs": 5000,
         },
@@ -74,12 +79,7 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                         "type": "FORMULA",
                         "expression": PREFILL_EXECUTION_TIME_EXPRESSION,
                     },
-                    "selector": {
-                        "type": "ESTIMATED_TTFT",
-                        "candidateChoice": {
-                            "type": "RANDOM_WITHIN_TOLERANCE"
-                        },
-                    },
+                    "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"},
                 },
                 "decode": {
                     "availability": {
@@ -87,9 +87,7 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
                         "maxEngineRequests": 132,
                     },
                     "kvReservation": {"maxOutputTokensForEstimate": 1000},
-                    "selector": {"type": "KV_USAGE_WEIGHTED_RANDOM"},
                 },
-                "vit": {"selector": {"type": "RANDOM"}},
             },
         },
         "observability": {

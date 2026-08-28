@@ -1,8 +1,5 @@
 package org.flexlb.config;
 
-import org.flexlb.config.RoutingConfig.EstimatedTtftSelectorConfig;
-import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
-import org.flexlb.config.RoutingConfig.RandomWithinToleranceConfig;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
@@ -22,8 +19,10 @@ class ConfigServiceTest {
 
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
-        assertTrue(config.isBatchDispatch());
-        assertEquals(1, config.getSchemaVersion());
+        assertEquals(DispatcherConfig.Type.BATCH,
+                config.getDispatcher().getType());
+        assertTrue(config.isFixedWindowDecision());
+        assertEquals(2, config.getSchemaVersion());
     }
 
     @Test
@@ -33,10 +32,19 @@ class ConfigServiceTest {
     }
 
     @Test
+    void rejects_unsupported_schema_instead_of_migrating_it() {
+        ConfigValidationException failure = assertThrows(
+                ConfigValidationException.class,
+                () -> ConfigService.parse("{\"schemaVersion\":1}"));
+
+        assertTrue(failure.getMessage().contains("schemaVersion"));
+    }
+
+    @Test
     void parses_complete_responsibility_oriented_document() {
         FlexlbConfig config = ConfigService.parse("""
                 {
-                  "schemaVersion": 1,
+                  "schemaVersion": 2,
                   "scheduler": {
                     "type": "QUEUE",
                     "ordering": {
@@ -50,8 +58,15 @@ class ConfigServiceTest {
                         }
                       }
                     },
+                    "decision": {
+                      "type": "FIXED_WINDOW",
+                      "maxRequests": 12,
+                      "maxCollectionWaitMs": 40,
+                      "maxPredictedExecutionMs": 90
+                    },
                     "capacity": {
-                      "maxOutstandingRequestsGlobal": 2000
+                      "maxOutstandingRequestsGlobal": 2000,
+                      "maxWaitingRequestsPerPrefillWorker": 192
                     },
                     "lifecycle": {
                       "staleInflightTimeoutMs": 300000,
@@ -61,10 +76,6 @@ class ConfigServiceTest {
                   },
                   "dispatcher": {
                     "type": "BATCH",
-                    "maxRequests": 16,
-                    "maxCollectionWaitMs": 50,
-                    "maxWaitingRequestsPerPrefillWorker": 256,
-                    "earlyDispatchPredictedExecutionMs": 100,
                     "maxInflightBatchesPerPrefillWorker": 2,
                     "enqueueRpcTimeoutMs": 4000
                   },
@@ -85,16 +96,13 @@ class ConfigServiceTest {
                           "type": "FORMULA",
                           "expression": "sum(computeTokens)"
                         },
-                        "selector": {
-                          "type": "ESTIMATED_TTFT",
-                          "candidateChoice": {
-                            "type": "RANDOM_WITHIN_TOLERANCE",
-                            "relativeTolerance": 0.2,
-                            "minimumToleranceMs": 10,
-                            "outlierRejection": {
-                              "maxPendingVsAverageMultiplier": 2.0,
-                              "maxWaitVsAverageMultiplier": 2.5
-                            }
+                        "candidateChoice": {
+                          "type": "RANDOM_WITHIN_TOLERANCE",
+                          "relativeTolerance": 0.2,
+                          "minimumToleranceMs": 10,
+                          "outlierRejection": {
+                            "maxPendingVsAverageMultiplier": 2.0,
+                            "maxProjectedDrainVsAverageMultiplier": 2.5
                           }
                         },
                         "cacheAffinity": {
@@ -108,16 +116,12 @@ class ConfigServiceTest {
                           "maxEngineRequests": 128
                         },
                         "kvReservation": {"maxOutputTokensForEstimate": 2048},
-                        "selector": {
-                          "type": "KV_USAGE_WEIGHTED_RANDOM",
-                          "decayPerToken": 0.002,
-                          "outlierRejection": {
-                            "maxEngineLoadVsAverageMultiplier": 2.0,
-                            "maxKvUsedVsAverageMultiplier": 2.0
-                          }
+                        "decayPerToken": 0.002,
+                        "outlierRejection": {
+                          "maxEngineLoadVsAverageMultiplier": 2.0,
+                          "maxKvUsedVsAverageMultiplier": 2.0
                         }
-                      },
-                      "vit": {"selector": {"type": "RANDOM"}}
+                      }
                     }
                   },
                   "workerRegistry": {
@@ -147,25 +151,39 @@ class ConfigServiceTest {
                 """);
 
         assertTrue(config.isPriorityOrdering());
-        assertTrue(config.isBatchDispatch());
+        DispatcherConfig dispatcher = config.getDispatcher();
+        assertEquals(DispatcherConfig.Type.BATCH, dispatcher.getType());
         assertEquals(60, config.priorityOrdering().getDefaultPriority());
         assertEquals(75, config.priorityOrdering().getPreemption()
                 .getEngineCancellation().getAckTimeoutMs());
         assertEquals(1200, config.priorityOrdering().getPreemption()
                 .getEngineCancellation().getCompletionTimeoutMs());
-        assertEquals(16, config.batchDispatcher().getMaxRequests());
-        FormulaEstimatorConfig estimator = assertInstanceOf(FormulaEstimatorConfig.class,
-                config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator());
+        assertEquals(12, config.fixedWindowDecision().getMaxRequests());
+        assertEquals(40L, config.fixedWindowDecision().getMaxCollectionWaitMs());
+        assertEquals(90L, config.fixedWindowDecision()
+                .getMaxPredictedExecutionMs().longValue());
+        assertEquals(192, config.queueScheduler().getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker());
+        assertEquals(2, dispatcher
+                .getMaxInflightBatchesPerPrefillWorker().intValue());
+        RoutingConfig.ExecutionTimeEstimatorConfig estimator =
+                config.getRouter().getRoles().getPrefill()
+                        .getExecutionTimeEstimator();
+        assertEquals(RoutingConfig.EstimatorType.FORMULA, estimator.getType());
         assertEquals("sum(computeTokens)", estimator.getExpression());
-        EstimatedTtftSelectorConfig selector = assertInstanceOf(
-                EstimatedTtftSelectorConfig.class,
-                config.getRouter().getRoles().getPrefill().getSelector());
-        RandomWithinToleranceConfig candidateChoice = assertInstanceOf(
-                RandomWithinToleranceConfig.class, selector.getCandidateChoice());
+        RoutingConfig.CandidateChoiceConfig candidateChoice =
+                config.getRouter().getRoles().getPrefill()
+                        .getCandidateChoice();
+        assertEquals(RoutingConfig.CandidateChoiceType.RANDOM_WITHIN_TOLERANCE,
+                candidateChoice.getType());
         assertEquals(2.0, candidateChoice.getOutlierRejection()
                 .getMaxPendingVsAverageMultiplier());
         assertEquals(2.5, candidateChoice.getOutlierRejection()
-                .getMaxWaitVsAverageMultiplier());
+                .getMaxProjectedDrainVsAverageMultiplier());
+        RoutingConfig.CacheAffinityConfig cacheAffinity =
+                config.getRouter().getRoles().getPrefill().getCacheAffinity();
+        assertEquals(25L, cacheAffinity.getMaxExtraTtftMs());
+        assertEquals(10.0, cacheAffinity.getMinPrefixHitPercent());
         assertEquals(128L, config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
@@ -187,30 +205,6 @@ class ConfigServiceTest {
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH","maxRequests":8}
-                }
-                """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
-                {
-                  "router":{"roles":{"prefill":{"selector":{
-                    "type":"ESTIMATED_TTFT",
-                    "candidateChoice":{
-                      "type":"LEAST_RECENTLY_USED_IN_POOL",
-                      "outlierRejection":{
-                        "maxPendingVsAverageMultiplier":2.0,
-                        "maxWaitVsAverageMultiplier":2.0
-                      }
-                    }
-                  }}}}
-                }
-                """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
-                {
-                  "router":{"roles":{"prefill":{
-                    "selector":{"type":"RANDOM"},
-                    "cacheAffinity":{"maxExtraTtftMs":10,"minPrefixHitPercent":5}
-                  }}},
-                  "scheduler":{"type":"DIRECT"},
-                  "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
     }
@@ -302,6 +296,27 @@ class ConfigServiceTest {
     }
 
     @Test
+    void validates_cache_affinity_bounds_from_json() {
+        assertInvalidCacheAffinity(-1, 5);
+        assertInvalidCacheAffinity(0, -0.1);
+        assertInvalidCacheAffinity(0, 100.1);
+    }
+
+    private static void assertInvalidCacheAffinity(
+            long maxExtraTtftMs, double minPrefixHitPercent) {
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{
+                    "cacheAffinity":{
+                      "maxExtraTtftMs":%d,
+                      "minPrefixHitPercent":%s
+                    }
+                  }}}
+                }
+                """.formatted(maxExtraTtftMs, minPrefixHitPercent)));
+    }
+
+    @Test
     void omission_is_the_only_unbounded_representation() {
         FlexlbConfig config = ConfigService.parse("""
                 {
@@ -311,7 +326,9 @@ class ConfigServiceTest {
                 }
                 """);
 
-        assertNull(config.nonBatchDispatcher().getMaxInflightRequestsPerPrefillWorker());
+        DispatcherConfig dispatcher = config.getDispatcher();
+        assertEquals(DispatcherConfig.Type.NON_BATCH, dispatcher.getType());
+        assertNull(dispatcher.getMaxInflightRequestsPerPrefillWorker());
         assertNull(config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
     }

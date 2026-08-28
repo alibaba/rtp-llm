@@ -6,12 +6,8 @@ import java.util.Comparator;
  * Single source of truth for priority-based queue ordering across all
  * FlexLB queue layers (PR-B of the Luoli refactor).
  *
- * <p>Before this refactor the ordering logic was duplicated: the
- * Auto-TPM batcher comparator in {@code WorkerBatcher} and the probe
- * comparison in {@code PrefillQueueManager.ordersBefore} were hand-mirrored
- * copies of the same rule. The object comparator and allocation-free probe
- * helpers now delegate to the same primitive comparison, so any future
- * change to the ordering rule is made in exactly one place.
+ * <p>The scheduler queue and eviction planner both delegate to this primitive
+ * comparison, so priority behavior cannot drift between lifecycle boundaries.
  *
  * <p><b>Ordering rule (STRICT):</b>
  * <ol>
@@ -69,20 +65,6 @@ public final class PriorityOrdering {
                 rightPriority, rightEnqueueSeq);
         return strictOrder != 0
                 ? strictOrder : Long.compare(leftRequestId, rightRequestId);
-    }
-
-    /**
-     * Whether an existing item precedes a primitive probe in the deterministic
-     * worker order, without allocating a temporary {@link Prioritized} view.
-     */
-    public static boolean comesBefore(Prioritized item,
-                                      long itemRequestId,
-                                      int probePriority,
-                                      long probeEnqueueSeq,
-                                      long probeRequestId) {
-        return compareWithRequestId(
-                item.priority(), item.enqueueSeq(), itemRequestId,
-                probePriority, probeEnqueueSeq, probeRequestId) < 0;
     }
 
     /**

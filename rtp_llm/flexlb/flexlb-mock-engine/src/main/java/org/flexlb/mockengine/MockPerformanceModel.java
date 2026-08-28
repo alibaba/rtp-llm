@@ -2,10 +2,10 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.strategy.PrefillTimeFormula;
+import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
+import org.flexlb.config.RoutingConfig.EstimatorType;
 import org.flexlb.engine.grpc.EngineRpcService;
 
 import java.io.IOException;
@@ -158,8 +158,8 @@ final class MockPerformanceModel {
                 FlexlbConfig config = ConfigService.parse(item.get(1).asText());
                 var estimator = config.getRouter().getRoles().getPrefill()
                         .getExecutionTimeEstimator();
-                return estimator instanceof FormulaEstimatorConfig formula
-                        ? formula.getExpression() : null;
+                return estimator.getType() == EstimatorType.FORMULA
+                        ? estimator.getExpression() : null;
             }
         }
         return null;
@@ -268,10 +268,6 @@ final class MockPerformanceModel {
 
     void setJitterPct(double pct) {
         this.jitterPct = pct;
-    }
-
-    void setCacheAdmissionRate(double rate) {
-        this.cacheAdmissionRate = rate;
     }
 
     long decodeMs(int outputLen, int activeBatchSize) {

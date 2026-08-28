@@ -1,10 +1,10 @@
 package org.flexlb.service;
 
+import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
-import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -19,17 +19,17 @@ import java.util.concurrent.CompletableFuture;
 public class RouteService {
 
     private final ConfigService configService;
-    private final Router router;
-    private final PriorityScheduler priorityScheduler;
+    private final DefaultRouter router;
+    private final RequestScheduler requestScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
-                        PriorityScheduler priorityScheduler,
+                        RequestScheduler requestScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
         this.router = defaultScheduler;
-        this.priorityScheduler = priorityScheduler;
+        this.requestScheduler = requestScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
@@ -70,13 +70,14 @@ public class RouteService {
     }
 
     private CompletableFuture<Response> routeScheduled(BalanceContext balanceContext) {
-        if (priorityScheduler == null) {
+        if (requestScheduler == null) {
             return CompletableFuture.failedFuture(new IllegalStateException(
-                    "PriorityScheduler is required for the configured scheduling path"));
+                    "RequestScheduler is required for the configured scheduling path"));
         }
-        if (balanceContext.getConfig().isBatchDispatch()
+        if (balanceContext.getConfig().getDispatcher().requiresGenerateInput()
                 && !hasValidGenerateInput(balanceContext)) {
-            Logger.warn("BATCH dispatcher rejected request without serialized generate input: request_id={}",
+            Logger.warn("{} dispatcher rejected request without serialized generate input: request_id={}",
+                    balanceContext.getConfig().getDispatcher().typeName(),
                     balanceContext.getRequestId());
             return CompletableFuture.completedFuture(
                     Response.error(StrategyErrorType.BATCH_BUILD_FAILED));
@@ -90,11 +91,11 @@ public class RouteService {
      * remains responsible for sending the original request to the engine.
      */
     private CompletableFuture<Response> submitScheduled(BalanceContext balanceContext) {
-        if (priorityScheduler == null) {
+        if (requestScheduler == null) {
             return CompletableFuture.failedFuture(new IllegalStateException(
-                    "PriorityScheduler is required for the configured scheduling path"));
+                    "RequestScheduler is required for the configured scheduling path"));
         }
-        CompletableFuture<Response> resultFuture = priorityScheduler.submit(balanceContext);
+        CompletableFuture<Response> resultFuture = requestScheduler.submit(balanceContext);
         balanceContext.setFuture(resultFuture);
         return resultFuture;
     }
@@ -105,21 +106,22 @@ public class RouteService {
                 return CompletableFuture.completedFuture(
                         Response.error(StrategyErrorType.BATCH_SLO_EXPIRED));
             }
-            return CompletableFuture.completedFuture(router.route(balanceContext));
+            return CompletableFuture.completedFuture(
+                    router.routeDirect(balanceContext));
         } catch (Exception e) {
             return CompletableFuture.failedFuture(e);
         }
     }
 
     private boolean hasValidGenerateInput(BalanceContext ctx) {
-        byte[] bytes = ctx.getGenerateInputPbBytes();
-        return bytes != null && bytes.length > 0;
+        ByteString generateInput = ctx.getGenerateInputPb();
+        return generateInput != null && !generateInput.isEmpty();
     }
 
-    public RequestLifecycleSnapshot getRequestState(long requestId,
+    public RequestState getRequestState(long requestId,
                                                     long expectedBatchId) {
-        return priorityScheduler == null ? null
-                : priorityScheduler.getRequestState(requestId, expectedBatchId);
+        return requestScheduler == null ? null
+                : requestScheduler.getRequestState(requestId, expectedBatchId);
     }
 
     /**
@@ -129,10 +131,10 @@ public class RouteService {
      * reducer there gives BATCH enqueue and QUEUE route-decision delivery the
      * same idempotency and generation-fencing semantics.</p>
      */
-    public RequestLifecycleSnapshot cancelRequest(long requestId,
+    public RequestState cancelRequest(long requestId,
                                                    long expectedBatchId,
                                                    CancelReason reason) {
-        return priorityScheduler == null ? null
-                : priorityScheduler.cancelRequest(requestId, expectedBatchId, reason);
+        return requestScheduler == null ? null
+                : requestScheduler.cancelRequest(requestId, expectedBatchId, reason);
     }
 }

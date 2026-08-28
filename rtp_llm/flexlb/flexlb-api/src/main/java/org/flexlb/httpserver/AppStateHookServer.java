@@ -2,9 +2,7 @@ package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
-import org.flexlb.service.grace.GracefulOnlineService;
-import org.flexlb.service.grace.GracefulShutdownService;
-import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
+import org.flexlb.service.grace.ApplicationLifecycle;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.event.EventListener;
@@ -25,19 +23,16 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 @Component
 public class AppStateHookServer {
 
-    private final GracefulOnlineService gracefulOnlineService;
-    private final GracefulShutdownService gracefulShutdownService;
+    private final ApplicationLifecycle applicationLifecycle;
     private final GracefulLifecycleReporter lifecycleReporter;
 
     private volatile boolean processReady = false;
 
     private volatile InetAddress localAddress;
 
-    public AppStateHookServer(GracefulOnlineService gracefulOnlineService,
-                              GracefulShutdownService gracefulShutdownService,
+    public AppStateHookServer(ApplicationLifecycle applicationLifecycle,
                               GracefulLifecycleReporter lifecycleReporter) {
-        this.gracefulOnlineService = gracefulOnlineService;
-        this.gracefulShutdownService = gracefulShutdownService;
+        this.applicationLifecycle = applicationLifecycle;
         this.lifecycleReporter = lifecycleReporter;
     }
 
@@ -86,7 +81,7 @@ public class AppStateHookServer {
         }
         long startTime = System.currentTimeMillis();
         try {
-            gracefulOnlineService.online();
+            applicationLifecycle.online();
             long duration = System.currentTimeMillis() - startTime;
             lifecycleReporter.reportOnlineComplete(duration);
             log.info("online service run success.");
@@ -103,17 +98,17 @@ public class AppStateHookServer {
         if (isNonLocalRequest(request)) {
             return buildErrorResponse("handleAppStop");
         }
-        return Mono.fromRunnable(gracefulShutdownService::offline)
+        return Mono.fromCallable(applicationLifecycle::offline)
                 .subscribeOn(Schedulers.boundedElastic())
-                .then(Mono.defer(() -> {
-                    if (ActiveRequestShutdownHooker.shutdownCompletedSuccessfully) {
+                .flatMap(completed -> {
+                    if (completed) {
                         log.info("shutDown Service offline success, active request complete.");
                         return ServerResponse.ok().body(Mono.just("Shutdown complete. Ready for termination."), String.class);
                     } else {
                         log.error("shutDown Service offline error, active request still pending.");
                         return ServerResponse.status(503).body(Mono.just("Shutdown error. Active requests still pending."), String.class);
                     }
-                }))
+                })
                 .onErrorResume(e -> {
                     log.error("shutDown Service offline execution error.", e);
                     return ServerResponse.status(500).body(Mono.just("Shutdown error."), String.class);

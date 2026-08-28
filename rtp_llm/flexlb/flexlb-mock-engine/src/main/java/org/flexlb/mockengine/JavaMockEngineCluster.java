@@ -1054,20 +1054,39 @@ public final class JavaMockEngineCluster {
         private void recordPriorityPreemptionCanceled(long requestId,
                                                       EngineRpcService.TaskPhase phase) {
             addPriorityCancelTombstone(requestId);
-            EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
+            EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     .setPhase(phase)
                     .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
                             .PRIORITY_PREEMPTION_CANCELED)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
-                            .setErrorMessage("preempted by higher-priority request")
+                    .setErrorMessage("preempted by higher-priority request")
                             .build())
                     .setEndTimeMs(System.currentTimeMillis())
-                    .setDpRank(0)
-                    .build();
-            publishCompletion(task);
+                    .setDpRank(0);
+            long batchId = positiveLifecycleBatchId(requestId);
+            if (batchId > 0L) {
+                task.setBatchId(batchId);
+            }
+            publishCompletion(task.build());
             statusVersion.incrementAndGet();
+        }
+
+        /** Preserve the exact EnqueueBatch identity on typed Prefill terminals. */
+        private long positiveLifecycleBatchId(long requestId) {
+            synchronized (requestLifecycles) {
+                Map<String, Object> lifecycle = requestLifecycles.get(requestId);
+                Object rawBatchId = lifecycle == null
+                        ? null : lifecycle.get("batch_id");
+                if (rawBatchId instanceof Number number
+                        && number.longValue() > 0L) {
+                    return number.longValue();
+                }
+            }
+            // Direct generate/test-only ownership has no positive batch identity;
+            // leave the proto field unset instead of fabricating one.
+            return 0L;
         }
 
         private void clearUpstreamOwnership(long requestId) {
@@ -1767,8 +1786,12 @@ public final class JavaMockEngineCluster {
         int getGrpcPort() { return grpcPort; }
         int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }
         int getUpstreamOwnershipCount() { return upstreamPrefillOwners.size(); }
-        boolean hasDownstreamOwnership(long requestId) { return downstreamDecodeOwners.containsKey(requestId); }
-        boolean hasUpstreamOwnership(long requestId) { return upstreamPrefillOwners.containsKey(requestId); }
+        boolean hasDownstreamOwnership(long requestId) {
+            return downstreamDecodeOwners.containsKey(requestId);
+        }
+        boolean hasUpstreamOwnership(long requestId) {
+            return upstreamPrefillOwners.containsKey(requestId);
+        }
         String getRoleName() { return roleName; }
         String getEngineName() { return engineName; }
         String getHost() { return host; }
@@ -1782,8 +1805,6 @@ public final class JavaMockEngineCluster {
         long getCompletedCount() { return completedCount.get(); }
         long getCancelledCount() { return cancelledCount.get(); }
         long getActiveKvTokens() { return activeKvTokens.get(); }
-        long getCacheKeyCount() { return cache.snapshotKeys().size(); }
-        long getCacheEvictions() { return cache.evictions(); }
         boolean isLeakDetected() { return leakDetected.get(); }
         boolean isShuttingDown() { return shuttingDown; }
         int getActiveDecodeCount() { return activeDecodeRequests.get(); }
