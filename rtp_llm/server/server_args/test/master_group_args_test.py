@@ -61,6 +61,10 @@ class MasterGroupArgsTest(TestCase):
                 "MASTER_CLIENT_FALLBACK_WORKER_GRPC_PORT_OVERRIDE",
                 "master_client_fallback_worker_grpc_port_override",
             ),
+            "--master_client_fallback_block_hash_lookahead_tokens": (
+                "MASTER_CLIENT_FALLBACK_BLOCK_HASH_LOOKAHEAD_TOKENS",
+                "master_client_fallback_block_hash_lookahead_tokens",
+            ),
             "--master_client_fallback_worker_status_port": (
                 "MASTER_CLIENT_FALLBACK_WORKER_STATUS_PORT",
                 "master_client_fallback_worker_status_port",

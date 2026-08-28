@@ -44,7 +44,7 @@ class KvcmFallbackConfig:
     p2p_host_count: int = 0
     worker_grpc_port_override: Optional[int] = None
     worker_status_port_override: Optional[int] = None
-    lookahead_tokens: int = 0
+    block_hash_lookahead_tokens: int = 0
     minimum_local_blocks: int = 1
     candidate_pool_size: int = 3
     hot_candidate_pool_size: int = 2
@@ -79,7 +79,10 @@ class KvcmFallbackConfig:
             )
         for name, value in (
             ("p2p_host_count", self.p2p_host_count),
-            ("lookahead_tokens", self.lookahead_tokens),
+            (
+                "block_hash_lookahead_tokens",
+                self.block_hash_lookahead_tokens,
+            ),
             (
                 "cache_affinity_first_max_extra_work_tokens",
                 self.cache_affinity_first_max_extra_work_tokens,
@@ -591,6 +594,7 @@ class KvcmFallbackClient:
         self._worker_status_semaphore = asyncio.Semaphore(
             self.config.worker_status_concurrency
         )
+        self._logged_worker_hash_contract_mismatches: set[tuple[str, int, int]] = set()
         self._last_selected_ns: dict[str, int] = {}
         self._closed = False
 
@@ -756,6 +760,31 @@ class KvcmFallbackClient:
                 )
             except (grpc.RpcError, asyncio.TimeoutError):
                 return None
+        reported_block_size = int(response.block_size)
+        reported_lookahead_tokens = int(response.block_hash_lookahead_tokens)
+        if (
+            reported_block_size != self.config.block_size
+            or reported_lookahead_tokens != self.config.block_hash_lookahead_tokens
+        ):
+            mismatch = (
+                candidate.worker_status_target,
+                reported_block_size,
+                reported_lookahead_tokens,
+            )
+            if mismatch not in self._logged_worker_hash_contract_mismatches:
+                self._logged_worker_hash_contract_mismatches.add(mismatch)
+                route_logger.warning(
+                    "WorkerStatus block hash contract mismatch; excluding fallback "
+                    "worker, worker=%s, expected_block_size=%s, "
+                    "expected_lookahead_tokens=%s, reported_block_size=%s, "
+                    "reported_lookahead_tokens=%s",
+                    candidate.worker_status_target,
+                    self.config.block_size,
+                    self.config.block_hash_lookahead_tokens,
+                    reported_block_size,
+                    reported_lookahead_tokens,
+                )
+            return None
         return worker_load_snapshot(candidate, response)
 
     async def query_and_select(
@@ -774,7 +803,7 @@ class KvcmFallbackClient:
             keys = calculate_vllm_block_cache_keys(
                 input_ids,
                 self.config.block_size,
-                self.config.lookahead_tokens,
+                self.config.block_hash_lookahead_tokens,
             )
         if keys:
             try:
@@ -906,6 +935,7 @@ class KvcmFallbackClient:
         self._stubs.clear()
         self._worker_status_channels.clear()
         self._worker_status_stubs.clear()
+        self._logged_worker_hash_contract_mismatches.clear()
         for channel in channels:
             await channel.close()
 

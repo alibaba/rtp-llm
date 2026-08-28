@@ -392,6 +392,8 @@ class MasterConfig:
         # Exact KVCM instance_id/namespace, for example <prefill-deployment>_128.
         self.master_kvcm_instance_id: str = ""
         self.master_kvcm_block_size: int = 0
+        # -1 means unset. Zero is a valid engine-reported hash contract value.
+        self.master_client_fallback_block_hash_lookahead_tokens: int = -1
         self.master_kvcm_request_timeout_ms: int = 100
         self.master_client_fallback_worker_grpc_port_override: int = 0
         self.master_client_fallback_worker_status_port: int = 0
@@ -424,6 +426,8 @@ class MasterConfig:
             f"master_kvcm_bootstrap_port: {self.master_kvcm_bootstrap_port}\n"
             f"master_kvcm_instance_id: {self.master_kvcm_instance_id}\n"
             f"master_kvcm_block_size: {self.master_kvcm_block_size}\n"
+            "master_client_fallback_block_hash_lookahead_tokens: "
+            f"{self.master_client_fallback_block_hash_lookahead_tokens}\n"
             f"master_kvcm_request_timeout_ms: {self.master_kvcm_request_timeout_ms}\n"
             "master_client_fallback_worker_grpc_port_override: "
             f"{self.master_client_fallback_worker_grpc_port_override}\n"

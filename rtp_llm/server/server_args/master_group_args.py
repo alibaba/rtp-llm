@@ -86,6 +86,21 @@ def init_master_group_args(parser, master_config):
     )
 
     master_group.add_argument(
+        "--master_client_fallback_block_hash_lookahead_tokens",
+        env_name="MASTER_CLIENT_FALLBACK_BLOCK_HASH_LOOKAHEAD_TOKENS",
+        bind_to=(
+            master_config,
+            "master_client_fallback_block_hash_lookahead_tokens",
+        ),
+        type=int,
+        default=-1,
+        help=(
+            "Engine-reported block_hash_lookahead_tokens used to generate "
+            "KVCM fallback cache keys; required when fallback is enabled"
+        ),
+    )
+
+    master_group.add_argument(
         "--master_kvcm_request_timeout_ms",
         env_name="MASTER_KVCM_REQUEST_TIMEOUT_MS",
         bind_to=(master_config, "master_kvcm_request_timeout_ms"),

@@ -70,6 +70,8 @@ class _FakeWorkerStatusService(status_pb2_grpc.RpcServiceServicer):
         self.active = 0
         self.max_active = 0
         self.delay_s = 0.0
+        self.block_size = 4
+        self.block_hash_lookahead_tokens = 0
 
     async def GetWorkerStatus(self, request, context):
         self.calls += 1
@@ -82,6 +84,8 @@ class _FakeWorkerStatusService(status_pb2_grpc.RpcServiceServicer):
                 role="RoleType.PREFILL",
                 alive=True,
                 status_version=self.calls,
+                block_size=self.block_size,
+                block_hash_lookahead_tokens=self.block_hash_lookahead_tokens,
             )
         finally:
             self.active -= 1
@@ -128,11 +132,17 @@ class KvcmFallbackClientTest(unittest.IsolatedAsyncioTestCase):
         await self.server.stop(None)
         await self.worker_server.stop(None)
 
-    def _client(self, candidate_snapshot_resolver=None):
+    def _client(
+        self,
+        candidate_snapshot_resolver=None,
+        *,
+        block_hash_lookahead_tokens=0,
+    ):
         return kvcm.KvcmFallbackClient(
             kvcm.KvcmFallbackConfig(
                 instance_id="prefill-test_4",
                 block_size=4,
+                block_hash_lookahead_tokens=block_hash_lookahead_tokens,
                 worker_grpc_port_override=8001,
                 worker_status_port_override=self.worker_port,
                 hot_candidate_pool_size=4,
@@ -141,6 +151,52 @@ class KvcmFallbackClientTest(unittest.IsolatedAsyncioTestCase):
             lambda: [f"127.0.0.1:{self.service.port}"],
             candidate_snapshot_resolver,
         )
+
+    async def test_configured_lookahead_is_used_for_kvcm_keys(self):
+        self.service.hosts = [
+            kvcm_pb2.HostCacheMatch(
+                host_ip_port="127.0.0.1:8080",
+                local=2,
+            )
+        ]
+        self.worker_service.block_hash_lookahead_tokens = 1
+        client = self._client(block_hash_lookahead_tokens=1)
+        input_ids = list(range(1, 10))
+        try:
+            result = await client.query_and_select(
+                request_id="request-lookahead",
+                block_cache_keys=[],
+                input_ids=input_ids,
+            )
+        finally:
+            await client.close()
+
+        self.assertEqual("selected", result.outcome)
+        self.assertEqual(
+            kvcm.calculate_vllm_block_cache_keys(input_ids, 4, 1),
+            list(self.service.last_cache_request.block_cache_keys),
+        )
+
+    async def test_worker_hash_contract_mismatch_excludes_candidate(self):
+        self.service.hosts = [
+            kvcm_pb2.HostCacheMatch(
+                host_ip_port="127.0.0.1:8080",
+                local=2,
+            )
+        ]
+        self.worker_service.block_hash_lookahead_tokens = 1
+        client = self._client(block_hash_lookahead_tokens=0)
+        try:
+            result = await client.query_and_select(
+                request_id="request-contract-mismatch",
+                block_cache_keys=[1, 2],
+            )
+        finally:
+            await client.close()
+
+        self.assertEqual("no_available_worker", result.outcome)
+        self.assertEqual(0, result.status_success_count)
+        self.assertIsNone(result.selected)
 
     async def test_bootstrap_resolver_runs_off_the_event_loop_thread(self):
         resolver_threads = []

@@ -168,6 +168,13 @@ class MasterClient:
             getattr(self.master_config, "master_kvcm_bootstrap_port", 6381)
         )
         block_size = int(getattr(self.master_config, "master_kvcm_block_size", 0))
+        block_hash_lookahead_tokens = int(
+            getattr(
+                self.master_config,
+                "master_client_fallback_block_hash_lookahead_tokens",
+                -1,
+            )
+        )
         request_timeout_ms = int(
             getattr(self.master_config, "master_kvcm_request_timeout_ms", 100)
         )
@@ -209,6 +216,11 @@ class MasterClient:
             )
         if not 1 <= bootstrap_port <= 65_535:
             raise ValueError("master_kvcm_bootstrap_port must be a valid port")
+        if block_hash_lookahead_tokens < 0:
+            raise ValueError(
+                "master_client_fallback_block_hash_lookahead_tokens is required "
+                "when KVCM fallback is enabled"
+            )
 
         self._kvcm_vip = VipServerWrapper(
             service_id,
@@ -233,6 +245,7 @@ class MasterClient:
         fallback_config = KvcmFallbackConfig(
             instance_id=instance_id,
             block_size=block_size,
+            block_hash_lookahead_tokens=block_hash_lookahead_tokens,
             request_timeout_ms=request_timeout_ms,
             worker_grpc_port_override=(grpc_port_override or None),
             worker_status_port_override=(worker_status_port or None),
