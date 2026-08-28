@@ -1,6 +1,6 @@
 # DSV4 Mega CSA/HCA TP1 接入状态与后续方案
 
-更新日期：2026-08-26
+更新日期：2026-08-28
 
 ## 1. 当前结论
 
@@ -30,6 +30,13 @@ Mega 覆盖 DSV4-Pro 全部 61 个 attention 层（30 CSA + 31 HCA）。
 超出后完整回退源 attention sublayer。MTP draft model 当前 `compress_ratio == 0`，不会挂
 CSA/HCA adapter，本次适配对象是 target model 的 verify 阶段。
 
+2026-08-28 起，EP>1 的 Mega decode FFN 默认使用 `MegaMoEStrategySE`，并接入
+CUDA-extension MoE-front；主模型 decode/target verify 与 DSpARK draft 都走完整的新 FFN
+路径，shared expert 已融合进 MegaMoE-SE。框架提交为
+`7297858d2406c71f9107771e440598b771b1f979`。在 DP8/EP8/TP1、32K context、MTP gamma=3、
+强制 100% 接受率下，per-rank batch 8/16/32 的单请求 TPS 相对 baseline 分别提升
+`1.3726x/1.3000x/1.1357x`；batch 32 的多轮波动仍有 `18.45%`，该点为低置信度结果。
+
 当前实现遵循“完整 attention sublayer 单独选路”，没有逐个替换普通算子：
 
 ```text
@@ -57,26 +64,40 @@ Block.forward_decode
   └─ 原路径: 其他所有情况
        attn_hc.pre -> AttentionFP8.forward_decode
        -> output projection -> attn_hc.post
+
+随后进入 FFN sublayer：
+  ├─ MegaMoE-SE decode / target verify / DSpARK draft，token 数 M<=128
+  │    DeepGEMM mHC prenorm
+  │    -> CUDA-extension reduce + RMSNorm
+  │    -> CUDA-extension routergemm_quant_post_comb
+  │    -> CUDA-extension reduce_topk
+  │    -> MegaMoE-SE（routed expert + shared expert）
+  │    -> 现有 ffn_hc.post
+  └─ 非 MegaMoE-SE 或 prefill
+       ffn_hc.pre -> ffn_norm -> gate/pack -> MoE -> ffn_hc.post
 ```
 
-FFN sublayer、FFN mHC、model head mHC 不在 Mega 替换范围内。
+MoE-front 替换 FFN mHC pre、FFN RMSNorm、router、quant/pack 和 TopK 编排；MegaMoE-SE
+同时计算 routed expert 与 shared expert。FFN mHC post 和 model head mHC 仍复用框架原实现。
 
 ## 2. 支持边界
 
 | 项目 | 当前支持 | 处理方式 |
 | --- | --- | --- |
 | 硬件 | Blackwell `sm_100a/sm_103a` | 首次执行前强校验 |
-| 并行 | TP1、单卡 | `tp_size != 1` 初始化失败 |
+| 并行 | attention TP1；已验证 DP8/EP8/TP1 集群 | `tp_size != 1` 时 CSA/HCA Mega 初始化失败；EP>1 MoE 默认选择 MegaMoE-SE |
 | KV cache | FP8 | 非 FP8 初始化失败 |
 | 层类型 | `compress_ratio == 4` 的 CSA 层（`DSV4_MEGA_CSA`）；`compress_ratio == 128` 的 HCA 层（`DSV4_MEGA_HCA`） | 按 ratio 分别挂 adapter |
 | 模型几何 | DSV4-Pro（dim 7168）与 DSV4-Flash（dim 4096） | `GEOMETRY_BY_DIM` 按 `attn.dim` 选 profile，其他 dim 初始化失败 |
-| 请求形态 | decode/target verify，`B>=1`、`S>=1`、`B*S<=128` | 超出展平 token 上限时走现有路径 |
+| 请求形态 | attention decode/target verify 为 `B>=1`、`S>=1`、`T=B*S<=128`；MoE-front 为 `M<=128` | attention 超出上限时走现有路径；MTP 启动配置须满足 `B*(gamma+1)<=128` |
 | 进程角色 | `DECODE` 和单卡 `PDFUSION` | 由 `forward_decode` 限制实际执行 |
-| 开关 | `DSV4_MEGA_CSA=1` / `DSV4_MEGA_HCA=1` | 各自默认关闭，模型构造期固定，共享一个模型级 runtime |
+| 开关/策略 | attention 使用 `DSV4_MEGA_CSA=1` / `DSV4_MEGA_HCA=1`；EP>1 MoE 自动选择 `mega_se` | attention 开关默认关闭；`mega` 兼容名称映射到 `mega_se`，MoE-front 随 `mega_se` decode 自动启用 |
 
-下列场景保持现有实现：prefill、SWA-only、`B*S>128`、TP2/DP2。MTP draft model 当前
-`compress_ratio == 0`，不会挂载 CSA/HCA adapter；target model verify 可在上述边界内进入
-Mega。
+attention 在下列场景保持现有实现：prefill、SWA-only、`B*S>128`、TP!=1。MTP draft model
+当前 `compress_ratio == 0`，不会挂载 CSA/HCA attention adapter，但 draft FFN 在
+MegaMoE-SE 下会进入 MoE-front；target model verify 的 attention 和 FFN 均可在上述边界内
+进入 Mega。MoE-front 固定容量为 128 token，并在 CUDA Graph capture 前为普通 decode
+`B`、DSpARK draft `B*gamma` 和 target verify `B*(gamma+1)` 分别创建 plan。
 
 `is_decode_role=False` 同时覆盖 `PDFUSION` 和专用 PREFILL，框架目前没有更细的构造参数。
 因此两个 Mega 开关都只应配置在 `DECODE/PDFUSION` 进程；误配到专用 PREFILL
@@ -90,7 +111,10 @@ Mega。
 | --- | --- |
 | `dsv4/transformer.py` | 解析开关；校验 FP8 KV/TP1；创建模型级 runtime；给 CSA 层挂 adapter |
 | `dsv4/decode/forward.py` | 在生产 layer loop 前推进一次 Mega decode step |
-| `dsv4/block.py` | 在 attention sublayer 入口选择完整 Mega 路径；FFN 前重新汇合 |
+| `dsv4/block.py` | 在 attention sublayer 入口选择完整 Mega 路径；decode FFN 在 `mega_se` 下选择 MoE-front |
+| `dsv4/moe/mega_front.py` | 绑定固定 128-row staging/buffer，预建 `B`、`B*gamma`、`B*(gamma+1)` plans，编排 mHC prenorm、reduce/norm、router/quant/post/comb 和 TopK |
+| `dsv4/moe/strategies/mega_se.py` | MegaMoE routed FP4 experts 与 shared FP8 expert 融合执行；EP>1 默认策略 |
+| `model_desc/deepseek_v4_dspark_model.py` | DSpARK draft FFN 接入同一 MoE-front/MegaMoE-SE 路径 |
 | `fp8/decode/mega_csa_weights.py` | 校验 checkpoint tensor 并构造算子要求的 TP1 fused layout |
 | `fp8/decode/mega_csa_runtime.py` | 共享 workspace、logits、MQA schedule 和 RoPE table；校验并透传框架 slot tensor |
 | `fp8/decode/mega_csa_adapter.py` | 绑定现有 cache/metadata，编排 Mega 算子、TopK、原生 FlashMLA 和 o-proj |
@@ -427,28 +451,6 @@ mHC post 的 `attn_out` 完全一致（CSA-only 首个 CSA block 与 HCA-only �
 mix 归约重写为 TileLang 的串行 split 累加，会牺牲当前归约并行度且没有正确性收益；现有
 误差在验收门限内，因此本轮保留实现，也不将其列为剩余缺口。
 
-### 2026-08-25：8EP 无 MTP 固定 batch 单层耗时
-
-测试配置为 8EP、无 MTP、固定每 rank decode batch。`B/M` 分别表示 baseline 和
-CSA+HCA Mega。Attention 耗时为 timeline 中对应 CSA/HCA attention sublayer 的单层均值。
-MoE 耗时按 batch 归一化，取 4 个 context、baseline/Mega 以及 CSA/HCA 层中从 attention
-结束到下一层 attention 开始区间的等权平均。
-
-| Batch/rank | Context | CSA Attn B/M (us) | CSA 加速比 | HCA Attn B/M (us) | HCA 加速比 | MoE (us) |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 32 | 8K | 171.1 / 111.9 | 1.528x | 128.1 / 88.4 | 1.448x | 140.8 |
-| 32 | 32K | 202.0 / 121.1 | 1.668x | 131.9 / 90.5 | 1.458x | 140.8 |
-| 32 | 64K | 214.5 / 127.0 | 1.689x | 134.0 / 92.5 | 1.448x | 140.8 |
-| 32 | 128K | 240.8 / 157.5 | 1.529x | 138.0 / 96.0 | 1.438x | 140.8 |
-| 64 | 8K | 199.1 / 114.9 | 1.733x | 129.5 / 82.9 | 1.563x | 162.4 |
-| 64 | 32K | 217.6 / 134.5 | 1.618x | 139.3 / 97.9 | 1.422x | 162.4 |
-| 64 | 64K | 236.3 / 155.6 | 1.519x | 142.4 / 100.9 | 1.410x | 162.4 |
-| 64 | 128K | 263.3 / 183.7 | 1.434x | 146.7 / 104.4 | 1.406x | 162.4 |
-| 128 | 8K | 196.0 / 122.6 | 1.599x | 138.1 / 90.8 | 1.521x | 177.4 |
-| 128 | 32K | 223.6 / 153.1 | 1.461x | 142.0 / 100.7 | 1.410x | 177.4 |
-| 128 | 64K | 253.6 / 186.0 | 1.363x | 147.8 / 107.2 | 1.379x | 177.4 |
-| 128 | 128K | 313.7 / 230.4 | 1.361x | 160.9 / 114.9 | 1.400x | 177.4 |
-
 ### 2026-08-26：MTP target verify 适配（`B*S<=128`）
 
 MTP target verify 的输入按 request-major 排列：`hidden[B,S,HC,D]`，其中 `S` 是每个请求
@@ -467,10 +469,32 @@ compressed length、TopK 和 FlashMLA index 保持 `[B,S,...]`，不能把同一
    调用链不变。
 
 验证覆盖：FP8/FP4 MQA 的 `S={1,2,3,5,6}` 正确性与 `S=1` 冷测回归；真实 RTP attention
-子层 `B=2,S=3` 跨 CSA ratio-4 和 HCA ratio-128 压缩边界对拍；全接受 target-verify
-perf runner 在 8 卡、`S=4`、32K context、500 输出 token 下覆盖 `T={32,64,128}`，Mega
-相对源路径吞吐加速分别为 `1.185x/1.174x/1.177x`。当前仍只支持同一 batch 内统一 `S`
-和 `T<=128`；真实 draft 权重的接受/拒绝回写需在 checkpoint loader 命名对齐后继续验证。
+子层 `B=2,S=3` 跨 CSA ratio-4 和 HCA ratio-128 压缩边界对拍。当前仍只支持同一 batch
+内统一 `S` 和 `T<=128`；最新整模型 MTP 结果见下一节。
+
+### 2026-08-28：8EP MTP + MoE-front 最新端到端性能
+
+测试为 DSpARK/MTP gamma=3、`force_sp_accept=true`（强制 100% 接受率）、context 32768、
+输出 500 token、DP8/EP8/TP1。表中 per-rank batch 8/16/32 对应集群 batch 64/128/256；
+单请求 TPS 按 `1000 / avg_decode_time_ms` 计算，集群 TPS 按
+`单请求 TPS * per-rank batch * 8` 计算。Baseline 来自
+`dsv4_attention_ab/results_20260827_170540/attention_baseline`，Mega 来自
+`dsv4_attention_ab/moe_front_dspark_mtp_bs64_128_256_ctx32768_20260828_135426/attention_mega`。
+
+| Batch/rank | 集群 batch | Baseline/Mega latency (ms) | Baseline/Mega 单请求 TPS | 加速比 | latency 降幅 | Baseline/Mega 集群 TPS | Baseline/Mega spread |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 64 | 4.045546 / 2.947365 | 247.19 / 339.29 | 1.3726x | 27.15% | 15819.9 / 21714.3 | 0.39% / 0.17% |
+| 16 | 128 | 4.417251 / 3.397968 | 226.39 / 294.29 | 1.3000x | 23.08% | 28977.3 / 37669.6 | 0.18% / 4.59% |
+| 32 | 256 | 4.881205 / 4.298063 | 204.87 / 232.66 | 1.1357x | 11.95% | 52446.1 / 59561.7 | 2.62% / 18.45% |
+
+所有请求均成功。24 条 Mega timeline 覆盖 3 个 batch 和全部 8 个 rank，每条 trace 都有
+`mtp_step=3` 和 276 条完整的 MoE-front/MegaMoE-SE chain，其中 learned/hash router 分别为
+258/18 条，旧 gate-pack kernel 计数为 0。batch 32 跑满 6 轮后 spread 仍为 `18.45%`，
+因此 `1.1357x` 仅作为低置信度结果；需要在更稳定的集群环境重跑后再作为容量规划依据。
+
+本轮是强制 100% 接受率，用于隔离 target verify 和新算子路径的吞吐上限，不代表真实
+draft 模型的自然接受率。真实 DSpARK forward 已跑通，但自然接受率及 reject/rollback
+路径下的线上 TPS 仍需另测。
 
 ## 6. 端到端剩余缺口
 
@@ -480,19 +504,20 @@ perf runner 在 8 卡、`S=4`、32K context、500 输出 token 下覆盖 `T={32,
 2. 增加由真实 `KVCacheManager` 创建 typed pools/block tables 的集成测试，替代手工 pool
    fixture（本地 serving e2e 已实际走真实 allocator，但缺 bazel 内可回归的形式）；
 3. ~~校验 normal prefill -> Mega decode~~ 已在裁层 Pro 与全量 Flash serving 中覆盖；
-   target verify 的全接受路径已于 2026-08-26 覆盖，真实 draft 权重接受/拒绝流程仍待验证；
+   真实 DSpARK draft forward 和强制全接受 target verify 已覆盖，自然接受率及 reject/rollback
+   路径下的正确性和线上性能仍待验证；
 4. 整模型正确性收口：为 Mega 配置生成 per-配置 golden（框架 smoke 惯例），并在健康模型
    上完成 logits 级对照（Flash 对照排队中）；建议同时把 4 层 Pro 裁层 checkpoint 上传 NAS
    并新增 `v4_pro_4layer_tp1` / `..._mega` smoke case。
 
 ## 7. 内源合入方案
 
-目标内源分支为 `develop/wangyin_ds_v4_20260424`。在开源提交稳定后（迁移清单现含 CSA 与
-HCA 两组 adapter/runtime/weights/测试文件）：
+目标内源分支为 `develop/wangyin_ds_v4_20260424`。在开源提交稳定后（迁移清单现含 CSA/HCA
+adapter/runtime/weights、MoE-front/MegaMoE-SE 选路和对应测试文件）：
 
 1. 将目标内源 worktree 对齐远端分支，保留现有用户修改和 gitlink；
-2. 迁移本分支的 adapter、runtime、weights、选路及测试文档改动，不迁移 Wuda TPDP 或改造版
-   FlashMLA 逻辑；
+2. 迁移本分支的 attention adapter/runtime/weights、MoE-front/MegaMoE-SE 选路及测试文档
+   改动，不迁移 Wuda TPDP 或改造版 FlashMLA 逻辑；
 3. 新 wheel 发布后，同时更新内源 CUDA13 requirements lock 和实际 Bazel 依赖选择；
 4. 先跑与开源相同的 CPU tests 和 `//rtp_llm:rtp_llm` 完整编译；
 5. 再在内源服务配置中只对 TP1 FP8 `DECODE/PDFUSION` 打开开关，按 `DSV4_MEGA_CSA` →
@@ -588,7 +613,10 @@ DSV4_PRO_SRC=<全量 Pro 目录> python truncate_dsv4_pro.py --layers 4 --out <�
 cache 环境变量（`FLASHINFER_WORKSPACE_BASE`、`DG_JIT_CACHE_DIR`、`TRTLLM_DG_CACHE_DIR`、
 `TILELANG_CACHE_DIR`、`TORCH_EXTENSIONS_DIR`、`TVM_FFI_CACHE_DIR`、`CUTE_DSL_CACHE_DIR`、
 `TRITON_CACHE_DIR`）到自有目录（compare 脚本已代管）；`DG_JIT_CPP_STANDARD=20`。
-Mega 开关：`DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`（默认全关，即 baseline）。
+Attention Mega 开关为 `DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`（默认全关）。EP>1 MoE
+默认选择 `mega_se`，decode/target verify/DSpARK draft 自动使用 MoE-front；显式
+`DSV4_MOE_STRATEGY=mega` 也会兼容映射到 `mega_se`。该路径不依赖已删除的临时开关
+`DSV4_USE_MEGA_MOE_SE` 或 `DSV4_MEGA_MOE_FRONT`。
 
 ### 8.4 测试
 
@@ -631,7 +659,7 @@ CPU/静态回归与端到端见第 5 节与 8.3。
 3. bazel 命令加 §8.3 的 8 个 JIT cache `--test_env`（smoke 子进程同样受
    `/tmp/rtp-llm` 权限问题影响）。
 
-Mega 轮在 target 的 `envs` 里加 `DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`。golden 是
+Attention Mega 轮在 target 的 `envs` 里加 `DSV4_MEGA_CSA=1`、`DSV4_MEGA_HCA=1`。golden 是
 旧环境产物（见 §5），判据看两轮 actual 的互相对照（bazel testlogs 的
 `test.outputs/outputs.zip` 里有每条 query 的 actual dump）；正式收编需按框架惯例
 生成本环境 per-配置 golden。smoke 宏会自动注入 `DETERMINISTIC_GEMM=1` 与
