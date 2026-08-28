@@ -176,11 +176,6 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         result.reuse_time_metrics_snapshots =
             collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us);
     }
-    if (result.matched_device_blocks > 0) {
-        evictor_.onMatched(
-            std::vector<TreeNode*>(path.begin(), path.begin() + static_cast<ptrdiff_t>(result.matched_device_blocks)));
-    }
-
     std::vector<TransferDescriptor> pending_load_descs;
     std::vector<bool>               joined_loads;
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
@@ -220,6 +215,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             joined_loads.push_back(is_joined);
         }
     }
+    evictor_.onMatched(path);
 
     StorageRequest storage_request;
     if (storage_backend_ && path.size() < cache_keys.size()) {

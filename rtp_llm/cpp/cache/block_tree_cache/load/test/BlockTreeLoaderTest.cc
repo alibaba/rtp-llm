@@ -6,6 +6,9 @@
 
 #include <gtest/gtest.h>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 namespace rtp_llm {
@@ -14,6 +17,9 @@ namespace {
 using block_tree_cache_test::FullSWAEnvironment;
 using block_tree_cache_test::FullSWAEnvironmentOptions;
 using block_tree_cache_test::cudaAvailable;
+using block_tree_cache_test::insertGroupSetResources;
+using block_tree_cache_test::makeHostPool;
+using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
 
 TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
@@ -85,6 +91,72 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+}
+
+TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
+    constexpr size_t path_length = 4;
+    auto             full        = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, makeHostPool(1, path_length), nullptr);
+    auto swa    = std::make_shared<SWAGroupSet>(/*sliding_window_size=*/2,
+                                             /*seq_size_per_block=*/1,
+                                             std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)},
+                                             makeHostPool(1, path_length),
+                                             nullptr);
+    auto linear = std::make_shared<LinearGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(2)}, makeHostPool(1, path_length), nullptr);
+    std::vector<GroupSetPtr> groups = {full, swa, linear};
+
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    config.enable_host_cache   = true;
+    config.enable_disk_cache   = false;
+    auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+
+    const CacheKeysType                        keys = {100, 200, 300, 400};
+    std::vector<std::vector<GroupSetResource>> resources(path_length, std::vector<GroupSetResource>(groups.size()));
+    for (size_t path_index = 0; path_index < path_length; ++path_index) {
+        for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
+            resources[path_index][group_set_id].host_block =
+                groups[group_set_id]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_NE(resources[path_index][group_set_id].host_block, NULL_BLOCK_IDX);
+        }
+    }
+    ASSERT_TRUE(insertGroupSetResources(*cache, keys, resources));
+
+    const std::vector<TreeNode*> path = cache->tree()->findNode(keys);
+    ASSERT_EQ(path.size(), path_length);
+    std::vector<std::vector<uint64_t>> access_before(path.size());
+    for (size_t node_index = 0; node_index < path.size(); ++node_index) {
+        access_before[node_index].reserve(groups.size());
+        for (const GroupSetResource& resource : path[node_index]->group_set_resources) {
+            EXPECT_EQ(resource.candidate_meta.hit_count, 0u);
+            access_before[node_index].push_back(resource.candidate_meta.last_access_seq);
+        }
+    }
+
+    BlockTreeMatchResult result = cache->match(keys);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_EQ(load_context->matchedBlocks(), path_length);
+
+    const std::vector<size_t> reused_suffix_starts = {0, 2, 3};
+    for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
+        for (size_t node_index = 0; node_index < path.size(); ++node_index) {
+            const CandidateMeta& meta = path[node_index]->group_set_resources[group_set_id].candidate_meta;
+            if (node_index < reused_suffix_starts[group_set_id]) {
+                EXPECT_EQ(meta.last_access_seq, access_before[node_index][group_set_id]);
+                EXPECT_EQ(meta.hit_count, 0u);
+            } else {
+                EXPECT_GT(meta.last_access_seq, access_before[node_index][group_set_id]);
+                EXPECT_EQ(meta.hit_count, 1u);
+            }
+        }
+    }
+
+    result.async_context.reset();
+    load_context.reset();
 }
 
 TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
