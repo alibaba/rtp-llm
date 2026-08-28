@@ -171,10 +171,10 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const KVCacheConfig&               kv_cache_config,
                                const ParallelismConfig&           parallelism_config,
                                const RuntimeConfig&               runtime_config,
-                               const SpeculativeExecutionConfig&  /*sp_config*/,
-                               const PDSepConfig&                 pd_sep_config,
-                               const CacheStoreConfig&            /*cache_store_config*/,
-                               bool                               use_cuda_malloc_block_pool):
+                               const SpeculativeExecutionConfig& /*sp_config*/,
+                               const PDSepConfig& pd_sep_config,
+                               const CacheStoreConfig& /*cache_store_config*/,
+                               bool use_cuda_malloc_block_pool):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -539,7 +539,7 @@ size_t KVCacheManager::freeBlocksNum() const {
 }
 
 size_t KVCacheManager::availableBlocksNum() const {
-    return allocator_->freeBlocksNum() + allocator_->activeTreeCachedBlocksNum();
+    return allocator_->availableBlocksNum();
 }
 
 size_t KVCacheManager::reserveBlocksNum() const {

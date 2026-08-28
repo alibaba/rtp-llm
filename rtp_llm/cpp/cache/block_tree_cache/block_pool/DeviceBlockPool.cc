@@ -51,15 +51,14 @@ void DeviceBlockPool::incRef(const BlockIdList& blocks) {
         [](BlockIdxType) {},
         [this](BlockIdxType block) {
             const bool was_active     = isActiveNoLock(block);
+            const bool was_available  = isAvailableNoLock(block);
             const bool was_referenced = hasRequestRefNoLock(block);
             ++refcounts_[block];
             if (!was_referenced) {
                 ++request_referenced_blocks_num_;
-                if (treeRefCountNoLock(block, BlockTreeRefType::CACHE) > 0) {
-                    ++active_tree_cached_blocks_num_;
-                }
             }
             updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
         });
 }
 
@@ -77,19 +76,17 @@ void DeviceBlockPool::decRef(const BlockIdList& blocks) {
                                     poolName().c_str());
         },
         [this](BlockIdxType block) {
-            const bool was_active = isActiveNoLock(block);
+            const bool was_active    = isActiveNoLock(block);
+            const bool was_available = isAvailableNoLock(block);
             --refcounts_[block];
             if (!hasRequestRefNoLock(block)) {
                 --request_referenced_blocks_num_;
-                if (treeRefCountNoLock(block, BlockTreeRefType::CACHE) > 0) {
-                    assert(active_tree_cached_blocks_num_ > 0);
-                    --active_tree_cached_blocks_num_;
-                }
             }
             if (refcounts_[block] == 0) {
                 freeAllocatedBlockNoLock(block);
             }
             updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
         });
 }
 
@@ -106,12 +103,6 @@ size_t DeviceBlockPool::referencedBlocksNum() const {
     return request_referenced_blocks_num_;
 }
 
-size_t DeviceBlockPool::activeTreeCachedBlocksNum() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    checkInitializedNoLock();
-    return active_tree_cached_blocks_num_;
-}
-
 void DeviceBlockPool::onFirstTreeRefNoLock(BlockIdxType block) {
     ++refcounts_[block];
 }
@@ -120,18 +111,6 @@ bool DeviceBlockPool::onLastTreeRefNoLock(BlockIdxType block) {
     assert(refcounts_[block] > 0);
     --refcounts_[block];
     return refcounts_[block] == 0;
-}
-
-void DeviceBlockPool::onCacheRefChangedNoLock(BlockIdxType block, bool cached) {
-    if (!hasRequestRefNoLock(block)) {
-        return;
-    }
-    if (cached) {
-        ++active_tree_cached_blocks_num_;
-    } else {
-        assert(active_tree_cached_blocks_num_ > 0);
-        --active_tree_cached_blocks_num_;
-    }
 }
 
 bool DeviceBlockPool::hasRequestRefNoLock(BlockIdxType block) const {
@@ -238,8 +217,8 @@ void DeviceBlockPool::initializeCacheBuffer() {
 }
 
 void DeviceBlockPool::initializePinnedCpuBuffer() {
-    const auto& cfg = config();
-    auto cpu_buffer = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
+    const auto& cfg        = config();
+    auto        cpu_buffer = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
                                    torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
     try {
         cache_aligned_buffer_ = cpu_buffer.pin_memory();
@@ -608,18 +587,15 @@ size_t DeviceBlockPool::blockSizeBytes() const {
 
 std::string DeviceBlockPool::debugString() const {
     size_t request_ref_blocks;
-    size_t active_tree_cached_blocks;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        request_ref_blocks        = request_referenced_blocks_num_;
-        active_tree_cached_blocks = active_tree_cached_blocks_num_;
+        request_ref_blocks = request_referenced_blocks_num_;
     }
 
     std::ostringstream oss;
     oss << "DeviceBlockPool{" << IBlockPool::debugString() << ", pool_name=" << config().pool_name
         << ", memory_layouts=" << config().memory_layouts.size() << ", total_size_bytes=" << config().total_size_bytes
-        << ", request_ref_blocks=" << request_ref_blocks << ", active_tree_cached=" << active_tree_cached_blocks
-        << ", where=" << memoryTypeName(where()) << "}";
+        << ", request_ref_blocks=" << request_ref_blocks << ", where=" << memoryTypeName(where()) << "}";
     return oss.str();
 }
 
