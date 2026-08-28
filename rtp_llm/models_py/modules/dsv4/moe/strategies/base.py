@@ -12,8 +12,8 @@ Strategies (priority high→low for ``forced=None``):
 
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
-    >1       DSV4_USE_MEGA_MOE_SE=1        MegaMoEStrategySE (strict)
-    >1       mega available + dist-init    MegaMoEStrategy
+    >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; default)
+    >1       DSV4_USE_MEGA_MOE_SE=0        MegaMoEStrategy
     >1       mega unavailable/disabled     RuntimeError
     1        grouped FP4 kernel available  GroupedFP4Strategy
     1        grouped unavailable           LocalLoopStrategy
@@ -21,7 +21,7 @@ Strategies (priority high→low for ``forced=None``):
 A model can override the auto-pick via:
   - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
   - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
-  - strict ``DSV4_USE_MEGA_MOE_SE=1`` fused-shared-expert opt-in
+  - ``DSV4_USE_MEGA_MOE_SE=0`` to disable the default fused shared expert
   - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
     (translated to forced=... internally; conflicting toggles → RuntimeError)
 """
@@ -250,7 +250,7 @@ def select_strategy(
     explicit_env = bool(explicit_env and explicit_env != "auto")
 
     # The current DeepGEMM shared-expert API and the older experimental fused
-    # API use incompatible buffers. Never allow both opt-ins to race.
+    # API use incompatible buffers. Never allow both variants to race.
     if cfg.ep_size > 1 and not explicit_env:
         from rtp_llm.models_py.modules.dsv4.moe.mega_fused_buf import (
             mega_moe_fused_requested,
@@ -261,8 +261,9 @@ def select_strategy(
         fused_requested = mega_moe_fused_requested()
         if se_requested and fused_requested:
             raise RuntimeError(
-                "DSV4_USE_MEGA_MOE_SE=1 conflicts with "
-                "DSV4_USE_MEGA_MOE_FUSED=1; select exactly one Mega variant."
+                "DSV4_USE_MEGA_MOE_SE (defaults to 1) conflicts with "
+                "DSV4_USE_MEGA_MOE_FUSED=1; set DSV4_USE_MEGA_MOE_SE=0 "
+                "to select the older fused variant."
             )
         if se_requested:
             if forced not in (None, "mega", "mega_se"):

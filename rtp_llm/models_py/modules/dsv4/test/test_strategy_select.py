@@ -79,6 +79,9 @@ class StrategySelectTest(unittest.TestCase):
             "DSV4_USE_GROUPED_FP4",
         ):
             os.environ.pop(k, None)
+        # Most selection-matrix tests exercise the routed-only baseline.
+        # Tests for the new default explicitly remove this override.
+        os.environ["DSV4_USE_MEGA_MOE_SE"] = "0"
 
     # --- auto-pick matrix --------------------------------------------------
 
@@ -138,8 +141,14 @@ class StrategySelectTest(unittest.TestCase):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
-    def test_ep_gt1_default_stays_mega_when_se_is_capable(self):
-        with mock.patch.object(
+    def test_ep_gt1_default_picks_mega_se_when_capable(self):
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=True
+        ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
+            self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategySE)
+
+    def test_ep_gt1_explicit_se_zero_picks_non_fused_mega(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="0"), mock.patch.object(
             MegaMoEStrategy, "can_handle", return_value=True
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
@@ -247,7 +256,7 @@ class StrategySelectTest(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=2))
-        self.assertIn("select exactly one Mega variant", str(cm.exception))
+        self.assertIn("conflicts with DSV4_USE_MEGA_MOE_FUSED=1", str(cm.exception))
 
     def test_legacy_use_grouped_fp4_1_translates_to_grouped_nonstrict(self):
         with _env(DSV4_USE_GROUPED_FP4="1"):
