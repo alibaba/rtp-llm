@@ -1933,19 +1933,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         boolean isPrefill = response.getRole() == RoleType.PREFILL;
         boolean isDecode = response.getRole() == RoleType.DECODE;
 
-        // Decode KV_ALLOCATED/RUNNING is the authoritative acceptance signal
-        // for the post-success lease.  Close the lease immediately instead of
-        // retaining one active slot until its 30s fallback timer.  RECEIVED is
-        // deliberately excluded: the engine has seen the request but has not
-        // yet accepted Decode ownership/KV.
-        if (isDecode && response.getRunningTaskInfo() != null) {
-            for (TaskInfo task : response.getRunningTaskInfo().values()) {
-                TaskPhase phase = task.getPhase();
-                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    markDecodeAccepted(task.getRequestId());
-                }
-            }
-        }
+        observeWorkerStatusActivity(response, System.currentTimeMillis());
 
         // NOT_FOUND_STALE is reopened only by a fresh active observation from
         // the original Prefill control owner.
@@ -1978,6 +1966,42 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             }
             submitResponseCompletion(publication.completion());
             publishPriorityCanceled(publication);
+        }
+    }
+
+    /**
+     * Refresh live request observations from a successful status heartbeat whose
+     * status version did not advance. Finished-task reduction remains versioned,
+     * but a full running-task snapshot is still authoritative evidence that an
+     * inflight entry is not an orphan.
+     */
+    public void onWorkerStatusHeartbeat(WorkerStatusResponse response) {
+        observeWorkerStatusActivity(response, System.currentTimeMillis());
+    }
+
+    /** Package-visible timestamp injection keeps inactivity-TTL tests deterministic. */
+    void onWorkerStatusHeartbeat(WorkerStatusResponse response, long observedAtMs) {
+        observeWorkerStatusActivity(response, observedAtMs);
+    }
+
+    private void observeWorkerStatusActivity(WorkerStatusResponse response,
+                                             long observedAtMs) {
+        if (response == null || response.getRunningTaskInfo() == null) {
+            return;
+        }
+        boolean isDecode = response.getRole() == RoleType.DECODE;
+        for (TaskInfo task : response.getRunningTaskInfo().values()) {
+            if (task == null) {
+                continue;
+            }
+            TaskPhase phase = task.getPhase();
+            // Every item in running_task_info proves that the Engine still
+            // owns or is processing the request. Decode KV_ALLOCATED/RUNNING
+            // additionally closes the post-success admission lease; RECEIVED
+            // deliberately remains activity-only until Decode owns KV.
+            boolean decodeAccepted = isDecode
+                    && (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING);
+            observeWorkerStatusTask(task.getRequestId(), observedAtMs, decodeAccepted);
         }
     }
 
@@ -2063,7 +2087,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         executeResponseTask(completion);
     }
 
-    private void markDecodeAccepted(long requestId) {
+    private void observeWorkerStatusTask(long requestId,
+                                         long observedAtMs,
+                                         boolean decodeAccepted) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return;
@@ -2072,6 +2098,10 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         synchronized (deliveryFence) {
             synchronized (entry) {
                 if (inflight.get(requestId) != entry) {
+                    return;
+                }
+                entry.observeWorkerStatus(observedAtMs);
+                if (!decodeAccepted) {
                     return;
                 }
                 EngineFenceRegistration fence = entry.engineFence;
@@ -2431,6 +2461,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     @Scheduled(fixedRate = 60000L)
     public void cleanupInflight() {
+        cleanupInflight(System.currentTimeMillis());
+    }
+
+    /** Package-visible timestamp injection keeps inactivity-TTL tests deterministic. */
+    void cleanupInflight(long now) {
         if (shuttingDown.get()) {
             return;
         }
@@ -2439,18 +2474,16 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             return;
         }
         long ttlMs = config.queueScheduler().getLifecycle().getStaleInflightTimeoutMs();
-        long now = System.currentTimeMillis();
         int expiredCount = 0;
-        long oldestExpiredAgeMs = 0;
+        long oldestExpiredIdleMs = 0;
         List<Long> expiredRequestSamples = new ArrayList<>(3);
         for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
             InflightEntry entry = candidate.getValue();
-            long ageMs = now - entry.createdAtMs();
-            if (ageMs <= ttlMs) {
+            long idleMs = now - entry.lastWorkerStatusAtMs();
+            if (idleMs <= ttlMs) {
                 continue;
             }
             ResponseCompletion publication = null;
-            EngineFenceRegistration startedFence = null;
             boolean expired = false;
             synchronized (deliveryFence) {
                 synchronized (entry) {
@@ -2465,24 +2498,18 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                         // the entry and must not be raced by TTL.
                         continue;
                     }
-                    RequestLifecycleSnapshot snapshot = entry.lifecycle.snapshot();
-                    if (entry.engineOwnershipState != EngineOwnershipState.DECODE_OWNED
-                            && isLocallyReversible(entry, snapshot)) {
-                        publication = timeoutEntry(entry, "inflight TTL expired");
-                    } else {
-                        // The request may already be visible to Prefill/Decode.
-                        // Install the same request-scoped cancellation fence as
-                        // public Cancel and retain both ledgers until an
-                        // authoritative Engine terminal settles the timeout.
-                        startedFence = installCancellationFenceLocked(
-                                entry, "inflight TTL expired");
-                        if (startedFence == null) {
-                            continue;
-                        }
-                        entry.cancellationReason = CancelReason.DEADLINE_EXCEEDED;
-                        entry.lifecycle.requestCancel("inflight TTL expired");
+                    idleMs = now - entry.lastWorkerStatusAtMs();
+                    if (idleMs <= ttlMs) {
+                        // A WorkerStatus callback refreshed this exact
+                        // generation after the optimistic check above.
+                        continue;
                     }
-                    oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
+                    // This TTL is a local-ledger orphan detector, not an
+                    // execution deadline. It must never create an Engine
+                    // cancellation fence or send Cancel to a live request.
+                    publication = timeoutEntry(
+                            entry, "inflight inactive TTL expired");
+                    oldestExpiredIdleMs = Math.max(oldestExpiredIdleMs, idleMs);
                     if (expiredRequestSamples.size() < 3) {
                         expiredRequestSamples.add(candidate.getKey());
                     }
@@ -2490,9 +2517,6 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 }
             }
             submitResponseCompletion(publication);
-            if (startedFence != null) {
-                reconcileEngineFence(entry, startedFence, 0);
-            }
             if (expired) {
                 expiredCount++;
             }
@@ -2500,8 +2524,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         if (expiredCount > 0) {
             reporter.reportInflightTtlExpired(expiredCount);
             Logger.info("event=scheduler_inflight_ttl_eviction evicted={} "
-                            + "oldest_age_ms={} ttl_ms={} request_samples={}",
-                    expiredCount, oldestExpiredAgeMs, ttlMs, expiredRequestSamples);
+                            + "oldest_idle_ms={} ttl_ms={} request_samples={}",
+                    expiredCount, oldestExpiredIdleMs, ttlMs, expiredRequestSamples);
         }
         probeQuarantinedEngineFences(now);
         long cutoff = System.currentTimeMillis() - ttlMs;
@@ -4478,11 +4502,14 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         EngineFenceRegistration engineFence;
         /** Non-null only when the frontend-facing Cancel reducer won first cause. */
         CancelReason cancellationReason;
+        /** Last full WorkerStatus snapshot which still listed this request as active. */
+        private volatile long lastWorkerStatusAtMs;
 
         InflightEntry(BatchItem item, boolean priorityAdmission) {
             this.item = Objects.requireNonNull(item);
             Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
             this.lifecycle = new RequestLifecycle(item.requestId());
+            this.lastWorkerStatusAtMs = lifecycle.snapshot().createdAtMs();
             this.priorityAdmission = priorityAdmission;
             this.deadlineErrorType = item.future() instanceof RequestGenerationGate generation
                     ? generation.deadlineErrorType
@@ -4491,6 +4518,14 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
         public long createdAtMs() {
             return lifecycle.snapshot().createdAtMs();
+        }
+
+        long lastWorkerStatusAtMs() {
+            return lastWorkerStatusAtMs;
+        }
+
+        void observeWorkerStatus(long observedAtMs) {
+            lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, observedAtMs);
         }
 
         boolean hasPreemption(long attemptToken) {
