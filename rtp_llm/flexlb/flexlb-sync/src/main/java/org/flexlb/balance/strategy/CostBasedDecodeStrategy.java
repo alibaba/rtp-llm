@@ -445,21 +445,14 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             }
             capacitySurvivorCount++;
         }
-        // Outlier baselines are leave-one-out: each engine is judged against
-        // the average of the OTHER eligible engines, never one that includes
-        // itself. A self-inclusive average lets a single hot engine drag its
-        // own baseline up with it — with n engines the threshold becomes
-        // multiplier * (own + rest)/n, so for small fleets (n=2,3) a genuinely
-        // hot engine mathematically cannot exceed it and the filter never
-        // fires. n == 1 (or an all-zero others average, checked per engine
-        // below) skips the relative checks: with no "others" to be an outlier
-        // against, rejecting the only candidate could only yield
-        // NO_AVAILABLE_WORKER with nothing to gain.
+        long avgLoad = sumLoad / n;
+        long avgCacheUsed = sumCacheUsed / n;
+
         List<T> capacityCandidates = capacitySurvivors == null
                 ? eligible
                 : Collections.unmodifiableList(capacitySurvivors);
-        boolean filterHotspots = hotspotMultiplier > 0 && n > 1;
-        boolean filterImbalance = imbalanceMultiplier > 0 && n > 1;
+        boolean filterHotspots = hotspotMultiplier > 0 && avgLoad > 0;
+        boolean filterImbalance = imbalanceMultiplier > 0 && avgCacheUsed > 0;
         if (capacitySurvivorCount == 0
                 || (!filterHotspots && !filterImbalance)) {
             return new FilterResult<>(
@@ -483,10 +476,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         for (int index = 0; index < capacitySurvivorCount; index++) {
             T candidate = capacityCandidates.get(index);
             DecodeEndpoint.DecodeRoutingView view = routing.view(candidate);
-            long ownLoad = view.engineLoad();
-            long othersAvgLoad = (sumLoad - ownLoad) / (n - 1);
-            if (filterHotspots && othersAvgLoad > 0
-                    && ownLoad > othersAvgLoad * hotspotMultiplier) {
+            if (filterHotspots
+                    && view.engineLoad() > avgLoad * hotspotMultiplier) {
                 hotspotRejected++;
                 if (outlierSurvivors == null) {
                     outlierSurvivors = new ArrayList<>(capacitySurvivorCount);
@@ -500,9 +491,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 continue;
             }
             long cacheUsed = view.realKvUsed();
-            long othersAvgCacheUsed = (sumCacheUsed - cacheUsed) / (n - 1);
-            if (filterImbalance && othersAvgCacheUsed > 0
-                    && cacheUsed > othersAvgCacheUsed * imbalanceMultiplier) {
+            if (filterImbalance
+                    && cacheUsed > avgCacheUsed * imbalanceMultiplier) {
                 imbalanceRejected++;
                 if (outlierSurvivors == null) {
                     outlierSurvivors = new ArrayList<>(capacitySurvivorCount);
