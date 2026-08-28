@@ -59,9 +59,6 @@ DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576
 # Sliding window length in entries; doubles as the HCA compression unit and as
 # the minimum entry count that may pay for block-stride alignment padding.
 DSV4_SWA_WINDOW_ENTRIES = 128
-# HCA_STATE is a small fixed ring; it is sized explicitly instead of tracking
-# the paged budget.
-DSV4_HCA_STATE_POOL_BLOCKS = 256
 # DSv4's physical KV block is 256 tokens (the CLI default is 64).
 DSV4_TOKENS_PER_BLOCK = 256
 
@@ -136,10 +133,10 @@ def _make_dsv4_desc(
         cp.align_payload = True
         cp.prefill_slice_layout = CpPrefillSliceLayout.PAYLOAD
         cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
-        capacity = CacheCapacityPolicyDesc()
-        capacity.explicit_block_num = DSV4_HCA_STATE_POOL_BLOCKS
-        capacity.charge_to_paged_budget = True
-        desc.capacity = capacity
+        # HCA_STATE has a one-block active tail and no prefix reuse.  Its fixed
+        # capacity is injected from KVCacheConfig by HybridPoolConfigCreator;
+        # leaving the descriptor unspecified keeps the model description free
+        # of runtime/CLI sizing policy.
         reuse.enable_prefix_reuse = False
         tail = CacheTailPolicyDesc()
         tail.active_tail_blocks = 1

@@ -8,7 +8,6 @@ from rtp_llm.models.dsv4_kv_cache import (
     DSV4_FP8_INDEXER_ENTRY_BYTES,
     DSV4_FP8_KV_ENTRY_BYTES,
     DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES,
-    DSV4_HCA_STATE_POOL_BLOCKS,
     DSV4_SWA_WINDOW_ENTRIES,
     DSV4_TOKENS_PER_BLOCK,
     HCA_KV_TAG,
@@ -212,11 +211,10 @@ class Dsv4KvCacheSpecTest(TestCase):
     def test_hca_state_capacity_reuse_and_tail(self):
         by_tag = self._by_tag(self._build())
         hca_state = by_tag[HCA_STATE_TAG]
-        self.assertIsNotNone(hca_state.capacity)
-        self.assertEqual(
-            hca_state.capacity.explicit_block_num, DSV4_HCA_STATE_POOL_BLOCKS
-        )
-        self.assertTrue(hca_state.capacity.charge_to_paged_budget)
+        # HCA's ring policy is special. Runtime capacity is injected by the
+        # C++ creator from KVCacheConfig rather than encoded in this model
+        # descriptor.
+        self.assertIsNone(hca_state.capacity)
         self.assertFalse(hca_state.reuse.enable_prefix_reuse)
         self.assertIsNotNone(hca_state.tail)
         self.assertEqual(hca_state.tail.active_tail_blocks, 1)
@@ -247,11 +245,8 @@ class Dsv4KvCacheSpecTest(TestCase):
             )
             self.assertIsNotNone(desc.capacity, tag)
             self.assertFalse(desc.capacity.charge_to_paged_budget, tag)
-        # hca_state keeps its explicit sizing while leaving the HBM budget.
-        self.assertEqual(
-            by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
-            DSV4_HCA_STATE_POOL_BLOCKS,
-        )
+        # Host placement must not synthesize a block count.
+        self.assertIsNone(by_tag[HCA_STATE_TAG].capacity.explicit_block_num)
         # Compressed pools stay on device.
         for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
             self.assertIsNone(by_tag[tag].memory, tag)
@@ -263,6 +258,13 @@ class Dsv4KvCacheSpecTest(TestCase):
         swa = self._by_tag(layer_descs)[SWA_KV_TAG]
         self.assertEqual(swa.capacity.explicit_block_num, 512)
         self.assertTrue(swa.capacity.charge_to_paged_budget)
+
+    def test_explicit_hca_state_pool_blocks_helper(self):
+        layer_descs = self._build()
+        apply_dsv4_explicit_pool_blocks(layer_descs, HCA_STATE_TAG, 7)
+        hca_state = self._by_tag(layer_descs)[HCA_STATE_TAG]
+        self.assertEqual(hca_state.capacity.explicit_block_num, 7)
+        self.assertTrue(hca_state.capacity.charge_to_paged_budget)
 
     def test_explicit_pool_blocks_helper_keeps_host_pool_off_budget(self):
         layer_descs = self._build(fixed_pool_use_host_memory=True)
