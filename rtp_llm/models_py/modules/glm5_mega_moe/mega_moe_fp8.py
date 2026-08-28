@@ -12,6 +12,7 @@ from .mega_fp8_buf import get_or_create_mega_buf_fp8
 from .mega_moe import (
     GLM5MegaMoE,
     GLM5MegaMoeCfg,
+    _activation_clamp,
     _mega_output_capacity,
     _sync_cuda_graph_warmup_ranks,
 )
@@ -266,7 +267,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=_activation_clamp(self.cfg),
             fast_math=False,
             assume_all_topk_valid=True,
         )

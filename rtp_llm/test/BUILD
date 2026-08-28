@@ -348,3 +348,11 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
 )
+
+py_test(
+    name = "glm5_next_renderer_test",
+    srcs = ["glm5_next_renderer_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)

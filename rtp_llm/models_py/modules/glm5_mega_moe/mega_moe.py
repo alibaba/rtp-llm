@@ -55,6 +55,11 @@ _PRE_KERNEL_BARRIER_VERBOSE_ENV = "GLM5_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
 
 
+def _activation_clamp(cfg) -> Optional[float]:
+    limit = float(getattr(cfg, "swiglu_limit", 0.0))
+    return limit if limit > 0 else None
+
+
 def _interleave_stacked_up_gate(t: torch.Tensor, gran: int = 8) -> torch.Tensor:
     """Convert RTP's ``[up | gate]`` layout without full-size temporaries."""
     if t.dim() not in (2, 3):
@@ -762,7 +767,7 @@ class GLM5MegaMoE(nn.Module):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=_activation_clamp(self.cfg),
             fast_math=False,
         )
         return y

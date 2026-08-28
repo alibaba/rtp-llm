@@ -81,6 +81,7 @@ class ModelConfig(CppModelConfig):
         "index_skip_topk_offset",
         "index_topk_pattern",
         "indexer_types",
+        "kda_gate_lower_bound",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)

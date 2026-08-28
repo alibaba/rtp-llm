@@ -3,6 +3,7 @@
 """
 
 import math
+from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main, skipIf
 
 import torch
@@ -29,7 +30,11 @@ if CUDA_VERSION_OK:
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
         SparseMlaOp,
     )
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+        MlaKVCacheWriteOp,
+    )
+from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 
 def set_seed(seed: int):
@@ -513,6 +518,72 @@ class SparseMlaOpTest(TestCase):
                     batch_size=batch_size,
                 )
                 self._run_test(p)
+
+    def test_nope_prefill_cache_write_then_decode(self):
+        """GLM-5.3: empty k_pe cache write followed by BF16 paged decode."""
+        seq_len = top_k = 128
+        page_size = 64
+        kv_lora_rank = 512
+        num_heads = 64
+
+        compressed_kv = torch.randn(
+            seq_len, kv_lora_rank, dtype=torch.bfloat16, device="cuda"
+        )
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.empty(
+            seq_len // page_size,
+            page_size,
+            kv_lora_rank,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        MlaKVCacheWriteOp(KvCacheDataType.BASE).forward(
+            compressed_kv,
+            compressed_kv.new_empty(seq_len, 0),
+            kv_cache,
+            SimpleNamespace(
+                slot_mapping=torch.arange(seq_len, dtype=torch.int64, device="cuda")
+            ),
+        )
+
+        p = TestParam(
+            num_tokens=1,
+            total_cache_len=seq_len,
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=0,
+            qk_nope_head_dim=256,
+            page_size=page_size,
+            top_k=top_k,
+        )
+        testcase = generate_testcase(p)
+        q = torch.randn(1, num_heads, kv_lora_rank, dtype=torch.bfloat16, device="cuda")
+        topk_indices = torch.arange(top_k, dtype=torch.int32, device="cuda").view(
+            1, 1, top_k
+        )
+        op = SparseMlaOp(
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=0,
+            qk_nope_head_dim=256,
+            page_size=page_size,
+            softmax_extra_scale=1.0,
+            top_k=top_k,
+        )
+        op.plan(testcase.mla_params, testcase.block_table)
+        cache_flat = kv_cache.kv_cache_base.view(-1, 1, kv_lora_rank)
+        output = op.forward(q, cache_flat, topk_indices)
+        global_indices = op._convert_topk_indices_to_global(topk_indices)[:, 0, :]
+        expected = ref_sparse_mla_forward(
+            q, cache_flat, global_indices, 256**-0.5, kv_lora_rank
+        )
+
+        self.assertGreater(
+            F.cosine_similarity(
+                output.float().flatten(), expected.float().flatten(), dim=0
+            ).item(),
+            0.99,
+        )
 
 
 if __name__ == "__main__":

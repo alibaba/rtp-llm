@@ -3,6 +3,7 @@
 from typing import Dict, Optional, Type
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
@@ -34,6 +35,18 @@ _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
 _GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu]
 
 
+class ClampedSiluAndMul(nn.Module):
+    def __init__(self, limit: float):
+        super().__init__()
+        self.limit = limit
+
+    def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
+        gate, up = gate_up.chunk(2, dim=-1)
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        return F.silu(gate) * up
+
+
 class DenseMLP(nn.Module):
     """
     Unified DenseMLP implementation supporting both SiGLU and GELU activations.
@@ -49,6 +62,7 @@ class DenseMLP(nn.Module):
         weights: Dict[str, torch.Tensor],
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        swiglu_limit: float = 0.0,
     ):
         super().__init__()
 
@@ -56,7 +70,12 @@ class DenseMLP(nn.Module):
         self.parallelism_config = parallelism_config
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
-        self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
+        self.swiglu_limit = swiglu_limit
+        self.act_fn = (
+            ClampedSiluAndMul(swiglu_limit)
+            if activation_type == ActivationType.Swiglu and swiglu_limit > 0
+            else _ACTIVATION_FUNC_MAP[activation_type]()
+        )
         self.is_gated = activation_type in _GATED_ACTIVATION_TYPE_LIST
 
         if self.is_gated:
@@ -112,6 +131,7 @@ class DenseMLP(nn.Module):
         self._fuse_silu_quant = (
             fuse_kernels_enabled(hw_kernel_config)
             and self.is_gated
+            and self.swiglu_limit <= 0
             and CudaFp8GEMMLinear is not None
             and isinstance(self.down_proj, CudaFp8GEMMLinear)
             and (self.down_proj.K % 128 == 0)

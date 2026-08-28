@@ -196,6 +196,12 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
 
         self.assertEqual(moe.cfg.swiglu_limit, 10.0)
 
+    def test_activation_clamp_is_opt_in(self):
+        self.assertEqual(
+            mega_moe._activation_clamp(SimpleNamespace(swiglu_limit=10.0)), 10.0
+        )
+        self.assertIsNone(mega_moe._activation_clamp(SimpleNamespace(swiglu_limit=0.0)))
+
     def test_fp4_stacked_moe_w1_reorders_up_gate_for_deepgemm(self):
         config = _config(hidden_size=8, inter=4)
         up_w = torch.full((2, 4, 4), 3, dtype=torch.int8)

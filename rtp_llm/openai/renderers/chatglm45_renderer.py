@@ -1,12 +1,20 @@
+import copy
 import json
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from jinja2 import Environment
 from typing_extensions import override
 
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    ContentPart,
+    ContentPartTypeEnum,
+    MMPreprocessConfigPart,
+)
 from rtp_llm.openai.renderer_factory_register import register_renderer
+from rtp_llm.openai.renderers.custom_renderer import RenderedInputs
+from rtp_llm.openai.renderers.llava_renderer import get_preprocess_config
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
@@ -17,6 +25,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.glm4_moe_detector imp
     Glm4MoeDetector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
 class ChatGlm45Renderer(ReasoningToolBaseRenderer):
@@ -109,5 +118,79 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
         )
 
 
+class Glm5NextRenderer(ChatGlm45Renderer):
+    """GLM-5.3 renderer that preserves media inputs for the ViT pipeline."""
+
+    _IMAGE_TOKEN = "<|begin_of_image|><|image|><|end_of_image|>"
+    _VIDEO_TOKEN = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    @staticmethod
+    def _preprocess_config(content_part, media_url):
+        config = (
+            content_part.preprocess_config.model_copy()
+            if content_part.preprocess_config is not None
+            else MMPreprocessConfigPart()
+        )
+        for field in ("max_long_side_pixel", "fps"):
+            value = getattr(media_url, field, None)
+            if value is None:
+                value = getattr(content_part, field, None)
+            if value is not None:
+                setattr(config, field, value)
+        return get_preprocess_config(config)
+
+    @override
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        request = copy.deepcopy(request)
+        urls: List[str] = []
+        types: List[MMUrlType] = []
+        preprocess_configs = []
+
+        for message in request.messages:
+            if not isinstance(message.content, list):
+                continue
+            rewritten = []
+            for part in message.content:
+                if part.type == ContentPartTypeEnum.image_url:
+                    assert part.image_url is not None
+                    urls.append(part.image_url.url)
+                    types.append(MMUrlType.IMAGE)
+                    preprocess_configs.append(
+                        self._preprocess_config(part, part.image_url)
+                    )
+                    rewritten.append(
+                        ContentPart(
+                            type=ContentPartTypeEnum.text,
+                            text=self._IMAGE_TOKEN + "\n",
+                        )
+                    )
+                elif part.type == ContentPartTypeEnum.video_url:
+                    assert part.video_url is not None
+                    urls.append(part.video_url.url)
+                    types.append(MMUrlType.VIDEO)
+                    preprocess_configs.append(
+                        self._preprocess_config(part, part.video_url)
+                    )
+                    rewritten.append(
+                        ContentPart(
+                            type=ContentPartTypeEnum.text,
+                            text=self._VIDEO_TOKEN + "\n",
+                        )
+                    )
+                else:
+                    rewritten.append(part)
+            message.content = rewritten
+
+        prompt = self._build_prompt(request)
+        return RenderedInputs(
+            input_ids=self.tokenizer.encode(prompt),
+            input_urls=urls,
+            rendered_prompt=prompt,
+            input_urls_type=types,
+            preprocess_configs=preprocess_configs,
+        )
+
+
 register_renderer("glm4_moe", ChatGlm45Renderer)
 register_renderer("glm_5", ChatGlm45Renderer)
+register_renderer("glm5_next", Glm5NextRenderer)

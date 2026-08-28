@@ -69,6 +69,16 @@ py_test(
 )
 
 py_test(
+    name = "glm5_next_vit_test",
+    srcs = [
+        "glm5_next_vit_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "minimax_m3_vl_vit_test",
     srcs = [
         "minimax_m3_vl_vit_test.py",

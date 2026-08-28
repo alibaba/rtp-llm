@@ -24,6 +24,7 @@ from .mega_fused_buf import (
 from .mega_moe import (
     GLM5MegaMoE,
     GLM5MegaMoeCfg,
+    _activation_clamp,
     _mega_output_capacity,
     _sync_cuda_graph_warmup_ranks,
 )
@@ -346,7 +347,7 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=_activation_clamp(self.cfg),
             fast_math=False,
         )
         return y

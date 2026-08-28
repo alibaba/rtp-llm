@@ -20,7 +20,12 @@ from .jit_warmup_se import (
     mega_moe_se_jit_warmup_enabled,
     parse_mega_moe_se_jit_warmup_tokens_override,
 )
-from .mega_moe import GLM5MegaMoE, _mega_output_capacity, _sync_cuda_graph_warmup_ranks
+from .mega_moe import (
+    GLM5MegaMoE,
+    _activation_clamp,
+    _mega_output_capacity,
+    _sync_cuda_graph_warmup_ranks,
+)
 from .mega_se_buf import (
     get_or_create_mega_moe_se_buf,
     get_or_create_mega_moe_se_clone_buf,
@@ -355,7 +360,7 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             recipe=(1, 1, FP4_BLOCK),
             shared_recipe=SHARED_WEIGHT_RECIPE,
             activation="swiglu",
-            activation_clamp=None,
+            activation_clamp=_activation_clamp(self.cfg),
             fast_math=False,
         )
         return y

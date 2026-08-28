@@ -29,10 +29,19 @@ from rtp_llm.utils.model_weight import (
     transpose,
 )
 
-
 _LANGUAGE_MODEL_PREFIX = "model.language_model."
 _UNQUANTIZED_WEIGHT_NAMES = {
     W.linear_attn_out_w,
+    W.linear_attn_qkv_w,
+    W.linear_attn_b_w,
+    W.linear_attn_f_a_w,
+    W.linear_attn_f_b_w,
+    W.linear_attn_g_a_w,
+    W.linear_attn_g_b_w,
+    W.linear_attn_conv1d_w,
+    W.linear_attn_norm_w,
+    W.linear_attn_dt_b_kda,
+    W.linear_attn_alog,
     W.mla_kv_b_w,
     W.mla_kc,
     W.mla_vc,
@@ -98,9 +107,7 @@ def parse_glm5_next_config(
     config.special_tokens.bos_token_id = int(
         config_json.get("bos_token_id", text_config.get("bos_token_id", -1))
     )
-    eos_token_ids = config_json.get(
-        "eos_token_id", text_config.get("eos_token_id", 0)
-    )
+    eos_token_ids = config_json.get("eos_token_id", text_config.get("eos_token_id", 0))
     if not isinstance(eos_token_ids, list):
         eos_token_ids = [eos_token_ids]
     if not eos_token_ids:
@@ -122,9 +129,7 @@ def parse_glm5_next_config(
     attn_config.nope_head_dim = int(text_config["qk_nope_head_dim"])
     attn_config.rope_head_dim = int(text_config.get("qk_rope_head_dim", 0))
     attn_config.v_head_dim = int(text_config["v_head_dim"])
-    attn_config.size_per_head = (
-        attn_config.nope_head_dim + attn_config.rope_head_dim
-    )
+    attn_config.size_per_head = attn_config.nope_head_dim + attn_config.rope_head_dim
     attn_config.rope_config.dim = attn_config.rope_head_dim
     attn_config.rope_config.offset = attn_config.nope_head_dim
     attn_config.rope_config.indexer_is_neox_style = not bool(
@@ -155,6 +160,11 @@ def parse_glm5_next_config(
     linear_config.linear_value_head_dim = int(linear_hf_config["head_dim"])
     linear_config.linear_num_key_heads = int(linear_hf_config["num_heads"])
     linear_config.linear_num_value_heads = int(linear_hf_config["num_heads"])
+    config.kda_gate_lower_bound = (
+        float(linear_hf_config["gate_lower_bound"])
+        if "gate_lower_bound" in linear_hf_config
+        else None
+    )
 
     scoring_func = text_config.get("scoring_func", "sigmoid")
     if scoring_func not in {"softmax", "sigmoid"}:
@@ -176,6 +186,42 @@ def parse_glm5_next_config(
     config.hc_sinkhorn_iters = int(text_config.get("hc_sinkhorn_iters", 0))
     config.hc_eps = float(text_config.get("hc_eps", 1e-6))
     config.swiglu_limit = float(text_config.get("swiglu_limit", 0.0))
+    vision_config = config_json.get("vision_config")
+    if vision_config:
+        vision_config = dict(vision_config)
+        # Match the reference implementation, which uses 1e-6 for the
+        # vision block and post-attention norms despite the checkpoint value.
+        vision_config["rms_norm_eps"] = 1e-6
+        config.mm_model_config.is_multimodal = True
+        config.mm_model_config.mm_sep_tokens = [
+            [
+                int(config_json.get("image_start_token_id", 154830)),
+                int(config_json.get("image_end_token_id", 154831)),
+            ],
+            [
+                int(config_json.get("video_start_token_id", 154832)),
+                int(config_json.get("video_end_token_id", 154833)),
+            ],
+        ]
+        config.mm_model_config.mm_position_ids_style = 0
+        config.mm_related_params.special_tokens["default_mm_token"] = (
+            "<|begin_of_image|><|image|><|end_of_image|>"
+        )
+        processor_path = os.path.join(ckpt_path, "processor_config.json")
+        if not os.path.exists(processor_path):
+            raise FileNotFoundError(
+                f"processor_config.json not found for GLM5-Next VL: {ckpt_path}"
+            )
+        with open(processor_path, encoding="utf-8") as reader:
+            processor_config = json.load(reader)
+        config.mm_related_params.config.update(
+            {
+                "ckpt_path": ckpt_path,
+                "vision_config": vision_config,
+                "processor_config": processor_config,
+                "swiglu_limit": config.swiglu_limit,
+            }
+        )
     return config
 
 
@@ -355,11 +401,7 @@ class Glm5NextWeight(DeepSeekV2Weight):
                 weights.append(
                     AtomicWeight(
                         getattr(W, f"v4_hc_{residual}_{suffix}"),
-                        [
-                            CkptWeightInfo(
-                                f"model.layers.{{i}}.hc_{residual}_{suffix}"
-                            )
-                        ],
+                        [CkptWeightInfo(f"model.layers.{{i}}.hc_{residual}_{suffix}")],
                         identity,
                         data_type=torch.float32,
                     )

@@ -10,7 +10,11 @@ import torch
 from .input_packer import get_mega_moe_input_packer
 from .mega_buf import get_or_create_mega_output
 from .mega_fp8_buf import get_or_create_mega_buf_fp8
-from .mega_moe import _mega_output_capacity, _sync_cuda_graph_warmup_ranks
+from .mega_moe import (
+    _activation_clamp,
+    _mega_output_capacity,
+    _sync_cuda_graph_warmup_ranks,
+)
 from .mega_moe_fp8 import GLM5MegaMoEFP8
 from .quant_layouts import FP4_BLOCK, prepare_fp8_weight_scale_for_deepgemm
 from .shared_fp8_scale import stage_shared_fp8_input_scales
@@ -235,7 +239,7 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
             shared_l2_weights=(self._shared_l2_w, self._shared_l2_sf),
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None,
+            activation_clamp=_activation_clamp(self.cfg),
             fast_math=False,
             assume_all_topk_valid=True,
         )

@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     MlaAttention,
+    MultimodalEmbeddingInjector,
     RMSNorm,
     RMSResNorm,
 )
@@ -95,11 +96,13 @@ class KimiLinearKDABase(nn.Module):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        gate_lower_bound: Optional[float] = None,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
+        self.gate_lower_bound = gate_lower_bound
         # params
         self.head_k_dim: int = linear_attn_config.linear_key_head_dim
         self.head_v_dim: int = linear_attn_config.linear_value_head_dim
@@ -172,8 +175,11 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        gate_lower_bound: Optional[float] = None,
     ):
-        super().__init__(linear_attn_config, parallelism_config, weights)
+        super().__init__(
+            linear_attn_config, parallelism_config, weights, gate_lower_bound
+        )
 
     def _conv1d(
         self,
@@ -278,6 +284,8 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             return_intermediate_states=True,
             A_log=self.alog,
             dt_bias=self.dt_bias,
+            safe_gate=self.gate_lower_bound is not None,
+            lower_bound=self.gate_lower_bound,
         )
         h_from_chunk = h
 
@@ -350,6 +358,17 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
 
 
 class KimiLinearKDADecode(KimiLinearKDABase):
+    def __init__(
+        self,
+        linear_attn_config: LinearAttentionConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        gate_lower_bound: Optional[float] = None,
+    ):
+        super().__init__(
+            linear_attn_config, parallelism_config, weights, gate_lower_bound
+        )
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -436,6 +455,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
+            lower_bound=self.gate_lower_bound,
         )
 
         res = core_attn_out.reshape(
@@ -523,6 +543,7 @@ class KimiLinearKDA(nn.Module):
         weights: Dict[str, torch.Tensor],
         layernorm_eps: float,
         quant_config: Optional[object] = None,
+        gate_lower_bound: Optional[float] = None,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -558,10 +579,10 @@ class KimiLinearKDA(nn.Module):
         )
 
         self.prefill_kda = KimiLinearKDAPrefill(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config, parallelism_config, weights, gate_lower_bound
         )
         self.decode_kda = KimiLinearKDADecode(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config, parallelism_config, weights, gate_lower_bound
         )
         # o_norm with sigmoid activation (not SwiGLU)
         self.norm = RmsNormGated(
@@ -667,6 +688,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 weights,
                 config.layernorm_eps,
                 quant_config,
+                getattr(config, "kda_gate_lower_bound", None),
             )
         else:
             # Full MLA attention layer
@@ -679,12 +701,17 @@ class KimiLinearDecoderLayer(nn.Module):
                 quant_config,
                 hw_kernel_config=hw_kernel_config,
                 global_weights=global_weights,
+                indexer_layernorm_eps=1e-6,
             )
 
         # FFN: Dense (layer 0) or MoE (layer 1+)
         if layer_idx not in config.moe_layer_index:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                swiglu_limit=float(getattr(config, "swiglu_limit", 0.0)),
             )
         else:
             self.mlp = GenericMoeLayer(
@@ -771,9 +798,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 kv_cache=kv_cache,
             )
 
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return DecodeLayerOutput(hidden_states, residual)
 
@@ -838,6 +863,11 @@ class KimiLinearModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = (
+            MultimodalEmbeddingInjector()
+            if model_config.mm_model_config.is_multimodal
+            else None
+        )
         enable_cuda_graph = (
             py_hw_kernel_config.enable_cuda_graph
             if py_hw_kernel_config is not None
@@ -873,7 +903,23 @@ class KimiLinearModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
+        multimodal_embedding_injector = getattr(
+            self, "multimodal_embedding_injector", None
+        )
+        if multimodal_embedding_injector is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+        else:
+            inputs_embeds = self.embed_tokens(
+                input_ids,
+                inputs.combo_position_ids,
+                inputs.embedding_inputs.combo_tokens_type_ids,
+                inputs.embedding_inputs.text_tokens_mask,
+            )
+            inputs_embeds = multimodal_embedding_injector(
+                inputs_embeds,
+                inputs.multimodal_inputs.multimodal_features,
+                inputs.multimodal_inputs.mm_features_locs,
+            )
         hidden_states = inputs_embeds
 
         attention_inputs: PyAttentionInputs = inputs.attention_inputs

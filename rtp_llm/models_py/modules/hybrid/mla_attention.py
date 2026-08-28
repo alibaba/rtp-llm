@@ -48,6 +48,7 @@ class MlaAttention(nn.Module):
         global_weights: Optional[Dict[str, torch.Tensor]] = None,
         has_indexer: Optional[bool] = None,
         reuse_topk_indices: bool = False,
+        indexer_layernorm_eps: Optional[float] = None,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -75,7 +76,11 @@ class MlaAttention(nn.Module):
                 weights,
                 global_weights,
                 layer_idx,
-                layernorm_eps,
+                (
+                    layernorm_eps
+                    if indexer_layernorm_eps is None
+                    else indexer_layernorm_eps
+                ),
                 quant_config,
                 hw_kernel_config,
                 parallelism_config,

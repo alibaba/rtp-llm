@@ -15,33 +15,25 @@ from rtp_llm.model_loader.linear_attn_weight import (
     split_kda_tp_dim1,
 )
 from rtp_llm.model_loader.weight_module import CompositeWeight
-from rtp_llm.models.glm5_next import (
-    Glm5Next,
-    Glm5NextWeight,
-    parse_glm5_next_config,
-)
+from rtp_llm.models.glm5_next import Glm5Next, Glm5NextWeight, parse_glm5_next_config
 from rtp_llm.models_py.model_desc import kimi_linear
 from rtp_llm.models_py.modules.base.cuda import indexer_op
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _requires_prefill_cp_support,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import flashinfer_mla
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
-    flashmla_sparse_impl,
-)
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+    flashinfer_mla,
     flashmla_sparse_cp_impl,
+    flashmla_sparse_impl,
+    rope_emb_new,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import rope_emb_new
+from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe import _activation_clamp
 from rtp_llm.models_py.modules.hybrid import indexer as indexer_module
+from rtp_llm.models_py.modules.hybrid.dense_mlp import ClampedSiluAndMul
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
 )
-from rtp_llm.ops import (
-    HWKernelConfig,
-    HybridAttentionType,
-    ParallelismConfig,
-)
+from rtp_llm.ops import HWKernelConfig, HybridAttentionType, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -75,6 +67,7 @@ def _test_config():
                 "num_heads": 64,
                 "head_dim": 128,
                 "short_conv_kernel_size": 4,
+                "gate_lower_bound": -5.0,
             },
             "mlp_layer_types": ["dense"] * 3 + ["sparse"] * 42,
             "intermediate_size": 12288,
@@ -97,6 +90,163 @@ def _test_config():
 
 
 class Glm5NextConfigTest(unittest.TestCase):
+    def test_mega_moe_activation_clamp_is_opt_in(self):
+        self.assertEqual(_activation_clamp(SimpleNamespace(swiglu_limit=10.0)), 10.0)
+        self.assertIsNone(_activation_clamp(SimpleNamespace(swiglu_limit=0.0)))
+
+    def test_clamped_swiglu_matches_checkpoint_semantics(self):
+        gate_up = torch.tensor([[12.0, -12.0, 12.0, -12.0]])
+        actual = ClampedSiluAndMul(10.0)(gate_up)
+        gate, up = gate_up.chunk(2, dim=-1)
+        expected = torch.nn.functional.silu(gate.clamp(max=10.0)) * up.clamp(
+            -10.0, 10.0
+        )
+        torch.testing.assert_close(actual, expected)
+
+    def test_prefill_uses_safe_gate_for_bounded_gate(self):
+        prefill = kimi_linear.KimiLinearKDAPrefill.__new__(
+            kimi_linear.KimiLinearKDAPrefill
+        )
+        nn.Module.__init__(prefill)
+        prefill.local_num_k_heads = 1
+        prefill.local_num_v_heads = 1
+        prefill.head_k_dim = 2
+        prefill.head_v_dim = 2
+        prefill.gate_lower_bound = -5.0
+        prefill.alog = torch.zeros(1)
+        prefill.dt_bias = torch.zeros(2)
+        prefill._get_ssm_states = mock.Mock(return_value=None)
+        attention_inputs = SimpleNamespace(
+            input_lengths=torch.tensor([1], dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 1], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+        )
+
+        with mock.patch.object(
+            kimi_linear,
+            "chunk_kda",
+            return_value=(
+                torch.zeros(1, 1, 1, 2),
+                None,
+                None,
+            ),
+        ) as chunk:
+            prefill._fla(
+                torch.zeros(1, 6),
+                torch.zeros(1, 2),
+                torch.zeros(1, 1),
+                None,
+                64,
+                attention_inputs,
+            )
+
+        self.assertTrue(chunk.call_args.kwargs["safe_gate"])
+        self.assertEqual(chunk.call_args.kwargs["lower_bound"], -5.0)
+
+    def test_decode_threads_gate_lower_bound_to_recurrence(self):
+        decode = kimi_linear.KimiLinearKDADecode.__new__(
+            kimi_linear.KimiLinearKDADecode
+        )
+        nn.Module.__init__(decode)
+        decode.local_num_k_heads = 1
+        decode.local_num_v_heads = 1
+        decode.head_k_dim = 2
+        decode.head_v_dim = 2
+        decode.gate_lower_bound = -5.0
+        decode.alog = torch.zeros(1)
+        decode.dt_bias = torch.zeros(2)
+        decode._get_bs_from_attention_input = mock.Mock(return_value=(1, 1))
+        decode._get_ssm_states = mock.Mock(return_value=torch.zeros(1, 1, 2, 2))
+        attention_inputs = SimpleNamespace(
+            kv_cache_kernel_block_id_device=torch.zeros((1, 1), dtype=torch.int32),
+            sequence_lengths_plus_1_d=torch.ones(1, dtype=torch.int32),
+        )
+
+        with mock.patch.object(
+            kimi_linear,
+            "fused_recurrent_kda",
+            return_value=(torch.zeros(1, 1, 1, 2), None),
+        ) as recurrent:
+            decode._fla(
+                torch.zeros(1, 6),
+                torch.zeros(1, 2),
+                torch.zeros(1, 1),
+                torch.empty(0),
+                64,
+                attention_inputs,
+                False,
+            )
+
+        self.assertEqual(recurrent.call_args.kwargs["lower_bound"], -5.0)
+
+    def test_decode_conv_does_not_receive_gate_lower_bound(self):
+        decode = kimi_linear.KimiLinearKDADecode.__new__(
+            kimi_linear.KimiLinearKDADecode
+        )
+        nn.Module.__init__(decode)
+        decode.conv_weights = torch.ones(6, 4)
+        decode.gate_lower_bound = -5.0
+        decode._get_bs_from_attention_input = mock.Mock(return_value=(1, 1))
+        decode._get_conv_states = mock.Mock(return_value=torch.zeros(1, 3, 6))
+        attention_inputs = SimpleNamespace(
+            kv_cache_kernel_block_id_device=torch.zeros((1, 1), dtype=torch.int32),
+            sequence_lengths_plus_1_d=torch.ones(1, dtype=torch.int32),
+        )
+        mixed_qkv = torch.ones(1, 6)
+
+        with mock.patch.object(
+            kimi_linear,
+            "causal_conv1d_update",
+            side_effect=lambda x, *args, **kwargs: x,
+        ) as conv1d:
+            output = decode._conv1d(
+                mixed_qkv,
+                torch.empty(0),
+                64,
+                attention_inputs,
+                False,
+            )
+
+        self.assertTrue(torch.equal(output, mixed_qkv))
+        self.assertNotIn("lower_bound", conv1d.call_args.kwargs)
+
+    def test_glm_mla_uses_indexer_specific_norm_epsilon(self):
+        config = SimpleNamespace(
+            hybrid_attention_config=SimpleNamespace(
+                hybrid_attention_types=[HybridAttentionType.NONE]
+            ),
+            quant_config=None,
+            attn_config=object(),
+            layernorm_eps=1e-5,
+            moe_layer_index=[],
+            activation_type="SiLU",
+            hc_mult=1,
+        )
+        parallelism = SimpleNamespace()
+        weights = {
+            W.pre_ln_gamma: torch.ones(1),
+            W.post_ln_gamma: torch.ones(1),
+        }
+
+        with (
+            mock.patch.object(
+                kimi_linear, "MlaAttention", return_value=nn.Identity()
+            ) as mla,
+            mock.patch.object(kimi_linear, "DenseMLP", return_value=nn.Identity()),
+            mock.patch.object(kimi_linear, "RMSResNorm", return_value=nn.Identity()),
+        ):
+            kimi_linear.KimiLinearDecoderLayer(
+                config,
+                parallelism,
+                weights,
+                {},
+                0,
+                None,
+            )
+
+        self.assertEqual(mla.call_args.kwargs["indexer_layernorm_eps"], 1e-6)
+        self.assertEqual(mla.call_args.args[4], 1e-5)
+
     def test_decode_does_not_require_prefill_cp_support(self):
         self.assertFalse(
             _requires_prefill_cp_support(
@@ -133,9 +283,37 @@ class Glm5NextConfigTest(unittest.TestCase):
         self.assertEqual(config.linear_attention_config.linear_num_key_heads, 64)
         self.assertEqual(config.linear_attention_config.linear_key_head_dim, 128)
         self.assertEqual(config.linear_attention_config.linear_conv_kernel_dim, 4)
+        self.assertEqual(config.kda_gate_lower_bound, -5.0)
         self.assertEqual(config.hc_mult, 4)
         self.assertTrue(
             config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+
+    def test_parse_multimodal_config(self):
+        config_json = _test_config()
+        config_json.update(
+            {
+                "vision_config": {"hidden_size": 16},
+                "image_start_token_id": 11,
+                "image_end_token_id": 12,
+                "video_start_token_id": 13,
+                "video_end_token_id": 14,
+            }
+        )
+        with (
+            mock.patch("builtins.open", mock.mock_open(read_data="{}")),
+            mock.patch("os.path.exists", return_value=True),
+        ):
+            config = parse_glm5_next_config(config_json, "/model")
+        self.assertTrue(config.mm_model_config.is_multimodal)
+        self.assertEqual(config.mm_model_config.mm_sep_tokens, [[11, 12], [13, 14]])
+        self.assertEqual(
+            config.mm_related_params.special_tokens["default_mm_token"],
+            "<|begin_of_image|><|image|><|end_of_image|>",
+        )
+        self.assertEqual(
+            config.mm_related_params.config["vision_config"],
+            {"hidden_size": 16, "rms_norm_eps": 1e-6},
         )
 
     def test_rejects_mismatched_layer_schedule(self):
@@ -187,9 +365,7 @@ class Glm5NextConfigTest(unittest.TestCase):
             )
 
         self.assertIs(mla_attention.call_args.kwargs["global_weights"], global_weights)
-        self.assertIs(
-            mla_attention.call_args.kwargs["hw_kernel_config"], kernel_config
-        )
+        self.assertIs(mla_attention.call_args.kwargs["hw_kernel_config"], kernel_config)
 
     def test_mla_workspace_does_not_require_layer_zero_mla_weights(self):
         old_workspace = flashinfer_mla.g_workspace_buffer
@@ -275,7 +451,9 @@ class Glm5NextConfigTest(unittest.TestCase):
         q = torch.ones(2, 2, 128, dtype=torch.bfloat16)
         k = torch.ones(2, 128, dtype=torch.bfloat16)
         with (
-            mock.patch.object(indexer_op, "_rotate_activation", side_effect=lambda x: x),
+            mock.patch.object(
+                indexer_op, "_rotate_activation", side_effect=lambda x: x
+            ),
             mock.patch.object(
                 indexer_op.rope, "_apply_rope_pos_ids_cos_sin_cache"
             ) as apply_rope,
@@ -373,9 +551,7 @@ class Glm5NextConfigTest(unittest.TestCase):
         self.assertIs(conv1d.call_args.kwargs["prefix_lengths"], prefix_lengths)
 
     def test_kda_context_parallel_keeps_full_attention_heads(self):
-        linear_config = parse_glm5_next_config(
-            _test_config()
-        ).linear_attention_config
+        linear_config = parse_glm5_next_config(_test_config()).linear_attention_config
         parallelism = SimpleNamespace(
             tp_size=4,
             get_attn_tp_size=lambda: 1,
@@ -400,7 +576,8 @@ class Glm5NextConfigTest(unittest.TestCase):
         config = parse_glm5_next_config(_test_config())
         manifest = object.__new__(Glm5NextWeight)
         manifest.model_config = config
-        weights = manifest._get_kda_weight_info() + manifest._get_hc_weight_info()
+        kda_weights = manifest._get_kda_weight_info()
+        weights = kda_weights + manifest._get_hc_weight_info()
         for weight in weights:
             manifest._prefix_checkpoint_names(weight)
 
@@ -416,6 +593,7 @@ class Glm5NextConfigTest(unittest.TestCase):
         self.assertIn(prefix + "hc_attn_base", checkpoint_names)
         self.assertIn(prefix + "hc_ffn_scale", checkpoint_names)
         self.assertEqual(len(checkpoint_names), 21)
+        self.assertTrue(all(weight.quantization_disabled for weight in kda_weights))
 
         manifest._prefix_checkpoint_names(weights[0])
         checkpoint_names = {
@@ -537,6 +715,10 @@ class Glm5NextConfigTest(unittest.TestCase):
         ckpt_path = os.environ["GLM5_CKPT_PATH"]
         tokenizer = TokenizerFactory.create(ckpt_path, ckpt_path, "glm5_next")
         self.assertTrue(tokenizer.encode("hello"))
+        self.assertEqual(
+            tokenizer.encode("<|begin_of_image|><|image|><|end_of_image|>"),
+            [154830, 154854, 154831],
+        )
 
 
 class Glm5KdaWeightTest(unittest.TestCase):
@@ -584,12 +766,8 @@ class Glm5KdaWeightTest(unittest.TestCase):
         )
         for tp_rank in range(4):
             load_config = self._load_config(4, tp_rank)
-            actual_bias = split_kda_dt_bias(
-                dt_bias.flatten(), load_config, self.config
-            )
-            actual_projection = split_kda_tp_dim1(
-                projection, load_config, self.config
-            )
+            actual_bias = split_kda_dt_bias(dt_bias.flatten(), load_config, self.config)
+            actual_projection = split_kda_tp_dim1(projection, load_config, self.config)
             head_slice = slice(tp_rank * 16, (tp_rank + 1) * 16)
             self.assertTrue(torch.equal(actual_bias, dt_bias[head_slice].flatten()))
             self.assertTrue(
