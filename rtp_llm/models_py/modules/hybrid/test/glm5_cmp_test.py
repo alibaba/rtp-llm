@@ -1,9 +1,10 @@
 import inspect
+import os
 import sys
+import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import pytest
 import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import (
@@ -15,11 +16,11 @@ from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8 import GLM5MegaMoEFP8
 from rtp_llm.models_py.modules.hybrid import glm5_cmp as bridge
 
 
-def test_switch_defaults_off(monkeypatch) -> None:
-    monkeypatch.delenv("RTP_LLM_GLM5_CMP", raising=False)
-    assert bridge.resolve_glm5_cmp_enabled() is False
-    monkeypatch.setenv("RTP_LLM_GLM5_CMP", "1")
-    assert bridge.resolve_glm5_cmp_enabled() is True
+def test_switch_defaults_off() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        assert bridge.resolve_glm5_cmp_enabled() is False
+        os.environ["RTP_LLM_GLM5_CMP"] = "1"
+        assert bridge.resolve_glm5_cmp_enabled() is True
 
 
 def test_page_table_keeps_64_token_contract() -> None:
@@ -313,20 +314,21 @@ def test_integration_has_no_whole_attention_resource_cache() -> None:
     assert "ops.sparse_mla" not in source
 
 
-def test_side_streams_are_shared_once_per_device(monkeypatch) -> None:
+def test_side_streams_are_shared_once_per_device() -> None:
     created: list[tuple[torch.device, int]] = []
 
     def make_stream(*, device: torch.device, priority: int = 0) -> object:
         created.append((device, priority))
         return object()
 
-    monkeypatch.setattr(bridge, "_is_capturing", lambda: False)
-    monkeypatch.setattr(bridge.torch.cuda, "Stream", make_stream)
-    monkeypatch.setattr(bridge.Glm5Cmp, "_streams_by_device", {})
-
-    first = bridge.Glm5Cmp._side_streams(torch.device("cuda:2"))
-    second = bridge.Glm5Cmp._side_streams(torch.device("cuda:2"))
-    other = bridge.Glm5Cmp._side_streams(torch.device("cuda:3"))
+    with (
+        patch.object(bridge, "_is_capturing", return_value=False),
+        patch.object(bridge.torch.cuda, "Stream", side_effect=make_stream),
+        patch.object(bridge.Glm5Cmp, "_streams_by_device", {}),
+    ):
+        first = bridge.Glm5Cmp._side_streams(torch.device("cuda:2"))
+        second = bridge.Glm5Cmp._side_streams(torch.device("cuda:2"))
+        other = bridge.Glm5Cmp._side_streams(torch.device("cuda:3"))
 
     assert first is second
     assert other is not first
@@ -451,41 +453,43 @@ def test_sparse_mla_calls_rtp_flashmla_directly() -> None:
     flashmla.forward.assert_called_once_with(query, cache, topk, layer_id=3)
 
 
-@pytest.mark.parametrize(
-    ("op_type", "expected_call", "sync_module"),
-    [
+def test_prepacked_mega_moe_skips_input_packer() -> None:
+    cases = (
         (GLM5MegaMoE, "fp8_fp4_mega_moe", "mega_moe"),
         (GLM5MegaMoEFP8, "fp8_fp8_mega_moe", "mega_moe_fp8"),
-    ],
-)
-def test_prepacked_mega_moe_skips_input_packer(
-    op_type, expected_call: str, sync_module: str
-) -> None:
-    op = object.__new__(op_type)
-    torch.nn.Module.__init__(op)
-    op.cfg = SimpleNamespace(layer_id=0)
-    op._mega_buf = SimpleNamespace(num_max_tokens_per_rank=16)
-    op._mega_y = torch.empty((16, 8), dtype=torch.bfloat16)
-    op._mega_l1_w = op._mega_l1_sf = torch.empty(0)
-    op._mega_l2_w = op._mega_l2_sf = torch.empty(0)
-    op._input_packer = Mock()
-    op._maybe_pre_kernel_barrier = Mock()
-    deep_gemm = SimpleNamespace(
-        fp8_fp4_mega_moe=Mock(),
-        fp8_fp8_mega_moe=Mock(),
     )
-    sync_target = (
-        "rtp_llm.models_py.modules.glm5_mega_moe."
-        f"{sync_module}._sync_cuda_graph_warmup_ranks"
-    )
+    for op_type, expected_call, sync_module in cases:
+        op = object.__new__(op_type)
+        torch.nn.Module.__init__(op)
+        op.cfg = SimpleNamespace(layer_id=0)
+        op._mega_buf = SimpleNamespace(num_max_tokens_per_rank=16)
+        op._mega_y = torch.empty((16, 8), dtype=torch.bfloat16)
+        op._mega_l1_w = op._mega_l1_sf = torch.empty(0)
+        op._mega_l2_w = op._mega_l2_sf = torch.empty(0)
+        op._input_packer = Mock()
+        op._maybe_pre_kernel_barrier = Mock()
+        deep_gemm = SimpleNamespace(
+            fp8_fp4_mega_moe=Mock(),
+            fp8_fp8_mega_moe=Mock(),
+        )
+        sync_target = (
+            "rtp_llm.models_py.modules.glm5_mega_moe."
+            f"{sync_module}._sync_cuda_graph_warmup_ranks"
+        )
 
-    with patch.dict(sys.modules, {"deep_gemm": deep_gemm}), patch(sync_target):
-        result = op.forward_prepacked(torch.empty((6, 8), dtype=torch.bfloat16))
+        with patch.dict(sys.modules, {"deep_gemm": deep_gemm}), patch(sync_target):
+            result = op.forward_prepacked(torch.empty((6, 8), dtype=torch.bfloat16))
 
-    assert result.shape == (6, 8)
-    op._input_packer.pack.assert_not_called()
-    getattr(deep_gemm, expected_call).assert_called_once()
+        assert result.shape == (6, 8)
+        op._input_packer.pack.assert_not_called()
+        getattr(deep_gemm, expected_call).assert_called_once()
 
 
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__]))
+    tests = unittest.TestSuite(
+        unittest.FunctionTestCase(value, description=name)
+        for name, value in sorted(globals().items())
+        if name.startswith("test_") and callable(value)
+    )
+    result = unittest.TextTestRunner(verbosity=2).run(tests)
+    raise SystemExit(0 if result.wasSuccessful() else 1)
