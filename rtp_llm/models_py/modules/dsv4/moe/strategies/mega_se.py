@@ -1,9 +1,9 @@
 """DeepGEMM Mega MoE strategy with the FP8 shared expert fused in-kernel.
 
 The installed DeepGEMM API uses the ordinary ``fp8_fp4_mega_moe`` symbol with
-optional shared weights.  This strategy is opt-in via
-``DSV4_USE_MEGA_MOE_SE=1`` and owns independent buffer/packer/warmup state so
-the default routed-only Mega path is unchanged.
+optional shared weights.  This strategy is enabled by default and can be
+disabled via ``DSV4_USE_MEGA_MOE_SE=0``.  It owns independent
+buffer/packer/warmup state from the routed-only Mega path.
 """
 
 from __future__ import annotations

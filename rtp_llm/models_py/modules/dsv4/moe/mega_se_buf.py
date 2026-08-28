@@ -25,9 +25,9 @@ _MMA_TYPE = "fp8xfp4"
 
 
 def mega_moe_se_requested() -> bool:
-    """Return whether the operator explicitly opted into fused SE execution."""
+    """Return whether fused SE execution is enabled (on by default)."""
 
-    return os.environ.get(_USE_MEGA_MOE_SE_ENV, "0") == "1"
+    return os.environ.get(_USE_MEGA_MOE_SE_ENV, "1") == "1"
 
 
 def estimate_mega_moe_se_symm_buffer_bytes(
