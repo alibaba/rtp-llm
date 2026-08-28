@@ -56,7 +56,7 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     snapshot.free_blocks            = pool.freeBlocksNum();
     snapshot.used_blocks            = snapshot.total_blocks - snapshot.free_blocks;
     snapshot.active_blocks          = pool.activeBlocksNum();
-    snapshot.available_blocks       = snapshot.total_blocks - snapshot.active_blocks;
+    snapshot.available_blocks       = pool.availableBlocksNum();
     snapshot.block_cache_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
     snapshot.load_ref_blocks        = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
     snapshot.eviction_ref_blocks    = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
@@ -83,7 +83,7 @@ bool BlockTreeCacheMetricsReporter::enabled() const {
 
 std::vector<BlockTreePoolMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets) const {
-    std::unordered_set<const IBlockPool*> reported_device_pools;
+    std::unordered_set<const IBlockPool*>     reported_device_pools;
     std::vector<BlockTreePoolMetricsSnapshot> snapshots;
     for (const GroupSetPtr& group_set : group_sets) {
         const std::vector<DeviceBlockPoolPtr>& device_pools = group_set->devicePools();
@@ -299,10 +299,10 @@ void BlockTreeCacheMetricsReporter::reportEvictionTransfer(const TransferDescrip
     }
 
     RtpLLMCacheEvictionMetricsCollector collector;
-    collector.source_tier     = tierName(desc.source_tier);
-    collector.target_tier     = tierName(desc.target_tier);
-    collector.group_type      = metricCacheGroupTypeName(group_set->groupType());
-    collector.report_eviction = true;
+    collector.source_tier                = tierName(desc.source_tier);
+    collector.target_tier                = tierName(desc.target_tier);
+    collector.group_type                 = metricCacheGroupTypeName(group_set->groupType());
+    collector.report_eviction            = true;
     collector.tier_residence_time_ms     = (finish_time_us - timing.tier_enter_time_us) / 1000;
     collector.report_tier_residence_time = true;
     if (report_candidate_times) {

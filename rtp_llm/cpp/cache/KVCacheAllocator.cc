@@ -129,8 +129,8 @@ size_t KVCacheAllocator::heldRequestBlocks(const MallocInfo& malloc_info, int gr
                             "held-block group out of range: group_id=%d groups=%d",
                             group_id,
                             resource->groupNums());
-    const int group_begin = group_id < 0 ? 0 : group_id;
-    const int group_end   = group_id < 0 ? resource->groupNums() : group_id + 1;
+    const int                        group_begin = group_id < 0 ? 0 : group_id;
+    const int                        group_end   = group_id < 0 ? resource->groupNums() : group_id + 1;
     std::unordered_set<BlockIdxType> held_blocks;
     for (int batch = 0; batch < resource->batchSize(); ++batch) {
         for (int group = group_begin; group < group_end; ++group) {
@@ -384,7 +384,7 @@ size_t KVCacheAllocator::freeBlocksNum() const {
 }
 
 size_t KVCacheAllocator::availableBlocksNum() const {
-    return freeBlocksNum() + activeTreeCachedBlocksNum();
+    return block_pool_ ? block_pool_->availableBlocksNum() : 0;
 }
 
 size_t KVCacheAllocator::reservableFreeBlocksNum() const {
@@ -395,12 +395,8 @@ int64_t KVCacheAllocator::getMrCostTimeMs() const {
     return block_pool_ ? block_pool_->getMrCostTimeMs() : 0;
 }
 
-size_t KVCacheAllocator::activeTreeCachedBlocksNum() const {
-    return block_pool_ ? block_pool_->activeTreeCachedBlocksNum() : 0;
-}
-
 size_t KVCacheAllocator::availableTokensNum() const {
-    return block_pool_ ? (block_pool_->freeBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
+    return block_pool_ ? (block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(/*gid=*/0)) : 0;
 }
 
 size_t KVCacheAllocator::totalTokensNum() const {
@@ -441,7 +437,7 @@ int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
 
 KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
     const size_t total_blocks     = totalBlocksNum();
-    const size_t available_blocks = freeBlocksNum();
+    const size_t available_blocks = availableBlocksNum();
     return {total_blocks * default_seq_size_per_block, available_blocks * default_seq_size_per_block};
 }
 
@@ -468,19 +464,20 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
 
         const size_t               pool_index = static_cast<size_t>(group->group_id());
         KVCachePoolMetricsSnapshot snapshot;
-        snapshot.pool_index                = pool_index;
-        snapshot.pool_name                 = pool->poolName();
-        snapshot.block_size_bytes          = pool->blockSizeBytes();
-        snapshot.total_blocks              = pool->totalBlocksNum();
-        snapshot.free_blocks               = pool->freeBlocksNum();
-        snapshot.used_blocks               = snapshot.total_blocks - snapshot.free_blocks;
-        snapshot.active_blocks             = pool->activeBlocksNum();
-        snapshot.reserve_blocks            = reserveBlocksForPoolMetrics(pool_index);
-        snapshot.request_ref_blocks        = pool->referencedBlocksNum();
-        snapshot.block_cache_ref_blocks    = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
-        snapshot.load_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
-        snapshot.eviction_ref_blocks       = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
-        snapshot.store_ref_blocks          = pool->referencedBlocksNum(BlockTreeRefType::STORE);
+        snapshot.pool_index             = pool_index;
+        snapshot.pool_name              = pool->poolName();
+        snapshot.block_size_bytes       = pool->blockSizeBytes();
+        snapshot.total_blocks           = pool->totalBlocksNum();
+        snapshot.free_blocks            = pool->freeBlocksNum();
+        snapshot.used_blocks            = snapshot.total_blocks - snapshot.free_blocks;
+        snapshot.active_blocks          = pool->activeBlocksNum();
+        snapshot.available_blocks       = pool->availableBlocksNum();
+        snapshot.reserve_blocks         = reserveBlocksForPoolMetrics(pool_index);
+        snapshot.request_ref_blocks     = pool->referencedBlocksNum();
+        snapshot.block_cache_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
+        snapshot.load_ref_blocks        = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
+        snapshot.eviction_ref_blocks    = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
+        snapshot.store_ref_blocks       = pool->referencedBlocksNum(BlockTreeRefType::STORE);
         snapshot.used_ratio =
             snapshot.total_blocks == 0 ?
                 0.0f :

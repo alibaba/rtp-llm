@@ -31,9 +31,8 @@ public:
         return 0;
     }
 
-    size_t            first_tree_edges{0};
-    size_t            last_tree_edges{0};
-    std::vector<bool> cache_edges;
+    size_t first_tree_edges{0};
+    size_t last_tree_edges{0};
 
 protected:
     void onFirstTreeRefNoLock(BlockIdxType) override {
@@ -43,10 +42,6 @@ protected:
     bool onLastTreeRefNoLock(BlockIdxType) override {
         ++last_tree_edges;
         return true;
-    }
-
-    void onCacheRefChangedNoLock(BlockIdxType, bool cached) override {
-        cache_edges.push_back(cached);
     }
 };
 
@@ -96,7 +91,7 @@ TEST(IBlockPoolTest, BatchMallocIsAtomic) {
     EXPECT_EQ(pool.freeBlocksNum(), 1u);
 }
 
-TEST(IBlockPoolTest, TreeHooksRunOnlyOnTotalAndCacheEdges) {
+TEST(IBlockPoolTest, TreeHooksRunOnlyOnTotalEdges) {
     auto pool  = makeInitializedPool(/*physical_block_count=*/4);
     auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
@@ -107,13 +102,14 @@ TEST(IBlockPoolTest, TreeHooksRunOnlyOnTotalAndCacheEdges) {
 
     EXPECT_EQ(pool->first_tree_edges, 1u);
     EXPECT_EQ(pool->last_tree_edges, 0u);
-    EXPECT_EQ(pool->cache_edges, (std::vector<bool>{true}));
 
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
-    EXPECT_EQ(pool->cache_edges, (std::vector<bool>{true}));
+    EXPECT_EQ(pool->first_tree_edges, 1u);
+    EXPECT_EQ(pool->last_tree_edges, 0u);
 
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
-    EXPECT_EQ(pool->cache_edges, (std::vector<bool>{true, false}));
+    EXPECT_EQ(pool->first_tree_edges, 1u);
+    EXPECT_EQ(pool->last_tree_edges, 0u);
     EXPECT_TRUE(pool->isAllocated(*block));
 
     pool->decTreeRef(*block, BlockTreeRefType::LOAD);
@@ -168,6 +164,43 @@ TEST(IBlockPoolTest, ActiveBlocksDeduplicateReferenceTypes) {
     pool->decTreeRef(*block, BlockTreeRefType::CACHE);
     active_blocks = pool->activeBlocksNum();
     EXPECT_EQ(active_blocks, 0u);
+}
+
+TEST(IBlockPoolTest, AvailableBlocksCountOnlyFreeAndCacheOnlyBlocks) {
+    std::shared_ptr<TestPool>   pool  = makeInitializedPool(/*physical_block_count=*/4);
+    std::optional<BlockIdxType> block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+
+    const size_t total_blocks = pool->totalBlocksNum();
+    ASSERT_EQ(total_blocks, 3u);
+    EXPECT_EQ(pool->freeBlocksNum(), total_blocks - 1);
+    // A freshly allocated block has no owner yet, but is not physically free or
+    // cache-only and therefore must not be reported as available.
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks - 1);
+
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks);
+
+    // Duplicate CACHE refs do not double count a block.
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks);
+
+    pool->incTreeRef(*block, BlockTreeRefType::LOAD);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks - 1);
+    pool->incTreeRef(*block, BlockTreeRefType::STORE);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks - 1);
+
+    pool->decTreeRef(*block, BlockTreeRefType::LOAD);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks - 1);
+    pool->decTreeRef(*block, BlockTreeRefType::STORE);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks);
+
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks);
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_FALSE(pool->isAllocated(*block));
+    EXPECT_EQ(pool->freeBlocksNum(), total_blocks);
+    EXPECT_EQ(pool->availableBlocksNum(), total_blocks);
 }
 
 TEST(IBlockPoolTest, AscendingOrderReturnsSortedBlockIds) {
