@@ -33,17 +33,17 @@ TEST(EvictionHeapTest, LRUBestOrder) {
     heap.upsert(n2, makeMeta(/*last_access=*/20, /*admission=*/2, 0));
     heap.upsert(n3, makeMeta(/*last_access=*/30, /*admission=*/3, 0));
 
-    auto r1 = heap.best();
+    auto r1 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r1.has_value());
     EXPECT_EQ(r1->node, n1);
     heap.erase(r1->node);
 
-    auto r2 = heap.best();
+    auto r2 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r2.has_value());
     EXPECT_EQ(r2->node, n2);
     heap.erase(r2->node);
 
-    auto r3 = heap.best();
+    auto r3 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r3.has_value());
     EXPECT_EQ(r3->node, n3);
     heap.erase(r3->node);
@@ -67,17 +67,17 @@ TEST(EvictionHeapTest, LFUBestOrder) {
     heap.upsert(n2, makeMeta(/*last_access=*/2, /*admission=*/2, /*hit=*/1));
     heap.upsert(n3, makeMeta(/*last_access=*/3, /*admission=*/3, /*hit=*/0));
 
-    auto r1 = heap.best();
+    auto r1 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r1.has_value());
     EXPECT_EQ(r1->node, n3);
     heap.erase(r1->node);
 
-    auto r2 = heap.best();
+    auto r2 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r2.has_value());
     EXPECT_EQ(r2->node, n2);
     heap.erase(r2->node);
 
-    auto r3 = heap.best();
+    auto r3 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r3.has_value());
     EXPECT_EQ(r3->node, n1);
     heap.erase(r3->node);
@@ -99,17 +99,17 @@ TEST(EvictionHeapTest, FIFOBestOrder) {
     heap.upsert(n2, makeMeta(0, /*admission=*/2, 0));
     heap.upsert(n3, makeMeta(0, /*admission=*/3, 0));
 
-    auto r1 = heap.best();
+    auto r1 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r1.has_value());
     EXPECT_EQ(r1->node, n1);
     heap.erase(r1->node);
 
-    auto r2 = heap.best();
+    auto r2 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r2.has_value());
     EXPECT_EQ(r2->node, n2);
     heap.erase(r2->node);
 
-    auto r3 = heap.best();
+    auto r3 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r3.has_value());
     EXPECT_EQ(r3->node, n3);
     heap.erase(r3->node);
@@ -134,7 +134,7 @@ TEST(EvictionHeapTest, RepeatedUpsertKeepsSingleEntry) {
     EXPECT_TRUE(heap.contains(n1));
 
     // The retained ordering key reflects the most recent upsert.
-    auto r = heap.best();
+    auto r = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(r->node, n1);
     EXPECT_EQ(r->primary_key, kUpdateCount);
@@ -158,8 +158,8 @@ TEST(EvictionHeapTest, UpdateIfPresentReordersExistingEntryWithoutAdmittingMissi
     EXPECT_EQ(heap.size(), 2u);
 
     EXPECT_TRUE(heap.updateIfPresent(first, makeMeta(/*last_access=*/30, /*admission=*/1, 0)));
-    ASSERT_TRUE(heap.best().has_value());
-    EXPECT_EQ(heap.best()->node, second);
+    ASSERT_TRUE(heap.best([](TreeNode*) { return true; }).has_value());
+    EXPECT_EQ(heap.best([](TreeNode*) { return true; })->node, second);
     EXPECT_EQ(heap.size(), 2u);
 
     delete first;
@@ -185,7 +185,7 @@ TEST(EvictionHeapTest, EraseSyncsBothContainers) {
     EXPECT_EQ(heap.size(), 2u);
 
     // best now returns n2 (next by admission_seq).
-    auto r = heap.best();
+    auto r = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r.has_value());
     EXPECT_EQ(r->node, n2);
     heap.erase(r->node);
@@ -221,12 +221,12 @@ TEST(EvictionHeapTest, CacheKeyTieBreak) {
     heap.upsert(high, makeMeta(100, 1, 0));
     heap.upsert(low, makeMeta(100, 1, 0));
 
-    auto r1 = heap.best();
+    auto r1 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r1.has_value());
     EXPECT_EQ(r1->node, low);
     heap.erase(r1->node);
 
-    auto r2 = heap.best();
+    auto r2 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r2.has_value());
     EXPECT_EQ(r2->node, high);
     heap.erase(r2->node);
@@ -248,10 +248,10 @@ TEST(EvictionHeapTest, PointerTieBreakKeepsOtherwiseIdenticalEntries) {
     EXPECT_TRUE(heap.contains(n1));
     EXPECT_TRUE(heap.contains(n2));
 
-    auto r1 = heap.best();
+    auto r1 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r1.has_value());
     heap.erase(r1->node);
-    auto r2 = heap.best();
+    auto r2 = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(r2.has_value());
     EXPECT_NE(r1->node, r2->node);
     EXPECT_TRUE((r1->node == n1 && r2->node == n2) || (r1->node == n2 && r2->node == n1));
@@ -263,7 +263,7 @@ TEST(EvictionHeapTest, PointerTieBreakKeepsOtherwiseIdenticalEntries) {
 
 TEST(EvictionHeapTest, EmptyBestReturnsNullopt) {
     EvictionHeap heap(EvictionPolicy::LRU);
-    EXPECT_FALSE(heap.best().has_value());
+    EXPECT_FALSE(heap.best([](TreeNode*) { return true; }).has_value());
 }
 
 TEST(EvictionHeapTest, BestReturnsVictimWithoutRemovingIt) {
@@ -274,7 +274,7 @@ TEST(EvictionHeapTest, BestReturnsVictimWithoutRemovingIt) {
     heap.upsert(first, makeMeta(0, 1, 0));
     heap.upsert(second, makeMeta(0, 2, 0));
 
-    auto best = heap.best();
+    auto best = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(best.has_value());
     EXPECT_EQ(best->node, first);
     EXPECT_EQ(heap.size(), 2u);
@@ -289,6 +289,32 @@ TEST(EvictionHeapTest, BestReturnsVictimWithoutRemovingIt) {
     delete second;
 }
 
+TEST(EvictionHeapTest, BestSkipsEntriesWithoutChangingMembership) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+
+    TreeNode* first  = makeNode(1);
+    TreeNode* second = makeNode(2);
+    TreeNode* third  = makeNode(3);
+    heap.upsert(first, makeMeta(/*last_access=*/10, /*admission=*/1, 0));
+    heap.upsert(second, makeMeta(/*last_access=*/20, /*admission=*/2, 0));
+    heap.upsert(third, makeMeta(/*last_access=*/30, /*admission=*/3, 0));
+
+    const auto matching = heap.best([first](TreeNode* node) { return node != first; });
+    ASSERT_TRUE(matching.has_value());
+    EXPECT_EQ(matching->node, second);
+    EXPECT_FALSE(heap.best([](TreeNode*) { return false; }).has_value());
+    ASSERT_TRUE(heap.best([](TreeNode*) { return true; }).has_value());
+    EXPECT_EQ(heap.best([](TreeNode*) { return true; })->node, first);
+    EXPECT_EQ(heap.size(), 3u);
+    EXPECT_TRUE(heap.contains(first));
+    EXPECT_TRUE(heap.contains(second));
+    EXPECT_TRUE(heap.contains(third));
+
+    delete first;
+    delete second;
+    delete third;
+}
+
 TEST(EvictionHeapTest, ContainsAfterErase) {
     EvictionHeap heap(EvictionPolicy::FIFO);
 
@@ -296,7 +322,7 @@ TEST(EvictionHeapTest, ContainsAfterErase) {
     heap.upsert(n1, makeMeta(0, 1, 0));
     EXPECT_TRUE(heap.contains(n1));
 
-    auto best = heap.best();
+    auto best = heap.best([](TreeNode*) { return true; });
     ASSERT_TRUE(best.has_value());
     heap.erase(best->node);
     EXPECT_FALSE(heap.contains(n1));

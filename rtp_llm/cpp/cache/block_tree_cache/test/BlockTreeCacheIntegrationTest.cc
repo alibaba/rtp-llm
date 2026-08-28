@@ -446,6 +446,11 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     std::shared_ptr<LoadAsyncContext> host_context = takeLoadContext(host_match);
     ASSERT_NE(host_context, nullptr);
     host_context.reset();
+    const CandidateMeta matched_meta = before.back()->group_set_resources[0].candidate_meta;
+    EXPECT_GT(matched_meta.last_access_seq, before_meta.last_access_seq);
+    EXPECT_EQ(matched_meta.admission_seq, before_meta.admission_seq);
+    EXPECT_EQ(matched_meta.hit_count, before_meta.hit_count + 1);
+    EXPECT_GE(matched_meta.last_access_time_us, before_meta.last_access_time_us);
 
     scripted_copy->enqueue(/*success=*/false);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
@@ -463,10 +468,10 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
-    EXPECT_EQ(failed_resource.candidate_meta.last_access_seq, before_meta.last_access_seq);
-    EXPECT_EQ(failed_resource.candidate_meta.admission_seq, before_meta.admission_seq);
-    EXPECT_EQ(failed_resource.candidate_meta.hit_count, before_meta.hit_count);
-    EXPECT_EQ(failed_resource.candidate_meta.last_access_time_us, before_meta.last_access_time_us);
+    EXPECT_EQ(failed_resource.candidate_meta.last_access_seq, matched_meta.last_access_seq);
+    EXPECT_EQ(failed_resource.candidate_meta.admission_seq, matched_meta.admission_seq);
+    EXPECT_EQ(failed_resource.candidate_meta.hit_count, matched_meta.hit_count);
+    EXPECT_EQ(failed_resource.candidate_meta.last_access_time_us, matched_meta.last_access_time_us);
     const auto snapshot_after_failure = cache->getKeySnapshot(/*limit=*/8);
     EXPECT_EQ(snapshot_after_failure.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after_failure.keys, snapshot_before.keys);
@@ -2300,6 +2305,95 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     environment->releaseRequestRefs();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, LoadingHostChildSkipsDeviceParentUntilSettlement) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    DeviceBlockPoolPtr             device_pool = makeDevicePool({{16, 0}}, 3, "loading_child_device_parent");
+    std::shared_ptr<HostBlockPool> host_pool   = makeHostPool(16, 1);
+    ASSERT_NE(device_pool, nullptr);
+    ASSERT_NE(host_pool, nullptr);
+
+    auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    std::vector<GroupSetPtr> groups = {full};
+    BlockTreeCacheConfig     config;
+    config.enable_device_cache = true;
+    config.enable_host_cache   = true;
+    config.enable_disk_cache   = false;
+    auto cache                 = makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+
+    auto pausable_per_rank_transfer_engine =
+        std::make_shared<PausablePerRankBlockTransferEngine>(groups, /*succeed=*/true);
+    PausableTransferReleaseGuard release_guard(pausable_per_rank_transfer_engine);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_per_rank_transfer_engine);
+
+    MultiNodeBlocks parent_blocks = allocateDeviceBlocksForTest(*full, 1);
+    ASSERT_EQ(parent_blocks.size(), 1u);
+    ASSERT_EQ(parent_blocks.front().size(), 1u);
+    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = parent_blocks.front();
+    resources[1][0].host_block    = host_block;
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
+    unreferenceDeviceBlocksForTest(*full, parent_blocks);
+
+    std::vector<TreeNode*> path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    TreeNode* parent = path[0];
+    TreeNode* child  = path[1];
+    ASSERT_TRUE(parent->group_set_resources[0].hasTier(Tier::DEVICE));
+    ASSERT_TRUE(child->group_set_resources[0].hasTier(Tier::HOST));
+    ASSERT_EQ(cache->getStats().device_heap_total_size, 1u);
+
+    BlockTreeMatchResult              result  = cache->match({100, 200});
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->loadDescs().size(), 1u);
+    EXPECT_EQ(context->loadDescs().front().node, child);
+    EXPECT_EQ(context->loadDescs().front().source_tier, Tier::HOST);
+
+    BlockIdList target_blocks = device_pool->malloc(1).value();
+    ASSERT_EQ(target_blocks.size(), 1u);
+    device_pool->incRef(target_blocks);
+    context->setTargetBlocks(0, target_blocks);
+
+    ASSERT_TRUE(context->commit());
+    pausable_per_rank_transfer_engine->waitUntilEntered();
+    ASSERT_EQ(child->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
+
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+    path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_EQ(path[0], parent);
+    EXPECT_EQ(path[1], child);
+    EXPECT_TRUE(parent->group_set_resources[0].hasTier(Tier::DEVICE));
+
+    pausable_per_rank_transfer_engine->release();
+    context->waitDone();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    ASSERT_TRUE(context->success());
+    path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_TRUE(path[0]->group_set_resources[0].hasTier(Tier::DEVICE));
+    EXPECT_TRUE(path[1]->group_set_resources[0].hasTier(Tier::DEVICE));
+    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
+
+    releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    result.matched_device_resources.clear();
+    context.reset();
+    cache.reset();
+    device_pool->decRef(target_blocks);
+    EXPECT_EQ(device_pool->freeBlocksNum(), 3u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 1u);
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadRequestReleaseKeepsCandidateMembership) {
