@@ -1,8 +1,34 @@
+import contextlib
+import fcntl
 import functools
+import hashlib
 import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Union
+
+
+@contextlib.contextmanager
+def _remote_tokenizer_load_lock(tokenizer_path: str):
+    """Serialize transformers remote-code materialization across processes.
+
+    Transformers copies custom tokenizer modules into a shared cache before importing
+    them. Concurrent frontends can otherwise observe a partially copied module and
+    cache it in ``sys.modules`` without the requested tokenizer class. ``flock`` is
+    released by the kernel if a frontend exits unexpectedly.
+    """
+    lock_root = f"/tmp/rtp_llm-tokenizer-locks-{os.getuid()}"
+    os.makedirs(lock_root, mode=0o700, exist_ok=True)
+    tokenizer_key = hashlib.sha256(
+        os.path.realpath(tokenizer_path).encode("utf-8")
+    ).hexdigest()
+    lock_path = os.path.join(lock_root, f"{tokenizer_key}.lock")
+    with open(lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class BaseTokenizer:
@@ -27,13 +53,19 @@ class BaseTokenizer:
         extra_kwargs = self._transformers_v5_kwargs(tokenizer_config, tokenizer_obj)
         extra_kwargs.update(self._additional_kwargs(tokenizer_config))
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_path,
-                trust_remote_code=True,
-                verbose=False,
-                use_fast=True,
-                **extra_kwargs,
+            load_context = (
+                _remote_tokenizer_load_lock(tokenizer_path)
+                if tokenizer_config.get("auto_map")
+                else contextlib.nullcontext()
             )
+            with load_context:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_path,
+                    trust_remote_code=True,
+                    verbose=False,
+                    use_fast=True,
+                    **extra_kwargs,
+                )
         except Exception as e:
             logging.error(
                 f"AutoTokenizer.from_pretrained failed for tokenizer_path={tokenizer_path}, "
